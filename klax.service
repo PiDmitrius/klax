@@ -1,0 +1,14 @@
+[Unit]
+Description=klax — Telegram bridge for Claude Code
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/go/bin/klax start --foreground
+Restart=always
+RestartSec=5
+StartLimitBurst=3
+StartLimitIntervalSec=60
+
+[Install]
+WantedBy=default.target
