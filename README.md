@@ -68,16 +68,9 @@ If `source_dir` is set in config, builds from local source instead (bumps patch 
 | `/status` | active session, current tool, queue length |
 | `/sessions` | list all sessions |
 | `/new [name]` | create new session |
-| `/s<n>` | switch to session by number |
-| `/name <name>` | rename active session |
-| `/cwd [path]` | show or set working directory |
 | `/model` | show/switch model (opus/sonnet/haiku) |
-| `/prompt [text]` | show or set system prompt |
-| `/groups` | group chat mode |
-| `/transports` | manage transports (tg/mx/vk) |
-| `/update` | update klax |
-| `/fallback` | install latest release from GitHub |
 | `/abort` | kill current Claude process and clear queue |
+| `/update` | update klax |
 | `/help` | command reference |
 
 Everything else is forwarded to Claude.
