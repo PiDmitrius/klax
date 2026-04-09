@@ -13,7 +13,7 @@ klax polls Telegram, routes messages to Claude Code CLI, streams tool activity b
 ## Prerequisites
 
 - Linux (amd64 or arm64)
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated:
+- [Claude Code](https://code.claude.com/docs) installed and authenticated:
   ```bash
   curl -fsSL https://claude.ai/install.sh | bash
   ```
