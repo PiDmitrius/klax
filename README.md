@@ -1,14 +1,14 @@
 # klax
 
-Telegram bridge for Claude Code. Uses your Claude Max subscription — no extra API billing.
+Messenger bridge for Claude Code. Supports Telegram, MAX and VK. Uses your Claude Max subscription — no extra API billing.
 
 ## How it works
 
 ```
-Telegram → klax daemon → claude -p --output-format stream-json → Telegram
+Messenger → klax daemon → claude -p --output-format stream-json → Messenger
 ```
 
-klax polls Telegram, routes messages to Claude Code CLI, streams tool activity back as the response is built, and delivers the final answer.
+klax polls messengers, routes messages to Claude Code CLI, streams tool activity back as the response is built, and delivers the final answer.
 
 ## Prerequisites
 
@@ -33,18 +33,20 @@ klax start
 
 ```json
 {
-  "telegram_token": "123456:AAH...",
-  "allowed_users": [123456789],
+  "tg_token": "123456:AAH...",
+  "tg_allowed_users": [123456789],
   "default_cwd": "/home/user/projects",
   "permission_mode": "bypassPermissions",
-  "source_dir": "/home/user/workspace/klax"
+  "source_dir": ""
 }
 ```
 
 | field | description |
 |---|---|
-| `telegram_token` | Bot API token from @BotFather |
-| `allowed_users` | Telegram user IDs (whitelist) |
+| `tg_token` | Telegram Bot API token from @BotFather |
+| `tg_allowed_users` | Telegram user IDs (whitelist) |
+| `mx_token` | MAX bot token (optional) |
+| `mx_allowed_users` | MAX user IDs (optional) |
 | `default_cwd` | working directory for new sessions |
 | `permission_mode` | `acceptEdits` (default), `bypassPermissions`, or `auto` |
 | `source_dir` | path to klax source for local builds (`klax update`) |
@@ -59,15 +61,22 @@ Downloads the latest release from GitHub, installs the new binary, and writes a 
 
 If `source_dir` is set in config, builds from local source instead (bumps patch version, `go build`, install).
 
-## Telegram commands
+## Commands
 
 | command | effect |
 |---|---|
 | `/status` | active session, current tool, queue length |
 | `/sessions` | list all sessions |
 | `/new [name]` | create new session |
-| `/switch <n>` | switch to session by number |
-| `/clear` | reset context of active session |
+| `/s<n>` | switch to session by number |
+| `/name <name>` | rename active session |
+| `/cwd [path]` | show or set working directory |
+| `/model` | show/switch model (opus/sonnet/haiku) |
+| `/prompt [text]` | show or set system prompt |
+| `/groups` | group chat mode |
+| `/transports` | manage transports (tg/mx/vk) |
+| `/update` | update klax |
+| `/fallback` | install latest release from GitHub |
 | `/abort` | kill current Claude process and clear queue |
 | `/help` | command reference |
 
@@ -102,7 +111,7 @@ Claude runs in the session's working directory with `--resume <uuid>`.
 `klax install` sets up a user service at `~/.config/systemd/user/klax.service`:
 - `Restart=always` — auto-restart on exit
 - `StartLimitBurst=3` / `StartLimitIntervalSec=60` — stops retrying after 3 crashes in 60s
-- Validates Telegram token on startup (fatal on bad token, retries on network errors)
+- Validates transport tokens on startup (fatal on bad token, retries on network errors)
 - Drains stale messages on startup to skip accumulated updates
 
 ## Structure
