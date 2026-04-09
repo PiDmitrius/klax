@@ -10,6 +10,14 @@ Telegram → klax daemon → claude -p --output-format stream-json → Telegram
 
 klax polls Telegram, routes messages to Claude Code CLI, streams tool activity back as the response is built, and delivers the final answer.
 
+## Prerequisites
+
+- Linux (amd64 or arm64)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated:
+  ```bash
+  curl -fsSL https://claude.ai/install.sh | bash
+  ```
+
 ## Install
 
 ```bash
