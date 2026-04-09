@@ -82,8 +82,9 @@ if ! command -v klax >/dev/null 2>&1; then
     fail "klax not found in PATH after install"
 fi
 
-info "$(klax version) installed successfully"
+info "$("${INSTALL_DIR}/klax" version) installed successfully"
 echo ""
 echo "Next steps:"
+echo "  source ~/.bashrc"
 echo "  klax setup     — configure bot token and allowed users"
 echo "  klax start     — start the service"
