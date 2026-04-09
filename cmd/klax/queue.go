@@ -164,7 +164,9 @@ func (d *daemon) runClaude(msg queuedMsg) {
 	if result.SessionID != "" {
 		sess.ID = result.SessionID
 	}
-	if result.Usage.Model != "" {
+	// Only update model/usage from successful runs.
+	// On kill/error, system event may report a wrong default model.
+	if result.Error == nil && result.Usage.Model != "" {
 		sess.Model = result.Usage.Model
 		sess.ContextWindow = result.Usage.ContextWindow
 		sess.ContextUsed = result.Usage.ContextUsed

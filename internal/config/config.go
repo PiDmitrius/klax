@@ -31,6 +31,13 @@ type Config struct {
 
 	Users              []UserIdentity `json:"users,omitempty"`               // cross-platform identity mapping
 	DisabledTransports []string       `json:"disabled_transports,omitempty"` // transports disabled via /transports off
+	GroupChats         []GroupChat    `json:"group_chats,omitempty"`         // chats with group mode enabled
+}
+
+// GroupChat stores group mode settings for a chat.
+type GroupChat struct {
+	ID  string `json:"id"`  // chat ID (e.g. "tg:-100123456")
+	CWD string `json:"cwd"` // working directory for the group
 }
 
 func Dir() string {

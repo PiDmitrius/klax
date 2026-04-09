@@ -79,9 +79,12 @@ func helpText() string {
 /cwd [путь] — рабочая директория
 /model — модель (opus/sonnet/haiku)
 /prompt [текст] — системный промпт
+/groups — режим группы
 /transports — управление транспортами
 /bypass — команда в Claude
-/abort — прервать исполнение`
+/abort — прервать исполнение
+/update — обновить из локального источника
+/fallback — откат на релизную версию`
 }
 
 func (d *daemon) statusText(chatID string) string {

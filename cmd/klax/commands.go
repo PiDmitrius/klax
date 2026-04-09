@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -65,7 +67,10 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		if len(parts) > 1 {
 			name = strings.Join(parts[1:], " ")
 		}
-		cwd := d.cfg.DefaultCWD
+		cwd := d.groupCWD(chatID)
+		if cwd == "" {
+			cwd = d.cfg.DefaultCWD
+		}
 		if cwd == "" {
 			cwd, _ = os.UserHomeDir()
 		}
@@ -130,8 +135,17 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		}
 		d.sendPlain(chatID, msgID, d.modelText(sess))
 
+	case "/groups":
+		d.handleGroups(chatID, msgID, parts)
+
 	case "/transports":
 		d.handleTransports(chatID, msgID, parts)
+
+	case "/update":
+		go d.runChatOp(chatID, msgID, "update", "⏳ Обновляю из локального источника...")
+
+	case "/fallback":
+		go d.runChatOp(chatID, msgID, "fallback", "⏳ Устанавливаю релизную версию с GitHub...")
 
 	case "/bypass":
 		if len(parts) < 2 {
@@ -227,6 +241,68 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 	}
 }
 
+func (d *daemon) handleGroups(chatID, msgID string, parts []string) {
+	// /groups — list all enabled group chats
+	if len(parts) < 2 {
+		d.sendMessage(chatID, msgID, d.groupsText())
+		return
+	}
+	switch strings.ToLower(parts[1]) {
+	case "on":
+		if !isGroupChatID(chatID) {
+			d.sendMessage(chatID, msgID, "❌ Команда /groups on работает только в групповых чатах.")
+			return
+		}
+		cwd := d.groupCWD(chatID)
+		if cwd == "" {
+			// Create group CWD: <default_cwd>/groups/<sanitized_chatID>/
+			base := d.cfg.DefaultCWD
+			if base == "" {
+				base, _ = os.UserHomeDir()
+			}
+			// Sanitize chatID for directory name (replace : with _)
+			dirName := strings.ReplaceAll(chatID, ":", "_")
+			cwd = filepath.Join(base, "groups", dirName)
+			if err := os.MkdirAll(cwd, 0755); err != nil {
+				d.sendMessage(chatID, msgID, fmt.Sprintf("❌ Не удалось создать директорию: %v", err))
+				return
+			}
+		}
+		d.enableGroupChat(chatID, cwd)
+		// Update session CWD to group directory.
+		sk := d.sessionKey(chatID)
+		d.ensureSession(sk)
+		if sess := d.store.Active(sk); sess != nil {
+			sess.CWD = cwd
+			d.store.Save()
+		}
+		d.sendMessage(chatID, msgID, fmt.Sprintf("✅ Режим группы включён. Начинайте сообщение с <b>klax,</b> для обращения к боту.\n📂 <code>%s</code>", cwd))
+	case "off":
+		target := chatID
+		if len(parts) >= 3 {
+			target = parts[2]
+		}
+		d.disableGroupChat(target)
+		d.sendMessage(chatID, msgID, fmt.Sprintf("❌ Режим группы выключен: <code>%s</code>", target))
+	default:
+		d.sendMessage(chatID, msgID, "Использование: /groups [on | off [id]]")
+	}
+}
+
+func (d *daemon) groupsText() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.groupChats) == 0 {
+		return "Нет активных групп."
+	}
+	var sb strings.Builder
+	sb.WriteString("Группы:\n")
+	for id, cwd := range d.groupChats {
+		sb.WriteString(fmt.Sprintf("- <code>%s</code>\n  📂 <code>%s</code>\n", id, cwd))
+	}
+	return sb.String()
+}
+
 func (d *daemon) handleTransports(chatID, msgID string, parts []string) {
 	// /transports — list
 	if len(parts) == 1 {
@@ -298,6 +374,36 @@ func (d *daemon) transportsText() string {
 		}
 	}
 	return sb.String()
+}
+
+// runChatOp sends a progress message, runs the given klax subcommand,
+// and edits the progress message with the result.
+func (d *daemon) runChatOp(chatID, msgID, subcmd, progressText string) {
+	t, rawChatID, fmtStr := d.transportFor(chatID)
+	if t == nil {
+		return
+	}
+
+	progressMsgID, err := t.SendMessageReturnID(rawChatID, progressText, msgID, fmtStr)
+	if err != nil {
+		return
+	}
+
+	bin, _ := os.Executable()
+	cmd := exec.Command(bin, subcmd)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		detail := lines[len(lines)-1]
+		t.EditMessage(rawChatID, progressMsgID, fmt.Sprintf("%s\n❌ %s", progressText, detail), "")
+		return
+	}
+
+	if subcmd == "fallback" {
+		t.EditMessage(rawChatID, progressMsgID, progressText+"\n✅ Релизная версия установлена, перезапускаюсь...", "")
+	} else {
+		t.EditMessage(rawChatID, progressMsgID, progressText+"\n✅ Обновлено, перезапускаюсь...", "")
+	}
 }
 
 // saveDisabled persists the disabled transports set to config.

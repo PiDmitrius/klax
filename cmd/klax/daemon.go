@@ -47,6 +47,7 @@ type daemon struct {
 	identities map[int64]string // telegram userID -> canonical user ID
 	maxIdents  map[int64]string // max userID -> canonical user ID
 	vkIdents   map[int]string   // vk userID -> canonical user ID
+	groupChats map[string]string // chatID -> CWD for group mode chats
 }
 
 // getRunner returns the sessionRunner for the given key, creating one if needed.
@@ -255,6 +256,11 @@ func runDaemon() {
 		disabled[name] = true
 	}
 
+	groupChats := make(map[string]string)
+	for _, gc := range cfg.GroupChats {
+		groupChats[gc.ID] = gc.CWD
+	}
+
 	d := &daemon{
 		cfg:        cfg,
 		transports: transports,
@@ -266,6 +272,7 @@ func runDaemon() {
 		identities: tgIdents,
 		maxIdents:  maxIdents,
 		vkIdents:   vkIdents,
+		groupChats: groupChats,
 	}
 
 	writePID()
@@ -457,12 +464,16 @@ func (d *daemon) pollTG(ctx context.Context) {
 				bot.SendMessage(fmt.Sprintf("%d", msg.Chat.ID), reply, "", "")
 				continue
 			}
-			if !d.isTGAllowed(msg.From.ID) {
-				continue
-			}
 			chatID := fmt.Sprintf("tg:%d", msg.Chat.ID)
 			msgID := fmt.Sprintf("%d", msg.MessageID)
-			d.handleMessage(chatID, msgID, msg.Text)
+			if d.isTGAllowed(msg.From.ID) {
+				d.handleMessage(chatID, msgID, msg.Text)
+			} else if d.isGroupChat(chatID) {
+				if prompt, ok := stripGroupTrigger(strings.TrimSpace(msg.Text)); ok {
+					d.ensureSessionWithCWD(d.sessionKey(chatID), d.groupCWD(chatID))
+					d.enqueue(chatID, msgID, prompt)
+				}
+			}
 		}
 	}
 }
@@ -500,9 +511,6 @@ func (d *daemon) pollMAX(ctx context.Context) {
 				}
 				continue
 			}
-			if !d.isMAXAllowed(senderID) {
-				continue
-			}
 			if text == "" {
 				continue
 			}
@@ -513,7 +521,14 @@ func (d *daemon) pollMAX(ctx context.Context) {
 				chatID = fmt.Sprintf("mx:%d", upd.Message.Recipient.ChatID)
 			}
 			msgID := upd.Message.Body.Mid
-			d.handleMessage(chatID, msgID, text)
+			if d.isMAXAllowed(senderID) {
+				d.handleMessage(chatID, msgID, text)
+			} else if d.isGroupChat(chatID) {
+				if prompt, ok := stripGroupTrigger(strings.TrimSpace(text)); ok {
+					d.ensureSession(d.sessionKey(chatID))
+					d.enqueue(chatID, msgID, prompt)
+				}
+			}
 		}
 	}
 }
@@ -557,15 +572,19 @@ func (d *daemon) pollVK(ctx context.Context) {
 				bot.SendMessage(strconv.Itoa(msg.PeerID), reply, "", "")
 				continue
 			}
-			if !d.isVKAllowed(msg.FromID) {
-				continue
-			}
 			if msg.Text == "" {
 				continue
 			}
 			chatID := fmt.Sprintf("vk:%d", msg.PeerID)
 			msgID := strconv.Itoa(msg.ID)
-			d.handleMessage(chatID, msgID, msg.Text)
+			if d.isVKAllowed(msg.FromID) {
+				d.handleMessage(chatID, msgID, msg.Text)
+			} else if d.isGroupChat(chatID) {
+				if prompt, ok := stripGroupTrigger(strings.TrimSpace(msg.Text)); ok {
+					d.ensureSessionWithCWD(d.sessionKey(chatID), d.groupCWD(chatID))
+					d.enqueue(chatID, msgID, prompt)
+				}
+			}
 		}
 	}
 }
@@ -588,6 +607,100 @@ func (d *daemon) isMAXAllowed(id int64) bool {
 	return false
 }
 
+// isGroupChat returns true if the chat has group mode enabled.
+func (d *daemon) isGroupChat(chatID string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, ok := d.groupChats[chatID]
+	return ok
+}
+
+// isGroupChatID returns true if the chatID refers to a group (not a DM).
+// TG: negative chat ID. MAX: negative chat ID. VK: peer_id >= 2000000000.
+func isGroupChatID(chatID string) bool {
+	idx := strings.Index(chatID, ":")
+	if idx == -1 {
+		return false
+	}
+	prefix := chatID[:idx]
+	raw := chatID[idx+1:]
+	if prefix == "vk" {
+		if id, err := strconv.Atoi(raw); err == nil {
+			return id >= 2000000000
+		}
+		return false
+	}
+	return len(raw) > 0 && raw[0] == '-'
+}
+
+// groupCWD returns the CWD for a group chat, or "" if not a group.
+func (d *daemon) groupCWD(chatID string) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.groupChats[chatID]
+}
+
+// enableGroupChat enables group mode for a chat with the given CWD.
+func (d *daemon) enableGroupChat(chatID, cwd string) {
+	d.mu.Lock()
+	d.groupChats[chatID] = cwd
+	d.mu.Unlock()
+	d.saveGroupChats()
+}
+
+// disableGroupChat disables group mode for a chat.
+func (d *daemon) disableGroupChat(chatID string) {
+	d.mu.Lock()
+	delete(d.groupChats, chatID)
+	d.mu.Unlock()
+	d.saveGroupChats()
+}
+
+func (d *daemon) saveGroupChats() {
+	d.mu.Lock()
+	var list []config.GroupChat
+	for id, cwd := range d.groupChats {
+		list = append(list, config.GroupChat{ID: id, CWD: cwd})
+	}
+	d.mu.Unlock()
+	d.cfg.GroupChats = list
+	config.Save(d.cfg)
+}
+
+// groupTriggerPrefixes are the recognized prefixes for group mode messages.
+// Checked case-insensitively. Must be followed by comma, space, or comma+space.
+var groupTriggerPrefixes = []string{
+	"klax", "клакс", "клэкс", "клац",
+	"kl", "кл",
+}
+
+// stripGroupTrigger checks if text starts with a group trigger prefix.
+// Returns the remaining text (trimmed) and true, or "" and false.
+func stripGroupTrigger(text string) (string, bool) {
+	lower := strings.ToLower(text)
+	for _, prefix := range groupTriggerPrefixes {
+		if !strings.HasPrefix(lower, prefix) {
+			continue
+		}
+		rest := text[len(prefix):]
+		// Must be followed by comma, space, or comma+space
+		if len(rest) == 0 {
+			continue
+		}
+		if rest[0] == ',' {
+			rest = rest[1:]
+		} else if rest[0] != ' ' {
+			continue
+		}
+		rest = strings.TrimLeft(rest, " ")
+		if rest == "" {
+			continue
+		}
+		return rest, true
+	}
+	return "", false
+}
+
 func (d *daemon) handleMessage(chatID, msgID, text string) {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -596,11 +709,20 @@ func (d *daemon) handleMessage(chatID, msgID, text string) {
 
 	// Ensure chat has at least one session.
 	sk := d.sessionKey(chatID)
-	d.ensureSession(sk)
+	d.ensureSessionWithCWD(sk, d.groupCWD(chatID))
 
-	// Handle built-in commands
+	// Handle built-in commands (allowed users only — enforced by poll loops)
 	if strings.HasPrefix(text, "/") {
 		d.handleCommand(chatID, msgID, text)
+		return
+	}
+
+	// In group mode, require trigger prefix for all users
+	if d.isGroupChat(chatID) {
+		if prompt, ok := stripGroupTrigger(text); ok {
+			d.enqueue(chatID, msgID, prompt)
+		}
+		// No prefix — ignore silently
 		return
 	}
 
@@ -609,10 +731,22 @@ func (d *daemon) handleMessage(chatID, msgID, text string) {
 }
 
 func (d *daemon) ensureSession(sessionKey string) {
-	if d.store.Active(sessionKey) != nil {
+	d.ensureSessionWithCWD(sessionKey, "")
+}
+
+func (d *daemon) ensureSessionWithCWD(sessionKey, forceCWD string) {
+	if sess := d.store.Active(sessionKey); sess != nil {
+		// If group CWD is set and session CWD doesn't match, update it.
+		if forceCWD != "" && sess.CWD != forceCWD {
+			sess.CWD = forceCWD
+			d.store.Save()
+		}
 		return
 	}
-	cwd := d.cfg.DefaultCWD
+	cwd := forceCWD
+	if cwd == "" {
+		cwd = d.cfg.DefaultCWD
+	}
 	if cwd == "" {
 		cwd, _ = os.UserHomeDir()
 	}

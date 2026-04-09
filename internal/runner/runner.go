@@ -20,6 +20,8 @@ type StreamEvent struct {
 	Name       string                     `json:"name,omitempty"`
 	Input      json.RawMessage            `json:"input,omitempty"`
 	Result     string                     `json:"result,omitempty"`
+	IsError    bool                       `json:"is_error,omitempty"`
+	Subtype    string                     `json:"subtype,omitempty"`
 	Message    *Message                   `json:"message,omitempty"`
 	SessionID  string                     `json:"session_id,omitempty"`
 	Model      string                     `json:"model,omitempty"`
@@ -273,6 +275,7 @@ func (r *Runner) Run(opts RunOptions, onProgress ProgressFunc) RunResult {
 	var model string
 	var textParts []string
 	var usage ModelUsageInfo
+	var streamError string
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
@@ -322,10 +325,15 @@ func (r *Runner) Run(opts RunOptions, onProgress ProgressFunc) RunResult {
 			}
 
 		case "result":
-			if ev.Result != "" {
+			if ev.IsError && ev.Result != "" {
+				streamError = ev.Result
+			} else if ev.Result != "" {
 				textParts = append(textParts, ev.Result)
 			}
 			// Extract model usage from result event.
+			// Pick the model with the most output tokens (primary model),
+			// not background models (haiku for compaction etc).
+			bestOutput := -1
 			for modelName, raw := range ev.ModelUsage {
 				var mu struct {
 					InputTokens          int `json:"inputTokens"`
@@ -334,7 +342,8 @@ func (r *Runner) Run(opts RunOptions, onProgress ProgressFunc) RunResult {
 					CacheCreationTokens  int `json:"cacheCreationInputTokens"`
 					ContextWindow        int `json:"contextWindow"`
 				}
-				if json.Unmarshal(raw, &mu) == nil {
+				if json.Unmarshal(raw, &mu) == nil && mu.OutputTokens > bestOutput {
+					bestOutput = mu.OutputTokens
 					usage.Model = modelName
 					usage.ContextWindow = mu.ContextWindow
 					usage.InputTokens = mu.InputTokens
@@ -358,7 +367,9 @@ func (r *Runner) Run(opts RunOptions, onProgress ProgressFunc) RunResult {
 		Text:      text,
 		Usage:     usage,
 	}
-	if text == "" && waitErr != nil {
+	if streamError != "" {
+		result.Error = fmt.Errorf("claude: %s", streamError)
+	} else if text == "" && waitErr != nil {
 		stderr := strings.TrimSpace(stderrBuf.String())
 		if stderr != "" {
 			result.Error = fmt.Errorf("claude: %s", stderr)
