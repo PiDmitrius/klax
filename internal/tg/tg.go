@@ -134,6 +134,19 @@ func (b *Bot) SetMyCommands(commands []BotCommand) error {
 	return err
 }
 
+// SetMyCommandsForChat sets the bot's command menu for a specific chat.
+// This overrides any per-chat menu that may have been set by a previous bot using the same token.
+func (b *Bot) SetMyCommandsForChat(chatID string, commands []BotCommand) error {
+	_, err := b.call("setMyCommands", map[string]interface{}{
+		"commands": commands,
+		"scope": map[string]interface{}{
+			"type":    "chat",
+			"chat_id": chatID,
+		},
+	})
+	return err
+}
+
 // BotCommand describes a bot command for the Telegram menu.
 type BotCommand struct {
 	Command     string `json:"command"`
