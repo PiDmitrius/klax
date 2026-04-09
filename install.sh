@@ -15,6 +15,7 @@ NC='\033[0m'
 info()  { echo -e "${GREEN}[+]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 fail()  { echo -e "${RED}[x]${NC} $*"; exit 1; }
+tilde() { echo "$1" | sed "s|^$HOME|~|"; }
 
 # --- Detect architecture ---
 
@@ -45,12 +46,12 @@ if ! curl -sfL "$URL" -o "${INSTALL_DIR}/klax"; then
     fail "download failed: ${URL}"
 fi
 chmod +x "${INSTALL_DIR}/klax"
-info "installed: ${INSTALL_DIR}/klax"
+info "installed: $(tilde "${INSTALL_DIR}/klax")"
 
 # --- Ensure ~/.local/bin is in PATH ---
 
 if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
-    warn "${INSTALL_DIR} is not in your PATH"
+    warn "$(tilde "$INSTALL_DIR") is not in your PATH"
 
     SHELL_NAME=$(basename "$SHELL")
     case "$SHELL_NAME" in
@@ -66,8 +67,8 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
             echo "" >> "$RC"
             echo "# Added by klax installer" >> "$RC"
             echo "$EXPORT_LINE" >> "$RC"
-            info "added to ${RC}: ${EXPORT_LINE}"
-            warn "run: source ${RC}"
+            info "added to $(tilde "$RC"): ${EXPORT_LINE}"
+            warn "run: source $(tilde "$RC")"
         fi
     else
         warn "add to your shell profile: ${EXPORT_LINE}"
