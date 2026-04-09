@@ -13,7 +13,7 @@ klax polls Telegram, routes messages to Claude Code CLI, streams tool activity b
 ## Install
 
 ```bash
-go install github.com/PiDmitrius/klax/cmd/klax@latest
+curl -fsSL https://raw.githubusercontent.com/PiDmitrius/klax/main/install.sh | bash
 klax setup
 klax install
 klax start
@@ -47,7 +47,9 @@ klax start
 klax update
 ```
 
-Builds from `source_dir`, installs the new binary, and writes a restart marker. The running daemon picks up the marker, drains the current task, notifies all chats, and exits. systemd restarts it with the new binary.
+Downloads the latest release from GitHub, installs the new binary, and writes a restart marker. The running daemon picks up the marker, drains the current task, notifies all chats, and exits. systemd restarts it with the new binary.
+
+If `source_dir` is set in config, builds from local source instead (bumps patch version, `go build`, install).
 
 ## Telegram commands
 
@@ -72,8 +74,9 @@ klax uninstall   remove systemd user service
 klax start       start the service (--foreground to run directly)
 klax stop        stop the service
 klax restart     restart the service
-klax update      build, install, and restart (from source)
+klax update      download latest release and restart
 klax status      show service status
+klax fallback    install latest release from GitHub (ignores source_dir)
 klax version     print version
 ```
 
@@ -102,4 +105,5 @@ internal/config/    config.json read/write
 internal/runner/    claude process, stream-json parser, tool formatter
 internal/session/   session store (sessions.json)
 internal/tg/        Telegram Bot API client (no external deps)
+internal/max/       MAX (VK Teams) Bot API client
 ```
