@@ -124,8 +124,7 @@ info "$("${INSTALL_DIR}/klax" version) installed successfully"
 
 if ! command -v claude >/dev/null 2>&1; then
     warn "claude not found in PATH"
-    echo "  Install Claude Code: npm install -g @anthropic-ai/claude-code"
-    echo "  More info: https://docs.anthropic.com/en/docs/claude-code"
+    echo "  Install Claude Code: curl -fsSL https://claude.ai/install.sh | bash"
 fi
 
 echo ""
