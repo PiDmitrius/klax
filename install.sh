@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # klax installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/PiDmitrius/klax/dev/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/PiDmitrius/klax/main/install.sh | bash
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
