@@ -30,7 +30,7 @@ import (
 	"github.com/PiDmitrius/klax/internal/vk"
 )
 
-const version = "0.3.76"
+const version = "0.3.77"
 
 func main() {
 	log.SetPrefix("klax: ")
@@ -638,7 +638,7 @@ func runDaemon() {
 		var text string
 		switch m.Reason {
 		case "update":
-			text = fmt.Sprintf("✅ klax обновлён: v%s → v%s", m.Version, version)
+			text = fmt.Sprintf("✅ klax обновлён (v%s)", version)
 		default:
 			text = fmt.Sprintf("✅ klax перезапущен (v%s)", version)
 		}
