@@ -30,7 +30,7 @@ import (
 	"github.com/PiDmitrius/klax/internal/vk"
 )
 
-const version = "0.3.79"
+const version = "0.3.80"
 
 func main() {
 	log.SetPrefix("klax: ")
