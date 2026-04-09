@@ -30,7 +30,7 @@ import (
 	"github.com/PiDmitrius/klax/internal/vk"
 )
 
-const version = "0.3.74"
+const version = "0.3.76"
 
 func main() {
 	log.SetPrefix("klax: ")
@@ -208,24 +208,43 @@ func runUpdate() {
 		fmt.Fprintf(os.Stderr, "cannot load config: %v\nRun 'klax setup' first.\n", err)
 		os.Exit(1)
 	}
-	srcDir := cfg.SourceDir
-	if srcDir == "" {
-		fmt.Fprintln(os.Stderr, "source_dir not set in config. Set it to your klax source directory.")
-		os.Exit(1)
-	}
 
 	// Write restart marker with current (old) version before bumping.
 	if err := writeMarker("update"); err != nil {
 		log.Printf("warning: could not write restart marker: %v", err)
 	}
 
-	// Bump patch version
+	srcDir := cfg.SourceDir
+	if srcDir == "" {
+		// No local source — install from upstream.
+		fmt.Println("installing from upstream...")
+		goInstall := exec.Command("go", "install", "github.com/PiDmitrius/klax/cmd/klax@latest")
+		goInstall.Stdout = os.Stdout
+		goInstall.Stderr = os.Stderr
+		if err := goInstall.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "go install failed: %v\n", err)
+			os.Exit(1)
+		}
+		// Update systemd unit and restart.
+		home, _ := os.UserHomeDir()
+		newBin := filepath.Join(home, "go", "bin", "klax")
+		install := exec.Command(newBin, "install")
+		install.Stdout = os.Stdout
+		install.Stderr = os.Stderr
+		if err := install.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "install failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("daemon will restart via marker")
+		return
+	}
+
+	// Local source — bump version and build.
 	if err := bumpPatch(srcDir); err != nil {
 		fmt.Fprintf(os.Stderr, "version bump failed: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Build
 	fmt.Printf("building in %s...\n", srcDir)
 	build := exec.Command("go", "build", "-o", filepath.Join(srcDir, "klax"), "./cmd/klax")
 	build.Dir = srcDir
@@ -275,6 +294,7 @@ func runSetup() {
 		cwd, _ = os.UserHomeDir()
 	}
 	cfg.DefaultCWD = cwd
+	cfg.PermissionMode = "bypassPermissions"
 
 	if err := config.Save(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -493,13 +513,7 @@ func runDaemon() {
 				if err := tgBot.DrainUpdates(); err != nil {
 					log.Printf("warning: tg drain updates: %v", err)
 				}
-				tgBot.SetMyCommands([]tg.BotCommand{
-					{Command: "status", Description: "Статус"},
-					{Command: "sessions", Description: "Сессии"},
-					{Command: "new", Description: "Новая сессия"},
-					{Command: "model", Description: "Модель"},
-					{Command: "abort", Description: "Прервать"},
-				})
+				tgBot.SetMyCommands(tgMenuCommands)
 				break
 			}
 			var apiErr *tg.APIError
@@ -730,6 +744,9 @@ func (d *daemon) startDrain(reason string) {
 	d.mu.Unlock()
 
 	log.Printf("drain started (reason: %s)", reason)
+	if readMarker() == nil {
+		writeMarker(reason)
+	}
 	d.notifyAllUsers("🔄 klax перезапускается...")
 
 	// Kick processing on all session runners that have queued messages.
@@ -987,6 +1004,24 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 	case "/cleanup":
 		d.sendMessage(chatID, msgID, d.cleanupText(sk))
 
+	case "/menu":
+		prefix := transportPrefix(chatID)
+		if prefix != "tg" {
+			d.sendMessage(chatID, msgID, "Команда /menu доступна только в Telegram.")
+			return
+		}
+		bot, ok := d.transports["tg"].(*tg.Bot)
+		if !ok {
+			d.sendMessage(chatID, msgID, "Telegram транспорт недоступен.")
+			return
+		}
+		_, rawID, _ := d.transportFor(chatID)
+		if err := bot.SetMyCommandsForChat(rawID, tgMenuCommands); err != nil {
+			d.sendMessage(chatID, msgID, fmt.Sprintf("Ошибка: %v", err))
+			return
+		}
+		d.sendMessage(chatID, msgID, "✅ Меню установлено.")
+
 	case "/new":
 		name := "session"
 		if len(parts) > 1 {
@@ -1210,6 +1245,14 @@ func (d *daemon) handleTransports(chatID, msgID string, parts []string) {
 }
 
 var transportOrder = []string{"tg", "mx", "vk"}
+
+var tgMenuCommands = []tg.BotCommand{
+	{Command: "status", Description: "Статус"},
+	{Command: "sessions", Description: "Сессии"},
+	{Command: "new", Description: "Новая сессия"},
+	{Command: "model", Description: "Модель"},
+	{Command: "abort", Description: "Прервать"},
+}
 
 func (d *daemon) transportsText() string {
 	d.mu.Lock()
