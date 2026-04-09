@@ -17,7 +17,7 @@ func runInstall() {
 	}
 
 	home, _ := os.UserHomeDir()
-	binDir := filepath.Join(home, "go", "bin")
+	binDir := filepath.Join(home, ".local", "bin")
 	os.MkdirAll(binDir, 0755)
 	dst := filepath.Join(binDir, "klax")
 	if err := copyFile(exe, dst, 0755); err != nil {

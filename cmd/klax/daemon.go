@@ -124,11 +124,18 @@ func (d *daemon) sessionKey(chatID string) string {
 	return chatID
 }
 
+// attachment is a file downloaded from a messenger, to be saved to a temp dir before running Claude.
+type attachment struct {
+	filename string // original filename (e.g. "photo.jpg")
+	data     []byte
+}
+
 type queuedMsg struct {
-	chatID     string
-	msgID      string // user's message ID (for replyTo)
-	text       string
-	progressID string // ID of "В очереди" message to reuse as progress
+	chatID      string
+	msgID       string // user's message ID (for replyTo)
+	text        string
+	progressID  string // ID of "В очереди" message to reuse as progress
+	attachments []attachment
 }
 
 func runDaemon() {
@@ -466,12 +473,39 @@ func (d *daemon) pollTG(ctx context.Context) {
 			}
 			chatID := fmt.Sprintf("tg:%d", msg.Chat.ID)
 			msgID := fmt.Sprintf("%d", msg.MessageID)
+
+			// Extract text: prefer Text, fall back to Caption for media messages.
+			text := msg.Text
+			if text == "" {
+				text = msg.Caption
+			}
+
+			// Download attachments (photo or document).
+			var attachments []attachment
+			if photo := msg.BestPhoto(); photo != nil {
+				if data, name, err := bot.DownloadFile(photo.FileID); err == nil {
+					attachments = append(attachments, attachment{filename: name, data: data})
+				} else {
+					log.Printf("tg: download photo: %v", err)
+				}
+			}
+			if msg.Document != nil {
+				if data, name, err := bot.DownloadFile(msg.Document.FileID); err == nil {
+					if name == "" {
+						name = msg.Document.FileName
+					}
+					attachments = append(attachments, attachment{filename: name, data: data})
+				} else {
+					log.Printf("tg: download document: %v", err)
+				}
+			}
+
 			if d.isTGAllowed(msg.From.ID) {
-				d.handleMessage(chatID, msgID, msg.Text)
+				d.handleMessageWithAttachments(chatID, msgID, text, attachments)
 			} else if d.isGroupChat(chatID) {
-				if prompt, ok := stripGroupTrigger(strings.TrimSpace(msg.Text)); ok {
+				if prompt, ok := stripGroupTrigger(strings.TrimSpace(text)); ok {
 					d.ensureSessionWithCWD(d.sessionKey(chatID), d.groupCWD(chatID))
-					d.enqueue(chatID, msgID, prompt)
+					d.enqueueWithAttachments(chatID, msgID, prompt, attachments)
 				}
 			}
 		}
@@ -511,9 +545,6 @@ func (d *daemon) pollMAX(ctx context.Context) {
 				}
 				continue
 			}
-			if text == "" {
-				continue
-			}
 			var chatID string
 			if upd.Message.Recipient.ChatType == "dialog" {
 				chatID = fmt.Sprintf("mx:%d", senderID)
@@ -521,12 +552,28 @@ func (d *daemon) pollMAX(ctx context.Context) {
 				chatID = fmt.Sprintf("mx:%d", upd.Message.Recipient.ChatID)
 			}
 			msgID := upd.Message.Body.Mid
+
+			// Download attachments from MAX message.
+			var attachments []attachment
+			for _, att := range upd.Message.Body.ParseAttachments() {
+				data, err := bot.DownloadURL(att.URL)
+				if err != nil {
+					log.Printf("mx: download %s: %v", att.Type, err)
+					continue
+				}
+				attachments = append(attachments, attachment{filename: att.Filename, data: data})
+			}
+
+			if text == "" && len(attachments) == 0 {
+				continue
+			}
+
 			if d.isMAXAllowed(senderID) {
-				d.handleMessage(chatID, msgID, text)
+				d.handleMessageWithAttachments(chatID, msgID, text, attachments)
 			} else if d.isGroupChat(chatID) {
 				if prompt, ok := stripGroupTrigger(strings.TrimSpace(text)); ok {
 					d.ensureSession(d.sessionKey(chatID))
-					d.enqueue(chatID, msgID, prompt)
+					d.enqueueWithAttachments(chatID, msgID, prompt, attachments)
 				}
 			}
 		}
@@ -702,8 +749,12 @@ func stripGroupTrigger(text string) (string, bool) {
 }
 
 func (d *daemon) handleMessage(chatID, msgID, text string) {
+	d.handleMessageWithAttachments(chatID, msgID, text, nil)
+}
+
+func (d *daemon) handleMessageWithAttachments(chatID, msgID, text string, attachments []attachment) {
 	text = strings.TrimSpace(text)
-	if text == "" {
+	if text == "" && len(attachments) == 0 {
 		return
 	}
 
@@ -720,14 +771,14 @@ func (d *daemon) handleMessage(chatID, msgID, text string) {
 	// In group mode, require trigger prefix for all users
 	if d.isGroupChat(chatID) {
 		if prompt, ok := stripGroupTrigger(text); ok {
-			d.enqueue(chatID, msgID, prompt)
+			d.enqueueWithAttachments(chatID, msgID, prompt, attachments)
 		}
 		// No prefix — ignore silently
 		return
 	}
 
 	// Queue for Claude
-	d.enqueue(chatID, msgID, text)
+	d.enqueueWithAttachments(chatID, msgID, text, attachments)
 }
 
 func (d *daemon) ensureSession(sessionKey string) {

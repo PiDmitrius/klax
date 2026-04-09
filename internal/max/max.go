@@ -43,9 +43,86 @@ type Recipient struct {
 }
 
 type MessageBody struct {
-	Mid  string `json:"mid"`
-	Seq  int64  `json:"seq"`
-	Text string `json:"text"`
+	Mid            string            `json:"mid"`
+	Seq            int64             `json:"seq"`
+	Text           string            `json:"text"`
+	RawAttachments []json.RawMessage `json:"attachments"`
+}
+
+// AttachmentType identifies the kind of attachment.
+type AttachmentType struct {
+	Type string `json:"type"`
+}
+
+type PhotoAttachment struct {
+	AttachmentType
+	Payload struct {
+		URL string `json:"url"`
+	} `json:"payload"`
+}
+
+type FileAttachment struct {
+	AttachmentType
+	Payload struct {
+		URL string `json:"url"`
+	} `json:"payload"`
+	Filename string `json:"filename"`
+	Size     int64  `json:"size"`
+}
+
+// Attachment represents a parsed incoming attachment with a download URL and filename.
+type Attachment struct {
+	Type     string // "photo", "file", "video", "audio"
+	URL      string
+	Filename string
+}
+
+// ParseAttachments parses the raw attachments into typed Attachment structs.
+func (mb *MessageBody) ParseAttachments() []Attachment {
+	var result []Attachment
+	for _, raw := range mb.RawAttachments {
+		var base AttachmentType
+		if json.Unmarshal(raw, &base) != nil {
+			continue
+		}
+		switch base.Type {
+		case "image":
+			var a PhotoAttachment
+			if json.Unmarshal(raw, &a) == nil && a.Payload.URL != "" {
+				result = append(result, Attachment{Type: "photo", URL: a.Payload.URL, Filename: "photo.jpg"})
+			}
+		case "file":
+			var a FileAttachment
+			if json.Unmarshal(raw, &a) == nil && a.Payload.URL != "" {
+				name := a.Filename
+				if name == "" {
+					name = "file"
+				}
+				result = append(result, Attachment{Type: "file", URL: a.Payload.URL, Filename: name})
+			}
+		case "video":
+			var a struct {
+				AttachmentType
+				Payload struct {
+					URL string `json:"url"`
+				} `json:"payload"`
+			}
+			if json.Unmarshal(raw, &a) == nil && a.Payload.URL != "" {
+				result = append(result, Attachment{Type: "video", URL: a.Payload.URL, Filename: "video.mp4"})
+			}
+		case "audio":
+			var a struct {
+				AttachmentType
+				Payload struct {
+					URL string `json:"url"`
+				} `json:"payload"`
+			}
+			if json.Unmarshal(raw, &a) == nil && a.Payload.URL != "" {
+				result = append(result, Attachment{Type: "audio", URL: a.Payload.URL, Filename: "audio.mp3"})
+			}
+		}
+	}
+	return result
 }
 
 type Message struct {
@@ -201,6 +278,16 @@ func (b *Bot) sendMsg(chatID, text, replyTo, format string) (string, error) {
 		return "", err
 	}
 	return msg.Message.Body.Mid, nil
+}
+
+// DownloadURL downloads a file from a direct URL (from attachment payload).
+func (b *Bot) DownloadURL(url string) ([]byte, error) {
+	resp, err := b.client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
 }
 
 // EditMessage edits an existing message by mid.

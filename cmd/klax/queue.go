@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -11,6 +14,10 @@ import (
 )
 
 func (d *daemon) enqueue(chatID, msgID, text string) {
+	d.enqueueWithAttachments(chatID, msgID, text, nil)
+}
+
+func (d *daemon) enqueueWithAttachments(chatID, msgID, text string, attachments []attachment) {
 	if d.isDraining() {
 		d.sendMessage(chatID, msgID, "🔄 klax перезапускается, новые задачи не принимаются.")
 		return
@@ -20,7 +27,7 @@ func (d *daemon) enqueue(chatID, msgID, text string) {
 	sr := d.getRunner(sk)
 
 	sr.mu.Lock()
-	qm := queuedMsg{chatID: chatID, msgID: msgID, text: text}
+	qm := queuedMsg{chatID: chatID, msgID: msgID, text: text, attachments: attachments}
 	busy := sr.runner.IsBusy()
 	if busy {
 		// Send queue notification and capture its ID for later reuse as progress message.
@@ -145,12 +152,44 @@ func (d *daemon) runClaude(msg queuedMsg) {
 		}
 	}
 
+	// Save attachments to a temp directory and build prompt with file paths.
+	prompt := msg.text
+	var tmpDir string
+	if len(msg.attachments) > 0 {
+		var err error
+		tmpDir, err = os.MkdirTemp("", "klax-attach-*")
+		if err != nil {
+			log.Printf("failed to create temp dir for attachments: %v", err)
+		} else {
+			var filePaths []string
+			for _, att := range msg.attachments {
+				fp := filepath.Join(tmpDir, att.filename)
+				if err := os.WriteFile(fp, att.data, 0644); err != nil {
+					log.Printf("failed to write attachment %s: %v", att.filename, err)
+					continue
+				}
+				filePaths = append(filePaths, fp)
+			}
+			if len(filePaths) > 0 {
+				fileList := strings.Join(filePaths, "\n")
+				if prompt == "" {
+					prompt = fmt.Sprintf("Пользователь отправил файлы. Прочитай и проанализируй их:\n%s", fileList)
+				} else {
+					prompt = fmt.Sprintf("%s\n\nПрикреплённые файлы:\n%s", prompt, fileList)
+				}
+			}
+		}
+	}
+	if tmpDir != "" {
+		defer os.RemoveAll(tmpDir)
+	}
+
 	permMode := sess.PermissionMode
 	if permMode == "" {
 		permMode = d.cfg.PermissionMode
 	}
 	result := sr.runner.Run(runner.RunOptions{
-		Prompt:             msg.text,
+		Prompt:             prompt,
 		SessionID:          sess.ID,
 		CWD:                sess.CWD,
 		PermissionMode:     permMode,
