@@ -119,6 +119,15 @@ if ! command -v klax >/dev/null 2>&1; then
 fi
 
 info "$("${INSTALL_DIR}/klax" version) installed successfully"
+
+# --- Check for claude ---
+
+if ! command -v claude >/dev/null 2>&1; then
+    warn "claude not found in PATH"
+    echo "  Install Claude Code: npm install -g @anthropic-ai/claude-code"
+    echo "  More info: https://docs.anthropic.com/en/docs/claude-code"
+fi
+
 echo ""
 echo "Next steps:"
 echo "  source ~/.bashrc"

@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -268,6 +269,9 @@ func (r *Runner) Run(opts RunOptions, onProgress ProgressFunc) RunResult {
 	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return RunResult{Error: fmt.Errorf("claude not found. Install: npm install -g @anthropic-ai/claude-code")}
+		}
 		return RunResult{Error: fmt.Errorf("start: %w", err)}
 	}
 
