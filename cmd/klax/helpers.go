@@ -2,12 +2,22 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/session"
 )
+
+// tildePath replaces $HOME prefix with ~ for display.
+func tildePath(path string) string {
+	home, _ := os.UserHomeDir()
+	if strings.HasPrefix(path, home) {
+		return "~" + path[len(home):]
+	}
+	return path
+}
 
 // formatToolLines wraps each tool line in monospace.
 func formatToolLines(lines []string, format string) string {
@@ -83,8 +93,8 @@ func helpText() string {
 /transports — управление транспортами
 /bypass — команда в Claude
 /abort — прервать исполнение
-/update — обновить из локального источника
-/fallback — откат на релизную версию`
+/update — обновить
+/fallback — установить релизную версию`
 }
 
 func (d *daemon) statusText(chatID string) string {

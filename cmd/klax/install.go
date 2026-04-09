@@ -24,7 +24,7 @@ func runInstall() {
 		fmt.Fprintf(os.Stderr, "cannot install: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("installed: %s\n", dst)
+	fmt.Printf("installed: %s\n", tildePath(dst))
 
 	unitDir := filepath.Join(home, ".config", "systemd", "user")
 	os.MkdirAll(unitDir, 0755)
@@ -45,7 +45,7 @@ StartLimitIntervalSec=60
 WantedBy=default.target
 `, dst)
 	os.WriteFile(unitPath, []byte(unit), 0644)
-	fmt.Printf("installed: %s\n", unitPath)
+	fmt.Printf("installed: %s\n", tildePath(unitPath))
 
 	exec.Command("systemctl", "--user", "daemon-reload").Run()
 	exec.Command("systemctl", "--user", "enable", "klax").Run()
