@@ -8,7 +8,7 @@ import (
 	"os"
 )
 
-const version = "0.3.81"
+const version = "0.4.24"
 
 func main() {
 	log.SetPrefix("klax: ")
@@ -38,6 +38,8 @@ func main() {
 		runUninstall()
 	case "update":
 		runUpdate()
+	case "fallback":
+		runFallback()
 	case "setup":
 		runSetup()
 	case "version":
@@ -59,5 +61,6 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  restart     Restart the service")
 	fmt.Fprintln(os.Stderr, "  update      Build, install, and restart (from source)")
 	fmt.Fprintln(os.Stderr, "  status      Show service status")
+	fmt.Fprintln(os.Stderr, "  fallback    Install latest release from GitHub main branch")
 	fmt.Fprintln(os.Stderr, "  version     Print version")
 }

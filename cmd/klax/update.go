@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,11 +46,6 @@ func runUpdate() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot load config: %v\nRun 'klax setup' first.\n", err)
 		os.Exit(1)
-	}
-
-	// Write restart marker with current (old) version before bumping.
-	if err := writeMarker("update"); err != nil {
-		log.Printf("warning: could not write restart marker: %v", err)
 	}
 
 	srcDir := cfg.SourceDir
@@ -106,5 +100,30 @@ func runUpdate() {
 	}
 
 	// Daemon will pick up the marker and restart via drain.
+	fmt.Println("daemon will restart via marker")
+}
+
+// runFallback installs the latest release from GitHub main branch and restarts.
+func runFallback() {
+	fmt.Println("installing release from main branch...")
+	goInstall := exec.Command("go", "install", "github.com/PiDmitrius/klax/cmd/klax@main")
+	goInstall.Env = append(os.Environ(), "GOPROXY=direct")
+	goInstall.Stdout = os.Stdout
+	goInstall.Stderr = os.Stderr
+	if err := goInstall.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "go install failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	home, _ := os.UserHomeDir()
+	newBin := filepath.Join(home, "go", "bin", "klax")
+	install := exec.Command(newBin, "install")
+	install.Stdout = os.Stdout
+	install.Stderr = os.Stderr
+	if err := install.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "install failed: %v\n", err)
+		os.Exit(1)
+	}
+
 	fmt.Println("daemon will restart via marker")
 }

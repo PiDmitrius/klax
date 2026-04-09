@@ -175,30 +175,15 @@ func (b *Bot) GetUpdates() ([]Update, error) {
 }
 
 func (b *Bot) SendMessage(chatID, text, replyTo, format string) error {
-	payload := map[string]interface{}{
-		"chat_id": chatID,
-		"text":    text,
-	}
-	if replyTo != "" {
-		if id, err := strconv.Atoi(replyTo); err == nil {
-			payload["reply_parameters"] = map[string]interface{}{
-				"message_id": id,
-			}
-		}
-	}
-	switch format {
-	case "markdown":
-		payload["parse_mode"] = "Markdown"
-	case "markdownv2":
-		payload["parse_mode"] = "MarkdownV2"
-	case "html":
-		payload["parse_mode"] = "HTML"
-	}
-	_, err := b.call("sendMessage", payload)
+	_, err := b.sendMsg(chatID, text, replyTo, format)
 	return err
 }
 
 func (b *Bot) SendMessageReturnID(chatID, text, replyTo, format string) (string, error) {
+	return b.sendMsg(chatID, text, replyTo, format)
+}
+
+func (b *Bot) sendMsg(chatID, text, replyTo, format string) (string, error) {
 	payload := map[string]interface{}{
 		"chat_id": chatID,
 		"text":    text,
