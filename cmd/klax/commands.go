@@ -142,7 +142,7 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		d.handleTransports(chatID, msgID, parts)
 
 	case "/update":
-		go d.runChatOp(chatID, msgID, "update", "⏳ Обновляю из локального источника...")
+		go d.runChatOp(chatID, msgID, "update", "⏳ Обновляю...")
 
 	case "/fallback":
 		go d.runChatOp(chatID, msgID, "fallback", "⏳ Устанавливаю релизную версию с GitHub...")

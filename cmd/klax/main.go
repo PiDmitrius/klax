@@ -8,7 +8,7 @@ import (
 	"os"
 )
 
-const version = "0.4.24"
+const version = "0.4.27"
 
 func main() {
 	log.SetPrefix("klax: ")
@@ -59,8 +59,8 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  start       Start the service (--foreground to run directly)")
 	fmt.Fprintln(os.Stderr, "  stop        Stop the service")
 	fmt.Fprintln(os.Stderr, "  restart     Restart the service")
-	fmt.Fprintln(os.Stderr, "  update      Build, install, and restart (from source)")
+	fmt.Fprintln(os.Stderr, "  update      Download latest release and restart")
 	fmt.Fprintln(os.Stderr, "  status      Show service status")
-	fmt.Fprintln(os.Stderr, "  fallback    Install latest release from GitHub main branch")
+	fmt.Fprintln(os.Stderr, "  fallback    Install latest release from GitHub")
 	fmt.Fprintln(os.Stderr, "  version     Print version")
 }

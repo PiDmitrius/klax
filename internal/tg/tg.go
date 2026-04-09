@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/transport"
@@ -58,11 +59,30 @@ type Update struct {
 }
 
 type Message struct {
-	MessageID int    `json:"message_id"`
-	From      User   `json:"from"`
-	Chat      Chat   `json:"chat"`
-	Date      int    `json:"date"`
-	Text      string `json:"text"`
+	MessageID int        `json:"message_id"`
+	From      User       `json:"from"`
+	Chat      Chat       `json:"chat"`
+	Date      int        `json:"date"`
+	Text      string     `json:"text"`
+	Caption   string     `json:"caption"`
+	Photo     []PhotoSize `json:"photo"`
+	Document  *Document  `json:"document"`
+}
+
+type PhotoSize struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id"`
+	Width        int    `json:"width"`
+	Height       int    `json:"height"`
+	FileSize     int    `json:"file_size"`
+}
+
+type Document struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id"`
+	FileName     string `json:"file_name"`
+	MimeType     string `json:"mime_type"`
+	FileSize     int    `json:"file_size"`
 }
 
 type User struct {
@@ -212,6 +232,48 @@ func (b *Bot) sendMsg(chatID, text, replyTo, format string) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%d", msg.MessageID), nil
+}
+
+// BestPhoto returns the largest photo from the Photo array, or nil.
+func (m *Message) BestPhoto() *PhotoSize {
+	if len(m.Photo) == 0 {
+		return nil
+	}
+	best := &m.Photo[0]
+	for i := range m.Photo {
+		if m.Photo[i].FileSize > best.FileSize {
+			best = &m.Photo[i]
+		}
+	}
+	return best
+}
+
+// DownloadFile downloads a file by its file_id and returns the bytes and filename.
+func (b *Bot) DownloadFile(fileID string) ([]byte, string, error) {
+	raw, err := b.call("getFile", map[string]interface{}{"file_id": fileID})
+	if err != nil {
+		return nil, "", err
+	}
+	var f struct {
+		FilePath string `json:"file_path"`
+	}
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return nil, "", err
+	}
+	url := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", b.token, f.FilePath)
+	resp, err := b.client.Get(url)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", err
+	}
+	// Extract filename from file_path (e.g. "photos/file_1.jpg" -> "file_1.jpg")
+	parts := strings.Split(f.FilePath, "/")
+	name := parts[len(parts)-1]
+	return data, name, nil
 }
 
 func (b *Bot) EditMessage(chatID, messageID, text, format string) error {
