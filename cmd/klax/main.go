@@ -30,7 +30,7 @@ import (
 	"github.com/PiDmitrius/klax/internal/vk"
 )
 
-const version = "0.3.77"
+const version = "0.3.78"
 
 func main() {
 	log.SetPrefix("klax: ")
@@ -219,6 +219,7 @@ func runUpdate() {
 		// No local source — install from upstream.
 		fmt.Println("installing from upstream...")
 		goInstall := exec.Command("go", "install", "github.com/PiDmitrius/klax/cmd/klax@latest")
+		goInstall.Env = append(os.Environ(), "GOPROXY=direct")
 		goInstall.Stdout = os.Stdout
 		goInstall.Stderr = os.Stderr
 		if err := goInstall.Run(); err != nil {
