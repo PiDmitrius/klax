@@ -12,6 +12,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/PiDmitrius/klax/internal/config"
 	"github.com/PiDmitrius/klax/internal/max"
@@ -740,13 +741,13 @@ func stripGroupTrigger(text string) (string, bool) {
 		if len(rest) == 0 {
 			return "", true
 		}
-		// Must be followed by comma, space, newline, or combinations thereof.
+		// Must be followed by comma or any whitespace.
 		if rest[0] == ',' {
 			rest = rest[1:]
-		} else if rest[0] != ' ' && rest[0] != '\n' {
+		} else if !unicode.IsSpace(rune(rest[0])) {
 			continue
 		}
-		rest = strings.TrimLeft(rest, " \n")
+		rest = strings.TrimLeftFunc(rest, unicode.IsSpace)
 		return rest, true
 	}
 	return "", false
