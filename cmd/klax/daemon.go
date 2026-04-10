@@ -722,7 +722,7 @@ func (d *daemon) saveGroupChats() {
 }
 
 // groupTriggerPrefixes are the recognized prefixes for group mode messages.
-// Checked case-insensitively. Must be followed by comma, space, or comma+space.
+// Checked case-insensitively. Must be followed by comma or any whitespace.
 var groupTriggerPrefixes = []string{
 	"klax", "клакс", "клэкс", "клац",
 	"kl", "кл",
