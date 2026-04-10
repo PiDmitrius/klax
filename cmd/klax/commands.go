@@ -32,7 +32,7 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 	sk := d.sessionKey(chatID)
 
 	switch cmd {
-	case "/help":
+	case "/start", "/help":
 		d.sendMessage(chatID, msgID, helpText())
 
 	case "/status":
@@ -269,13 +269,22 @@ func (d *daemon) handleGroups(chatID, msgID string, parts []string) {
 			}
 		}
 		d.enableGroupChat(chatID, cwd)
-		// Update session CWD to group directory.
+		// Create a fresh session for group mode with the correct CWD.
+		// Any pre-existing sessions (from before group mode) are left inactive.
 		sk := d.sessionKey(chatID)
-		d.ensureSession(sk)
-		if sess := d.store.Active(sk); sess != nil {
-			sess.CWD = cwd
-			d.store.Save()
+		sessions := d.store.SessionsFor(sk)
+		// Check if there's already a session with group CWD.
+		hasGroupSession := false
+		for _, s := range sessions {
+			if s.CWD == cwd {
+				hasGroupSession = true
+				break
+			}
 		}
+		if !hasGroupSession {
+			d.store.New(sk, "group", cwd)
+		}
+		d.store.Save()
 		d.sendMessage(chatID, msgID, fmt.Sprintf("✅ Режим группы включён. Начинайте сообщение с <b>klax,</b> для обращения к боту.\n📂 <code>%s</code>", cwd))
 	case "off":
 		target := chatID

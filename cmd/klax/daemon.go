@@ -12,6 +12,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/PiDmitrius/klax/internal/config"
 	"github.com/PiDmitrius/klax/internal/max"
@@ -503,7 +504,10 @@ func (d *daemon) pollTG(ctx context.Context) {
 			if d.isTGAllowed(msg.From.ID) {
 				d.handleMessageWithAttachments(chatID, msgID, text, attachments)
 			} else if d.isGroupChat(chatID) {
-				if prompt, ok := stripGroupTrigger(strings.TrimSpace(text)); ok {
+				if strings.HasPrefix(text, "/") && isGroupCommand(text) {
+					d.ensureSessionWithCWD(d.sessionKey(chatID), d.groupCWD(chatID))
+					d.handleCommand(chatID, msgID, text)
+				} else if prompt, ok := stripGroupTrigger(strings.TrimSpace(text)); ok {
 					d.ensureSessionWithCWD(d.sessionKey(chatID), d.groupCWD(chatID))
 					d.enqueueWithAttachments(chatID, msgID, prompt, attachments)
 				}
@@ -571,8 +575,11 @@ func (d *daemon) pollMAX(ctx context.Context) {
 			if d.isMAXAllowed(senderID) {
 				d.handleMessageWithAttachments(chatID, msgID, text, attachments)
 			} else if d.isGroupChat(chatID) {
-				if prompt, ok := stripGroupTrigger(strings.TrimSpace(text)); ok {
-					d.ensureSession(d.sessionKey(chatID))
+				if strings.HasPrefix(text, "/") && isGroupCommand(text) {
+					d.ensureSessionWithCWD(d.sessionKey(chatID), d.groupCWD(chatID))
+					d.handleCommand(chatID, msgID, text)
+				} else if prompt, ok := stripGroupTrigger(strings.TrimSpace(text)); ok {
+					d.ensureSessionWithCWD(d.sessionKey(chatID), d.groupCWD(chatID))
 					d.enqueueWithAttachments(chatID, msgID, prompt, attachments)
 				}
 			}
@@ -715,7 +722,7 @@ func (d *daemon) saveGroupChats() {
 }
 
 // groupTriggerPrefixes are the recognized prefixes for group mode messages.
-// Checked case-insensitively. Must be followed by comma, space, or comma+space.
+// Checked case-insensitively. Must be followed by comma or any whitespace.
 var groupTriggerPrefixes = []string{
 	"klax", "клакс", "клэкс", "клац",
 	"kl", "кл",
@@ -730,22 +737,42 @@ func stripGroupTrigger(text string) (string, bool) {
 			continue
 		}
 		rest := text[len(prefix):]
-		// Must be followed by comma, space, or comma+space
+		// Trigger alone (e.g. caption "кл" with attachment) — valid, empty prompt.
 		if len(rest) == 0 {
-			continue
+			return "", true
 		}
+		// Must be followed by comma or any whitespace.
 		if rest[0] == ',' {
 			rest = rest[1:]
-		} else if rest[0] != ' ' {
+		} else if !unicode.IsSpace(rune(rest[0])) {
 			continue
 		}
-		rest = strings.TrimLeft(rest, " ")
-		if rest == "" {
-			continue
-		}
+		rest = strings.TrimLeftFunc(rest, unicode.IsSpace)
 		return rest, true
 	}
 	return "", false
+}
+
+// isGroupCommand checks if text starts with a command allowed for non-admin group members.
+func isGroupCommand(text string) bool {
+	cmd := strings.Fields(text)[0]
+	if at := strings.Index(cmd, "@"); at != -1 {
+		cmd = cmd[:at]
+	}
+	switch cmd {
+	case "/status", "/sessions", "/s", "/new", "/model", "/abort", "/help", "/start":
+		return true
+	}
+	// /s<n> shortcuts
+	if strings.HasPrefix(cmd, "/s") {
+		for _, c := range cmd[2:] {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+		return len(cmd) > 2
+	}
+	return false
 }
 
 func (d *daemon) handleMessage(chatID, msgID, text string) {
