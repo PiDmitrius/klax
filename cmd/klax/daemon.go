@@ -740,13 +740,13 @@ func stripGroupTrigger(text string) (string, bool) {
 		if len(rest) == 0 {
 			return "", true
 		}
-		// Must be followed by comma, space, or comma+space
+		// Must be followed by comma, space, newline, or combinations thereof.
 		if rest[0] == ',' {
 			rest = rest[1:]
-		} else if rest[0] != ' ' {
+		} else if rest[0] != ' ' && rest[0] != '\n' {
 			continue
 		}
-		rest = strings.TrimLeft(rest, " ")
+		rest = strings.TrimLeft(rest, " \n")
 		return rest, true
 	}
 	return "", false
