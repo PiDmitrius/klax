@@ -503,7 +503,10 @@ func (d *daemon) pollTG(ctx context.Context) {
 			if d.isTGAllowed(msg.From.ID) {
 				d.handleMessageWithAttachments(chatID, msgID, text, attachments)
 			} else if d.isGroupChat(chatID) {
-				if prompt, ok := stripGroupTrigger(strings.TrimSpace(text)); ok {
+				if strings.HasPrefix(text, "/") && isGroupCommand(text) {
+					d.ensureSessionWithCWD(d.sessionKey(chatID), d.groupCWD(chatID))
+					d.handleCommand(chatID, msgID, text)
+				} else if prompt, ok := stripGroupTrigger(strings.TrimSpace(text)); ok {
 					d.ensureSessionWithCWD(d.sessionKey(chatID), d.groupCWD(chatID))
 					d.enqueueWithAttachments(chatID, msgID, prompt, attachments)
 				}
@@ -571,8 +574,11 @@ func (d *daemon) pollMAX(ctx context.Context) {
 			if d.isMAXAllowed(senderID) {
 				d.handleMessageWithAttachments(chatID, msgID, text, attachments)
 			} else if d.isGroupChat(chatID) {
-				if prompt, ok := stripGroupTrigger(strings.TrimSpace(text)); ok {
-					d.ensureSession(d.sessionKey(chatID))
+				if strings.HasPrefix(text, "/") && isGroupCommand(text) {
+					d.ensureSessionWithCWD(d.sessionKey(chatID), d.groupCWD(chatID))
+					d.handleCommand(chatID, msgID, text)
+				} else if prompt, ok := stripGroupTrigger(strings.TrimSpace(text)); ok {
+					d.ensureSessionWithCWD(d.sessionKey(chatID), d.groupCWD(chatID))
 					d.enqueueWithAttachments(chatID, msgID, prompt, attachments)
 				}
 			}
@@ -746,6 +752,28 @@ func stripGroupTrigger(text string) (string, bool) {
 		return rest, true
 	}
 	return "", false
+}
+
+// isGroupCommand checks if text starts with a command allowed for non-admin group members.
+func isGroupCommand(text string) bool {
+	cmd := strings.Fields(text)[0]
+	if at := strings.Index(cmd, "@"); at != -1 {
+		cmd = cmd[:at]
+	}
+	switch cmd {
+	case "/status", "/sessions", "/s", "/new", "/model", "/abort", "/help", "/start":
+		return true
+	}
+	// /s<n> shortcuts
+	if strings.HasPrefix(cmd, "/s") {
+		for _, c := range cmd[2:] {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+		return len(cmd) > 2
+	}
+	return false
 }
 
 func (d *daemon) handleMessage(chatID, msgID, text string) {
