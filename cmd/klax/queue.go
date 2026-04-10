@@ -19,6 +19,7 @@ func (d *daemon) enqueue(chatID, msgID, text string) {
 
 func (d *daemon) enqueueWithAttachments(chatID, msgID, text string, attachments []attachment) {
 	if text == "" && len(attachments) == 0 {
+		d.sendMessage(chatID, msgID, "👋")
 		return
 	}
 	if d.isDraining() {
