@@ -22,9 +22,6 @@ klax polls messengers, routes messages to Claude Code CLI, streams tool activity
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/PiDmitrius/klax/main/install.sh | bash
-klax setup
-klax install
-klax start
 ```
 
 ## Setup
