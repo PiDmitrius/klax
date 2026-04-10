@@ -32,7 +32,7 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 	sk := d.sessionKey(chatID)
 
 	switch cmd {
-	case "/help":
+	case "/start", "/help":
 		d.sendMessage(chatID, msgID, helpText())
 
 	case "/status":
