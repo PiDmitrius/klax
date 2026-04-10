@@ -736,19 +736,17 @@ func stripGroupTrigger(text string) (string, bool) {
 			continue
 		}
 		rest := text[len(prefix):]
-		// Must be followed by comma, space, or comma+space
+		// Trigger alone (e.g. caption "кл" with attachment) — valid, empty prompt.
 		if len(rest) == 0 {
-			continue
+			return "", true
 		}
+		// Must be followed by comma, space, or comma+space
 		if rest[0] == ',' {
 			rest = rest[1:]
 		} else if rest[0] != ' ' {
 			continue
 		}
 		rest = strings.TrimLeft(rest, " ")
-		if rest == "" {
-			continue
-		}
 		return rest, true
 	}
 	return "", false
