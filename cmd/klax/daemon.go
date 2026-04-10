@@ -741,8 +741,8 @@ func stripGroupTrigger(text string) (string, bool) {
 		if len(rest) == 0 {
 			return "", true
 		}
-		// Must be followed by comma or any whitespace.
-		if rest[0] == ',' {
+		// Must be followed by punctuation or any whitespace.
+		if strings.ContainsRune(",.!?:;—", rune(rest[0])) {
 			rest = rest[1:]
 		} else if !unicode.IsSpace(rune(rest[0])) {
 			continue
