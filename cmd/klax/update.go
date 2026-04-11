@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/PiDmitrius/klax/internal/config"
 )
@@ -197,9 +198,15 @@ func versionLess(a, b string) bool {
 	return a3 < b3
 }
 
-// releaseTags returns all release tags sorted descending (newest first).
-func releaseTags() ([]string, error) {
-	var allTags []string
+type releaseInfo struct {
+	Tag         string `json:"tag_name"`
+	PublishedAt string `json:"published_at"` // "2026-04-09T11:17:22Z"
+	URL         string `json:"html_url"`
+}
+
+// fetchReleases returns releases sorted descending (newest first).
+func fetchReleases() ([]releaseInfo, error) {
+	var all []releaseInfo
 	for page := 1; page <= 10; page++ {
 		url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=100&page=%d", repo, page)
 		resp, err := http.Get(url)
@@ -211,32 +218,30 @@ func releaseTags() ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Minimal JSON parsing — extract tag_name values.
-		var releases []struct {
-			TagName string `json:"tag_name"`
-		}
-		if err := parseJSON(body, &releases); err != nil {
+		var releases []releaseInfo
+		if err := json.Unmarshal(body, &releases); err != nil {
 			return nil, err
 		}
 		if len(releases) == 0 {
 			break
 		}
-		for _, r := range releases {
-			allTags = append(allTags, r.TagName)
-		}
+		all = append(all, releases...)
 	}
-	return allTags, nil
+	return all, nil
 }
 
-// parseJSON is a minimal helper to avoid importing encoding/json at top level
-// (it's already imported via config, but let's be explicit).
-func parseJSON(data []byte, v interface{}) error {
-	return json.Unmarshal(data, v)
+// formatReleaseDate formats "2026-04-09T11:17:22Z" as "09.04".
+func formatReleaseDate(published string) string {
+	t, err := time.Parse(time.RFC3339, published)
+	if err != nil {
+		return ""
+	}
+	return t.Format("02.01")
 }
 
 // updateText returns a menu: build from source + available release versions.
 func updateText() (string, error) {
-	tags, err := releaseTags()
+	releases, err := fetchReleases()
 	if err != nil {
 		return "", err
 	}
@@ -246,16 +251,17 @@ func updateText() (string, error) {
 	fmt.Fprintf(&sb, "Текущая: %s\n\n", current)
 	sb.WriteString("/v_dev Собрать из исходников\n")
 	limit := 10
-	if len(tags) < limit {
-		limit = len(tags)
+	if len(releases) < limit {
+		limit = len(releases)
 	}
-	for _, tag := range tags[:limit] {
-		alias := strings.ReplaceAll(strings.TrimPrefix(tag, "v"), ".", "_")
-		if tag == current {
-			fmt.Fprintf(&sb, "/v_%s %s ✅\n", alias, tag)
-		} else {
-			fmt.Fprintf(&sb, "/v_%s %s\n", alias, tag)
+	for _, r := range releases[:limit] {
+		alias := strings.ReplaceAll(strings.TrimPrefix(r.Tag, "v"), ".", "_")
+		date := formatReleaseDate(r.PublishedAt)
+		mark := ""
+		if r.Tag == current {
+			mark = " ✅"
 		}
+		fmt.Fprintf(&sb, "/v_%s <a href=\"%s\">%s</a> %s%s\n", alias, r.URL, r.Tag, date, mark)
 	}
 	return sb.String(), nil
 }

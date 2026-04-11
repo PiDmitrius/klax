@@ -181,7 +181,7 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 				d.sendMessage(chatID, msgID, fmt.Sprintf("❌ %v", err))
 				return
 			}
-			d.sendPlain(chatID, msgID, text)
+			d.sendMessage(chatID, msgID, text)
 		}()
 
 	case "/bypass":
