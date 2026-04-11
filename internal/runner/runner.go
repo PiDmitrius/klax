@@ -84,6 +84,26 @@ func (t ToolUse) String() string {
 	}
 }
 
+func formatRateLimit(rl *RateLimitInfo) string {
+	typeLabel := ""
+	switch rl.RateLimitType {
+	case "five_hour":
+		typeLabel = "5ч"
+	case "weekly", "seven_day":
+		typeLabel = "нед"
+	default:
+		typeLabel = rl.RateLimitType
+	}
+	switch rl.Status {
+	case "throttled", "rejected":
+		return fmt.Sprintf("🚫 Лимит исчерпан (%s)", typeLabel)
+	case "allowed_warning":
+		return fmt.Sprintf("⚠️ Лимит (%s)", typeLabel)
+	default:
+		return fmt.Sprintf("⏱ Лимит (%s) %s", typeLabel, rl.Status)
+	}
+}
+
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
@@ -233,6 +253,9 @@ func (r *Runner) Run(backend Backend, opts RunOptions, onProgress ProgressFunc) 
 			}
 			if ev.RateLimit != nil {
 				rateLimit = ev.RateLimit
+				if onProgress != nil {
+					onProgress(formatRateLimit(ev.RateLimit))
+				}
 			}
 
 		case "tool":
