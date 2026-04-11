@@ -232,15 +232,21 @@ func (d *daemon) statusText(chatID string) string {
 	var rateLine string
 	if sess.RateLimitResets > 0 {
 		resetsIn := time.Until(time.Unix(sess.RateLimitResets, 0))
-		hours := int(resetsIn.Hours())
-		mins := int(resetsIn.Minutes()) % 60
-		if sess.RateLimitStatus == "throttled" {
-			rateLine = fmt.Sprintf("\n🚫 Лимит исчерпан %dч%dм", hours, mins)
-		} else if resetsIn > 0 {
-			rateLine = fmt.Sprintf("\n⏱ Сброс лимита %dч%dм", hours, mins)
-		}
-		if sess.RateLimitOverage {
-			rateLine += " (overage)"
+		if resetsIn <= 0 {
+			// Rate limit already reset — clear stale data.
+			sess.RateLimitResets = 0
+			sess.RateLimitStatus = ""
+			sess.RateLimitOverage = false
+		} else {
+			remaining := formatDuration(resetsIn)
+			if sess.RateLimitStatus == "throttled" || sess.RateLimitStatus == "rejected" {
+				rateLine = fmt.Sprintf("\n🚫 Лимит исчерпан %s", remaining)
+			} else {
+				rateLine = fmt.Sprintf("\n⏱ Сброс лимита %s", remaining)
+			}
+			if sess.RateLimitOverage {
+				rateLine += " (overage)"
+			}
 		}
 	}
 
@@ -248,6 +254,25 @@ func (d *daemon) statusText(chatID string) string {
 		"<b>klax</b> v%s [%s]\n\n📌 <code>%s</code>\n%s%s%s\n💬 Сообщений: %d",
 		version, backend, sess.Name, statusLine, contextLine, rateLine, sess.Messages,
 	)
+}
+
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return "менее минуты"
+	}
+	days := int(d.Hours()) / 24
+	hours := int(d.Hours()) % 24
+	mins := int(d.Minutes()) % 60
+	if days > 0 {
+		if hours > 0 {
+			return fmt.Sprintf("%dд%dч", days, hours)
+		}
+		return fmt.Sprintf("%dд", days)
+	}
+	if hours > 0 {
+		return fmt.Sprintf("%dч%dм", hours, mins)
+	}
+	return fmt.Sprintf("%dм", mins)
 }
 
 func timeAgo(t time.Time) string {
