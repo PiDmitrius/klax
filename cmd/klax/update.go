@@ -234,25 +234,22 @@ func parseJSON(data []byte, v interface{}) error {
 	return json.Unmarshal(data, v)
 }
 
-// fallbackText returns a menu of available release versions.
-func fallbackText() (string, error) {
+// updateText returns a menu: build from source + available release versions.
+func updateText() (string, error) {
 	tags, err := releaseTags()
 	if err != nil {
 		return "", err
-	}
-	if len(tags) == 0 {
-		return "Нет доступных релизов.", nil
 	}
 
 	current := "v" + version
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Текущая: %s\n\n", current)
+	sb.WriteString("/v_dev Собрать из исходников\n")
 	limit := 10
 	if len(tags) < limit {
 		limit = len(tags)
 	}
 	for _, tag := range tags[:limit] {
-		// /v_0_4_39 for v0.4.39
 		alias := strings.ReplaceAll(strings.TrimPrefix(tag, "v"), ".", "_")
 		if tag == current {
 			fmt.Fprintf(&sb, "/v_%s %s ✅\n", alias, tag)
@@ -277,7 +274,7 @@ func runFallback() {
 		tag = os.Args[2]
 	}
 	if tag == "" {
-		text, err := fallbackText()
+		text, err := updateText()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cannot list releases: %v\n", err)
 			os.Exit(1)

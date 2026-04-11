@@ -183,8 +183,7 @@ func helpText() string {
 /bypass — прямая команда
 /abort — прервать исполнение
 /backend — backend (claude/codex)
-/update — обновить
-/fallback — установить релизную версию`
+/update — обновить`
 }
 
 func (d *daemon) statusText(chatID string) string {

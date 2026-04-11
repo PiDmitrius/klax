@@ -175,11 +175,8 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		d.sendPlain(chatID, msgID, d.backendText(sess))
 
 	case "/update":
-		go d.runChatOp(chatID, msgID, "update", "⏳ Обновляю...")
-
-	case "/fallback":
 		go func() {
-			text, err := fallbackText()
+			text, err := updateText()
 			if err != nil {
 				d.sendMessage(chatID, msgID, fmt.Sprintf("❌ %v", err))
 				return
@@ -337,8 +334,12 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		// /v_VERSION shortcut for installing a specific release
 		if strings.HasPrefix(cmd, "/v_") {
 			alias := cmd[3:]
-			tag := tagFromAlias(alias)
-			go d.runChatOp(chatID, msgID, "fallback "+tag, fmt.Sprintf("⏳ Устанавливаю %s...", tag))
+			if alias == "dev" {
+				go d.runChatOp(chatID, msgID, "update", "⏳ Собираю из исходников...")
+			} else {
+				tag := tagFromAlias(alias)
+				go d.runChatOp(chatID, msgID, "fallback "+tag, fmt.Sprintf("⏳ Устанавливаю %s...", tag))
+			}
 			return
 		}
 		d.sendMessage(chatID, msgID, fmt.Sprintf("Неизвестная команда: %s\nНапиши /help", cmd))
