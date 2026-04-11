@@ -230,13 +230,13 @@ func fetchReleases() ([]releaseInfo, error) {
 	return all, nil
 }
 
-// formatReleaseDate formats "2026-04-09T11:17:22Z" as "09.04".
-func formatReleaseDate(published string) string {
+// releaseAge formats "2026-04-09T11:17:22Z" as relative time using timeAgo.
+func releaseAge(published string) string {
 	t, err := time.Parse(time.RFC3339, published)
 	if err != nil {
 		return ""
 	}
-	return t.Format("02.01")
+	return timeAgo(t)
 }
 
 // updateText returns a menu: build from source + available release versions.
@@ -255,7 +255,7 @@ func updateText() (string, error) {
 	}
 	for _, r := range releases[:limit] {
 		alias := strings.ReplaceAll(strings.TrimPrefix(r.Tag, "v"), ".", "_")
-		date := formatReleaseDate(r.PublishedAt)
+		date := releaseAge(r.PublishedAt)
 		mark := ""
 		if r.Tag == current {
 			mark = " ✅"
