@@ -101,6 +101,9 @@ func (b *ClaudeBackend) ParseEvent(line []byte) (Event, bool) {
 			Model:     ev.Model,
 		}, true
 
+	case "user", "rate_limit_event":
+		return Event{}, false
+
 	case "assistant":
 		if ev.Message == nil {
 			return Event{}, false
