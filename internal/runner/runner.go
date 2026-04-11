@@ -195,6 +195,7 @@ func (r *Runner) Run(backend Backend, opts RunOptions, onProgress ProgressFunc) 
 	var sessionID string
 	var model string
 	var textParts []string
+	var lastIntermediate string // last intermediate message (codex thinking)
 	var usage ModelUsageInfo
 
 	scanner := bufio.NewScanner(stdout)
@@ -239,6 +240,14 @@ func (r *Runner) Run(backend Backend, opts RunOptions, onProgress ProgressFunc) 
 				usage.ContextUsed = ev.Usage.ContextUsed
 			}
 
+		case "intermediate":
+			// Codex intermediate "thinking" message — overwrite previous,
+			// only the last one becomes the final answer.
+			lastIntermediate = ev.Text
+			r.mu.Lock()
+			r.current = ToolUse{}
+			r.mu.Unlock()
+
 		case "result":
 			if ev.Error != "" {
 				return RunResult{
@@ -269,6 +278,11 @@ func (r *Runner) Run(backend Backend, opts RunOptions, onProgress ProgressFunc) 
 				usage.CacheCreation = ev.Usage.CacheCreation
 			}
 		}
+	}
+
+	// For codex: if no explicit result text, use last intermediate message.
+	if len(textParts) == 0 && lastIntermediate != "" {
+		textParts = append(textParts, lastIntermediate)
 	}
 
 	waitErr := cmd.Wait()

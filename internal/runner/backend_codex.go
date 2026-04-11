@@ -19,7 +19,14 @@ type CodexBackend struct {
 func (b *CodexBackend) Name() string { return "codex" }
 
 func (b *CodexBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
-	args := []string{"exec", "--json", "--skip-git-repo-check"}
+	var args []string
+
+	if opts.SessionID != "" {
+		// Resume existing session.
+		args = []string{"exec", "resume", opts.SessionID, "--json", "--skip-git-repo-check"}
+	} else {
+		args = []string{"exec", "--json", "--skip-git-repo-check"}
+	}
 
 	if b.FullAuto {
 		args = append(args, "--full-auto")
@@ -55,9 +62,9 @@ func (b *CodexBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 
 // codexEvent is the raw JSON from codex exec --json.
 type codexEvent struct {
-	Type     string     `json:"type"`
-	ThreadID string     `json:"thread_id,omitempty"`
-	Item     *codexItem `json:"item,omitempty"`
+	Type     string      `json:"type"`
+	ThreadID string      `json:"thread_id,omitempty"`
+	Item     *codexItem  `json:"item,omitempty"`
 	Usage    *codexUsage `json:"usage,omitempty"`
 }
 
@@ -108,8 +115,11 @@ func (b *CodexBackend) ParseEvent(line []byte) (Event, bool) {
 		}
 		switch ev.Item.Type {
 		case "agent_message":
+			// Intermediate thinking — show as progress, not final result.
+			// The runner will accumulate these; only the last text before
+			// turn.completed becomes the final answer.
 			return Event{
-				Type: "result",
+				Type: "intermediate",
 				Text: ev.Item.Text,
 			}, true
 		case "command_execution":
