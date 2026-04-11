@@ -47,14 +47,31 @@ func stripHTML(s string) string {
 	return s
 }
 
-var knownModels = []struct {
+type modelEntry struct {
 	alias string
 	model string // actual --model value
 	label string
-}{
+}
+
+var claudeModels = []modelEntry{
 	{"opus", "claude-opus-4-6[1m]", "Claude Opus 1M"},
 	{"sonnet", "claude-sonnet-4-6[1m]", "Claude Sonnet 1M"},
 	{"haiku", "claude-haiku-4-5-20251001", "Claude Haiku 200k"},
+}
+
+var codexModels = []modelEntry{
+	{"5.4", "gpt-5.4", "GPT-5.4"},
+	{"mini", "gpt-5.4-mini", "GPT-5.4-Mini"},
+	{"codex", "gpt-5.3-codex", "GPT-5.3-Codex"},
+	{"spark", "gpt-5.3-codex-spark", "GPT-5.3-Codex-Spark"},
+	{"5.2", "gpt-5.2", "GPT-5.2"},
+}
+
+func modelsForBackend(backend string) []modelEntry {
+	if backend == "codex" {
+		return codexModels
+	}
+	return claudeModels
 }
 
 func (d *daemon) backendText(sess *session.Session) string {
@@ -78,9 +95,15 @@ func (d *daemon) backendText(sess *session.Session) string {
 }
 
 func (d *daemon) modelText(sess *session.Session) string {
+	backend := sess.Backend
+	if backend == "" {
+		backend = d.cfg.GetDefaultBackend()
+	}
+	models := modelsForBackend(backend)
+
 	var sb strings.Builder
 	current := sess.ModelOverride
-	for _, m := range knownModels {
+	for _, m := range models {
 		if m.model == current {
 			fmt.Fprintf(&sb, "/m_%s %s ✅\n", m.alias, m.label)
 		} else {

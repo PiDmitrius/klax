@@ -241,8 +241,12 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 				return
 			}
 			// Resolve alias to full model name.
+			backend := sess.Backend
+			if backend == "" {
+				backend = d.cfg.GetDefaultBackend()
+			}
 			resolved := alias
-			for _, m := range knownModels {
+			for _, m := range modelsForBackend(backend) {
 				if m.alias == alias {
 					resolved = m.model
 					break
