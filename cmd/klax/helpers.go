@@ -244,7 +244,7 @@ func (d *daemon) statusText(chatID string) string {
 			switch sess.RateLimitType {
 			case "five_hour":
 				typeLabel = " (5ч)"
-			case "weekly":
+			case "weekly", "seven_day":
 				typeLabel = " (нед)"
 			}
 			if sess.RateLimitStatus == "throttled" || sess.RateLimitStatus == "rejected" {
