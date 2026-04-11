@@ -175,7 +175,7 @@ func helpText() string {
 /name — переименовать сессию
 /cleanup — управление сессиями
 /cwd [путь] — рабочая директория
-/model — модель (opus/sonnet/haiku)
+/model — выбор модели
 /think — уровень мышления
 /prompt [текст] — системный промпт
 /groups — режим группы
