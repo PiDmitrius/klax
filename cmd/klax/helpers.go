@@ -170,6 +170,7 @@ func (d *daemon) saveRateLimit(backendName string, rl *runner.RateLimitInfo) {
 	state := &session.RateLimitState{
 		Status:         rl.Status,
 		ResetsAt:       rl.ResetsAt,
+		Utilization:    rl.Utilization,
 		IsUsingOverage: rl.IsUsingOverage,
 	}
 	switch rl.RateLimitType {
@@ -209,7 +210,8 @@ func (d *daemon) rateLimitText(backendName string) string {
 			}
 			lines = append(lines, line)
 		case "allowed_warning":
-			lines = append(lines, fmt.Sprintf("⚠️ Лимит (%s) %s", entry.label, remaining))
+			pct := int((*entry.rl).Utilization * 100)
+			lines = append(lines, fmt.Sprintf("⚠️ Лимит (%s) %d%% %s", entry.label, pct, remaining))
 		}
 	}
 	if len(lines) > 0 {

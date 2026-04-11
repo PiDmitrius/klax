@@ -6,9 +6,10 @@ import (
 
 // RateLimitInfo holds subscription rate limit status from a backend.
 type RateLimitInfo struct {
-	Status         string // "allowed" | "throttled"
-	ResetsAt       int64  // unix timestamp
-	RateLimitType  string // "five_hour"
+	Status         string  // "allowed" | "allowed_warning" | "throttled" | "rejected"
+	ResetsAt       int64   // unix timestamp
+	RateLimitType  string  // "five_hour" | "seven_day"
+	Utilization    float64 // 0.0–1.0
 	IsUsingOverage bool
 }
 

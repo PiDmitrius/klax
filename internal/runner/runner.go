@@ -109,7 +109,8 @@ func formatRateLimit(rl *RateLimitInfo) string {
 		}
 		return s
 	case "allowed_warning":
-		return fmt.Sprintf("⚠️ Лимит (%s)%s", typeLabel, remaining)
+		pct := int(rl.Utilization * 100)
+		return fmt.Sprintf("⚠️ Лимит (%s) %d%%%s", typeLabel, pct, remaining)
 	default:
 		return fmt.Sprintf("⏱ Лимит (%s) %s%s", typeLabel, rl.Status, remaining)
 	}

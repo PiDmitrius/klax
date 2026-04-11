@@ -9,9 +9,10 @@ import (
 
 // RateLimitState stores one rate limit (e.g. five_hour or seven_day).
 type RateLimitState struct {
-	Status         string `json:"status,omitempty"`    // "allowed" | "allowed_warning" | "throttled" | "rejected"
-	ResetsAt       int64  `json:"resets_at,omitempty"` // unix timestamp
-	IsUsingOverage bool   `json:"overage,omitempty"`
+	Status         string  `json:"status,omitempty"`      // "allowed_warning" | "throttled" | "rejected"
+	ResetsAt       int64   `json:"resets_at,omitempty"`   // unix timestamp
+	Utilization    float64 `json:"utilization,omitempty"` // 0.0–1.0
+	IsUsingOverage bool    `json:"overage,omitempty"`
 }
 
 // BackendState holds runtime state for a backend.

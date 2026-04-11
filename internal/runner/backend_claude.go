@@ -73,11 +73,12 @@ type claudeStreamEvent struct {
 }
 
 type claudeRateLimitInfo struct {
-	Status         string `json:"status"`          // "allowed" | "throttled"
-	ResetsAt       int64  `json:"resetsAt"`        // unix timestamp
-	RateLimitType  string `json:"rateLimitType"`   // "five_hour"
-	OverageStatus  string `json:"overageStatus"`   // "allowed" | ...
-	IsUsingOverage bool   `json:"isUsingOverage"`
+	Status         string  `json:"status"`          // "allowed" | "allowed_warning" | "throttled" | "rejected"
+	ResetsAt       int64   `json:"resetsAt"`        // unix timestamp
+	RateLimitType  string  `json:"rateLimitType"`   // "five_hour" | "seven_day"
+	Utilization    float64 `json:"utilization"`     // 0.0–1.0
+	OverageStatus  string  `json:"overageStatus"`   // "allowed" | ...
+	IsUsingOverage bool    `json:"isUsingOverage"`
 }
 
 type claudeMessage struct {
@@ -117,13 +118,14 @@ func (b *ClaudeBackend) ParseEvent(line []byte) (Event, bool) {
 		return Event{}, false
 
 	case "rate_limit_event":
-		if ev.RateLimitInfo != nil {
+		if ev.RateLimitInfo != nil && ev.RateLimitInfo.Status != "allowed" {
 			return Event{
 				Type: "system",
 				RateLimit: &RateLimitInfo{
 					Status:         ev.RateLimitInfo.Status,
 					ResetsAt:       ev.RateLimitInfo.ResetsAt,
 					RateLimitType:  ev.RateLimitInfo.RateLimitType,
+					Utilization:    ev.RateLimitInfo.Utilization,
 					IsUsingOverage: ev.RateLimitInfo.IsUsingOverage,
 				},
 			}, true
