@@ -166,7 +166,7 @@ func (d *daemon) thinkText(sess *session.Session) string {
 // --- Text helpers ---
 
 func helpText() string {
-	return `<b>klax</b> — AI coding bridge
+	return `<b>klax</b> — AI messaging bridge
 
 <b>Команды:</b>
 /status — статус
