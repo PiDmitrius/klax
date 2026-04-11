@@ -167,10 +167,12 @@ func (d *daemon) statusText(chatID string) string {
 	d.mu.Unlock()
 	if rl != nil && rl.ResetsAt > 0 {
 		resetsIn := time.Until(time.Unix(rl.ResetsAt, 0))
-		if resetsIn > 0 {
-			hours := int(resetsIn.Hours())
-			mins := int(resetsIn.Minutes()) % 60
-			rateLine = fmt.Sprintf("\n⏱ Лимит сбросится через %dч%dм", hours, mins)
+		hours := int(resetsIn.Hours())
+		mins := int(resetsIn.Minutes()) % 60
+		if rl.Status == "throttled" {
+			rateLine = fmt.Sprintf("\n🚫 Лимит исчерпан %dч%dм", hours, mins)
+		} else if resetsIn > 0 {
+			rateLine = fmt.Sprintf("\n⏱ Сброс лимита %dч%dм", hours, mins)
 		}
 		if rl.IsUsingOverage {
 			rateLine += " (overage)"
