@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os/exec"
 	"strings"
 	"sync"
@@ -234,7 +233,6 @@ func (r *Runner) Run(backend Backend, opts RunOptions, onProgress ProgressFunc) 
 			}
 			if ev.RateLimit != nil {
 				rateLimit = ev.RateLimit
-				log.Printf("[debug] got rate limit: status=%s type=%s resets=%d", rateLimit.Status, rateLimit.RateLimitType, rateLimit.ResetsAt)
 			}
 
 		case "tool":
