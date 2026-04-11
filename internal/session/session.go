@@ -18,7 +18,8 @@ type Session struct {
 	Active             bool   `json:"active"`                   // currently selected
 	Backend            string `json:"backend,omitempty"`        // "claude" (default) or "codex"
 	Model              string `json:"model,omitempty"`          // last used model (from result)
-	ModelOverride      string `json:"model_override,omitempty"` // user-selected model
+	ModelOverride      string `json:"model_override,omitempty"`  // user-selected model
+	EffortOverride     string `json:"effort_override,omitempty"` // reasoning effort level
 	ContextWindow      int    `json:"ctx_window,omitempty"`
 	ContextUsed        int    `json:"ctx_used,omitempty"`
 	Messages           int    `json:"messages"` // user message count

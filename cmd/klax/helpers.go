@@ -74,6 +74,27 @@ func modelsForBackend(backend string) []modelEntry {
 	return claudeModels
 }
 
+var claudeEfforts = []modelEntry{
+	{"low", "low", "Low"},
+	{"med", "medium", "Medium"},
+	{"high", "high", "High"},
+	{"max", "max", "Max"},
+}
+
+var codexEfforts = []modelEntry{
+	{"low", "low", "Low"},
+	{"med", "medium", "Medium"},
+	{"high", "high", "High"},
+	{"xhigh", "xhigh", "Extra High"},
+}
+
+func effortsForBackend(backend string) []modelEntry {
+	if backend == "codex" {
+		return codexEfforts
+	}
+	return claudeEfforts
+}
+
 func (d *daemon) backendText(sess *session.Session) string {
 	current := sess.Backend
 	if current == "" {
@@ -118,6 +139,30 @@ func (d *daemon) modelText(sess *session.Session) string {
 	return sb.String()
 }
 
+func (d *daemon) effortText(sess *session.Session) string {
+	backend := sess.Backend
+	if backend == "" {
+		backend = d.cfg.GetDefaultBackend()
+	}
+	efforts := effortsForBackend(backend)
+
+	var sb strings.Builder
+	current := sess.EffortOverride
+	for _, e := range efforts {
+		if e.model == current {
+			fmt.Fprintf(&sb, "/e_%s %s ✅\n", e.alias, e.label)
+		} else {
+			fmt.Fprintf(&sb, "/e_%s %s\n", e.alias, e.label)
+		}
+	}
+	if current == "" {
+		fmt.Fprintf(&sb, "/e_default По умолчанию ✅\n")
+	} else {
+		fmt.Fprintf(&sb, "/e_default По умолчанию\n")
+	}
+	return sb.String()
+}
+
 // --- Text helpers ---
 
 func helpText() string {
@@ -131,6 +176,7 @@ func helpText() string {
 /cleanup — управление сессиями
 /cwd [путь] — рабочая директория
 /model — модель (opus/sonnet/haiku)
+/effort — уровень reasoning
 /prompt [текст] — системный промпт
 /groups — режим группы
 /transports — управление транспортами

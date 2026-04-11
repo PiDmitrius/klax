@@ -39,6 +39,9 @@ func (b *CodexBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
 	}
+	if opts.Effort != "" {
+		args = append(args, "-c", fmt.Sprintf("reasoning_effort=%q", opts.Effort))
+	}
 
 	// Prompt via stdin.
 	args = append(args, "-")

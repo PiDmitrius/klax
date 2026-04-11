@@ -35,6 +35,9 @@ func (b *ClaudeBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
 	}
+	if opts.Effort != "" {
+		args = append(args, "--effort", opts.Effort)
+	}
 	if opts.AppendSystemPrompt != "" {
 		args = append(args, "--append-system-prompt", opts.AppendSystemPrompt)
 	}

@@ -98,6 +98,7 @@ type RunOptions struct {
 	CWD                string // working directory
 	PermissionMode     string // claude: acceptEdits | bypassPermissions | auto
 	Model              string // model override
+	Effort             string // reasoning effort: low | medium | high (claude also: max; codex also: xhigh)
 	AppendSystemPrompt string // appended to default system prompt
 }
 
@@ -202,7 +203,7 @@ func (r *Runner) Run(backend Backend, opts RunOptions, onProgress ProgressFunc) 
 		return RunResult{Error: fmt.Errorf("start: %w", err)}
 	}
 
-	var sessionID string
+	sessionID := opts.SessionID
 	var model string
 	var textParts []string
 	var lastIntermediate string // last intermediate message (codex thinking)
@@ -284,6 +285,9 @@ func (r *Runner) Run(backend Backend, opts RunOptions, onProgress ProgressFunc) 
 			if ev.Usage.ContextWindow > 0 {
 				usage.ContextWindow = ev.Usage.ContextWindow
 			}
+			if ev.Usage.ContextUsed > 0 {
+				usage.ContextUsed = ev.Usage.ContextUsed
+			}
 			if ev.Usage.InputTokens > 0 {
 				usage.InputTokens = ev.Usage.InputTokens
 			}
@@ -310,14 +314,19 @@ func (r *Runner) Run(backend Backend, opts RunOptions, onProgress ProgressFunc) 
 		usage.Model = model
 	}
 
-	// For codex: read model and context window from session file.
+	// For codex: read model, effective context window, and the latest turn's
+	// prompt size from the local session file. On resumed runs, codex may not
+	// re-emit thread.started, so fall back to the SessionID we already passed.
 	if backend.Name() == "codex" && sessionID != "" {
-		if m, cw := ReadCodexSessionMeta(sessionID); m != "" || cw > 0 {
+		if m, cw, cu := ReadCodexSessionMeta(sessionID); m != "" || cw > 0 || cu > 0 {
 			if usage.Model == "" {
 				usage.Model = m
 			}
 			if usage.ContextWindow == 0 {
 				usage.ContextWindow = cw
+			}
+			if cu > 0 {
+				usage.ContextUsed = cu
 			}
 		}
 	}
