@@ -11,7 +11,18 @@ import (
 
 	"github.com/PiDmitrius/klax/internal/mdhtml"
 	"github.com/PiDmitrius/klax/internal/runner"
+	"github.com/PiDmitrius/klax/internal/session"
 )
+
+func sanitizeAttachmentFilename(name string) string {
+	name = strings.ReplaceAll(name, "\\", "/")
+	name = filepath.Base(name)
+	name = strings.TrimSpace(name)
+	if name == "" || name == "." || name == string(filepath.Separator) {
+		return "attachment"
+	}
+	return name
+}
 
 func (d *daemon) enqueue(chatID, msgID, text string) {
 	d.enqueueWithAttachments(chatID, msgID, text, nil)
@@ -124,20 +135,15 @@ func (d *daemon) runClaude(msg queuedMsg) {
 	// Progress message — edit in place.
 	// If this message was queued, reuse the "В очереди" notification.
 	t, rawChatID, chatFmt := d.transportFor(msg.chatID)
-	progressMsgID := msg.progressID
+	var progressMsgIDs []string
+	if msg.progressID != "" {
+		progressMsgIDs = append(progressMsgIDs, msg.progressID)
+	}
 	if t != nil {
-		if progressMsgID != "" {
-			// Edit existing queue notification into progress indicator.
-			t.EditMessage(rawChatID, progressMsgID, "...", "")
-		} else {
-			// Send new progress message as reply to user's message.
-			retryDo(ctx, func() error {
-				mid, err := t.SendMessageReturnID(rawChatID, "...", msg.msgID, "")
-				if err == nil {
-					progressMsgID = mid
-				}
-				return err
-			})
+		var err error
+		progressMsgIDs, err = d.syncMessageChain(ctx, msg.chatID, t, rawChatID, msg.msgID, progressMsgIDs, "...", "")
+		if err != nil {
+			progressMsgIDs = nil
 		}
 	}
 
@@ -151,8 +157,12 @@ func (d *daemon) runClaude(msg queuedMsg) {
 		toolLines = append(toolLines, status)
 
 		newText := formatToolLines(toolLines, chatFmt) + "\n\n..."
-		if progressMsgID != "" {
-			t.EditMessage(rawChatID, progressMsgID, newText, chatFmt)
+		if len(progressMsgIDs) > 0 {
+			var err error
+			progressMsgIDs, err = d.syncMessageChain(ctx, msg.chatID, t, rawChatID, "", progressMsgIDs, newText, chatFmt)
+			if err != nil {
+				log.Printf("progress update failed: %v", err)
+			}
 		}
 	}
 
@@ -167,7 +177,7 @@ func (d *daemon) runClaude(msg queuedMsg) {
 		} else {
 			var filePaths []string
 			for _, att := range msg.attachments {
-				fp := filepath.Join(tmpDir, att.filename)
+				fp := filepath.Join(tmpDir, sanitizeAttachmentFilename(att.filename))
 				if err := os.WriteFile(fp, att.data, 0644); err != nil {
 					log.Printf("failed to write attachment %s: %v", att.filename, err)
 					continue
@@ -188,38 +198,50 @@ func (d *daemon) runClaude(msg queuedMsg) {
 		defer os.RemoveAll(tmpDir)
 	}
 
-	permMode := sess.PermissionMode
-	if permMode == "" {
-		permMode = d.cfg.PermissionMode
-	}
-	result := sr.runner.Run(runner.RunOptions{
+	backend := d.backendFor(sess)
+	result := sr.runner.Run(backend, runner.RunOptions{
 		Prompt:             prompt,
 		SessionID:          sess.ID,
 		CWD:                sess.CWD,
-		PermissionMode:     permMode,
+		PermissionMode:     sess.PermissionMode,
 		Model:              sess.ModelOverride,
+		Effort:             sess.ThinkOverride,
 		AppendSystemPrompt: sess.AppendSystemPrompt,
 	}, onProgress)
 
-	// Update session metadata.
-	sess.Messages++
-	sess.LastUsed = time.Now().Unix()
-	if result.SessionID != "" {
-		sess.ID = result.SessionID
-	}
-	// Only update model/usage from successful runs.
-	// On kill/error, system event may report a wrong default model.
-	if result.Error == nil && result.Usage.Model != "" {
-		sess.Model = result.Usage.Model
-		sess.ContextWindow = result.Usage.ContextWindow
-		sess.ContextUsed = result.Usage.ContextUsed
+	// Persist changes onto the same session record that started the run.
+	d.store.UpdateSession(sk, sess.Created, func(current *session.Session) {
+		current.Messages++
+		current.LastUsed = time.Now().Unix()
+		if result.SessionID != "" {
+			current.ID = result.SessionID
+		}
+		// Only update model/usage from successful runs.
+		// On kill/error, system event may report a wrong default model.
+		if result.Error == nil {
+			if result.Usage.Model != "" {
+				current.Model = result.Usage.Model
+			}
+			if result.Usage.ContextWindow > 0 {
+				current.ContextWindow = result.Usage.ContextWindow
+			}
+			if result.Usage.ContextUsed > 0 {
+				current.ContextUsed = result.Usage.ContextUsed
+			}
+		}
+	})
+	if result.RateLimit != nil {
+		d.saveRateLimit(backend.Name(), result.RateLimit)
 	}
 	d.store.Save()
 
 	if result.Error != nil {
 		finalText := fmt.Sprintf("❌ Ошибка: %v", result.Error)
-		if progressMsgID != "" && t != nil {
-			tryEdit(ctx, t, rawChatID, progressMsgID, finalText, "")
+		if len(progressMsgIDs) > 0 && t != nil {
+			_, err := d.syncMessageChain(ctx, msg.chatID, t, rawChatID, "", progressMsgIDs, finalText, "")
+			if err != nil {
+				log.Printf("final error delivery failed: %v", err)
+			}
 		} else {
 			d.sendMessage(msg.chatID, msg.msgID, finalText)
 		}
@@ -248,6 +270,9 @@ func (d *daemon) runClaude(msg queuedMsg) {
 	}
 
 	if t != nil {
-		d.deliverFinal(ctx, t, rawChatID, progressMsgID, finalText, chatFmt)
+		_, err := d.syncMessageChain(ctx, msg.chatID, t, rawChatID, "", progressMsgIDs, finalText, chatFmt)
+		if err != nil {
+			log.Printf("final delivery failed: %v", err)
+		}
 	}
 }

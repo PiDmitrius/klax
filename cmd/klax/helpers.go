@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PiDmitrius/klax/internal/runner"
 	"github.com/PiDmitrius/klax/internal/session"
 )
 
@@ -47,38 +48,199 @@ func stripHTML(s string) string {
 	return s
 }
 
-var knownModels = []struct {
+type modelEntry struct {
 	alias string
 	model string // actual --model value
 	label string
-}{
+}
+
+var claudeModels = []modelEntry{
 	{"opus", "claude-opus-4-6[1m]", "Claude Opus 1M"},
 	{"sonnet", "claude-sonnet-4-6[1m]", "Claude Sonnet 1M"},
 	{"haiku", "claude-haiku-4-5-20251001", "Claude Haiku 200k"},
 }
 
-func (d *daemon) modelText(sess *session.Session) string {
+var codexModels = []modelEntry{
+	{"54", "gpt-5.4", "GPT-5.4"},
+	{"mini", "gpt-5.4-mini", "GPT-5.4-Mini"},
+	{"codex", "gpt-5.3-codex", "GPT-5.3-Codex"},
+	{"spark", "gpt-5.3-codex-spark", "GPT-5.3-Codex-Spark"},
+	{"52", "gpt-5.2", "GPT-5.2"},
+}
+
+func modelsForBackend(backend string) []modelEntry {
+	if backend == "codex" {
+		return codexModels
+	}
+	return claudeModels
+}
+
+var claudeEfforts = []modelEntry{
+	{"low", "low", "Low"},
+	{"med", "medium", "Medium"},
+	{"high", "high", "High"},
+	{"max", "max", "Max"},
+}
+
+var codexEfforts = []modelEntry{
+	{"low", "low", "Low"},
+	{"med", "medium", "Medium"},
+	{"high", "high", "High"},
+	{"xhigh", "xhigh", "Extra High"},
+}
+
+func effortsForBackend(backend string) []modelEntry {
+	if backend == "codex" {
+		return codexEfforts
+	}
+	return claudeEfforts
+}
+
+func (d *daemon) backendText(sk string, sess *session.Session) string {
+	current := resolveSessionBackend(sess, d.scopeDefaults(sk), d.cfg.GetDefaultBackend())
+	backends := []string{"claude", "codex"}
+	var sb strings.Builder
+	for _, name := range backends {
+		if name == current {
+			fmt.Fprintf(&sb, "/backend_%s ✅\n", name)
+		} else {
+			fmt.Fprintf(&sb, "/backend_%s\n", name)
+		}
+	}
+	if sess.Messages > 0 {
+		sb.WriteString("\n(зафиксирован)")
+	}
+	return sb.String()
+}
+
+func (d *daemon) modelText(sk string, sess *session.Session) string {
+	def := d.scopeDefaults(sk)
+	backend := resolveSessionBackend(sess, def, d.cfg.GetDefaultBackend())
+	models := modelsForBackend(backend)
+
 	var sb strings.Builder
 	current := sess.ModelOverride
-	for _, m := range knownModels {
+	defaultModel := def.Model
+	for _, m := range models {
 		if m.model == current {
 			fmt.Fprintf(&sb, "/m_%s %s ✅\n", m.alias, m.label)
 		} else {
 			fmt.Fprintf(&sb, "/m_%s %s\n", m.alias, m.label)
 		}
 	}
-	if current == "" {
-		fmt.Fprintf(&sb, "/m_default По умолчанию ✅\n")
+	if current == defaultModel {
+		if defaultModel == "" {
+			fmt.Fprintf(&sb, "/m_default По умолчанию ✅\n")
+		} else {
+			fmt.Fprintf(&sb, "/m_default По умолчанию (%s) ✅\n", defaultModel)
+		}
 	} else {
-		fmt.Fprintf(&sb, "/m_default По умолчанию\n")
+		if defaultModel == "" {
+			fmt.Fprintf(&sb, "/m_default По умолчанию\n")
+		} else {
+			fmt.Fprintf(&sb, "/m_default По умолчанию (%s)\n", defaultModel)
+		}
 	}
 	return sb.String()
+}
+
+func (d *daemon) thinkText(sk string, sess *session.Session) string {
+	def := d.scopeDefaults(sk)
+	backend := resolveSessionBackend(sess, def, d.cfg.GetDefaultBackend())
+	efforts := effortsForBackend(backend)
+
+	var sb strings.Builder
+	current := sess.ThinkOverride
+	defaultThink := def.Think
+	for _, e := range efforts {
+		if e.model == current {
+			fmt.Fprintf(&sb, "/t_%s %s ✅\n", e.alias, e.label)
+		} else {
+			fmt.Fprintf(&sb, "/t_%s %s\n", e.alias, e.label)
+		}
+	}
+	if current == defaultThink {
+		if defaultThink == "" {
+			fmt.Fprintf(&sb, "/t_default По умолчанию ✅\n")
+		} else {
+			fmt.Fprintf(&sb, "/t_default По умолчанию (%s) ✅\n", defaultThink)
+		}
+	} else {
+		if defaultThink == "" {
+			fmt.Fprintf(&sb, "/t_default По умолчанию\n")
+		} else {
+			fmt.Fprintf(&sb, "/t_default По умолчанию (%s)\n", defaultThink)
+		}
+	}
+	return sb.String()
+}
+
+// saveRateLimit stores a rate limit event into global state.
+func (d *daemon) saveRateLimit(backendName string, rl *runner.RateLimitInfo) {
+	bs := d.state.Backend(backendName)
+	state := &session.RateLimitState{
+		Status:         rl.Status,
+		ResetsAt:       rl.ResetsAt,
+		Utilization:    rl.Utilization,
+		IsUsingOverage: rl.IsUsingOverage,
+	}
+	switch rl.RateLimitType {
+	case "five_hour":
+		bs.RateLimit5h = state
+	case "weekly", "seven_day":
+		bs.RateLimitWk = state
+	}
+	d.state.Save()
+}
+
+// rateLimitText returns rate limit lines for /status.
+func (d *daemon) rateLimitText(backendName string) string {
+	bs := d.state.Backend(backendName)
+	var lines []string
+	for _, entry := range []struct {
+		label string
+		rl    **session.RateLimitState
+	}{
+		{"5ч", &bs.RateLimit5h},
+		{"нед", &bs.RateLimitWk},
+	} {
+		if *entry.rl == nil || (*entry.rl).ResetsAt == 0 {
+			continue
+		}
+		resetsIn := time.Until(time.Unix((*entry.rl).ResetsAt, 0))
+		if resetsIn <= 0 {
+			*entry.rl = nil
+			continue
+		}
+		remaining := formatDuration(resetsIn)
+		rl := *entry.rl
+		switch rl.Status {
+		case "throttled", "rejected":
+			line := fmt.Sprintf("🚫 Лимит (%s) %s", entry.label, remaining)
+			if rl.IsUsingOverage {
+				line += " (overage)"
+			}
+			lines = append(lines, line)
+		case "allowed_warning":
+			pct := int(rl.Utilization * 100)
+			lines = append(lines, fmt.Sprintf("⚠️ Лимит (%s) %d%% %s", entry.label, pct, remaining))
+		case "allowed":
+			pct := int(rl.Utilization * 100)
+			if pct > 0 {
+				lines = append(lines, fmt.Sprintf("⏱ Лимит (%s) %d%% %s", entry.label, pct, remaining))
+			}
+		}
+	}
+	if len(lines) > 0 {
+		return "\n" + strings.Join(lines, "\n")
+	}
+	return ""
 }
 
 // --- Text helpers ---
 
 func helpText() string {
-	return `<b>klax</b> — bridge для Claude Code
+	return `<b>klax</b> — AI messaging bridge
 
 <b>Команды:</b>
 /status — статус
@@ -87,14 +249,15 @@ func helpText() string {
 /name — переименовать сессию
 /cleanup — управление сессиями
 /cwd [путь] — рабочая директория
-/model — модель (opus/sonnet/haiku)
+/model — выбор модели
+/think — уровень мышления
 /prompt [текст] — системный промпт
 /groups — режим группы
 /transports — управление транспортами
-/bypass — команда в Claude
+/bypass — прямая команда
 /abort — прервать исполнение
-/update — обновить
-/fallback — установить релизную версию`
+/backend — backend (claude/codex)
+/update — обновить`
 }
 
 func (d *daemon) statusText(chatID string) string {
@@ -125,18 +288,49 @@ func (d *daemon) statusText(chatID string) string {
 		statusLine = "💤 Свободен"
 	}
 
+	backend := resolveSessionBackend(sess, d.scopeDefaults(chatID), d.cfg.GetDefaultBackend())
+	model := sess.ModelOverride
+	if model == "" {
+		model = "по умолчанию"
+	}
+	think := sess.ThinkOverride
+	if think == "" {
+		think = "по умолчанию"
+	}
+
 	var contextLine string
 	if sess.ContextWindow > 0 {
 		pct := sess.ContextUsed * 100 / sess.ContextWindow
-		contextLine = fmt.Sprintf("\n🤖 <code>%s</code>\n📊 Контекст: %d%% (%dk/%dk)",
-			sess.Model, pct,
+		contextLine = fmt.Sprintf("\n📊 Контекст: %d%% (%dk/%dk)",
+			pct,
 			sess.ContextUsed/1000, sess.ContextWindow/1000)
 	}
 
+	rateLine := d.rateLimitText(backend)
+
 	return fmt.Sprintf(
-		"<b>klax</b> v%s\n\n📌 <code>%s</code>\n%s%s\n💬 Сообщений: %d",
-		version, sess.Name, statusLine, contextLine, sess.Messages,
+		"<b>klax</b> v%s\n\n📌 Сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n%s%s%s\n💬 Сообщений: %d",
+		version, sess.Name, sessionModeLabel(chatID), backend, model, think, statusLine, contextLine, rateLine, sess.Messages,
 	)
+}
+
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return "менее минуты"
+	}
+	days := int(d.Hours()) / 24
+	hours := int(d.Hours()) % 24
+	mins := int(d.Minutes()) % 60
+	if days > 0 {
+		if hours > 0 {
+			return fmt.Sprintf("%dд%dч", days, hours)
+		}
+		return fmt.Sprintf("%dд", days)
+	}
+	if hours > 0 {
+		return fmt.Sprintf("%dч%dм", hours, mins)
+	}
+	return fmt.Sprintf("%dм", mins)
 }
 
 func timeAgo(t time.Time) string {
@@ -156,21 +350,41 @@ func timeAgo(t time.Time) string {
 	}
 }
 
+// hasMultipleBackends checks if sessions use more than one backend.
+func hasMultipleBackends(sessions []*session.Session) bool {
+	seen := ""
+	for _, s := range sessions {
+		b := resolveSessionBackend(s, nil, "claude")
+		if seen == "" {
+			seen = b
+		} else if seen != b {
+			return true
+		}
+	}
+	return false
+}
+
 // formatSessionLine renders one session line.
 // activePrefix/inactiveCmd control per-mode differences.
-func formatSessionLine(sb *strings.Builder, i int, s *session.Session, activePrefix, inactiveCmd string) {
+// showBackend adds backend name after message count when multiple backends are used.
+func formatSessionLine(sb *strings.Builder, i int, s *session.Session, activePrefix, inactiveCmd string, showBackend bool) {
 	ctx := ""
 	if s.ContextWindow > 0 {
 		pct := s.ContextUsed * 100 / s.ContextWindow
 		ctx = fmt.Sprintf("%d%%", pct)
+	}
+	backendSuffix := ""
+	if showBackend {
+		b := resolveSessionBackend(s, nil, "claude")
+		backendSuffix = fmt.Sprintf(" (%s)", b)
 	}
 	if s.Active {
 		detail := "активна"
 		if ctx != "" {
 			detail += " " + ctx
 		}
-		fmt.Fprintf(sb, "%s<b>/s%d</b> <code>%s</code> <b>(%s)</b> <b>%d💬</b>\n",
-			activePrefix, i+1, s.Name, detail, s.Messages)
+		fmt.Fprintf(sb, "%s<b>/s%d</b> <code>%s</code> <b>(%s)</b> <b>%d💬</b>%s\n",
+			activePrefix, i+1, s.Name, detail, s.Messages, backendSuffix)
 	} else {
 		ago := ""
 		if s.LastUsed > 0 {
@@ -187,8 +401,8 @@ func formatSessionLine(sb *strings.Builder, i int, s *session.Session, activePre
 		if len(parts) > 0 {
 			detail = " (" + strings.Join(parts, " ") + ")"
 		}
-		fmt.Fprintf(sb, "%s%d <code>%s</code>%s %d💬\n",
-			inactiveCmd, i+1, s.Name, detail, s.Messages)
+		fmt.Fprintf(sb, "%s%d <code>%s</code>%s %d💬%s\n",
+			inactiveCmd, i+1, s.Name, detail, s.Messages, backendSuffix)
 	}
 }
 
@@ -197,13 +411,14 @@ func (d *daemon) cleanupText(chatID string) string {
 	if len(sessions) == 0 {
 		return "Нет сессий."
 	}
+	multi := hasMultipleBackends(sessions)
 	var sb strings.Builder
 	inactive := 0
 	for i, s := range sessions {
 		if !s.Active {
 			inactive++
 		}
-		formatSessionLine(&sb, i, s, "✅ ", "❌ /d")
+		formatSessionLine(&sb, i, s, "✅ ", "❌ /d", multi)
 	}
 	if inactive == 0 {
 		sb.WriteString("\nНечего удалять.")
@@ -216,9 +431,10 @@ func (d *daemon) sessionsText(chatID string) string {
 	if len(sessions) == 0 {
 		return "Нет сессий. Напиши /new"
 	}
+	multi := hasMultipleBackends(sessions)
 	var sb strings.Builder
 	for i, s := range sessions {
-		formatSessionLine(&sb, i, s, "", "/s")
+		formatSessionLine(&sb, i, s, "", "/s", multi)
 	}
 	sb.WriteString("\n/cleanup — управление сессиями")
 	return sb.String()

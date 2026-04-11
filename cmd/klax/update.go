@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/PiDmitrius/klax/internal/config"
 )
@@ -166,15 +168,130 @@ func runUpdate() {
 	fmt.Println("daemon will restart via marker")
 }
 
-// runFallback downloads the latest release from GitHub and installs it,
-// ignoring local source. Useful as an escape hatch for local developers.
-func runFallback() {
-	tag, err := latestTag()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "cannot get latest version: %v\n", err)
-		os.Exit(1)
+// parseVersion extracts major, minor, patch from "v0.4.39" or "0.5.11".
+func parseVersion(s string) (major, minor, patch int, ok bool) {
+	s = strings.TrimPrefix(s, "v")
+	parts := strings.Split(s, ".")
+	if len(parts) != 3 {
+		return
 	}
-	fmt.Printf("installing release %s...\n", tag)
+	major, e1 := strconv.Atoi(parts[0])
+	minor, e2 := strconv.Atoi(parts[1])
+	patch, e3 := strconv.Atoi(parts[2])
+	ok = e1 == nil && e2 == nil && e3 == nil
+	return
+}
+
+// versionLess returns true if a < b.
+func versionLess(a, b string) bool {
+	a1, a2, a3, ok1 := parseVersion(a)
+	b1, b2, b3, ok2 := parseVersion(b)
+	if !ok1 || !ok2 {
+		return a < b
+	}
+	if a1 != b1 {
+		return a1 < b1
+	}
+	if a2 != b2 {
+		return a2 < b2
+	}
+	return a3 < b3
+}
+
+type releaseInfo struct {
+	Tag         string `json:"tag_name"`
+	PublishedAt string `json:"published_at"` // "2026-04-09T11:17:22Z"
+	URL         string `json:"html_url"`
+}
+
+// fetchReleases returns releases sorted descending (newest first).
+func fetchReleases() ([]releaseInfo, error) {
+	var all []releaseInfo
+	for page := 1; page <= 10; page++ {
+		url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=100&page=%d", repo, page)
+		resp, err := http.Get(url)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+		var releases []releaseInfo
+		if err := json.Unmarshal(body, &releases); err != nil {
+			return nil, err
+		}
+		if len(releases) == 0 {
+			break
+		}
+		all = append(all, releases...)
+	}
+	return all, nil
+}
+
+// releaseAge formats "2026-04-09T11:17:22Z" as relative time using timeAgo.
+func releaseAge(published string) string {
+	t, err := time.Parse(time.RFC3339, published)
+	if err != nil {
+		return ""
+	}
+	return timeAgo(t)
+}
+
+// updateText returns a menu: build from source + available release versions.
+func updateText() (string, error) {
+	releases, err := fetchReleases()
+	if err != nil {
+		return "", err
+	}
+
+	current := "v" + version
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Текущая: %s\n\n", current)
+	limit := 10
+	if len(releases) < limit {
+		limit = len(releases)
+	}
+	for _, r := range releases[:limit] {
+		alias := strings.ReplaceAll(strings.TrimPrefix(r.Tag, "v"), ".", "_")
+		date := releaseAge(r.PublishedAt)
+		mark := ""
+		if r.Tag == current {
+			mark = " ✅"
+		}
+		fmt.Fprintf(&sb, "/v_%s <a href=\"%s\">%s</a> %s%s\n", alias, r.URL, r.Tag, date, mark)
+	}
+	return sb.String(), nil
+}
+
+// tagFromAlias converts "0_4_39" back to "v0.4.39".
+func tagFromAlias(alias string) string {
+	return "v" + strings.ReplaceAll(alias, "_", ".")
+}
+
+// runFallback installs a specific release version.
+func runFallback() {
+	// Called from CLI: klax fallback [tag]
+	// Without args, just print available versions.
+	tag := ""
+	if len(os.Args) > 2 {
+		tag = os.Args[2]
+	}
+	if tag == "" {
+		text, err := updateText()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cannot list releases: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(text)
+		return
+	}
+
+	if !strings.HasPrefix(tag, "v") {
+		tag = "v" + tag
+	}
+	fmt.Printf("installing %s...\n", tag)
 
 	binPath, err := downloadRelease(tag)
 	if err != nil {
