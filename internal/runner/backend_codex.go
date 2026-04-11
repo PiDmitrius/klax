@@ -157,6 +157,11 @@ func (b *CodexBackend) ParseEvent(line []byte) (Event, bool) {
 					Input: fmt.Sprintf(`{"file_path":"%s"}`, escapeJSON(codexChangePaths(ev.Item.Changes))),
 				},
 			}, true
+		case "todo_list":
+			return Event{
+				Type: "tool",
+				Tool: ToolUse{Name: "TodoWrite", Input: ""},
+			}, true
 		}
 		return Event{Type: "unknown", Text: fmt.Sprintf("item.started:%s", ev.Item.Type)}, true
 
@@ -184,7 +189,7 @@ func (b *CodexBackend) ParseEvent(line []byte) (Event, bool) {
 				}, true
 			}
 			return Event{Type: "text"}, true
-		case "file_read", "file_edit", "file_change":
+		case "file_read", "file_edit", "file_change", "todo_list":
 			return Event{Type: "text"}, true
 		}
 		return Event{Type: "unknown", Text: fmt.Sprintf("item.completed:%s", ev.Item.Type)}, true
