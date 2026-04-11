@@ -249,7 +249,6 @@ func updateText() (string, error) {
 	current := "v" + version
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "Текущая: %s\n\n", current)
-	sb.WriteString("/v_dev Собрать из исходников\n")
 	limit := 10
 	if len(releases) < limit {
 		limit = len(releases)

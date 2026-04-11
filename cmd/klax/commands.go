@@ -334,12 +334,8 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		// /v_VERSION shortcut for installing a specific release
 		if strings.HasPrefix(cmd, "/v_") {
 			alias := cmd[3:]
-			if alias == "dev" {
-				go d.runChatOp(chatID, msgID, "update", "⏳ Собираю из исходников...")
-			} else {
-				tag := tagFromAlias(alias)
-				go d.runChatOp(chatID, msgID, "fallback "+tag, fmt.Sprintf("⏳ Устанавливаю %s...", tag))
-			}
+			tag := tagFromAlias(alias)
+			go d.runChatOp(chatID, msgID, "fallback "+tag, fmt.Sprintf("⏳ Устанавливаю %s...", tag))
 			return
 		}
 		d.sendMessage(chatID, msgID, fmt.Sprintf("Неизвестная команда: %s\nНапиши /help", cmd))
