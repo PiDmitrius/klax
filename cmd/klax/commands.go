@@ -178,7 +178,14 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		go d.runChatOp(chatID, msgID, "update", "⏳ Обновляю...")
 
 	case "/fallback":
-		go d.runChatOp(chatID, msgID, "fallback", "⏳ Устанавливаю релизную версию с GitHub...")
+		go func() {
+			text, err := fallbackText()
+			if err != nil {
+				d.sendMessage(chatID, msgID, fmt.Sprintf("❌ %v", err))
+				return
+			}
+			d.sendPlain(chatID, msgID, text)
+		}()
 
 	case "/bypass":
 		if len(parts) < 2 {
@@ -326,6 +333,13 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 				d.sendMessage(chatID, msgID, d.cleanupText(sk))
 				return
 			}
+		}
+		// /v_VERSION shortcut for installing a specific release
+		if strings.HasPrefix(cmd, "/v_") {
+			alias := cmd[3:]
+			tag := tagFromAlias(alias)
+			go d.runChatOp(chatID, msgID, "fallback "+tag, fmt.Sprintf("⏳ Устанавливаю %s...", tag))
+			return
 		}
 		d.sendMessage(chatID, msgID, fmt.Sprintf("Неизвестная команда: %s\nНапиши /help", cmd))
 	}
@@ -489,7 +503,8 @@ func (d *daemon) runChatOp(chatID, msgID, subcmd, progressText string) {
 	}
 
 	bin, _ := os.Executable()
-	cmd := exec.Command(bin, subcmd)
+	args := strings.Fields(subcmd)
+	cmd := exec.Command(bin, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
@@ -498,7 +513,7 @@ func (d *daemon) runChatOp(chatID, msgID, subcmd, progressText string) {
 		return
 	}
 
-	if subcmd == "fallback" {
+	if strings.HasPrefix(subcmd, "fallback") {
 		t.EditMessage(rawChatID, progressMsgID, progressText+"\n✅ Релизная версия установлена, перезапускаюсь...", "")
 	} else {
 		t.EditMessage(rawChatID, progressMsgID, progressText+"\n✅ Обновлено, перезапускаюсь...", "")

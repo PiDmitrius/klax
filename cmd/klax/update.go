@@ -234,31 +234,64 @@ func parseJSON(data []byte, v interface{}) error {
 	return json.Unmarshal(data, v)
 }
 
-// runFallback installs the most recent release older than the current version.
-// Each successive call rolls back further.
-func runFallback() {
+// fallbackText returns a menu of available release versions.
+func fallbackText() (string, error) {
 	tags, err := releaseTags()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "cannot list releases: %v\n", err)
-		os.Exit(1)
+		return "", err
+	}
+	if len(tags) == 0 {
+		return "Нет доступных релизов.", nil
 	}
 
 	current := "v" + version
-	var target string
-	for _, tag := range tags {
-		if versionLess(tag, current) {
-			target = tag
-			break
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Текущая: %s\n\n", current)
+	limit := 10
+	if len(tags) < limit {
+		limit = len(tags)
+	}
+	for _, tag := range tags[:limit] {
+		// /v_0_4_39 for v0.4.39
+		alias := strings.ReplaceAll(strings.TrimPrefix(tag, "v"), ".", "_")
+		if tag == current {
+			fmt.Fprintf(&sb, "/v_%s %s ✅\n", alias, tag)
+		} else {
+			fmt.Fprintf(&sb, "/v_%s %s\n", alias, tag)
 		}
 	}
-	if target == "" {
-		fmt.Fprintf(os.Stderr, "no release older than %s found\n", current)
-		os.Exit(1)
+	return sb.String(), nil
+}
+
+// tagFromAlias converts "0_4_39" back to "v0.4.39".
+func tagFromAlias(alias string) string {
+	return "v" + strings.ReplaceAll(alias, "_", ".")
+}
+
+// runFallback installs a specific release version.
+func runFallback() {
+	// Called from CLI: klax fallback [tag]
+	// Without args, just print available versions.
+	tag := ""
+	if len(os.Args) > 2 {
+		tag = os.Args[2]
+	}
+	if tag == "" {
+		text, err := fallbackText()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cannot list releases: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(text)
+		return
 	}
 
-	fmt.Printf("current: %s → fallback: %s\n", current, target)
+	if !strings.HasPrefix(tag, "v") {
+		tag = "v" + tag
+	}
+	fmt.Printf("installing %s...\n", tag)
 
-	binPath, err := downloadRelease(target)
+	binPath, err := downloadRelease(tag)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "download failed: %v\n", err)
 		os.Exit(1)
