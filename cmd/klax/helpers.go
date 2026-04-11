@@ -180,7 +180,7 @@ func helpText() string {
 /prompt [текст] — системный промпт
 /groups — режим группы
 /transports — управление транспортами
-/bypass — команда в Claude
+/bypass — прямая команда
 /abort — прервать исполнение
 /backend — backend (claude/codex)
 /update — обновить
