@@ -206,15 +206,21 @@ func (d *daemon) runClaude(msg queuedMsg) {
 	}
 	// Only update model/usage from successful runs.
 	// On kill/error, system event may report a wrong default model.
-	if result.Error == nil && result.Usage.Model != "" {
-		sess.Model = result.Usage.Model
-		sess.ContextWindow = result.Usage.ContextWindow
-		sess.ContextUsed = result.Usage.ContextUsed
+	if result.Error == nil {
+		if result.Usage.Model != "" {
+			sess.Model = result.Usage.Model
+		}
+		if result.Usage.ContextWindow > 0 {
+			sess.ContextWindow = result.Usage.ContextWindow
+		}
+		if result.Usage.ContextUsed > 0 {
+			sess.ContextUsed = result.Usage.ContextUsed
+		}
 	}
 	if result.RateLimit != nil {
-		d.mu.Lock()
-		d.lastRateLimit = result.RateLimit
-		d.mu.Unlock()
+		sess.RateLimitStatus = result.RateLimit.Status
+		sess.RateLimitResets = result.RateLimit.ResetsAt
+		sess.RateLimitOverage = result.RateLimit.IsUsingOverage
 	}
 	d.store.Save()
 

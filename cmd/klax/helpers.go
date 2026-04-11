@@ -162,19 +162,16 @@ func (d *daemon) statusText(chatID string) string {
 	}
 
 	var rateLine string
-	d.mu.Lock()
-	rl := d.lastRateLimit
-	d.mu.Unlock()
-	if rl != nil && rl.ResetsAt > 0 {
-		resetsIn := time.Until(time.Unix(rl.ResetsAt, 0))
+	if sess.RateLimitResets > 0 {
+		resetsIn := time.Until(time.Unix(sess.RateLimitResets, 0))
 		hours := int(resetsIn.Hours())
 		mins := int(resetsIn.Minutes()) % 60
-		if rl.Status == "throttled" {
+		if sess.RateLimitStatus == "throttled" {
 			rateLine = fmt.Sprintf("\n🚫 Лимит исчерпан %dч%dм", hours, mins)
 		} else if resetsIn > 0 {
 			rateLine = fmt.Sprintf("\n⏱ Сброс лимита %dч%dм", hours, mins)
 		}
-		if rl.IsUsingOverage {
+		if sess.RateLimitOverage {
 			rateLine += " (overage)"
 		}
 	}

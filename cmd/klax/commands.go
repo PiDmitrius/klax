@@ -161,6 +161,8 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			return
 		}
 		sess.Backend = name
+		d.cfg.DefaultBackend = name
+		config.Save(d.cfg)
 		d.store.Save()
 		d.sendPlain(chatID, msgID, d.backendText(sess))
 
@@ -218,6 +220,8 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 				return
 			}
 			sess.Backend = name
+			d.cfg.DefaultBackend = name
+			config.Save(d.cfg)
 			d.store.Save()
 			d.sendPlain(chatID, msgID, d.backendText(sess))
 			return
