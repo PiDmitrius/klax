@@ -175,6 +175,7 @@ func (b *CodexBackend) ParseEvent(line []byte) (Event, bool) {
 			e.Usage.InputTokens = ev.Usage.InputTokens
 			e.Usage.OutputTokens = ev.Usage.OutputTokens
 			e.Usage.CacheRead = ev.Usage.CachedInputTokens
+			e.Usage.ContextUsed = ev.Usage.InputTokens + ev.Usage.CachedInputTokens
 		}
 		return e, true
 
