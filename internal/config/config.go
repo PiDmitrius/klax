@@ -17,35 +17,35 @@ type UserIdentity struct {
 
 // BackendConfig holds per-backend settings.
 type BackendConfig struct {
-	PermissionMode string `json:"permission_mode,omitempty"` // claude: acceptEdits | bypassPermissions | auto
-	Sandbox        string `json:"sandbox,omitempty"`         // codex: read-only | workspace-write | danger-full-access
-	FullAuto       bool   `json:"full_auto,omitempty"`       // codex: --full-auto shortcut
-	APIKey         string `json:"api_key,omitempty"`         // codex: CODEX_API_KEY
+	PermissionMode string `json:"permission_mode"` // claude: acceptEdits | bypassPermissions | auto
+	Sandbox        string `json:"sandbox"`         // codex: read-only | workspace-write | danger-full-access
+	FullAuto       bool   `json:"full_auto"`       // codex: --full-auto shortcut
+	APIKey         string `json:"api_key"`         // codex: CODEX_API_KEY
 }
 
 // Config is stored at ~/.config/klax/config.json
 type Config struct {
-	TelegramToken  string  `json:"tg_token"`
-	AllowedUsers   []int64 `json:"tg_allowed_users"` // Telegram user IDs
-	DefaultCWD     string  `json:"default_cwd"`
-	SourceDir      string  `json:"source_dir"` // path to klax source for local builds
+	TelegramToken string  `json:"tg_token"`
+	AllowedUsers  []int64 `json:"tg_allowed_users"` // Telegram user IDs
+	DefaultCWD    string  `json:"default_cwd"`
+	SourceDir     string  `json:"source_dir"` // path to klax source for local builds
 
 	// Legacy field — migrated to Backends["claude"].PermissionMode on load.
 	PermissionMode string `json:"permission_mode,omitempty"`
 
 	// Backend settings.
-	DefaultBackend string                   `json:"default_backend,omitempty"` // "claude" (default) or "codex"
-	Backends       map[string]BackendConfig `json:"backends,omitempty"`
+	DefaultBackend string                   `json:"default_backend"` // "claude" (default) or "codex"
+	Backends       map[string]BackendConfig `json:"backends"`
 
-	MaxToken        string  `json:"mx_token,omitempty"`
-	MaxAllowedUsers []int64 `json:"mx_allowed_users,omitempty"` // MAX user IDs
+	MaxToken        string  `json:"mx_token"`
+	MaxAllowedUsers []int64 `json:"mx_allowed_users"` // MAX user IDs
 
-	VKToken        string `json:"vk_token,omitempty"`
-	VKAllowedUsers []int  `json:"vk_allowed_users,omitempty"` // VK user IDs
+	VKToken        string `json:"vk_token"`
+	VKAllowedUsers []int  `json:"vk_allowed_users"` // VK user IDs
 
-	Users              []UserIdentity `json:"users,omitempty"`               // cross-platform identity mapping
-	DisabledTransports []string       `json:"disabled_transports,omitempty"` // transports disabled via /transports off
-	GroupChats         []GroupChat    `json:"group_chats,omitempty"`         // chats with group mode enabled
+	Users              []UserIdentity `json:"users"`               // cross-platform identity mapping
+	DisabledTransports []string       `json:"disabled_transports"` // transports disabled via /transports off
+	GroupChats         []GroupChat    `json:"group_chats"`         // chats with group mode enabled
 }
 
 // GroupChat stores group mode settings for a chat.
@@ -100,7 +100,7 @@ func Load() (*Config, error) {
 			"claude": {PermissionMode: c.PermissionMode},
 		}
 	}
-	return &c, nil
+	return normalize(&c), nil
 }
 
 func Save(c *Config) error {
@@ -108,9 +108,46 @@ func Save(c *Config) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(c, "", "  ")
+	data, err := json.MarshalIndent(normalize(c), "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "config.json"), data, 0600)
+}
+
+func normalize(c *Config) *Config {
+	if c == nil {
+		c = &Config{}
+	}
+	if c.DefaultBackend == "" {
+		c.DefaultBackend = "claude"
+	}
+	if c.Backends == nil {
+		c.Backends = make(map[string]BackendConfig)
+	}
+	if _, ok := c.Backends["claude"]; !ok {
+		c.Backends["claude"] = BackendConfig{}
+	}
+	if _, ok := c.Backends["codex"]; !ok {
+		c.Backends["codex"] = BackendConfig{}
+	}
+	if c.AllowedUsers == nil {
+		c.AllowedUsers = []int64{}
+	}
+	if c.MaxAllowedUsers == nil {
+		c.MaxAllowedUsers = []int64{}
+	}
+	if c.VKAllowedUsers == nil {
+		c.VKAllowedUsers = []int{}
+	}
+	if c.Users == nil {
+		c.Users = []UserIdentity{}
+	}
+	if c.DisabledTransports == nil {
+		c.DisabledTransports = []string{}
+	}
+	if c.GroupChats == nil {
+		c.GroupChats = []GroupChat{}
+	}
+	return c
 }

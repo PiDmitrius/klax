@@ -289,22 +289,28 @@ func (d *daemon) statusText(chatID string) string {
 	}
 
 	backend := resolveSessionBackend(sess, d.scopeDefaults(chatID), d.cfg.GetDefaultBackend())
+	model := sess.ModelOverride
+	if model == "" {
+		model = "по умолчанию"
+	}
+	think := sess.ThinkOverride
+	if think == "" {
+		think = "по умолчанию"
+	}
 
 	var contextLine string
 	if sess.ContextWindow > 0 {
 		pct := sess.ContextUsed * 100 / sess.ContextWindow
-		contextLine = fmt.Sprintf("\n🤖 <code>%s</code>\n📊 Контекст: %d%% (%dk/%dk)",
-			sess.Model, pct,
+		contextLine = fmt.Sprintf("\n📊 Контекст: %d%% (%dk/%dk)",
+			pct,
 			sess.ContextUsed/1000, sess.ContextWindow/1000)
-	} else if sess.Model != "" {
-		contextLine = fmt.Sprintf("\n🤖 <code>%s</code>", sess.Model)
 	}
 
 	rateLine := d.rateLimitText(backend)
 
 	return fmt.Sprintf(
-		"<b>klax</b> v%s [%s]\n\n📌 <code>%s</code>\n%s%s%s\n💬 Сообщений: %d",
-		version, backend, sess.Name, statusLine, contextLine, rateLine, sess.Messages,
+		"<b>klax</b> v%s\n\n📌 Сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n%s%s%s\n💬 Сообщений: %d",
+		version, sess.Name, sessionModeLabel(chatID), backend, model, think, statusLine, contextLine, rateLine, sess.Messages,
 	)
 }
 

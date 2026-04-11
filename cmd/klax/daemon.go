@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,20 +45,73 @@ type daemon struct {
 	runners    map[string]*sessionRunner // sessionKey -> runner+queue
 	runnersMu  sync.Mutex
 	mu         sync.Mutex
-	draining   bool             // stop accepting new tasks, wait for current to finish
-	drainWg    sync.WaitGroup   // tracks active sessionRunners for drain
-	identities map[int64]string // telegram userID -> canonical user ID
-	maxIdents  map[int64]string // max userID -> canonical user ID
-	vkIdents   map[int]string   // vk userID -> canonical user ID
+	draining   bool           // stop accepting new tasks, wait for current to finish
+	drainWg    sync.WaitGroup // tracks active sessionRunners for drain
+	sendPause  map[string]time.Time
+	sendFails  map[string]int
+	identities map[int64]string  // telegram userID -> canonical user ID
+	maxIdents  map[int64]string  // max userID -> canonical user ID
+	vkIdents   map[int]string    // vk userID -> canonical user ID
 	groupChats map[string]string // chatID -> CWD for group mode chats
+}
+
+func startupBackoff(attempt int) time.Duration {
+	d := 10 * time.Second
+	for i := 0; i < attempt; i++ {
+		d *= 2
+	}
+	if d > time.Minute {
+		return time.Minute
+	}
+	return d
+}
+
+func isPermanentStartupError(err error) bool {
+	var apiErr *transport.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	switch apiErr.Platform {
+	case "tg", "max":
+		return apiErr.Code == 400 || apiErr.Code == 401 || apiErr.Code == 403
+	case "vk":
+		return apiErr.Code == 5 || apiErr.Code == 15
+	default:
+		return false
+	}
+}
+
+func hasConfiguredTransport(cfg *config.Config) bool {
+	return cfg.TelegramToken != "" || cfg.MaxToken != "" || cfg.VKToken != ""
+}
+
+func resolveSessionBackend(sess *session.Session, def *session.ScopeDefaults, globalDefault string) string {
+	if sess != nil && sess.Backend != "" {
+		return sess.Backend
+	}
+	if sess != nil && sess.Messages > 0 {
+		return "claude"
+	}
+	if def != nil && def.Backend != "" {
+		return def.Backend
+	}
+	if globalDefault != "" {
+		return globalDefault
+	}
+	return "claude"
+}
+
+func (d *daemon) fallbackScopeDefaults() session.ScopeDefaults {
+	return session.ScopeDefaults{Backend: d.cfg.GetDefaultBackend()}
+}
+
+func (d *daemon) scopeDefaults(chatID string) *session.ScopeDefaults {
+	return d.store.EnsureScopeDefaults(chatID, d.fallbackScopeDefaults())
 }
 
 // backendFor returns the Backend for a given session.
 func (d *daemon) backendFor(sess *session.Session) runner.Backend {
-	name := sess.Backend
-	if name == "" {
-		name = d.cfg.GetDefaultBackend()
-	}
+	name := resolveSessionBackend(sess, nil, d.fallbackScopeDefaults().Backend)
 	bc := d.cfg.BackendFor(name)
 	switch name {
 	case "codex":
@@ -166,7 +220,7 @@ func runDaemon() {
 	if err != nil {
 		log.Fatalf("cannot load config: %v\nRun 'klax setup' first.", err)
 	}
-	if cfg.TelegramToken == "" && cfg.MaxToken == "" {
+	if !hasConfiguredTransport(cfg) {
 		log.Fatal("no tokens configured. Run 'klax setup'.")
 	}
 
@@ -176,7 +230,7 @@ func runDaemon() {
 	var tgBot *tg.Bot
 	if cfg.TelegramToken != "" {
 		tgBot = tg.New(cfg.TelegramToken)
-		for {
+		for attempt := 0; ; attempt++ {
 			err := tgBot.GetMe()
 			if err == nil {
 				if err := tgBot.DrainUpdates(); err != nil {
@@ -185,12 +239,12 @@ func runDaemon() {
 				tgBot.SetMyCommands(tgMenuCommands)
 				break
 			}
-			var apiErr *tg.APIError
-			if errors.As(err, &apiErr) {
+			if isPermanentStartupError(err) {
 				log.Fatalf("telegram auth failed: %v", err)
 			}
-			log.Printf("telegram unreachable: %v (retry in 10s)", err)
-			time.Sleep(10 * time.Second)
+			wait := startupBackoff(attempt)
+			log.Printf("telegram unreachable: %v (retry in %v)", err, wait)
+			time.Sleep(wait)
 		}
 		transports["tg"] = tgBot
 		log.Println("[OK] Telegram connected")
@@ -200,9 +254,19 @@ func runDaemon() {
 	var maxBot *max.Bot
 	if cfg.MaxToken != "" {
 		maxBot = max.New(cfg.MaxToken)
-		me, err := maxBot.GetMe()
-		if err != nil {
-			log.Fatalf("MAX auth failed: %v", err)
+		var me *max.User
+		for attempt := 0; ; attempt++ {
+			var err error
+			me, err = maxBot.GetMe()
+			if err == nil {
+				break
+			}
+			if isPermanentStartupError(err) {
+				log.Fatalf("MAX auth failed: %v", err)
+			}
+			wait := startupBackoff(attempt)
+			log.Printf("MAX unreachable: %v (retry in %v)", err, wait)
+			time.Sleep(wait)
 		}
 		if err := maxBot.DrainUpdates(); err != nil {
 			log.Printf("warning: max drain updates: %v", err)
@@ -215,9 +279,19 @@ func runDaemon() {
 	var vkBot *vk.Bot
 	if cfg.VKToken != "" {
 		vkBot = vk.New(cfg.VKToken)
-		group, err := vkBot.GetMe()
-		if err != nil {
-			log.Fatalf("VK auth failed: %v", err)
+		var group *vk.GroupInfo
+		for attempt := 0; ; attempt++ {
+			var err error
+			group, err = vkBot.GetMe()
+			if err == nil {
+				break
+			}
+			if isPermanentStartupError(err) {
+				log.Fatalf("VK auth failed: %v", err)
+			}
+			wait := startupBackoff(attempt)
+			log.Printf("VK unreachable: %v (retry in %v)", err, wait)
+			time.Sleep(wait)
 		}
 		if err := vkBot.DrainUpdates(); err != nil {
 			log.Printf("warning: vk drain updates: %v", err)
@@ -300,6 +374,8 @@ func runDaemon() {
 		pollCtx:    make(map[string]context.CancelFunc),
 		store:      store,
 		runners:    make(map[string]*sessionRunner),
+		sendPause:  make(map[string]time.Time),
+		sendFails:  make(map[string]int),
 		identities: tgIdents,
 		maxIdents:  maxIdents,
 		vkIdents:   vkIdents,
@@ -473,6 +549,9 @@ func (d *daemon) watchMarker() {
 func (d *daemon) pollTG(ctx context.Context) {
 	bot := d.transports["tg"].(*tg.Bot)
 	for {
+		if !d.waitOutboundReady(ctx, "tg") {
+			return
+		}
 		if ctx.Err() != nil {
 			return
 		}
@@ -528,10 +607,10 @@ func (d *daemon) pollTG(ctx context.Context) {
 				d.handleMessageWithAttachments(chatID, msgID, text, attachments)
 			} else if d.isGroupChat(chatID) {
 				if strings.HasPrefix(text, "/") && isGroupCommand(text) {
-					d.ensureSessionWithCWD(d.sessionKey(chatID), d.groupCWD(chatID))
+					d.ensureSessionWithCWD(d.sessionKey(chatID), d.sessionCWD(chatID))
 					d.handleCommand(chatID, msgID, text)
 				} else if prompt, ok := stripGroupTrigger(strings.TrimSpace(text)); ok {
-					d.ensureSessionWithCWD(d.sessionKey(chatID), d.groupCWD(chatID))
+					d.ensureSessionWithCWD(d.sessionKey(chatID), d.sessionCWD(chatID))
 					d.enqueueWithAttachments(chatID, msgID, prompt, attachments)
 				}
 			}
@@ -542,6 +621,9 @@ func (d *daemon) pollTG(ctx context.Context) {
 func (d *daemon) pollMAX(ctx context.Context) {
 	bot := d.transports["mx"].(*max.Bot)
 	for {
+		if !d.waitOutboundReady(ctx, "mx") {
+			return
+		}
 		if ctx.Err() != nil {
 			return
 		}
@@ -599,10 +681,10 @@ func (d *daemon) pollMAX(ctx context.Context) {
 				d.handleMessageWithAttachments(chatID, msgID, text, attachments)
 			} else if d.isGroupChat(chatID) {
 				if strings.HasPrefix(text, "/") && isGroupCommand(text) {
-					d.ensureSessionWithCWD(d.sessionKey(chatID), d.groupCWD(chatID))
+					d.ensureSessionWithCWD(d.sessionKey(chatID), d.sessionCWD(chatID))
 					d.handleCommand(chatID, msgID, text)
 				} else if prompt, ok := stripGroupTrigger(strings.TrimSpace(text)); ok {
-					d.ensureSessionWithCWD(d.sessionKey(chatID), d.groupCWD(chatID))
+					d.ensureSessionWithCWD(d.sessionKey(chatID), d.sessionCWD(chatID))
 					d.enqueueWithAttachments(chatID, msgID, prompt, attachments)
 				}
 			}
@@ -622,6 +704,9 @@ func (d *daemon) isTGAllowed(id int64) bool {
 func (d *daemon) pollVK(ctx context.Context) {
 	bot := d.transports["vk"].(*vk.Bot)
 	for {
+		if !d.waitOutboundReady(ctx, "vk") {
+			return
+		}
 		if ctx.Err() != nil {
 			return
 		}
@@ -658,7 +743,7 @@ func (d *daemon) pollVK(ctx context.Context) {
 				d.handleMessage(chatID, msgID, msg.Text)
 			} else if d.isGroupChat(chatID) {
 				if prompt, ok := stripGroupTrigger(strings.TrimSpace(msg.Text)); ok {
-					d.ensureSessionWithCWD(d.sessionKey(chatID), d.groupCWD(chatID))
+					d.ensureSessionWithCWD(d.sessionKey(chatID), d.sessionCWD(chatID))
 					d.enqueue(chatID, msgID, prompt)
 				}
 			}
@@ -715,6 +800,29 @@ func (d *daemon) groupCWD(chatID string) string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.groupChats[chatID]
+}
+
+// sessionCWD returns the effective working directory for a chat session.
+// Group chats always use a dedicated group directory regardless of whether
+// group mode is enabled; /groups on/off only changes access policy.
+func (d *daemon) sessionCWD(chatID string) string {
+	if isGroupChatID(chatID) {
+		if cwd := d.groupCWD(chatID); cwd != "" {
+			return cwd
+		}
+		base := d.cfg.DefaultCWD
+		if base == "" {
+			base, _ = os.UserHomeDir()
+		}
+		dirName := strings.ReplaceAll(chatID, ":", "_")
+		cwd := filepath.Join(base, "groups", dirName)
+		if err := os.MkdirAll(cwd, 0755); err != nil {
+			log.Printf("group cwd mkdir failed for %s: %v", chatID, err)
+			return ""
+		}
+		return cwd
+	}
+	return ""
 }
 
 // enableGroupChat enables group mode for a chat with the given CWD.
@@ -811,7 +919,7 @@ func (d *daemon) handleMessageWithAttachments(chatID, msgID, text string, attach
 
 	// Ensure chat has at least one session.
 	sk := d.sessionKey(chatID)
-	d.ensureSessionWithCWD(sk, d.groupCWD(chatID))
+	d.ensureSessionWithCWD(sk, d.sessionCWD(chatID))
 
 	// Handle built-in commands (allowed users only — enforced by poll loops)
 	if strings.HasPrefix(text, "/") {
@@ -838,12 +946,9 @@ func (d *daemon) ensureSession(sessionKey string) {
 
 func (d *daemon) ensureSessionWithCWD(sessionKey, forceCWD string) {
 	if sess := d.store.Active(sessionKey); sess != nil {
-		// If group CWD is set and session CWD doesn't match, update it.
-		if forceCWD != "" && sess.CWD != forceCWD {
-			sess.CWD = forceCWD
-			d.store.Save()
+		if forceCWD == "" || sess.CWD == forceCWD {
+			return
 		}
-		return
 	}
 	cwd := forceCWD
 	if cwd == "" {
@@ -852,6 +957,6 @@ func (d *daemon) ensureSessionWithCWD(sessionKey, forceCWD string) {
 	if cwd == "" {
 		cwd, _ = os.UserHomeDir()
 	}
-	d.store.New(sessionKey, "default", cwd)
+	d.store.Ensure(sessionKey, "default", cwd, d.fallbackScopeDefaults())
 	d.store.Save()
 }
