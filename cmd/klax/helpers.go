@@ -96,11 +96,8 @@ func effortsForBackend(backend string) []modelEntry {
 	return claudeEfforts
 }
 
-func (d *daemon) backendText(sess *session.Session) string {
-	current := sess.Backend
-	if current == "" {
-		current = d.cfg.GetDefaultBackend()
-	}
+func (d *daemon) backendText(sk string, sess *session.Session) string {
+	current := resolveSessionBackend(sess, d.scopeDefaults(sk), d.cfg.GetDefaultBackend())
 	backends := []string{"claude", "codex"}
 	var sb strings.Builder
 	for _, name := range backends {
@@ -116,15 +113,14 @@ func (d *daemon) backendText(sess *session.Session) string {
 	return sb.String()
 }
 
-func (d *daemon) modelText(sess *session.Session) string {
-	backend := sess.Backend
-	if backend == "" {
-		backend = d.cfg.GetDefaultBackend()
-	}
+func (d *daemon) modelText(sk string, sess *session.Session) string {
+	def := d.scopeDefaults(sk)
+	backend := resolveSessionBackend(sess, def, d.cfg.GetDefaultBackend())
 	models := modelsForBackend(backend)
 
 	var sb strings.Builder
 	current := sess.ModelOverride
+	defaultModel := def.Model
 	for _, m := range models {
 		if m.model == current {
 			fmt.Fprintf(&sb, "/m_%s %s ✅\n", m.alias, m.label)
@@ -132,23 +128,30 @@ func (d *daemon) modelText(sess *session.Session) string {
 			fmt.Fprintf(&sb, "/m_%s %s\n", m.alias, m.label)
 		}
 	}
-	if current == "" {
-		fmt.Fprintf(&sb, "/m_default По умолчанию ✅\n")
+	if current == defaultModel {
+		if defaultModel == "" {
+			fmt.Fprintf(&sb, "/m_default По умолчанию ✅\n")
+		} else {
+			fmt.Fprintf(&sb, "/m_default По умолчанию (%s) ✅\n", defaultModel)
+		}
 	} else {
-		fmt.Fprintf(&sb, "/m_default По умолчанию\n")
+		if defaultModel == "" {
+			fmt.Fprintf(&sb, "/m_default По умолчанию\n")
+		} else {
+			fmt.Fprintf(&sb, "/m_default По умолчанию (%s)\n", defaultModel)
+		}
 	}
 	return sb.String()
 }
 
-func (d *daemon) thinkText(sess *session.Session) string {
-	backend := sess.Backend
-	if backend == "" {
-		backend = d.cfg.GetDefaultBackend()
-	}
+func (d *daemon) thinkText(sk string, sess *session.Session) string {
+	def := d.scopeDefaults(sk)
+	backend := resolveSessionBackend(sess, def, d.cfg.GetDefaultBackend())
 	efforts := effortsForBackend(backend)
 
 	var sb strings.Builder
-	current := sess.EffortOverride
+	current := sess.ThinkOverride
+	defaultThink := def.Think
 	for _, e := range efforts {
 		if e.model == current {
 			fmt.Fprintf(&sb, "/t_%s %s ✅\n", e.alias, e.label)
@@ -156,10 +159,18 @@ func (d *daemon) thinkText(sess *session.Session) string {
 			fmt.Fprintf(&sb, "/t_%s %s\n", e.alias, e.label)
 		}
 	}
-	if current == "" {
-		fmt.Fprintf(&sb, "/t_default По умолчанию ✅\n")
+	if current == defaultThink {
+		if defaultThink == "" {
+			fmt.Fprintf(&sb, "/t_default По умолчанию ✅\n")
+		} else {
+			fmt.Fprintf(&sb, "/t_default По умолчанию (%s) ✅\n", defaultThink)
+		}
 	} else {
-		fmt.Fprintf(&sb, "/t_default По умолчанию\n")
+		if defaultThink == "" {
+			fmt.Fprintf(&sb, "/t_default По умолчанию\n")
+		} else {
+			fmt.Fprintf(&sb, "/t_default По умолчанию (%s)\n", defaultThink)
+		}
 	}
 	return sb.String()
 }
@@ -202,16 +213,22 @@ func (d *daemon) rateLimitText(backendName string) string {
 			continue
 		}
 		remaining := formatDuration(resetsIn)
-		switch (*entry.rl).Status {
+		rl := *entry.rl
+		switch rl.Status {
 		case "throttled", "rejected":
 			line := fmt.Sprintf("🚫 Лимит (%s) %s", entry.label, remaining)
-			if (*entry.rl).IsUsingOverage {
+			if rl.IsUsingOverage {
 				line += " (overage)"
 			}
 			lines = append(lines, line)
 		case "allowed_warning":
-			pct := int((*entry.rl).Utilization * 100)
+			pct := int(rl.Utilization * 100)
 			lines = append(lines, fmt.Sprintf("⚠️ Лимит (%s) %d%% %s", entry.label, pct, remaining))
+		case "allowed":
+			pct := int(rl.Utilization * 100)
+			if pct > 0 {
+				lines = append(lines, fmt.Sprintf("⏱ Лимит (%s) %d%% %s", entry.label, pct, remaining))
+			}
 		}
 	}
 	if len(lines) > 0 {
@@ -271,10 +288,7 @@ func (d *daemon) statusText(chatID string) string {
 		statusLine = "💤 Свободен"
 	}
 
-	backend := sess.Backend
-	if backend == "" {
-		backend = d.cfg.GetDefaultBackend()
-	}
+	backend := resolveSessionBackend(sess, d.scopeDefaults(chatID), d.cfg.GetDefaultBackend())
 
 	var contextLine string
 	if sess.ContextWindow > 0 {
@@ -334,10 +348,7 @@ func timeAgo(t time.Time) string {
 func hasMultipleBackends(sessions []*session.Session) bool {
 	seen := ""
 	for _, s := range sessions {
-		b := s.Backend
-		if b == "" {
-			b = "claude"
-		}
+		b := resolveSessionBackend(s, nil, "claude")
 		if seen == "" {
 			seen = b
 		} else if seen != b {
@@ -358,10 +369,7 @@ func formatSessionLine(sb *strings.Builder, i int, s *session.Session, activePre
 	}
 	backendSuffix := ""
 	if showBackend {
-		b := s.Backend
-		if b == "" {
-			b = "claude"
-		}
+		b := resolveSessionBackend(s, nil, "claude")
 		backendSuffix = fmt.Sprintf(" (%s)", b)
 	}
 	if s.Active {

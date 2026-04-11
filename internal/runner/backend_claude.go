@@ -23,7 +23,7 @@ func (b *ClaudeBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 		mode = b.PermissionMode
 	}
 	if mode == "" {
-		mode = "acceptEdits"
+		mode = "bypassPermissions"
 	}
 	args := []string{
 		"-p",
@@ -73,11 +73,11 @@ type claudeStreamEvent struct {
 }
 
 type claudeRateLimitInfo struct {
-	Status         string  `json:"status"`          // "allowed" | "allowed_warning" | "throttled" | "rejected"
-	ResetsAt       int64   `json:"resetsAt"`        // unix timestamp
-	RateLimitType  string  `json:"rateLimitType"`   // "five_hour" | "seven_day"
-	Utilization    float64 `json:"utilization"`     // 0.0–1.0
-	OverageStatus  string  `json:"overageStatus"`   // "allowed" | ...
+	Status         string  `json:"status"`        // "allowed" | "allowed_warning" | "throttled" | "rejected"
+	ResetsAt       int64   `json:"resetsAt"`      // unix timestamp
+	RateLimitType  string  `json:"rateLimitType"` // "five_hour" | "seven_day"
+	Utilization    float64 `json:"utilization"`   // 0.0–1.0
+	OverageStatus  string  `json:"overageStatus"` // "allowed" | ...
 	IsUsingOverage bool    `json:"isUsingOverage"`
 }
 
@@ -118,7 +118,7 @@ func (b *ClaudeBackend) ParseEvent(line []byte) (Event, bool) {
 		return Event{}, false
 
 	case "rate_limit_event":
-		if ev.RateLimitInfo != nil && ev.RateLimitInfo.Status != "allowed" {
+		if ev.RateLimitInfo != nil {
 			return Event{
 				Type: "system",
 				RateLimit: &RateLimitInfo{

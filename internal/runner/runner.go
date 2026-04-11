@@ -281,7 +281,7 @@ func (r *Runner) Run(backend Backend, opts RunOptions, onProgress ProgressFunc) 
 			}
 			if ev.RateLimit != nil {
 				rateLimit = ev.RateLimit
-				if onProgress != nil {
+				if onProgress != nil && ev.RateLimit.Status != "allowed" {
 					onProgress(formatRateLimit(ev.RateLimit))
 				}
 			}
