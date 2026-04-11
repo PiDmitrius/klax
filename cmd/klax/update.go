@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -166,17 +167,98 @@ func runUpdate() {
 	fmt.Println("daemon will restart via marker")
 }
 
-// runFallback downloads the latest release from GitHub and installs it,
-// ignoring local source. Useful as an escape hatch for local developers.
+// parseVersion extracts major, minor, patch from "v0.4.39" or "0.5.11".
+func parseVersion(s string) (major, minor, patch int, ok bool) {
+	s = strings.TrimPrefix(s, "v")
+	parts := strings.Split(s, ".")
+	if len(parts) != 3 {
+		return
+	}
+	major, e1 := strconv.Atoi(parts[0])
+	minor, e2 := strconv.Atoi(parts[1])
+	patch, e3 := strconv.Atoi(parts[2])
+	ok = e1 == nil && e2 == nil && e3 == nil
+	return
+}
+
+// versionLess returns true if a < b.
+func versionLess(a, b string) bool {
+	a1, a2, a3, ok1 := parseVersion(a)
+	b1, b2, b3, ok2 := parseVersion(b)
+	if !ok1 || !ok2 {
+		return a < b
+	}
+	if a1 != b1 {
+		return a1 < b1
+	}
+	if a2 != b2 {
+		return a2 < b2
+	}
+	return a3 < b3
+}
+
+// releaseTags returns all release tags sorted descending (newest first).
+func releaseTags() ([]string, error) {
+	var allTags []string
+	for page := 1; page <= 10; page++ {
+		url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=100&page=%d", repo, page)
+		resp, err := http.Get(url)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+		// Minimal JSON parsing — extract tag_name values.
+		var releases []struct {
+			TagName string `json:"tag_name"`
+		}
+		if err := parseJSON(body, &releases); err != nil {
+			return nil, err
+		}
+		if len(releases) == 0 {
+			break
+		}
+		for _, r := range releases {
+			allTags = append(allTags, r.TagName)
+		}
+	}
+	return allTags, nil
+}
+
+// parseJSON is a minimal helper to avoid importing encoding/json at top level
+// (it's already imported via config, but let's be explicit).
+func parseJSON(data []byte, v interface{}) error {
+	return json.Unmarshal(data, v)
+}
+
+// runFallback installs the most recent release older than the current version.
+// Each successive call rolls back further.
 func runFallback() {
-	tag, err := latestTag()
+	tags, err := releaseTags()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "cannot get latest version: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cannot list releases: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("installing release %s...\n", tag)
 
-	binPath, err := downloadRelease(tag)
+	current := "v" + version
+	var target string
+	for _, tag := range tags {
+		if versionLess(tag, current) {
+			target = tag
+			break
+		}
+	}
+	if target == "" {
+		fmt.Fprintf(os.Stderr, "no release older than %s found\n", current)
+		os.Exit(1)
+	}
+
+	fmt.Printf("current: %s → fallback: %s\n", current, target)
+
+	binPath, err := downloadRelease(target)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "download failed: %v\n", err)
 		os.Exit(1)
