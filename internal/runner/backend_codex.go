@@ -128,7 +128,7 @@ func (b *CodexBackend) ParseEvent(line []byte) (Event, bool) {
 					Input: fmt.Sprintf(`{"file_path":"%s"}`, escapeJSON(ev.Item.FilePath)),
 				},
 			}, true
-		case "file_edit":
+		case "file_edit", "file_change":
 			return Event{
 				Type: "tool",
 				Tool: ToolUse{
@@ -163,7 +163,7 @@ func (b *CodexBackend) ParseEvent(line []byte) (Event, bool) {
 				}, true
 			}
 			return Event{Type: "text"}, true
-		case "file_read", "file_edit":
+		case "file_read", "file_edit", "file_change":
 			return Event{Type: "text"}, true
 		}
 		return Event{Type: "unknown", Text: fmt.Sprintf("item.completed:%s", ev.Item.Type)}, true
@@ -175,7 +175,10 @@ func (b *CodexBackend) ParseEvent(line []byte) (Event, bool) {
 			e.Usage.InputTokens = ev.Usage.InputTokens
 			e.Usage.OutputTokens = ev.Usage.OutputTokens
 			e.Usage.CacheRead = ev.Usage.CachedInputTokens
-			e.Usage.ContextUsed = ev.Usage.InputTokens + ev.Usage.CachedInputTokens
+			// Codex reports cached_input_tokens as a subset of input_tokens.
+			// For context occupancy we should use input_tokens directly to avoid
+			// double-counting cached prompt tokens.
+			e.Usage.ContextUsed = ev.Usage.InputTokens
 		}
 		return e, true
 
@@ -186,8 +189,9 @@ func (b *CodexBackend) ParseEvent(line []byte) (Event, bool) {
 	return Event{Type: "unknown", Text: ev.Type}, true
 }
 
-// ReadSessionMeta reads model and context window from codex session JSONL file.
-func ReadCodexSessionMeta(threadID string) (model string, contextWindow int) {
+// ReadSessionMeta reads model, effective context window, and the last turn's
+// prompt size from the local Codex session JSONL file.
+func ReadCodexSessionMeta(threadID string) (model string, contextWindow int, contextUsed int) {
 	home, _ := os.UserHomeDir()
 	if home == "" {
 		return
@@ -221,9 +225,19 @@ func ReadCodexSessionMeta(threadID string) (model string, contextWindow int) {
 			var ev struct {
 				Type               string `json:"type"`
 				ModelContextWindow int    `json:"model_context_window"`
+				Info               *struct {
+					LastTokenUsage *struct {
+						InputTokens int `json:"input_tokens"`
+					} `json:"last_token_usage"`
+				} `json:"info,omitempty"`
 			}
-			if json.Unmarshal(entry.Payload, &ev) == nil && ev.Type == "task_started" && ev.ModelContextWindow > 0 {
-				contextWindow = ev.ModelContextWindow
+			if json.Unmarshal(entry.Payload, &ev) == nil {
+				if ev.Type == "task_started" && ev.ModelContextWindow > 0 {
+					contextWindow = ev.ModelContextWindow
+				}
+				if ev.Type == "token_count" && ev.Info != nil && ev.Info.LastTokenUsage != nil && ev.Info.LastTokenUsage.InputTokens > 0 {
+					contextUsed = ev.Info.LastTokenUsage.InputTokens
+				}
 			}
 		case "turn_context":
 			var tc struct {
@@ -234,9 +248,6 @@ func ReadCodexSessionMeta(threadID string) (model string, contextWindow int) {
 			}
 		}
 		// Stop after finding both.
-		if model != "" && contextWindow > 0 {
-			return
-		}
 	}
 	return
 }
