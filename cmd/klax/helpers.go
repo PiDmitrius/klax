@@ -146,17 +146,24 @@ func (d *daemon) statusText(chatID string) string {
 		statusLine = "💤 Свободен"
 	}
 
+	backend := sess.Backend
+	if backend == "" {
+		backend = d.cfg.GetDefaultBackend()
+	}
+
 	var contextLine string
 	if sess.ContextWindow > 0 {
 		pct := sess.ContextUsed * 100 / sess.ContextWindow
 		contextLine = fmt.Sprintf("\n🤖 <code>%s</code>\n📊 Контекст: %d%% (%dk/%dk)",
 			sess.Model, pct,
 			sess.ContextUsed/1000, sess.ContextWindow/1000)
+	} else if sess.Model != "" {
+		contextLine = fmt.Sprintf("\n🤖 <code>%s</code>", sess.Model)
 	}
 
 	return fmt.Sprintf(
-		"<b>klax</b> v%s\n\n📌 <code>%s</code>\n%s%s\n💬 Сообщений: %d",
-		version, sess.Name, statusLine, contextLine, sess.Messages,
+		"<b>klax</b> v%s [%s]\n\n📌 <code>%s</code>\n%s%s\n💬 Сообщений: %d",
+		version, backend, sess.Name, statusLine, contextLine, sess.Messages,
 	)
 }
 
