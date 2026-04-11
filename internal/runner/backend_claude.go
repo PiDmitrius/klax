@@ -57,15 +57,24 @@ func (b *ClaudeBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 
 // claudeStreamEvent is the raw JSON from claude --output-format stream-json.
 type claudeStreamEvent struct {
-	Type       string                     `json:"type"`
-	Name       string                     `json:"name,omitempty"`
-	Input      json.RawMessage            `json:"input,omitempty"`
-	Result     string                     `json:"result,omitempty"`
-	IsError    bool                       `json:"is_error,omitempty"`
-	SessionID  string                     `json:"session_id,omitempty"`
-	Model      string                     `json:"model,omitempty"`
-	ModelUsage map[string]json.RawMessage `json:"modelUsage,omitempty"`
-	Message    *claudeMessage             `json:"message,omitempty"`
+	Type          string                     `json:"type"`
+	Name          string                     `json:"name,omitempty"`
+	Input         json.RawMessage            `json:"input,omitempty"`
+	Result        string                     `json:"result,omitempty"`
+	IsError       bool                       `json:"is_error,omitempty"`
+	SessionID     string                     `json:"session_id,omitempty"`
+	Model         string                     `json:"model,omitempty"`
+	ModelUsage    map[string]json.RawMessage `json:"modelUsage,omitempty"`
+	Message       *claudeMessage             `json:"message,omitempty"`
+	RateLimitInfo *claudeRateLimitInfo       `json:"rate_limit_info,omitempty"`
+}
+
+type claudeRateLimitInfo struct {
+	Status         string `json:"status"`          // "allowed" | "throttled"
+	ResetsAt       int64  `json:"resetsAt"`        // unix timestamp
+	RateLimitType  string `json:"rateLimitType"`   // "five_hour"
+	OverageStatus  string `json:"overageStatus"`   // "allowed" | ...
+	IsUsingOverage bool   `json:"isUsingOverage"`
 }
 
 type claudeMessage struct {
@@ -101,7 +110,21 @@ func (b *ClaudeBackend) ParseEvent(line []byte) (Event, bool) {
 			Model:     ev.Model,
 		}, true
 
-	case "user", "rate_limit_event":
+	case "user":
+		return Event{}, false
+
+	case "rate_limit_event":
+		if ev.RateLimitInfo != nil {
+			return Event{
+				Type: "system",
+				RateLimit: &RateLimitInfo{
+					Status:         ev.RateLimitInfo.Status,
+					ResetsAt:       ev.RateLimitInfo.ResetsAt,
+					RateLimitType:  ev.RateLimitInfo.RateLimitType,
+					IsUsingOverage: ev.RateLimitInfo.IsUsingOverage,
+				},
+			}, true
+		}
 		return Event{}, false
 
 	case "assistant":

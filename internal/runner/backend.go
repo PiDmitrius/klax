@@ -4,6 +4,14 @@ import (
 	"os/exec"
 )
 
+// RateLimitInfo holds subscription rate limit status from a backend.
+type RateLimitInfo struct {
+	Status         string // "allowed" | "throttled"
+	ResetsAt       int64  // unix timestamp
+	RateLimitType  string // "five_hour"
+	IsUsingOverage bool
+}
+
 // Event is a unified event from any backend's JSON stream.
 type Event struct {
 	Type      string // "system", "tool", "text", "intermediate", "result", "unknown"
@@ -13,6 +21,7 @@ type Event struct {
 	Text      string
 	Usage     ModelUsageInfo
 	Error     string
+	RateLimit *RateLimitInfo
 }
 
 // Backend abstracts the CLI tool that executes prompts (claude, codex, etc).

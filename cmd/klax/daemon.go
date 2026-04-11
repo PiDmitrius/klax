@@ -48,7 +48,8 @@ type daemon struct {
 	identities map[int64]string // telegram userID -> canonical user ID
 	maxIdents  map[int64]string // max userID -> canonical user ID
 	vkIdents   map[int]string   // vk userID -> canonical user ID
-	groupChats map[string]string // chatID -> CWD for group mode chats
+	groupChats    map[string]string      // chatID -> CWD for group mode chats
+	lastRateLimit *runner.RateLimitInfo  // last rate limit info from claude
 }
 
 // backendFor returns the Backend for a given session.

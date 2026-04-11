@@ -211,6 +211,11 @@ func (d *daemon) runClaude(msg queuedMsg) {
 		sess.ContextWindow = result.Usage.ContextWindow
 		sess.ContextUsed = result.Usage.ContextUsed
 	}
+	if result.RateLimit != nil {
+		d.mu.Lock()
+		d.lastRateLimit = result.RateLimit
+		d.mu.Unlock()
+	}
 	d.store.Save()
 
 	if result.Error != nil {

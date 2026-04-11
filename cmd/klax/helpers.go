@@ -161,9 +161,25 @@ func (d *daemon) statusText(chatID string) string {
 		contextLine = fmt.Sprintf("\n🤖 <code>%s</code>", sess.Model)
 	}
 
+	var rateLine string
+	d.mu.Lock()
+	rl := d.lastRateLimit
+	d.mu.Unlock()
+	if rl != nil && rl.ResetsAt > 0 {
+		resetsIn := time.Until(time.Unix(rl.ResetsAt, 0))
+		if resetsIn > 0 {
+			hours := int(resetsIn.Hours())
+			mins := int(resetsIn.Minutes()) % 60
+			rateLine = fmt.Sprintf("\n⏱ Лимит сбросится через %dч%dм", hours, mins)
+		}
+		if rl.IsUsingOverage {
+			rateLine += " (overage)"
+		}
+	}
+
 	return fmt.Sprintf(
-		"<b>klax</b> v%s [%s]\n\n📌 <code>%s</code>\n%s%s\n💬 Сообщений: %d",
-		version, backend, sess.Name, statusLine, contextLine, sess.Messages,
+		"<b>klax</b> v%s [%s]\n\n📌 <code>%s</code>\n%s%s%s\n💬 Сообщений: %d",
+		version, backend, sess.Name, statusLine, contextLine, rateLine, sess.Messages,
 	)
 }
 

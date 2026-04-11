@@ -117,6 +117,7 @@ type RunResult struct {
 	SessionID string
 	Text      string
 	Usage     ModelUsageInfo
+	RateLimit *RateLimitInfo
 	Error     error
 }
 
@@ -206,6 +207,7 @@ func (r *Runner) Run(backend Backend, opts RunOptions, onProgress ProgressFunc) 
 	var textParts []string
 	var lastIntermediate string // last intermediate message (codex thinking)
 	var usage ModelUsageInfo
+	var rateLimit *RateLimitInfo
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
@@ -227,6 +229,9 @@ func (r *Runner) Run(backend Backend, opts RunOptions, onProgress ProgressFunc) 
 			}
 			if ev.Model != "" {
 				model = ev.Model
+			}
+			if ev.RateLimit != nil {
+				rateLimit = ev.RateLimit
 			}
 
 		case "tool":
@@ -310,6 +315,7 @@ func (r *Runner) Run(backend Backend, opts RunOptions, onProgress ProgressFunc) 
 		SessionID: sessionID,
 		Text:      text,
 		Usage:     usage,
+		RateLimit: rateLimit,
 	}
 	if text == "" && waitErr != nil {
 		stderr := strings.TrimSpace(stderrBuf.String())
