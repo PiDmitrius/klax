@@ -139,7 +139,7 @@ func (d *daemon) modelText(sess *session.Session) string {
 	return sb.String()
 }
 
-func (d *daemon) effortText(sess *session.Session) string {
+func (d *daemon) thinkText(sess *session.Session) string {
 	backend := sess.Backend
 	if backend == "" {
 		backend = d.cfg.GetDefaultBackend()
@@ -150,9 +150,9 @@ func (d *daemon) effortText(sess *session.Session) string {
 	current := sess.EffortOverride
 	for _, e := range efforts {
 		if e.model == current {
-			fmt.Fprintf(&sb, "/e_%s %s ✅\n", e.alias, e.label)
+			fmt.Fprintf(&sb, "/t_%s %s ✅\n", e.alias, e.label)
 		} else {
-			fmt.Fprintf(&sb, "/e_%s %s\n", e.alias, e.label)
+			fmt.Fprintf(&sb, "/t_%s %s\n", e.alias, e.label)
 		}
 	}
 	if current == "" {
@@ -176,7 +176,7 @@ func helpText() string {
 /cleanup — управление сессиями
 /cwd [путь] — рабочая директория
 /model — модель (opus/sonnet/haiku)
-/effort — уровень reasoning
+/think — уровень мышления
 /prompt [текст] — системный промпт
 /groups — режим группы
 /transports — управление транспортами

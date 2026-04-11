@@ -135,13 +135,13 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		}
 		d.sendPlain(chatID, msgID, d.modelText(sess))
 
-	case "/effort":
+	case "/think":
 		sess := d.store.Active(sk)
 		if sess == nil {
 			d.sendMessage(chatID, msgID, "Нет активной сессии")
 			return
 		}
-		d.sendPlain(chatID, msgID, d.effortText(sess))
+		d.sendPlain(chatID, msgID, d.thinkText(sess))
 
 	case "/groups":
 		d.handleGroups(chatID, msgID, parts)
@@ -265,8 +265,8 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			d.sendPlain(chatID, msgID, d.modelText(sess))
 			return
 		}
-		// /e_EFFORT shortcut for effort switch
-		if strings.HasPrefix(cmd, "/e_") {
+		// /t_EFFORT shortcut for effort switch
+		if strings.HasPrefix(cmd, "/t_") {
 			sess := d.store.Active(sk)
 			if sess == nil {
 				d.sendMessage(chatID, msgID, "Нет активной сессии")
@@ -276,7 +276,7 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			if alias == "default" {
 				sess.EffortOverride = ""
 				d.store.Save()
-				d.sendPlain(chatID, msgID, d.effortText(sess))
+				d.sendPlain(chatID, msgID, d.thinkText(sess))
 				return
 			}
 			backend := sess.Backend
@@ -292,7 +292,7 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			}
 			sess.EffortOverride = resolved
 			d.store.Save()
-			d.sendPlain(chatID, msgID, d.effortText(sess))
+			d.sendPlain(chatID, msgID, d.thinkText(sess))
 			return
 		}
 		// /sN shortcut for /switch N
