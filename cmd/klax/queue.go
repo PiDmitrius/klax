@@ -219,10 +219,13 @@ func (d *daemon) runClaude(msg queuedMsg) {
 		}
 	}
 	if result.RateLimit != nil {
+		log.Printf("[debug] saving rate limit: status=%s type=%s resets=%d", result.RateLimit.Status, result.RateLimit.RateLimitType, result.RateLimit.ResetsAt)
 		sess.RateLimitStatus = result.RateLimit.Status
 		sess.RateLimitResets = result.RateLimit.ResetsAt
 		sess.RateLimitType = result.RateLimit.RateLimitType
 		sess.RateLimitOverage = result.RateLimit.IsUsingOverage
+	} else {
+		log.Printf("[debug] no rate limit in result")
 	}
 	d.store.Save()
 
