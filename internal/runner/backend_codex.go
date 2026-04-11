@@ -19,7 +19,7 @@ type CodexBackend struct {
 func (b *CodexBackend) Name() string { return "codex" }
 
 func (b *CodexBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
-	args := []string{"exec", "--json"}
+	args := []string{"exec", "--json", "--skip-git-repo-check"}
 
 	if b.FullAuto {
 		args = append(args, "--full-auto")

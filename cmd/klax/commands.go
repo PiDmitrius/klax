@@ -201,6 +201,27 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		d.sendMessage(chatID, msgID, reply)
 
 	default:
+		// /backend_NAME shortcut for backend switch
+		if strings.HasPrefix(cmd, "/backend_") {
+			sess := d.store.Active(sk)
+			if sess == nil {
+				d.sendMessage(chatID, msgID, "Нет активной сессии")
+				return
+			}
+			if sess.Messages > 0 {
+				d.sendMessage(chatID, msgID, "Backend нельзя изменить после первого сообщения.")
+				return
+			}
+			name := cmd[9:] // strip "/backend_"
+			if name != "claude" && name != "codex" {
+				d.sendMessage(chatID, msgID, "Доступные backend: claude, codex")
+				return
+			}
+			sess.Backend = name
+			d.store.Save()
+			d.sendPlain(chatID, msgID, d.backendText(sess))
+			return
+		}
 		// /m_MODEL shortcut for model switch
 		if strings.HasPrefix(cmd, "/m_") {
 			sess := d.store.Active(sk)

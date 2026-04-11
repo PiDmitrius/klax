@@ -66,9 +66,9 @@ func (d *daemon) backendText(sess *session.Session) string {
 	var sb strings.Builder
 	for _, name := range backends {
 		if name == current {
-			fmt.Fprintf(&sb, "/backend %s ✅\n", name)
+			fmt.Fprintf(&sb, "/backend_%s ✅\n", name)
 		} else {
-			fmt.Fprintf(&sb, "/backend %s\n", name)
+			fmt.Fprintf(&sb, "/backend_%s\n", name)
 		}
 	}
 	if sess.Messages > 0 {
