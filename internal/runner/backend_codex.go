@@ -1,11 +1,13 @@
 package runner
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -181,6 +183,61 @@ func (b *CodexBackend) ParseEvent(line []byte) (Event, bool) {
 	}
 
 	return Event{Type: "unknown", Text: ev.Type}, true
+}
+
+// ReadSessionMeta reads model and context window from codex session JSONL file.
+func ReadCodexSessionMeta(threadID string) (model string, contextWindow int) {
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		return
+	}
+	sessDir := filepath.Join(home, ".codex", "sessions")
+	// Find session file matching thread ID.
+	pattern := filepath.Join(sessDir, "*", "*", "*", fmt.Sprintf("*%s.jsonl", threadID))
+	matches, _ := filepath.Glob(pattern)
+	if len(matches) == 0 {
+		return
+	}
+	f, err := os.Open(matches[0])
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 256*1024), 256*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		var entry struct {
+			Type    string          `json:"type"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if json.Unmarshal(line, &entry) != nil {
+			continue
+		}
+		switch entry.Type {
+		case "event_msg":
+			var ev struct {
+				Type               string `json:"type"`
+				ModelContextWindow int    `json:"model_context_window"`
+			}
+			if json.Unmarshal(entry.Payload, &ev) == nil && ev.Type == "task_started" && ev.ModelContextWindow > 0 {
+				contextWindow = ev.ModelContextWindow
+			}
+		case "turn_context":
+			var tc struct {
+				Model string `json:"model"`
+			}
+			if json.Unmarshal(entry.Payload, &tc) == nil && tc.Model != "" {
+				model = tc.Model
+			}
+		}
+		// Stop after finding both.
+		if model != "" && contextWindow > 0 {
+			return
+		}
+	}
+	return
 }
 
 func escapeJSON(s string) string {

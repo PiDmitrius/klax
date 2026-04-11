@@ -310,6 +310,18 @@ func (r *Runner) Run(backend Backend, opts RunOptions, onProgress ProgressFunc) 
 		usage.Model = model
 	}
 
+	// For codex: read model and context window from session file.
+	if backend.Name() == "codex" && sessionID != "" {
+		if m, cw := ReadCodexSessionMeta(sessionID); m != "" || cw > 0 {
+			if usage.Model == "" {
+				usage.Model = m
+			}
+			if usage.ContextWindow == 0 {
+				usage.ContextWindow = cw
+			}
+		}
+	}
+
 	text := strings.Join(textParts, "\n")
 	result := RunResult{
 		SessionID: sessionID,
