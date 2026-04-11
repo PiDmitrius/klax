@@ -141,6 +141,29 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 	case "/transports":
 		d.handleTransports(chatID, msgID, parts)
 
+	case "/backend":
+		sess := d.store.Active(sk)
+		if sess == nil {
+			d.sendMessage(chatID, msgID, "Нет активной сессии")
+			return
+		}
+		if sess.Messages > 0 {
+			d.sendMessage(chatID, msgID, "Backend нельзя изменить после первого сообщения.")
+			return
+		}
+		if len(parts) < 2 {
+			d.sendPlain(chatID, msgID, d.backendText(sess))
+			return
+		}
+		name := strings.ToLower(parts[1])
+		if name != "claude" && name != "codex" {
+			d.sendMessage(chatID, msgID, "Доступные backend: claude, codex")
+			return
+		}
+		sess.Backend = name
+		d.store.Save()
+		d.sendPlain(chatID, msgID, d.backendText(sess))
+
 	case "/update":
 		go d.runChatOp(chatID, msgID, "update", "⏳ Обновляю...")
 

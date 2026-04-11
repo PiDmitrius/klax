@@ -1,4 +1,4 @@
-// Package session manages Claude Code sessions.
+// Package session manages AI coding sessions.
 package session
 
 import (
@@ -10,12 +10,13 @@ import (
 )
 
 type Session struct {
-	ID                 string `json:"id"`                       // Claude session UUID
+	ID                 string `json:"id"`                       // session UUID (claude or codex thread_id)
 	Name               string `json:"name"`                     // user-friendly name
-	CWD                string `json:"cwd"`                      // working directory for claude
+	CWD                string `json:"cwd"`                      // working directory
 	Created            int64  `json:"created"`                  // unix timestamp
 	LastUsed           int64  `json:"last_used"`                // unix timestamp
 	Active             bool   `json:"active"`                   // currently selected
+	Backend            string `json:"backend,omitempty"`        // "claude" (default) or "codex"
 	Model              string `json:"model,omitempty"`          // last used model (from result)
 	ModelOverride      string `json:"model_override,omitempty"` // user-selected model
 	ContextWindow      int    `json:"ctx_window,omitempty"`

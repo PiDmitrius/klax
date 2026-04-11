@@ -57,6 +57,26 @@ var knownModels = []struct {
 	{"haiku", "claude-haiku-4-5-20251001", "Claude Haiku 200k"},
 }
 
+func (d *daemon) backendText(sess *session.Session) string {
+	current := sess.Backend
+	if current == "" {
+		current = d.cfg.GetDefaultBackend()
+	}
+	backends := []string{"claude", "codex"}
+	var sb strings.Builder
+	for _, name := range backends {
+		if name == current {
+			fmt.Fprintf(&sb, "/backend %s ✅\n", name)
+		} else {
+			fmt.Fprintf(&sb, "/backend %s\n", name)
+		}
+	}
+	if sess.Messages > 0 {
+		sb.WriteString("\n(зафиксирован)")
+	}
+	return sb.String()
+}
+
 func (d *daemon) modelText(sess *session.Session) string {
 	var sb strings.Builder
 	current := sess.ModelOverride
@@ -93,6 +113,7 @@ func helpText() string {
 /transports — управление транспортами
 /bypass — команда в Claude
 /abort — прервать исполнение
+/backend — backend (claude/codex)
 /update — обновить
 /fallback — установить релизную версию`
 }

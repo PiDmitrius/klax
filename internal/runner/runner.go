@@ -1,54 +1,18 @@
-// Package runner executes claude CLI and streams results.
+// Package runner executes AI CLI tools and streams results.
 package runner
 
 import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 )
 
-// StreamEvent is a parsed event from claude --output-format stream-json
-type StreamEvent struct {
-	Type       string                     `json:"type"`
-	Name       string                     `json:"name,omitempty"`
-	Input      json.RawMessage            `json:"input,omitempty"`
-	Result     string                     `json:"result,omitempty"`
-	IsError    bool                       `json:"is_error,omitempty"`
-	Subtype    string                     `json:"subtype,omitempty"`
-	Message    *Message                   `json:"message,omitempty"`
-	SessionID  string                     `json:"session_id,omitempty"`
-	Model      string                     `json:"model,omitempty"`
-	ModelUsage map[string]json.RawMessage `json:"modelUsage,omitempty"`
-}
-
-type Message struct {
-	Content []ContentBlock `json:"content"`
-	Usage   *MessageUsage  `json:"usage,omitempty"`
-}
-
-type MessageUsage struct {
-	InputTokens   int `json:"input_tokens"`
-	OutputTokens  int `json:"output_tokens"`
-	CacheRead     int `json:"cache_read_input_tokens"`
-	CacheCreation int `json:"cache_creation_input_tokens"`
-}
-
-type ContentBlock struct {
-	Type  string          `json:"type"`
-	Text  string          `json:"text,omitempty"`
-	Name  string          `json:"name,omitempty"`
-	Input json.RawMessage `json:"input,omitempty"`
-}
-
-// ToolUse describes what Claude is doing right now.
+// ToolUse describes what the AI is doing right now.
 type ToolUse struct {
 	Name  string
 	Input string
@@ -118,17 +82,17 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// RunOptions configures a claude invocation.
+// RunOptions configures a CLI invocation.
 type RunOptions struct {
 	Prompt             string
 	SessionID          string // empty = new session
 	CWD                string // working directory
-	PermissionMode     string // acceptEdits | bypassPermissions | auto | default
-	Model              string // claude model override
+	PermissionMode     string // claude: acceptEdits | bypassPermissions | auto
+	Model              string // model override
 	AppendSystemPrompt string // appended to default system prompt
 }
 
-// ModelUsageInfo captures context window usage from a claude run.
+// ModelUsageInfo captures context window usage from a run.
 type ModelUsageInfo struct {
 	Model         string
 	ContextWindow int
@@ -136,10 +100,10 @@ type ModelUsageInfo struct {
 	OutputTokens  int
 	CacheRead     int
 	CacheCreation int
-	ContextUsed   int // input_tokens + cache_read + cache_creation from last assistant msg
+	ContextUsed   int
 }
 
-// RunResult is the final result of a claude invocation.
+// RunResult is the final result of a CLI invocation.
 type RunResult struct {
 	SessionID string
 	Text      string
@@ -150,14 +114,14 @@ type RunResult struct {
 // ProgressFunc is called with human-readable progress updates.
 type ProgressFunc func(status string)
 
-// Runner executes claude and tracks state.
+// Runner executes an AI backend and tracks state.
 type Runner struct {
 	mu      sync.Mutex
 	cmd     *exec.Cmd
 	busy    bool
 	current ToolUse
-	startAt time.Time // when Run() started
-	toolAt  time.Time // when current tool_use started
+	startAt time.Time
+	toolAt  time.Time
 }
 
 func New() *Runner {
@@ -182,7 +146,7 @@ func (r *Runner) Status() (tool ToolUse, toolElapsed, totalElapsed time.Duration
 	return r.current, te, total
 }
 
-// Abort kills the current claude process.
+// Abort kills the current process.
 func (r *Runner) Abort() {
 	r.mu.Lock()
 	cmd := r.cmd
@@ -192,10 +156,8 @@ func (r *Runner) Abort() {
 	}
 }
 
-// Run executes claude with streaming output.
-// onProgress is called when tool use changes.
-// Returns final result.
-func (r *Runner) Run(opts RunOptions, onProgress ProgressFunc) RunResult {
+// Run executes the backend with streaming output.
+func (r *Runner) Run(backend Backend, opts RunOptions, onProgress ProgressFunc) RunResult {
 	r.mu.Lock()
 	r.busy = true
 	r.startAt = time.Now()
@@ -210,52 +172,10 @@ func (r *Runner) Run(opts RunOptions, onProgress ProgressFunc) RunResult {
 		r.mu.Unlock()
 	}()
 
-	mode := opts.PermissionMode
-	if mode == "" {
-		mode = "acceptEdits"
+	cmd, err := backend.BuildCmd(opts)
+	if err != nil {
+		return RunResult{Error: err}
 	}
-	args := []string{
-		"-p",
-		"--output-format", "stream-json",
-		"--verbose",
-		"--permission-mode", mode,
-		"--disallowed-tools", "Agent",
-	}
-	if opts.Model != "" {
-		args = append(args, "--model", opts.Model)
-	}
-	if opts.AppendSystemPrompt != "" {
-		args = append(args, "--append-system-prompt", opts.AppendSystemPrompt)
-	}
-	if opts.SessionID != "" {
-		args = append(args, "--resume", opts.SessionID)
-	}
-	// Prompt is passed via stdin, not as a CLI argument.
-	// This avoids arg length limits, hides content from `ps`, and prevents
-	// any interpretation of user text as flags.
-
-	claudeBin := "claude"
-	if p, err := exec.LookPath("claude"); err == nil {
-		claudeBin = p
-	} else {
-		// Fallback: common install locations when PATH is stripped (e.g. systemd)
-		home, _ := os.UserHomeDir()
-		candidates := []string{"/usr/local/bin/claude"}
-		if home != "" {
-			candidates = append([]string{filepath.Join(home, ".local", "bin", "claude")}, candidates...)
-		}
-		for _, candidate := range candidates {
-			if _, err := exec.LookPath(candidate); err == nil {
-				claudeBin = candidate
-				break
-			}
-		}
-	}
-	cmd := exec.Command(claudeBin, args...)
-	if opts.CWD != "" {
-		cmd.Dir = opts.CWD
-	}
-	cmd.Stdin = strings.NewReader(opts.Prompt)
 
 	r.mu.Lock()
 	r.cmd = cmd
@@ -269,9 +189,6 @@ func (r *Runner) Run(opts RunOptions, onProgress ProgressFunc) RunResult {
 	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
-		if errors.Is(err, exec.ErrNotFound) {
-			return RunResult{Error: fmt.Errorf("claude not found. Install: curl -fsSL https://claude.ai/install.sh | bash")}
-		}
 		return RunResult{Error: fmt.Errorf("start: %w", err)}
 	}
 
@@ -279,17 +196,17 @@ func (r *Runner) Run(opts RunOptions, onProgress ProgressFunc) RunResult {
 	var model string
 	var textParts []string
 	var usage ModelUsageInfo
-	var streamError string
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
+		line := scanner.Bytes()
+		if len(line) == 0 {
 			continue
 		}
-		var ev StreamEvent
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+
+		ev, ok := backend.ParseEvent(line)
+		if !ok {
 			continue
 		}
 
@@ -302,59 +219,54 @@ func (r *Runner) Run(opts RunOptions, onProgress ProgressFunc) RunResult {
 				model = ev.Model
 			}
 
-		case "assistant":
-			if ev.Message == nil {
-				continue
+		case "tool":
+			r.mu.Lock()
+			r.current = ev.Tool
+			r.toolAt = time.Now()
+			r.mu.Unlock()
+			if onProgress != nil {
+				onProgress(ev.Tool.String())
 			}
-			if u := ev.Message.Usage; u != nil {
-				usage.ContextUsed = u.InputTokens + u.CacheRead + u.CacheCreation
+			if ev.Usage.ContextUsed > 0 {
+				usage.ContextUsed = ev.Usage.ContextUsed
 			}
-			for _, block := range ev.Message.Content {
-				switch block.Type {
-				case "tool_use":
-					tu := ToolUse{Name: block.Name, Input: string(block.Input)}
-					r.mu.Lock()
-					r.current = tu
-					r.toolAt = time.Now()
-					r.mu.Unlock()
-					if onProgress != nil {
-						onProgress(tu.String())
-					}
-				case "text":
-					// Claude is writing text — clear stale tool status.
-					r.mu.Lock()
-					r.current = ToolUse{}
-					r.mu.Unlock()
-				}
+
+		case "text":
+			r.mu.Lock()
+			r.current = ToolUse{}
+			r.mu.Unlock()
+			if ev.Usage.ContextUsed > 0 {
+				usage.ContextUsed = ev.Usage.ContextUsed
 			}
 
 		case "result":
-			if ev.IsError && ev.Result != "" {
-				streamError = ev.Result
-			} else if ev.Result != "" {
-				textParts = append(textParts, ev.Result)
+			if ev.Error != "" {
+				return RunResult{
+					SessionID: sessionID,
+					Error:     fmt.Errorf("%s: %s", backend.Name(), ev.Error),
+				}
 			}
-			// Extract model usage from result event.
-			// Pick the model with the most output tokens (primary model),
-			// not background models (haiku for compaction etc).
-			bestOutput := -1
-			for modelName, raw := range ev.ModelUsage {
-				var mu struct {
-					InputTokens          int `json:"inputTokens"`
-					OutputTokens         int `json:"outputTokens"`
-					CacheReadInputTokens int `json:"cacheReadInputTokens"`
-					CacheCreationTokens  int `json:"cacheCreationInputTokens"`
-					ContextWindow        int `json:"contextWindow"`
-				}
-				if json.Unmarshal(raw, &mu) == nil && mu.OutputTokens > bestOutput {
-					bestOutput = mu.OutputTokens
-					usage.Model = modelName
-					usage.ContextWindow = mu.ContextWindow
-					usage.InputTokens = mu.InputTokens
-					usage.OutputTokens = mu.OutputTokens
-					usage.CacheRead = mu.CacheReadInputTokens
-					usage.CacheCreation = mu.CacheCreationTokens
-				}
+			if ev.Text != "" {
+				textParts = append(textParts, ev.Text)
+			}
+			// Merge usage from result event.
+			if ev.Usage.Model != "" {
+				usage.Model = ev.Usage.Model
+			}
+			if ev.Usage.ContextWindow > 0 {
+				usage.ContextWindow = ev.Usage.ContextWindow
+			}
+			if ev.Usage.InputTokens > 0 {
+				usage.InputTokens = ev.Usage.InputTokens
+			}
+			if ev.Usage.OutputTokens > 0 {
+				usage.OutputTokens = ev.Usage.OutputTokens
+			}
+			if ev.Usage.CacheRead > 0 {
+				usage.CacheRead = ev.Usage.CacheRead
+			}
+			if ev.Usage.CacheCreation > 0 {
+				usage.CacheCreation = ev.Usage.CacheCreation
 			}
 		}
 	}
@@ -371,14 +283,12 @@ func (r *Runner) Run(opts RunOptions, onProgress ProgressFunc) RunResult {
 		Text:      text,
 		Usage:     usage,
 	}
-	if streamError != "" {
-		result.Error = fmt.Errorf("claude: %s", streamError)
-	} else if text == "" && waitErr != nil {
+	if text == "" && waitErr != nil {
 		stderr := strings.TrimSpace(stderrBuf.String())
 		if stderr != "" {
-			result.Error = fmt.Errorf("claude: %s", stderr)
+			result.Error = fmt.Errorf("%s: %s", backend.Name(), stderr)
 		} else {
-			result.Error = fmt.Errorf("claude exited: %w", waitErr)
+			result.Error = fmt.Errorf("%s exited: %w", backend.Name(), waitErr)
 		}
 	}
 	return result

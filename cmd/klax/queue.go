@@ -188,15 +188,12 @@ func (d *daemon) runClaude(msg queuedMsg) {
 		defer os.RemoveAll(tmpDir)
 	}
 
-	permMode := sess.PermissionMode
-	if permMode == "" {
-		permMode = d.cfg.PermissionMode
-	}
-	result := sr.runner.Run(runner.RunOptions{
+	backend := d.backendFor(sess)
+	result := sr.runner.Run(backend, runner.RunOptions{
 		Prompt:             prompt,
 		SessionID:          sess.ID,
 		CWD:                sess.CWD,
-		PermissionMode:     permMode,
+		PermissionMode:     sess.PermissionMode,
 		Model:              sess.ModelOverride,
 		AppendSystemPrompt: sess.AppendSystemPrompt,
 	}, onProgress)

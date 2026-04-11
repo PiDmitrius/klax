@@ -15,13 +15,27 @@ type UserIdentity struct {
 	VKID       int64  `json:"vk_id,omitempty"` // VK user ID
 }
 
+// BackendConfig holds per-backend settings.
+type BackendConfig struct {
+	PermissionMode string `json:"permission_mode,omitempty"` // claude: acceptEdits | bypassPermissions | auto
+	Sandbox        string `json:"sandbox,omitempty"`         // codex: read-only | workspace-write | danger-full-access
+	FullAuto       bool   `json:"full_auto,omitempty"`       // codex: --full-auto shortcut
+	APIKey         string `json:"api_key,omitempty"`         // codex: CODEX_API_KEY
+}
+
 // Config is stored at ~/.config/klax/config.json
 type Config struct {
 	TelegramToken  string  `json:"tg_token"`
 	AllowedUsers   []int64 `json:"tg_allowed_users"` // Telegram user IDs
 	DefaultCWD     string  `json:"default_cwd"`
-	PermissionMode string  `json:"permission_mode"` // acceptEdits | bypassPermissions | auto
-	SourceDir      string  `json:"source_dir"`      // path to klax source for local builds
+	SourceDir      string  `json:"source_dir"` // path to klax source for local builds
+
+	// Legacy field — migrated to Backends["claude"].PermissionMode on load.
+	PermissionMode string `json:"permission_mode,omitempty"`
+
+	// Backend settings.
+	DefaultBackend string                   `json:"default_backend,omitempty"` // "claude" (default) or "codex"
+	Backends       map[string]BackendConfig `json:"backends,omitempty"`
 
 	MaxToken        string  `json:"mx_token,omitempty"`
 	MaxAllowedUsers []int64 `json:"mx_allowed_users,omitempty"` // MAX user IDs
@@ -38,6 +52,28 @@ type Config struct {
 type GroupChat struct {
 	ID  string `json:"id"`  // chat ID (e.g. "tg:-100123456")
 	CWD string `json:"cwd"` // working directory for the group
+}
+
+// GetDefaultBackend returns the default backend name.
+func (c *Config) GetDefaultBackend() string {
+	if c.DefaultBackend != "" {
+		return c.DefaultBackend
+	}
+	return "claude"
+}
+
+// BackendFor returns config for a named backend, falling back to legacy fields.
+func (c *Config) BackendFor(name string) BackendConfig {
+	if c.Backends != nil {
+		if bc, ok := c.Backends[name]; ok {
+			return bc
+		}
+	}
+	// Fallback: build from legacy fields.
+	if name == "claude" {
+		return BackendConfig{PermissionMode: c.PermissionMode}
+	}
+	return BackendConfig{}
 }
 
 func Dir() string {
@@ -57,6 +93,12 @@ func Load() (*Config, error) {
 	var c Config
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil, err
+	}
+	// Migrate legacy permission_mode into backends.
+	if c.Backends == nil && c.PermissionMode != "" {
+		c.Backends = map[string]BackendConfig{
+			"claude": {PermissionMode: c.PermissionMode},
+		}
 	}
 	return &c, nil
 }

@@ -51,6 +51,27 @@ type daemon struct {
 	groupChats map[string]string // chatID -> CWD for group mode chats
 }
 
+// backendFor returns the Backend for a given session.
+func (d *daemon) backendFor(sess *session.Session) runner.Backend {
+	name := sess.Backend
+	if name == "" {
+		name = d.cfg.GetDefaultBackend()
+	}
+	bc := d.cfg.BackendFor(name)
+	switch name {
+	case "codex":
+		return &runner.CodexBackend{
+			Sandbox:  bc.Sandbox,
+			FullAuto: bc.FullAuto,
+			APIKey:   bc.APIKey,
+		}
+	default:
+		return &runner.ClaudeBackend{
+			PermissionMode: bc.PermissionMode,
+		}
+	}
+}
+
 // getRunner returns the sessionRunner for the given key, creating one if needed.
 func (d *daemon) getRunner(sessionKey string) *sessionRunner {
 	d.runnersMu.Lock()
