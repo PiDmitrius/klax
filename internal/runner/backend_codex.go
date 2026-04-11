@@ -72,15 +72,21 @@ type codexEvent struct {
 
 type codexItem struct {
 	ID               string          `json:"id"`
-	Type             string          `json:"type"` // agent_message | command_execution | web_search | file_read | file_edit | ...
+	Type             string          `json:"type"` // agent_message | command_execution | web_search | file_read | file_edit | file_change | ...
 	Text             string          `json:"text,omitempty"`
 	Command          string          `json:"command,omitempty"`
 	AggregatedOutput string          `json:"aggregated_output,omitempty"`
 	ExitCode         *int            `json:"exit_code,omitempty"`
 	Status           string          `json:"status,omitempty"`
-	Query            string          `json:"query,omitempty"`   // web_search
+	Query            string          `json:"query,omitempty"`     // web_search
 	FilePath         string          `json:"file_path,omitempty"` // file_read, file_edit
+	Changes          []codexChange   `json:"changes,omitempty"`   // file_change
 	Action           json.RawMessage `json:"action,omitempty"`
+}
+
+type codexChange struct {
+	Path string `json:"path"`
+	Kind string `json:"kind"` // add, update, delete
 }
 
 type codexUsage struct {
@@ -128,12 +134,24 @@ func (b *CodexBackend) ParseEvent(line []byte) (Event, bool) {
 					Input: fmt.Sprintf(`{"file_path":"%s"}`, escapeJSON(ev.Item.FilePath)),
 				},
 			}, true
-		case "file_edit", "file_change":
+		case "file_edit":
 			return Event{
 				Type: "tool",
 				Tool: ToolUse{
 					Name:  "Edit",
 					Input: fmt.Sprintf(`{"file_path":"%s"}`, escapeJSON(ev.Item.FilePath)),
+				},
+			}, true
+		case "file_change":
+			name := "Edit"
+			if len(ev.Item.Changes) == 1 && ev.Item.Changes[0].Kind == "add" {
+				name = "Write"
+			}
+			return Event{
+				Type: "tool",
+				Tool: ToolUse{
+					Name:  name,
+					Input: fmt.Sprintf(`{"file_path":"%s"}`, escapeJSON(codexChangePaths(ev.Item.Changes))),
 				},
 			}, true
 		}
@@ -250,6 +268,18 @@ func ReadCodexSessionMeta(threadID string) (model string, contextWindow int, con
 		// Stop after finding both.
 	}
 	return
+}
+
+// codexChangePaths returns a comma-separated list of paths from file_change events.
+func codexChangePaths(changes []codexChange) string {
+	if len(changes) == 1 {
+		return changes[0].Path
+	}
+	var paths []string
+	for _, c := range changes {
+		paths = append(paths, c.Path)
+	}
+	return strings.Join(paths, ", ")
 }
 
 func escapeJSON(s string) string {
