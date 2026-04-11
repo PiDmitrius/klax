@@ -32,13 +32,13 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 	sk := d.sessionKey(chatID)
 
 	switch cmd {
-	case "/start", "/help":
+	case "/start", "/help", "/h":
 		d.sendMessage(chatID, msgID, helpText())
 
-	case "/status":
+	case "/status", "/?":
 		d.sendMessage(chatID, msgID, d.statusText(sk))
 
-	case "/sessions", "/s":
+	case "/sessions", "/session", "/s":
 		d.sendMessage(chatID, msgID, d.sessionsText(sk))
 
 	case "/cleanup":
@@ -127,7 +127,7 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		d.store.Save()
 		d.sendMessage(chatID, msgID, fmt.Sprintf("📝 <code>%s</code>", sess.AppendSystemPrompt))
 
-	case "/model":
+	case "/model", "/models", "/m":
 		sess := d.store.Active(sk)
 		if sess == nil {
 			d.sendMessage(chatID, msgID, "Нет активной сессии")
@@ -135,7 +135,7 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		}
 		d.sendPlain(chatID, msgID, d.modelText(sess))
 
-	case "/think":
+	case "/think", "/thinking", "/t":
 		sess := d.store.Active(sk)
 		if sess == nil {
 			d.sendMessage(chatID, msgID, "Нет активной сессии")
@@ -143,7 +143,7 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		}
 		d.sendPlain(chatID, msgID, d.thinkText(sess))
 
-	case "/groups":
+	case "/groups", "/group", "/g":
 		d.handleGroups(chatID, msgID, parts)
 
 	case "/transports":

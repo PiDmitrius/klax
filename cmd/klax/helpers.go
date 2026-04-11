@@ -156,9 +156,9 @@ func (d *daemon) thinkText(sess *session.Session) string {
 		}
 	}
 	if current == "" {
-		fmt.Fprintf(&sb, "/e_default По умолчанию ✅\n")
+		fmt.Fprintf(&sb, "/t_default По умолчанию ✅\n")
 	} else {
-		fmt.Fprintf(&sb, "/e_default По умолчанию\n")
+		fmt.Fprintf(&sb, "/t_default По умолчанию\n")
 	}
 	return sb.String()
 }
