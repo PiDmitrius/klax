@@ -98,7 +98,10 @@ func (b *CodexBackend) ParseEvent(line []byte) (Event, bool) {
 		}, true
 
 	case "item.started":
-		if ev.Item != nil && ev.Item.Type == "command_execution" {
+		if ev.Item == nil {
+			return Event{}, false
+		}
+		if ev.Item.Type == "command_execution" {
 			return Event{
 				Type: "tool",
 				Tool: ToolUse{
@@ -107,7 +110,7 @@ func (b *CodexBackend) ParseEvent(line []byte) (Event, bool) {
 				},
 			}, true
 		}
-		return Event{}, false
+		return Event{Type: "unknown", Text: fmt.Sprintf("item.started:%s", ev.Item.Type)}, true
 
 	case "item.completed":
 		if ev.Item == nil {
@@ -115,18 +118,14 @@ func (b *CodexBackend) ParseEvent(line []byte) (Event, bool) {
 		}
 		switch ev.Item.Type {
 		case "agent_message":
-			// Intermediate thinking — show as progress, not final result.
-			// The runner will accumulate these; only the last text before
-			// turn.completed becomes the final answer.
 			return Event{
 				Type: "intermediate",
 				Text: ev.Item.Text,
 			}, true
 		case "command_execution":
-			// Tool finished — clear tool status.
 			return Event{Type: "text"}, true
 		}
-		return Event{}, false
+		return Event{Type: "unknown", Text: fmt.Sprintf("item.completed:%s", ev.Item.Type)}, true
 
 	case "turn.completed":
 		var e Event
@@ -137,9 +136,12 @@ func (b *CodexBackend) ParseEvent(line []byte) (Event, bool) {
 			e.Usage.CacheRead = ev.Usage.CachedInputTokens
 		}
 		return e, true
+
+	case "turn.started":
+		return Event{}, false // expected, no info
 	}
 
-	return Event{}, false
+	return Event{Type: "unknown", Text: ev.Type}, true
 }
 
 func escapeJSON(s string) string {

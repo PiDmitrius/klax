@@ -155,7 +155,7 @@ func (b *ClaudeBackend) ParseEvent(line []byte) (Event, bool) {
 		return e, true
 	}
 
-	return Event{}, false
+	return Event{Type: "unknown", Text: ev.Type}, true
 }
 
 // findBinary looks for a binary by name, with fallback paths relative to $HOME.

@@ -248,6 +248,11 @@ func (r *Runner) Run(backend Backend, opts RunOptions, onProgress ProgressFunc) 
 			r.current = ToolUse{}
 			r.mu.Unlock()
 
+		case "unknown":
+			if onProgress != nil && ev.Text != "" {
+				onProgress(fmt.Sprintf("❓ %s", ev.Text))
+			}
+
 		case "result":
 			if ev.Error != "" {
 				return RunResult{

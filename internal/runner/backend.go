@@ -6,7 +6,7 @@ import (
 
 // Event is a unified event from any backend's JSON stream.
 type Event struct {
-	Type      string // "system", "tool", "text", "intermediate", "result"
+	Type      string // "system", "tool", "text", "intermediate", "result", "unknown"
 	SessionID string
 	Model     string
 	Tool      ToolUse
