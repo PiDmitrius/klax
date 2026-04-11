@@ -236,13 +236,21 @@ func (d *daemon) statusText(chatID string) string {
 			// Rate limit already reset — clear stale data.
 			sess.RateLimitResets = 0
 			sess.RateLimitStatus = ""
+			sess.RateLimitType = ""
 			sess.RateLimitOverage = false
 		} else {
 			remaining := formatDuration(resetsIn)
+			typeLabel := ""
+			switch sess.RateLimitType {
+			case "five_hour":
+				typeLabel = " (5ч)"
+			case "weekly":
+				typeLabel = " (нед)"
+			}
 			if sess.RateLimitStatus == "throttled" || sess.RateLimitStatus == "rejected" {
-				rateLine = fmt.Sprintf("\n🚫 Лимит исчерпан %s", remaining)
+				rateLine = fmt.Sprintf("\n🚫 Лимит исчерпан%s %s", typeLabel, remaining)
 			} else {
-				rateLine = fmt.Sprintf("\n⏱ Сброс лимита %s", remaining)
+				rateLine = fmt.Sprintf("\n⏱ Сброс лимита%s %s", typeLabel, remaining)
 			}
 			if sess.RateLimitOverage {
 				rateLine += " (overage)"

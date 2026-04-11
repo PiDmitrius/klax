@@ -221,6 +221,7 @@ func (d *daemon) runClaude(msg queuedMsg) {
 	if result.RateLimit != nil {
 		sess.RateLimitStatus = result.RateLimit.Status
 		sess.RateLimitResets = result.RateLimit.ResetsAt
+		sess.RateLimitType = result.RateLimit.RateLimitType
 		sess.RateLimitOverage = result.RateLimit.IsUsingOverage
 	}
 	d.store.Save()

@@ -25,8 +25,9 @@ type Session struct {
 	Messages           int    `json:"messages"` // user message count
 	PermissionMode     string `json:"permission_mode,omitempty"`
 	AppendSystemPrompt string `json:"append_system_prompt,omitempty"`
-	RateLimitStatus    string `json:"rl_status,omitempty"`    // "allowed" | "throttled"
+	RateLimitStatus    string `json:"rl_status,omitempty"`    // "allowed" | "throttled" | "rejected"
 	RateLimitResets    int64  `json:"rl_resets,omitempty"`    // unix timestamp
+	RateLimitType      string `json:"rl_type,omitempty"`     // "five_hour" | "weekly"
 	RateLimitOverage   bool   `json:"rl_overage,omitempty"`   // using overage
 }
 
