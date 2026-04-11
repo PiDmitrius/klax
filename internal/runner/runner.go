@@ -94,14 +94,41 @@ func formatRateLimit(rl *RateLimitInfo) string {
 	default:
 		typeLabel = rl.RateLimitType
 	}
+	remaining := ""
+	if rl.ResetsAt > 0 {
+		d := time.Until(time.Unix(rl.ResetsAt, 0))
+		if d > 0 {
+			remaining = " " + fmtDuration(d)
+		}
+	}
 	switch rl.Status {
 	case "throttled", "rejected":
-		return fmt.Sprintf("🚫 Лимит исчерпан (%s)", typeLabel)
+		s := fmt.Sprintf("🚫 Лимит (%s)%s", typeLabel, remaining)
+		if rl.IsUsingOverage {
+			s += " (overage)"
+		}
+		return s
 	case "allowed_warning":
-		return fmt.Sprintf("⚠️ Лимит (%s)", typeLabel)
+		return fmt.Sprintf("⚠️ Лимит (%s)%s", typeLabel, remaining)
 	default:
-		return fmt.Sprintf("⏱ Лимит (%s) %s", typeLabel, rl.Status)
+		return fmt.Sprintf("⏱ Лимит (%s) %s%s", typeLabel, rl.Status, remaining)
 	}
+}
+
+func fmtDuration(d time.Duration) string {
+	days := int(d.Hours()) / 24
+	hours := int(d.Hours()) % 24
+	mins := int(d.Minutes()) % 60
+	if days > 0 {
+		if hours > 0 {
+			return fmt.Sprintf("%dд%dч", days, hours)
+		}
+		return fmt.Sprintf("%dд", days)
+	}
+	if hours > 0 {
+		return fmt.Sprintf("%dч%dм", hours, mins)
+	}
+	return fmt.Sprintf("%dм", mins)
 }
 
 func truncate(s string, n int) string {

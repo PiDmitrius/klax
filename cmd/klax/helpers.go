@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PiDmitrius/klax/internal/config"
+	"github.com/PiDmitrius/klax/internal/runner"
 	"github.com/PiDmitrius/klax/internal/session"
 )
 
@@ -163,6 +165,74 @@ func (d *daemon) thinkText(sess *session.Session) string {
 	return sb.String()
 }
 
+// saveRateLimit stores a rate limit event into global backend config.
+func (d *daemon) saveRateLimit(backendName string, rl *runner.RateLimitInfo) {
+	if d.cfg.Backends == nil {
+		d.cfg.Backends = make(map[string]config.BackendConfig)
+	}
+	bc := d.cfg.Backends[backendName]
+	state := &config.RateLimitState{
+		Status:         rl.Status,
+		ResetsAt:       rl.ResetsAt,
+		IsUsingOverage: rl.IsUsingOverage,
+	}
+	switch rl.RateLimitType {
+	case "five_hour":
+		bc.RateLimit5h = state
+	case "weekly", "seven_day":
+		bc.RateLimitWk = state
+	}
+	d.cfg.Backends[backendName] = bc
+	config.Save(d.cfg)
+}
+
+// rateLimitText returns rate limit lines for /status.
+func (d *daemon) rateLimitText(backendName string) string {
+	bc := d.cfg.BackendFor(backendName)
+	var lines []string
+	for _, entry := range []struct {
+		label string
+		rl    *config.RateLimitState
+	}{
+		{"5ч", bc.RateLimit5h},
+		{"нед", bc.RateLimitWk},
+	} {
+		if entry.rl == nil || entry.rl.ResetsAt == 0 {
+			continue
+		}
+		resetsIn := time.Until(time.Unix(entry.rl.ResetsAt, 0))
+		if resetsIn <= 0 {
+			// Expired — clear.
+			if entry.label == "5ч" {
+				bc.RateLimit5h = nil
+			} else {
+				bc.RateLimitWk = nil
+			}
+			continue
+		}
+		remaining := formatDuration(resetsIn)
+		switch entry.rl.Status {
+		case "throttled", "rejected":
+			line := fmt.Sprintf("🚫 Лимит (%s) %s", entry.label, remaining)
+			if entry.rl.IsUsingOverage {
+				line += " (overage)"
+			}
+			lines = append(lines, line)
+		case "allowed_warning":
+			lines = append(lines, fmt.Sprintf("⚠️ Лимит (%s) %s", entry.label, remaining))
+		}
+	}
+	// Save cleared limits.
+	if d.cfg.Backends == nil {
+		d.cfg.Backends = make(map[string]config.BackendConfig)
+	}
+	d.cfg.Backends[backendName] = bc
+	if len(lines) > 0 {
+		return "\n" + strings.Join(lines, "\n")
+	}
+	return ""
+}
+
 // --- Text helpers ---
 
 func helpText() string {
@@ -229,34 +299,7 @@ func (d *daemon) statusText(chatID string) string {
 		contextLine = fmt.Sprintf("\n🤖 <code>%s</code>", sess.Model)
 	}
 
-	var rateLine string
-	if sess.RateLimitResets > 0 {
-		resetsIn := time.Until(time.Unix(sess.RateLimitResets, 0))
-		if resetsIn <= 0 {
-			// Rate limit already reset — clear stale data.
-			sess.RateLimitResets = 0
-			sess.RateLimitStatus = ""
-			sess.RateLimitType = ""
-			sess.RateLimitOverage = false
-		} else {
-			remaining := formatDuration(resetsIn)
-			typeLabel := ""
-			switch sess.RateLimitType {
-			case "five_hour":
-				typeLabel = " (5ч)"
-			case "weekly", "seven_day":
-				typeLabel = " (нед)"
-			}
-			if sess.RateLimitStatus == "throttled" || sess.RateLimitStatus == "rejected" {
-				rateLine = fmt.Sprintf("\n🚫 Лимит исчерпан%s %s", typeLabel, remaining)
-			} else {
-				rateLine = fmt.Sprintf("\n⏱ Сброс лимита%s %s", typeLabel, remaining)
-			}
-			if sess.RateLimitOverage {
-				rateLine += " (overage)"
-			}
-		}
-	}
+	rateLine := d.rateLimitText(backend)
 
 	return fmt.Sprintf(
 		"<b>klax</b> v%s [%s]\n\n📌 <code>%s</code>\n%s%s%s\n💬 Сообщений: %d",
