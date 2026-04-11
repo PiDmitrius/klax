@@ -15,23 +15,12 @@ type UserIdentity struct {
 	VKID       int64  `json:"vk_id,omitempty"` // VK user ID
 }
 
-// RateLimitState stores one rate limit (e.g. five_hour or seven_day).
-type RateLimitState struct {
-	Status         string `json:"status,omitempty"`    // "allowed" | "allowed_warning" | "throttled" | "rejected"
-	ResetsAt       int64  `json:"resets_at,omitempty"` // unix timestamp
-	IsUsingOverage bool   `json:"overage,omitempty"`
-}
-
 // BackendConfig holds per-backend settings.
 type BackendConfig struct {
 	PermissionMode string `json:"permission_mode,omitempty"` // claude: acceptEdits | bypassPermissions | auto
 	Sandbox        string `json:"sandbox,omitempty"`         // codex: read-only | workspace-write | danger-full-access
 	FullAuto       bool   `json:"full_auto,omitempty"`       // codex: --full-auto shortcut
 	APIKey         string `json:"api_key,omitempty"`         // codex: CODEX_API_KEY
-
-	// Rate limits (global per backend, not per session).
-	RateLimit5h  *RateLimitState `json:"rl_5h,omitempty"`
-	RateLimitWk  *RateLimitState `json:"rl_wk,omitempty"`
 }
 
 // Config is stored at ~/.config/klax/config.json

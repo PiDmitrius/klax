@@ -35,6 +35,7 @@ type sessionRunner struct {
 
 type daemon struct {
 	cfg        *config.Config
+	state      *session.State
 	transports map[string]transport.Transport // "tg" -> tg.Bot, "mx" -> max.Bot
 	formats    map[string]string              // "tg" -> "html", "vk" -> ""
 	disabled   map[string]bool                // disabled transports
@@ -292,6 +293,7 @@ func runDaemon() {
 
 	d := &daemon{
 		cfg:        cfg,
+		state:      session.LoadState(),
 		transports: transports,
 		formats:    map[string]string{"tg": "html", "mx": "html", "vk": ""},
 		disabled:   disabled,
