@@ -48,6 +48,15 @@ func (t ToolUse) String() string {
 		}
 		json.Unmarshal([]byte(t.Input), &inp)
 		return fmt.Sprintf("🌐 Fetch: %s", truncate(inp.URL, 60))
+	case "WebSearch":
+		var inp struct {
+			Query string `json:"query"`
+		}
+		json.Unmarshal([]byte(t.Input), &inp)
+		if inp.Query != "" {
+			return fmt.Sprintf("🔎 Search: %s", truncate(inp.Query, 60))
+		}
+		return "🔎 Search..."
 	case "Glob", "GlobTool":
 		var inp struct {
 			Pattern string `json:"pattern"`

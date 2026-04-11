@@ -69,13 +69,16 @@ type codexEvent struct {
 }
 
 type codexItem struct {
-	ID               string `json:"id"`
-	Type             string `json:"type"` // agent_message | command_execution
-	Text             string `json:"text,omitempty"`
-	Command          string `json:"command,omitempty"`
-	AggregatedOutput string `json:"aggregated_output,omitempty"`
-	ExitCode         *int   `json:"exit_code,omitempty"`
-	Status           string `json:"status,omitempty"`
+	ID               string          `json:"id"`
+	Type             string          `json:"type"` // agent_message | command_execution | web_search | file_read | file_edit | ...
+	Text             string          `json:"text,omitempty"`
+	Command          string          `json:"command,omitempty"`
+	AggregatedOutput string          `json:"aggregated_output,omitempty"`
+	ExitCode         *int            `json:"exit_code,omitempty"`
+	Status           string          `json:"status,omitempty"`
+	Query            string          `json:"query,omitempty"`   // web_search
+	FilePath         string          `json:"file_path,omitempty"` // file_read, file_edit
+	Action           json.RawMessage `json:"action,omitempty"`
 }
 
 type codexUsage struct {
@@ -101,12 +104,34 @@ func (b *CodexBackend) ParseEvent(line []byte) (Event, bool) {
 		if ev.Item == nil {
 			return Event{}, false
 		}
-		if ev.Item.Type == "command_execution" {
+		switch ev.Item.Type {
+		case "command_execution":
 			return Event{
 				Type: "tool",
 				Tool: ToolUse{
 					Name:  "Bash",
 					Input: fmt.Sprintf(`{"command":"%s"}`, escapeJSON(ev.Item.Command)),
+				},
+			}, true
+		case "web_search":
+			return Event{
+				Type: "tool",
+				Tool: ToolUse{Name: "WebSearch", Input: ""},
+			}, true
+		case "file_read":
+			return Event{
+				Type: "tool",
+				Tool: ToolUse{
+					Name:  "Read",
+					Input: fmt.Sprintf(`{"file_path":"%s"}`, escapeJSON(ev.Item.FilePath)),
+				},
+			}, true
+		case "file_edit":
+			return Event{
+				Type: "tool",
+				Tool: ToolUse{
+					Name:  "Edit",
+					Input: fmt.Sprintf(`{"file_path":"%s"}`, escapeJSON(ev.Item.FilePath)),
 				},
 			}, true
 		}
@@ -123,6 +148,20 @@ func (b *CodexBackend) ParseEvent(line []byte) (Event, bool) {
 				Text: ev.Item.Text,
 			}, true
 		case "command_execution":
+			return Event{Type: "text"}, true
+		case "web_search":
+			query := ev.Item.Query
+			if query != "" {
+				return Event{
+					Type: "tool",
+					Tool: ToolUse{
+						Name:  "WebSearch",
+						Input: fmt.Sprintf(`{"query":"%s"}`, escapeJSON(query)),
+					},
+				}, true
+			}
+			return Event{Type: "text"}, true
+		case "file_read", "file_edit":
 			return Event{Type: "text"}, true
 		}
 		return Event{Type: "unknown", Text: fmt.Sprintf("item.completed:%s", ev.Item.Type)}, true
