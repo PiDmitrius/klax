@@ -1,4 +1,4 @@
-// klax daemon — Telegram bridge for Claude Code.
+// klax daemon — AI messaging bridge.
 // Uses claude -p --output-format stream-json for streaming responses.
 package main
 
@@ -8,7 +8,7 @@ import (
 	"os"
 )
 
-const version = "0.5.39"
+const version = "0.5.59"
 
 func main() {
 	log.SetPrefix("klax: ")
@@ -51,7 +51,7 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Fprintf(os.Stderr, "klax %s — Telegram bridge for Claude Code\n\n", version)
+	fmt.Fprintf(os.Stderr, "klax %s — AI messaging bridge\n\n", version)
 	fmt.Fprintln(os.Stderr, "Commands:")
 	fmt.Fprintln(os.Stderr, "  setup       Interactive first-time setup")
 	fmt.Fprintln(os.Stderr, "  install     Install systemd user service")

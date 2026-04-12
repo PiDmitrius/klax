@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"html"
+	"log"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/PiDmitrius/klax/internal/config"
 	"github.com/PiDmitrius/klax/internal/session"
@@ -17,7 +21,7 @@ var tgMenuCommands = []tg.BotCommand{
 	{Command: "status", Description: "Статус"},
 	{Command: "sessions", Description: "Сессии"},
 	{Command: "new", Description: "Новая сессия"},
-	{Command: "model", Description: "Модель"},
+	{Command: "settings", Description: "Настройки"},
 	{Command: "abort", Description: "Прервать"},
 }
 
@@ -27,6 +31,10 @@ func normalizeCommand(cmd string, args []string) (string, []string) {
 	switch {
 	case strings.HasPrefix(cmd, "/backend_") && len(cmd) > len("/backend_"):
 		return "/backend", append([]string{cmd[len("/backend_"):]}, args...)
+	case strings.HasPrefix(cmd, "/groups_") && len(cmd) > len("/groups_"):
+		return "/groups", append([]string{cmd[len("/groups_"):]}, args...)
+	case strings.HasPrefix(cmd, "/group_") && len(cmd) > len("/group_"):
+		return "/groups", append([]string{cmd[len("/group_"):]}, args...)
 	case strings.HasPrefix(cmd, "/m_") && len(cmd) > len("/m_"):
 		return "/__set_model", []string{cmd[len("/m_"):]}
 	case strings.HasPrefix(cmd, "/t_") && len(cmd) > len("/t_"):
@@ -76,13 +84,13 @@ func sessionCreatedText(cfg *config.Config, chatID string, def *session.ScopeDef
 		think = "по умолчанию"
 	}
 	return fmt.Sprintf(
-		"✅ Новая сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n📂 <code>%s</code>",
-		sess.Name,
+		"✅ Новая сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n📂 <code>%s</code>\n\n/settings — донастроить сессию",
+		html.EscapeString(sess.Name),
 		sessionModeLabel(chatID),
 		backend,
 		model,
 		think,
-		sess.CWD,
+		html.EscapeString(tildePath(sess.CWD)),
 	)
 }
 
@@ -98,7 +106,7 @@ func sessionSwitchedText(cfg *config.Config, chatID string, def *session.ScopeDe
 	}
 	return fmt.Sprintf(
 		"📌 Сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n\n%s",
-		sess.Name,
+		html.EscapeString(sess.Name),
 		sessionModeLabel(chatID),
 		backend,
 		model,
@@ -118,7 +126,7 @@ func (d *daemon) handleBackendSet(chatID, msgID, sk, name string) {
 		return
 	}
 	if name == "" {
-		d.sendPlain(chatID, msgID, d.backendText(sk, sess))
+		d.sendMessage(chatID, msgID, d.backendText(sk, sess))
 		return
 	}
 	if name != "claude" && name != "codex" {
@@ -140,8 +148,8 @@ func (d *daemon) handleBackendSet(chatID, msgID, sk, name string) {
 			sess.ThinkOverride = ""
 		}
 	})
-	d.store.Save()
-	d.sendPlain(chatID, msgID, d.backendText(sk, sess))
+	d.saveStore()
+	d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
 }
 
 func (d *daemon) handleModelSet(chatID, msgID, sk, alias string) {
@@ -150,15 +158,18 @@ func (d *daemon) handleModelSet(chatID, msgID, sk, alias string) {
 		d.sendMessage(chatID, msgID, "Нет активной сессии")
 		return
 	}
-	def := d.scopeDefaults(sk)
 	if alias == "default" {
-		sess = d.store.UpdateActive(sk, func(sess *session.Session) {
-			sess.ModelOverride = def.Model
+		d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
+			def.Model = ""
 		})
-		d.store.Save()
-		d.sendPlain(chatID, msgID, d.modelText(sk, sess))
+		sess = d.store.UpdateActive(sk, func(sess *session.Session) {
+			sess.ModelOverride = ""
+		})
+		d.saveStore()
+		d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
 		return
 	}
+	def := d.scopeDefaults(sk)
 	backend := effectiveBackendName(d.cfg, def, sess)
 	resolved := alias
 	for _, m := range modelsForBackend(backend) {
@@ -173,8 +184,8 @@ func (d *daemon) handleModelSet(chatID, msgID, sk, alias string) {
 	sess = d.store.UpdateActive(sk, func(sess *session.Session) {
 		sess.ModelOverride = resolved
 	})
-	d.store.Save()
-	d.sendPlain(chatID, msgID, d.modelText(sk, sess))
+	d.saveStore()
+	d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
 }
 
 func (d *daemon) handleThinkSet(chatID, msgID, sk, alias string) {
@@ -183,15 +194,18 @@ func (d *daemon) handleThinkSet(chatID, msgID, sk, alias string) {
 		d.sendMessage(chatID, msgID, "Нет активной сессии")
 		return
 	}
-	def := d.scopeDefaults(sk)
 	if alias == "default" {
-		sess = d.store.UpdateActive(sk, func(sess *session.Session) {
-			sess.ThinkOverride = def.Think
+		d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
+			def.Think = ""
 		})
-		d.store.Save()
-		d.sendPlain(chatID, msgID, d.thinkText(sk, sess))
+		sess = d.store.UpdateActive(sk, func(sess *session.Session) {
+			sess.ThinkOverride = ""
+		})
+		d.saveStore()
+		d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
 		return
 	}
+	def := d.scopeDefaults(sk)
 	backend := effectiveBackendName(d.cfg, def, sess)
 	resolved := alias
 	for _, e := range effortsForBackend(backend) {
@@ -206,8 +220,8 @@ func (d *daemon) handleThinkSet(chatID, msgID, sk, alias string) {
 	sess = d.store.UpdateActive(sk, func(sess *session.Session) {
 		sess.ThinkOverride = resolved
 	})
-	d.store.Save()
-	d.sendPlain(chatID, msgID, d.thinkText(sk, sess))
+	d.saveStore()
+	d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
 }
 
 func (d *daemon) handleSessionSwitch(chatID, msgID, sk, n string) {
@@ -221,7 +235,7 @@ func (d *daemon) handleSessionSwitch(chatID, msgID, sk, n string) {
 		d.sendMessage(chatID, msgID, fmt.Sprintf("Нет сессии #%d", idx))
 		return
 	}
-	d.store.Save()
+	d.saveStore()
 	d.sendMessage(chatID, msgID, sessionSwitchedText(d.cfg, chatID, d.scopeDefaults(sk), sess, d.sessionsText(sk)))
 }
 
@@ -242,8 +256,18 @@ func (d *daemon) handleSessionDelete(chatID, msgID, sk, n string) {
 		return
 	}
 	d.store.Delete(sk, pos)
-	d.store.Save()
+	d.saveStore()
 	d.sendMessage(chatID, msgID, d.cleanupText(sk))
+}
+
+// argPayload returns everything after the first whitespace-delimited word in text.
+// Handles @botname suffixes correctly: "/prompt@bot hello" → "hello".
+func argPayload(text string) string {
+	i := strings.IndexFunc(text, unicode.IsSpace)
+	if i == -1 {
+		return ""
+	}
+	return strings.TrimLeftFunc(text[i:], unicode.IsSpace)
 }
 
 func (d *daemon) handleCommand(chatID, msgID, text string) {
@@ -255,6 +279,7 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 	}
 	args := parts[1:]
 	cmd, args = normalizeCommand(cmd, args)
+	parts = append([]string{cmd}, args...)
 	sk := d.sessionKey(chatID)
 
 	switch cmd {
@@ -302,7 +327,7 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		}
 		def := d.scopeDefaults(sk)
 		sess := d.store.New(sk, name, cwd, *def)
-		d.store.Save()
+		d.saveStore()
 		d.sendMessage(chatID, msgID, sessionCreatedText(d.cfg, chatID, def, sess))
 
 	case "/name":
@@ -317,14 +342,14 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			d.sendMessage(chatID, msgID, "Нет активной сессии")
 			return
 		}
-		d.store.Save()
+		d.saveStore()
 		d.sendMessage(chatID, msgID, d.sessionsText(sk))
 
 	case "/cwd":
 		if len(args) == 0 {
 			sess := d.store.Active(sk)
 			if sess != nil {
-				d.sendMessage(chatID, msgID, fmt.Sprintf("📂 <code>%s</code>", sess.CWD))
+				d.sendMessage(chatID, msgID, fmt.Sprintf("📂 <code>%s</code>", html.EscapeString(tildePath(sess.CWD))))
 			}
 			return
 		}
@@ -335,8 +360,8 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			d.sendMessage(chatID, msgID, "Нет активной сессии")
 			return
 		}
-		d.store.Save()
-		d.sendMessage(chatID, msgID, fmt.Sprintf("📂 <code>%s</code>", sess.CWD))
+		d.saveStore()
+		d.sendMessage(chatID, msgID, fmt.Sprintf("📂 <code>%s</code>", html.EscapeString(tildePath(sess.CWD))))
 
 	case "/prompt":
 		sess := d.store.Active(sk)
@@ -348,15 +373,15 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			if sess.AppendSystemPrompt == "" {
 				d.sendMessage(chatID, msgID, "Системный промпт не задан.")
 			} else {
-				d.sendMessage(chatID, msgID, fmt.Sprintf("📝 <code>%s</code>", sess.AppendSystemPrompt))
+				d.sendMessage(chatID, msgID, fmt.Sprintf("📝 <code>%s</code>", html.EscapeString(sess.AppendSystemPrompt)))
 			}
 			return
 		}
 		sess = d.store.UpdateActive(sk, func(sess *session.Session) {
-			sess.AppendSystemPrompt = text[len("/prompt "):]
+			sess.AppendSystemPrompt = argPayload(text)
 		})
-		d.store.Save()
-		d.sendMessage(chatID, msgID, fmt.Sprintf("📝 <code>%s</code>", sess.AppendSystemPrompt))
+		d.saveStore()
+		d.sendMessage(chatID, msgID, fmt.Sprintf("📝 <code>%s</code>", html.EscapeString(sess.AppendSystemPrompt)))
 
 	case "/model", "/models", "/m":
 		sess := d.store.Active(sk)
@@ -364,7 +389,7 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			d.sendMessage(chatID, msgID, "Нет активной сессии")
 			return
 		}
-		d.sendPlain(chatID, msgID, d.modelText(sk, sess))
+		d.sendMessage(chatID, msgID, d.modelText(sk, sess))
 
 	case "/think", "/thinking", "/t":
 		sess := d.store.Active(sk)
@@ -372,7 +397,15 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			d.sendMessage(chatID, msgID, "Нет активной сессии")
 			return
 		}
-		d.sendPlain(chatID, msgID, d.thinkText(sk, sess))
+		d.sendMessage(chatID, msgID, d.thinkText(sk, sess))
+
+	case "/settings", "/setting":
+		sess := d.store.Active(sk)
+		if sess == nil {
+			d.sendMessage(chatID, msgID, "Нет активной сессии")
+			return
+		}
+		d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
 
 	case "/groups", "/group", "/g":
 		d.handleGroups(chatID, msgID, parts)
@@ -402,7 +435,7 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			d.sendMessage(chatID, msgID, "Использование: /bypass <команда>")
 			return
 		}
-		prompt := text[len("/bypass "):]
+		prompt := argPayload(text)
 		d.enqueue(chatID, msgID, prompt)
 
 	case "/abort":
@@ -481,15 +514,30 @@ func (d *daemon) handleGroups(chatID, msgID string, parts []string) {
 		if !hasGroupSession {
 			d.store.New(sk, "group", cwd, *d.scopeDefaults(sk))
 		}
-		d.store.Save()
-		d.sendMessage(chatID, msgID, fmt.Sprintf("✅ Режим группы включён. Начинайте сообщение с <b>klax,</b> для обращения к боту.\n📂 <code>%s</code>", cwd))
+		d.saveStore()
+		sess := d.store.Active(sk)
+		if sess == nil {
+			d.sendMessage(chatID, msgID, "Нет активной сессии")
+			return
+		}
+		d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
 	case "off":
 		target := chatID
 		if len(parts) >= 3 {
 			target = parts[2]
 		}
 		d.disableGroupChat(target)
-		d.sendMessage(chatID, msgID, fmt.Sprintf("❌ Режим группы выключен: <code>%s</code>", target))
+		if target == chatID && isGroupChatID(chatID) {
+			sk := d.sessionKey(chatID)
+			sess := d.store.Active(sk)
+			if sess == nil {
+				d.sendMessage(chatID, msgID, "Нет активной сессии")
+				return
+			}
+			d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
+			return
+		}
+		d.sendMessage(chatID, msgID, fmt.Sprintf("❌ Режим группы выключен: <code>%s</code>", html.EscapeString(target)))
 	default:
 		d.sendMessage(chatID, msgID, "Использование: /groups [on | off [id]]")
 	}
@@ -501,10 +549,15 @@ func (d *daemon) groupsText() string {
 	if len(d.groupChats) == 0 {
 		return "Нет активных групп."
 	}
+	keys := make([]string, 0, len(d.groupChats))
+	for id := range d.groupChats {
+		keys = append(keys, id)
+	}
+	sort.Strings(keys)
 	var sb strings.Builder
 	sb.WriteString("Группы:\n")
-	for id, cwd := range d.groupChats {
-		sb.WriteString(fmt.Sprintf("- <code>%s</code>\n  📂 <code>%s</code>\n", id, cwd))
+	for _, id := range keys {
+		sb.WriteString(fmt.Sprintf("- <code>%s</code>\n  📂 <code>%s</code>\n", html.EscapeString(id), html.EscapeString(tildePath(d.groupChats[id]))))
 	}
 	return sb.String()
 }
@@ -619,11 +672,14 @@ func (d *daemon) runChatOp(chatID, msgID, subcmd, progressText string) {
 // saveDisabled persists the disabled transports set to config.
 func (d *daemon) saveDisabled() {
 	d.mu.Lock()
-	var list []string
+	list := make([]string, 0, len(d.disabled))
 	for name := range d.disabled {
 		list = append(list, name)
 	}
+	sort.Strings(list)
 	d.mu.Unlock()
 	d.cfg.DisabledTransports = list
-	config.Save(d.cfg)
+	if err := config.Save(d.cfg); err != nil {
+		log.Printf("save config: %v", err)
+	}
 }

@@ -2,11 +2,13 @@ package main
 
 import (
 	"fmt"
+	"html"
 	"os"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/PiDmitrius/klax/internal/pathutil"
 	"github.com/PiDmitrius/klax/internal/runner"
 	"github.com/PiDmitrius/klax/internal/session"
 )
@@ -24,6 +26,7 @@ func tildePath(path string) string {
 func formatToolLines(lines []string, format string) string {
 	var out []string
 	for _, l := range lines {
+		l = pathutil.TildePathsInText(l)
 		if format == "html" {
 			escaped := strings.ReplaceAll(l, "&", "&amp;")
 			escaped = strings.ReplaceAll(escaped, "<", "&lt;")
@@ -102,13 +105,10 @@ func (d *daemon) backendText(sk string, sess *session.Session) string {
 	var sb strings.Builder
 	for _, name := range backends {
 		if name == current {
-			fmt.Fprintf(&sb, "/backend_%s ✅\n", name)
+			fmt.Fprintf(&sb, "<b>/backend_%s ✅</b>\n", name)
 		} else {
 			fmt.Fprintf(&sb, "/backend_%s\n", name)
 		}
-	}
-	if sess.Messages > 0 {
-		sb.WriteString("\n(зафиксирован)")
 	}
 	return sb.String()
 }
@@ -120,26 +120,17 @@ func (d *daemon) modelText(sk string, sess *session.Session) string {
 
 	var sb strings.Builder
 	current := sess.ModelOverride
-	defaultModel := def.Model
 	for _, m := range models {
 		if m.model == current {
-			fmt.Fprintf(&sb, "/m_%s %s ✅\n", m.alias, m.label)
+			fmt.Fprintf(&sb, "<b>/m_%s %s ✅</b>\n", m.alias, m.label)
 		} else {
 			fmt.Fprintf(&sb, "/m_%s %s\n", m.alias, m.label)
 		}
 	}
-	if current == defaultModel {
-		if defaultModel == "" {
-			fmt.Fprintf(&sb, "/m_default По умолчанию ✅\n")
-		} else {
-			fmt.Fprintf(&sb, "/m_default По умолчанию (%s) ✅\n", defaultModel)
-		}
+	if current == "" {
+		fmt.Fprintf(&sb, "<b>/m_default По умолчанию ✅</b>\n")
 	} else {
-		if defaultModel == "" {
-			fmt.Fprintf(&sb, "/m_default По умолчанию\n")
-		} else {
-			fmt.Fprintf(&sb, "/m_default По умолчанию (%s)\n", defaultModel)
-		}
+		fmt.Fprintf(&sb, "/m_default По умолчанию\n")
 	}
 	return sb.String()
 }
@@ -151,81 +142,91 @@ func (d *daemon) thinkText(sk string, sess *session.Session) string {
 
 	var sb strings.Builder
 	current := sess.ThinkOverride
-	defaultThink := def.Think
 	for _, e := range efforts {
 		if e.model == current {
-			fmt.Fprintf(&sb, "/t_%s %s ✅\n", e.alias, e.label)
+			fmt.Fprintf(&sb, "<b>/t_%s %s ✅</b>\n", e.alias, e.label)
 		} else {
 			fmt.Fprintf(&sb, "/t_%s %s\n", e.alias, e.label)
 		}
 	}
-	if current == defaultThink {
-		if defaultThink == "" {
-			fmt.Fprintf(&sb, "/t_default По умолчанию ✅\n")
-		} else {
-			fmt.Fprintf(&sb, "/t_default По умолчанию (%s) ✅\n", defaultThink)
-		}
+	if current == "" {
+		fmt.Fprintf(&sb, "<b>/t_default По умолчанию ✅</b>\n")
 	} else {
-		if defaultThink == "" {
-			fmt.Fprintf(&sb, "/t_default По умолчанию\n")
-		} else {
-			fmt.Fprintf(&sb, "/t_default По умолчанию (%s)\n", defaultThink)
-		}
+		fmt.Fprintf(&sb, "/t_default По умолчанию\n")
 	}
 	return sb.String()
 }
 
+func (d *daemon) groupModeText(chatID string) string {
+	if !isGroupChatID(chatID) {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("<b>Режим группы</b>\n")
+	if d.isGroupChat(chatID) {
+		sb.WriteString("<b>/group_on ✅</b>\n")
+		sb.WriteString("/group_off\n")
+	} else {
+		sb.WriteString("/group_on\n")
+		sb.WriteString("<b>/group_off ✅</b>\n")
+	}
+	return strings.TrimSuffix(sb.String(), "\n")
+}
+
+func (d *daemon) settingsText(chatID, sk string, sess *session.Session) string {
+	sections := []string{
+		"⚙️ Движок:\n" + strings.TrimSuffix(d.backendText(sk, sess), "\n"),
+		"🤖 Модель:\n" + strings.TrimSuffix(d.modelText(sk, sess), "\n"),
+		"🧠 Мышление:\n" + strings.TrimSuffix(d.thinkText(sk, sess), "\n"),
+	}
+	if groupText := d.groupModeText(chatID); groupText != "" {
+		sections = append(sections, groupText)
+	}
+	return strings.Join(sections, "\n\n")
+}
+
 // saveRateLimit stores a rate limit event into global state.
 func (d *daemon) saveRateLimit(backendName string, rl *runner.RateLimitInfo) {
-	bs := d.state.Backend(backendName)
-	state := &session.RateLimitState{
+	d.state.SetRateLimit(backendName, rl.RateLimitType, &session.RateLimitState{
 		Status:         rl.Status,
 		ResetsAt:       rl.ResetsAt,
 		Utilization:    rl.Utilization,
 		IsUsingOverage: rl.IsUsingOverage,
-	}
-	switch rl.RateLimitType {
-	case "five_hour":
-		bs.RateLimit5h = state
-	case "weekly", "seven_day":
-		bs.RateLimitWk = state
-	}
-	d.state.Save()
+	})
+	d.saveState()
 }
 
 // rateLimitText returns rate limit lines for /status.
 func (d *daemon) rateLimitText(backendName string) string {
-	bs := d.state.Backend(backendName)
+	rl5h, rlWk := d.state.RateLimits(backendName)
 	var lines []string
 	for _, entry := range []struct {
 		label string
-		rl    **session.RateLimitState
+		rl    *session.RateLimitState
 	}{
-		{"5ч", &bs.RateLimit5h},
-		{"нед", &bs.RateLimitWk},
+		{"5ч", rl5h},
+		{"нед", rlWk},
 	} {
-		if *entry.rl == nil || (*entry.rl).ResetsAt == 0 {
+		if entry.rl == nil || entry.rl.ResetsAt == 0 {
 			continue
 		}
-		resetsIn := time.Until(time.Unix((*entry.rl).ResetsAt, 0))
+		resetsIn := time.Until(time.Unix(entry.rl.ResetsAt, 0))
 		if resetsIn <= 0 {
-			*entry.rl = nil
 			continue
 		}
 		remaining := formatDuration(resetsIn)
-		rl := *entry.rl
-		switch rl.Status {
+		switch entry.rl.Status {
 		case "throttled", "rejected":
 			line := fmt.Sprintf("🚫 Лимит (%s) %s", entry.label, remaining)
-			if rl.IsUsingOverage {
+			if entry.rl.IsUsingOverage {
 				line += " (overage)"
 			}
 			lines = append(lines, line)
 		case "allowed_warning":
-			pct := int(rl.Utilization * 100)
+			pct := int(entry.rl.Utilization * 100)
 			lines = append(lines, fmt.Sprintf("⚠️ Лимит (%s) %d%% %s", entry.label, pct, remaining))
 		case "allowed":
-			pct := int(rl.Utilization * 100)
+			pct := int(entry.rl.Utilization * 100)
 			if pct > 0 {
 				lines = append(lines, fmt.Sprintf("⏱ Лимит (%s) %d%% %s", entry.label, pct, remaining))
 			}
@@ -246,6 +247,7 @@ func helpText() string {
 /status — статус
 /sessions — сессии
 /new [имя] — новая сессия
+/settings — backend, model, think
 /name — переименовать сессию
 /cleanup — управление сессиями
 /cwd [путь] — рабочая директория
@@ -310,7 +312,7 @@ func (d *daemon) statusText(chatID string) string {
 
 	return fmt.Sprintf(
 		"<b>klax</b> v%s\n\n📌 Сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n%s%s%s\n💬 Сообщений: %d",
-		version, sess.Name, sessionModeLabel(chatID), backend, model, think, statusLine, contextLine, rateLine, sess.Messages,
+		version, html.EscapeString(sess.Name), sessionModeLabel(chatID), backend, model, think, statusLine, contextLine, rateLine, sess.Messages,
 	)
 }
 
@@ -384,7 +386,7 @@ func formatSessionLine(sb *strings.Builder, i int, s *session.Session, activePre
 			detail += " " + ctx
 		}
 		fmt.Fprintf(sb, "%s<b>/s%d</b> <code>%s</code> <b>(%s)</b> <b>%d💬</b>%s\n",
-			activePrefix, i+1, s.Name, detail, s.Messages, backendSuffix)
+			activePrefix, i+1, html.EscapeString(s.Name), detail, s.Messages, backendSuffix)
 	} else {
 		ago := ""
 		if s.LastUsed > 0 {
@@ -402,7 +404,7 @@ func formatSessionLine(sb *strings.Builder, i int, s *session.Session, activePre
 			detail = " (" + strings.Join(parts, " ") + ")"
 		}
 		fmt.Fprintf(sb, "%s%d <code>%s</code>%s %d💬%s\n",
-			inactiveCmd, i+1, s.Name, detail, s.Messages, backendSuffix)
+			inactiveCmd, i+1, html.EscapeString(s.Name), detail, s.Messages, backendSuffix)
 	}
 }
 

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/PiDmitrius/klax/internal/pathutil"
 )
 
 // ToolUse describes what the AI is doing right now.
@@ -18,12 +20,14 @@ type ToolUse struct {
 	Input string
 }
 
+const toolPreviewLimit = 72
+
 func (t ToolUse) String() string {
 	switch t.Name {
 	case "Bash":
 		var inp struct{ Command string }
 		json.Unmarshal([]byte(t.Input), &inp)
-		return fmt.Sprintf("⚙️ Bash: `%s`", truncate(inp.Command, 60))
+		return fmt.Sprintf("⚙️ Bash: `%s`", truncate(inp.Command, toolPreviewLimit))
 	case "Read":
 		var inp struct {
 			FilePath string `json:"file_path"`
@@ -47,14 +51,14 @@ func (t ToolUse) String() string {
 			URL string `json:"url"`
 		}
 		json.Unmarshal([]byte(t.Input), &inp)
-		return fmt.Sprintf("🌐 Fetch: %s", truncate(inp.URL, 60))
+		return fmt.Sprintf("🌐 Fetch: %s", truncate(inp.URL, toolPreviewLimit))
 	case "WebSearch":
 		var inp struct {
 			Query string `json:"query"`
 		}
 		json.Unmarshal([]byte(t.Input), &inp)
 		if inp.Query != "" {
-			return fmt.Sprintf("🔎 Search: %s", truncate(inp.Query, 60))
+			return fmt.Sprintf("🔎 Search: %s", truncate(inp.Query, toolPreviewLimit))
 		}
 		return "🔎 Search..."
 	case "Glob", "GlobTool":
@@ -133,6 +137,7 @@ func fmtDuration(d time.Duration) string {
 }
 
 func truncate(s string, n int) string {
+	s = pathutil.TildePathsInText(s)
 	if len(s) <= n {
 		return s
 	}

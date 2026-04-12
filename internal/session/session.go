@@ -252,12 +252,6 @@ func (s *Store) normalize() {
 			if def.Backend == "" && sess.Backend != "" {
 				def.Backend = sess.Backend
 			}
-			if def.Model == "" && sess.ModelOverride != "" {
-				def.Model = sess.ModelOverride
-			}
-			if def.Think == "" && sess.ThinkOverride != "" {
-				def.Think = sess.ThinkOverride
-			}
 		}
 	}
 }
@@ -291,12 +285,6 @@ func (s *Store) EnsureScopeDefaults(chatID string, fallback ScopeDefaults) *Scop
 	def := s.scope(chatID)
 	if def.Backend == "" {
 		def.Backend = fallback.Backend
-	}
-	if def.Model == "" {
-		def.Model = fallback.Model
-	}
-	if def.Think == "" {
-		def.Think = fallback.Think
 	}
 	return cloneDefaults(def)
 }
@@ -341,12 +329,6 @@ func (s *Store) Ensure(chatID, name, cwd string, defaults ScopeDefaults) *Sessio
 	if def.Backend == "" {
 		def.Backend = defaults.Backend
 	}
-	if def.Model == "" {
-		def.Model = defaults.Model
-	}
-	if def.Think == "" {
-		def.Think = defaults.Think
-	}
 	for _, sess := range cs.Sessions {
 		if sess.Active {
 			if cwd != "" && sess.CWD != cwd {
@@ -378,12 +360,6 @@ func (s *Store) New(chatID, name, cwd string, defaults ScopeDefaults) *Session {
 	def := s.scope(chatID)
 	if def.Backend == "" {
 		def.Backend = defaults.Backend
-	}
-	if def.Model == "" {
-		def.Model = defaults.Model
-	}
-	if def.Think == "" {
-		def.Think = defaults.Think
 	}
 	for _, sess := range cs.Sessions {
 		sess.Active = false
