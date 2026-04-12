@@ -233,7 +233,7 @@ func (d *daemon) runClaude(msg queuedMsg) {
 	if result.RateLimit != nil {
 		d.saveRateLimit(backend.Name(), result.RateLimit)
 	}
-	d.store.Save()
+	d.saveStore()
 
 	if result.Error != nil {
 		finalText := fmt.Sprintf("❌ Ошибка: %v", result.Error)

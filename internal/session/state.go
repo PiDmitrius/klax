@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // RateLimitState stores one rate limit (e.g. five_hour or seven_day).
@@ -56,14 +57,54 @@ func (s *State) Save() error {
 	return os.WriteFile(s.path, data, 0600)
 }
 
-// Backend returns the state for a backend, creating it if needed.
-func (s *State) Backend(name string) *BackendState {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// backend returns the state for a backend, creating it if needed.
+// Caller must hold s.mu.
+func (s *State) backend(name string) *BackendState {
 	bs, ok := s.Backends[name]
 	if !ok {
 		bs = &BackendState{}
 		s.Backends[name] = bs
 	}
 	return bs
+}
+
+// SetRateLimit updates a rate limit for a backend under lock.
+func (s *State) SetRateLimit(backendName, rlType string, rl *RateLimitState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bs := s.backend(backendName)
+	switch rlType {
+	case "five_hour":
+		bs.RateLimit5h = rl
+	case "weekly", "seven_day":
+		bs.RateLimitWk = rl
+	}
+}
+
+// RateLimits returns cloned rate limits for a backend.
+// Expired entries (ResetsAt in the past) are cleared from state and returned as nil.
+func (s *State) RateLimits(backendName string) (rl5h, rlWk *RateLimitState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	bs, ok := s.Backends[backendName]
+	if !ok {
+		return nil, nil
+	}
+	if bs.RateLimit5h != nil {
+		if bs.RateLimit5h.ResetsAt > 0 && time.Now().Unix() >= bs.RateLimit5h.ResetsAt {
+			bs.RateLimit5h = nil
+		} else {
+			cp := *bs.RateLimit5h
+			rl5h = &cp
+		}
+	}
+	if bs.RateLimitWk != nil {
+		if bs.RateLimitWk.ResetsAt > 0 && time.Now().Unix() >= bs.RateLimitWk.ResetsAt {
+			bs.RateLimitWk = nil
+		} else {
+			cp := *bs.RateLimitWk
+			rlWk = &cp
+		}
+	}
+	return
 }

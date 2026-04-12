@@ -30,7 +30,7 @@ func runInstall() {
 	os.MkdirAll(unitDir, 0755)
 	unitPath := filepath.Join(unitDir, "klax.service")
 	unit := fmt.Sprintf(`[Unit]
-Description=klax — Telegram bridge for Claude Code
+Description=klax — AI messaging bridge
 After=network.target
 
 [Service]

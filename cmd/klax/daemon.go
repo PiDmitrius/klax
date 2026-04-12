@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -329,7 +330,9 @@ func runDaemon() {
 			migrateKey = "user:" + canonical
 		}
 		if store.MigrateTo(migrateKey) {
-			store.Save()
+			if err := store.Save(); err != nil {
+				log.Printf("save sessions: %v", err)
+			}
 			log.Printf("migrated legacy sessions to %s", migrateKey)
 		}
 	}
@@ -350,7 +353,9 @@ func runDaemon() {
 			oldKeys = append(oldKeys, fmt.Sprintf("vk:%d", u.VKID))
 		}
 		if store.MergeKeys(targetKey, oldKeys) {
-			store.Save()
+			if err := store.Save(); err != nil {
+				log.Printf("save sessions: %v", err)
+			}
 			log.Printf("merged sessions into %s", targetKey)
 		}
 	}
@@ -517,6 +522,18 @@ func (d *daemon) startDrain(reason string) {
 	log.Println("waiting for all sessions to drain...")
 	d.drainWg.Wait()
 	d.shutdown()
+}
+
+func (d *daemon) saveStore() {
+	if err := d.store.Save(); err != nil {
+		log.Printf("save sessions: %v", err)
+	}
+}
+
+func (d *daemon) saveState() {
+	if err := d.state.Save(); err != nil {
+		log.Printf("save state: %v", err)
+	}
 }
 
 func (d *daemon) shutdown() {
@@ -843,13 +860,20 @@ func (d *daemon) disableGroupChat(chatID string) {
 
 func (d *daemon) saveGroupChats() {
 	d.mu.Lock()
-	var list []config.GroupChat
-	for id, cwd := range d.groupChats {
-		list = append(list, config.GroupChat{ID: id, CWD: cwd})
+	keys := make([]string, 0, len(d.groupChats))
+	for id := range d.groupChats {
+		keys = append(keys, id)
+	}
+	sort.Strings(keys)
+	list := make([]config.GroupChat, 0, len(keys))
+	for _, id := range keys {
+		list = append(list, config.GroupChat{ID: id, CWD: d.groupChats[id]})
 	}
 	d.mu.Unlock()
 	d.cfg.GroupChats = list
-	config.Save(d.cfg)
+	if err := config.Save(d.cfg); err != nil {
+		log.Printf("save config: %v", err)
+	}
 }
 
 // groupTriggerPrefixes are the recognized prefixes for group mode messages.
@@ -892,7 +916,7 @@ func isGroupCommand(text string) bool {
 		cmd = cmd[:at]
 	}
 	switch cmd {
-	case "/status", "/?", "/sessions", "/session", "/s", "/new", "/model", "/models", "/m", "/think", "/thinking", "/t", "/abort", "/help", "/h", "/start":
+	case "/status", "/?", "/sessions", "/session", "/s", "/new", "/settings", "/setting", "/group_on", "/group_off", "/groups_on", "/groups_off", "/model", "/models", "/m", "/think", "/thinking", "/t", "/abort", "/help", "/h", "/start":
 		return true
 	}
 	// /s<n> shortcuts
@@ -958,5 +982,5 @@ func (d *daemon) ensureSessionWithCWD(sessionKey, forceCWD string) {
 		cwd, _ = os.UserHomeDir()
 	}
 	d.store.Ensure(sessionKey, "default", cwd, d.fallbackScopeDefaults())
-	d.store.Save()
+	d.saveStore()
 }

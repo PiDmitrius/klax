@@ -208,18 +208,8 @@ type releaseInfo struct {
 func fetchReleases() ([]releaseInfo, error) {
 	var all []releaseInfo
 	for page := 1; page <= 10; page++ {
-		url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=100&page=%d", repo, page)
-		resp, err := http.Get(url)
+		releases, err := fetchReleasePage(page)
 		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, err
-		}
-		var releases []releaseInfo
-		if err := json.Unmarshal(body, &releases); err != nil {
 			return nil, err
 		}
 		if len(releases) == 0 {
@@ -228,6 +218,24 @@ func fetchReleases() ([]releaseInfo, error) {
 		all = append(all, releases...)
 	}
 	return all, nil
+}
+
+func fetchReleasePage(page int) ([]releaseInfo, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=100&page=%d", repo, page)
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var releases []releaseInfo
+	if err := json.Unmarshal(body, &releases); err != nil {
+		return nil, err
+	}
+	return releases, nil
 }
 
 // releaseAge formats "2026-04-09T11:17:22Z" as relative time using timeAgo.

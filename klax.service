@@ -1,5 +1,5 @@
 [Unit]
-Description=klax — Telegram bridge for Claude Code
+Description=klax — AI messaging bridge
 After=network.target
 
 [Service]

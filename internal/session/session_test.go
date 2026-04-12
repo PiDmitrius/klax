@@ -51,11 +51,11 @@ func TestLoadStoreMigratesLegacyEffortOverrideAndScopeDefaults(t *testing.T) {
 	if def.Backend != "codex" {
 		t.Fatalf("defaults backend = %q, want codex", def.Backend)
 	}
-	if def.Model != "gpt-5.4" {
-		t.Fatalf("defaults model = %q, want gpt-5.4", def.Model)
+	if def.Model != "" {
+		t.Fatalf("defaults model = %q, want empty default", def.Model)
 	}
-	if def.Think != "high" {
-		t.Fatalf("defaults think = %q, want high", def.Think)
+	if def.Think != "" {
+		t.Fatalf("defaults think = %q, want empty default", def.Think)
 	}
 }
 
@@ -178,5 +178,54 @@ func TestNewSnapshotsScopeDefaults(t *testing.T) {
 	}
 	if sess.ThinkOverride != "high" {
 		t.Fatalf("snapshot think changed to %q", sess.ThinkOverride)
+	}
+}
+
+func TestLoadStoreKeepsEmptyScopeDefaultsAsExplicitDefault(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("KLAX_DATA_DIR", tmp)
+
+	data := `{
+  "chats": {
+    "user:claw": {
+      "sessions": [
+        {
+          "name": "main",
+          "cwd": "/tmp/project",
+          "active": true,
+          "backend": "codex",
+          "model_override": "gpt-5.4-mini",
+          "think_override": "high",
+          "messages": 1
+        }
+      ]
+    }
+  },
+  "scope_defaults": {
+    "user:claw": {
+      "backend": "codex",
+      "model": "",
+      "think": ""
+    }
+  }
+}`
+	if err := os.WriteFile(filepath.Join(tmp, "sessions.json"), []byte(data), 0600); err != nil {
+		t.Fatalf("write sessions.json: %v", err)
+	}
+
+	store, err := LoadStore()
+	if err != nil {
+		t.Fatalf("LoadStore: %v", err)
+	}
+
+	def := store.ScopeDefaults("user:claw")
+	if def == nil {
+		t.Fatal("expected scope defaults")
+	}
+	if def.Model != "" {
+		t.Fatalf("defaults model = %q, want explicit empty default", def.Model)
+	}
+	if def.Think != "" {
+		t.Fatalf("defaults think = %q, want explicit empty default", def.Think)
 	}
 }
