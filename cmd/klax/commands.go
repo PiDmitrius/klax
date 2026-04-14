@@ -39,6 +39,8 @@ func normalizeCommand(cmd string, args []string) (string, []string) {
 		return "/__set_model", []string{cmd[len("/m_"):]}
 	case strings.HasPrefix(cmd, "/t_") && len(cmd) > len("/t_"):
 		return "/__set_think", []string{cmd[len("/t_"):]}
+	case strings.HasPrefix(cmd, "/sandbox_") && len(cmd) > len("/sandbox_"):
+		return "/__set_sandbox", []string{cmd[len("/sandbox_"):]}
 	case strings.HasPrefix(cmd, "/v_") && len(cmd) > len("/v_"):
 		return "/__install_version", []string{cmd[len("/v_"):]}
 	case hasNumericSuffixCommand(cmd, "/s"):
@@ -83,14 +85,15 @@ func sessionCreatedText(cfg *config.Config, chatID string, def *session.ScopeDef
 	if think == "" {
 		think = "по умолчанию"
 	}
+	sandbox := effectiveSandboxMode(def, sess)
 	return fmt.Sprintf(
-		"✅ Новая сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n📂 <code>%s</code>\n\n/settings — донастроить сессию",
+		"✅ Новая сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n🔒 Sandbox: <code>%s</code>\n\nНастроить: /settings",
 		html.EscapeString(sess.Name),
 		sessionModeLabel(chatID),
 		backend,
 		model,
 		think,
-		html.EscapeString(tildePath(sess.CWD)),
+		sandbox,
 	)
 }
 
@@ -104,13 +107,15 @@ func sessionSwitchedText(cfg *config.Config, chatID string, def *session.ScopeDe
 	if think == "" {
 		think = "по умолчанию"
 	}
+	sandbox := effectiveSandboxMode(def, sess)
 	return fmt.Sprintf(
-		"📌 Сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n\n%s",
+		"📌 Сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n🔒 Sandbox: <code>%s</code>\n\n%s",
 		html.EscapeString(sess.Name),
 		sessionModeLabel(chatID),
 		backend,
 		model,
 		think,
+		sandbox,
 		sessionsText,
 	)
 }
@@ -219,6 +224,26 @@ func (d *daemon) handleThinkSet(chatID, msgID, sk, alias string) {
 	})
 	sess = d.store.UpdateActive(sk, func(sess *session.Session) {
 		sess.ThinkOverride = resolved
+	})
+	d.saveStore()
+	d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
+}
+
+func (d *daemon) handleSandboxSet(chatID, msgID, sk, mode string) {
+	sess := d.store.Active(sk)
+	if sess == nil {
+		d.sendMessage(chatID, msgID, "Нет активной сессии")
+		return
+	}
+	if mode != "on" && mode != "off" {
+		d.sendMessage(chatID, msgID, d.sandboxText(sk, sess))
+		return
+	}
+	d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
+		def.Sandbox = mode
+	})
+	sess = d.store.UpdateActive(sk, func(sess *session.Session) {
+		sess.Sandbox = mode
 	})
 	d.saveStore()
 	d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
@@ -399,6 +424,14 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		}
 		d.sendMessage(chatID, msgID, d.thinkText(sk, sess))
 
+	case "/sandbox":
+		sess := d.store.Active(sk)
+		if sess == nil {
+			d.sendMessage(chatID, msgID, "Нет активной сессии")
+			return
+		}
+		d.sendMessage(chatID, msgID, d.sandboxText(sk, sess))
+
 	case "/settings", "/setting":
 		sess := d.store.Active(sk)
 		if sess == nil {
@@ -465,6 +498,9 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 
 	case "/__set_think":
 		d.handleThinkSet(chatID, msgID, sk, args[0])
+
+	case "/__set_sandbox":
+		d.handleSandboxSet(chatID, msgID, sk, args[0])
 
 	case "/__switch_session":
 		d.handleSessionSwitch(chatID, msgID, sk, args[0])
@@ -646,7 +682,7 @@ func (d *daemon) runChatOp(chatID, msgID, subcmd, progressText string) {
 	ctx, cancel := withDeliveryTimeout(context.Background())
 	defer cancel()
 
-	messageIDs, err := d.syncMessageChain(ctx, chatID, t, rawChatID, msgID, nil, progressText, fmtStr)
+	chain, err := d.syncMessageChain(ctx, chatID, t, rawChatID, msgID, nil, progressText, fmtStr)
 	if err != nil {
 		return
 	}
@@ -658,14 +694,14 @@ func (d *daemon) runChatOp(chatID, msgID, subcmd, progressText string) {
 	if err != nil {
 		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 		detail := lines[len(lines)-1]
-		_, _ = d.syncMessageChain(ctx, chatID, t, rawChatID, "", messageIDs, fmt.Sprintf("%s\n❌ %s", progressText, detail), "")
+		_, _ = d.syncMessageChain(ctx, chatID, t, rawChatID, "", chain, fmt.Sprintf("%s\n❌ %s", progressText, detail), "")
 		return
 	}
 
 	if strings.HasPrefix(subcmd, "fallback") {
-		_, _ = d.syncMessageChain(ctx, chatID, t, rawChatID, "", messageIDs, progressText+"\n✅ Релизная версия установлена, перезапускаюсь...", "")
+		_, _ = d.syncMessageChain(ctx, chatID, t, rawChatID, "", chain, progressText+"\n✅ Релизная версия установлена, перезапускаюсь...", "")
 	} else {
-		_, _ = d.syncMessageChain(ctx, chatID, t, rawChatID, "", messageIDs, progressText+"\n✅ Обновлено, перезапускаюсь...", "")
+		_, _ = d.syncMessageChain(ctx, chatID, t, rawChatID, "", chain, progressText+"\n✅ Обновлено, перезапускаюсь...", "")
 	}
 }
 

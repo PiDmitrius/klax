@@ -101,7 +101,7 @@ func (d *daemon) processSessionQueue(sr *sessionRunner) {
 		}
 		sr.mu.Unlock()
 
-		d.runClaude(msg)
+		d.runBackend(msg)
 	}
 }
 
@@ -114,7 +114,7 @@ func (d *daemon) clearSessionQueue(sk string) int {
 	return n
 }
 
-func (d *daemon) runClaude(msg queuedMsg) {
+func (d *daemon) runBackend(msg queuedMsg) {
 	sk := d.sessionKey(msg.chatID)
 	sess := d.store.Active(sk)
 	if sess == nil {
@@ -135,15 +135,12 @@ func (d *daemon) runClaude(msg queuedMsg) {
 	// Progress message — edit in place.
 	// If this message was queued, reuse the "В очереди" notification.
 	t, rawChatID, chatFmt := d.transportFor(msg.chatID)
-	var progressMsgIDs []string
-	if msg.progressID != "" {
-		progressMsgIDs = append(progressMsgIDs, msg.progressID)
-	}
+	progressChain := newMessageChain(msg.progressID)
 	if t != nil {
 		var err error
-		progressMsgIDs, err = d.syncMessageChain(ctx, msg.chatID, t, rawChatID, msg.msgID, progressMsgIDs, "...", "")
+		progressChain, err = d.syncMessageChain(ctx, msg.chatID, t, rawChatID, msg.msgID, progressChain, "...", "")
 		if err != nil {
-			progressMsgIDs = nil
+			progressChain = nil
 		}
 	}
 
@@ -157,9 +154,9 @@ func (d *daemon) runClaude(msg queuedMsg) {
 		toolLines = append(toolLines, status)
 
 		newText := formatToolLines(toolLines, chatFmt) + "\n\n..."
-		if len(progressMsgIDs) > 0 {
+		if progressChain != nil && len(progressChain.ids) > 0 {
 			var err error
-			progressMsgIDs, err = d.syncMessageChain(ctx, msg.chatID, t, rawChatID, "", progressMsgIDs, newText, chatFmt)
+			progressChain, err = d.syncMessageChain(ctx, msg.chatID, t, rawChatID, "", progressChain, newText, chatFmt)
 			if err != nil {
 				log.Printf("progress update failed: %v", err)
 			}
@@ -203,7 +200,7 @@ func (d *daemon) runClaude(msg queuedMsg) {
 		Prompt:             prompt,
 		SessionID:          sess.ID,
 		CWD:                sess.CWD,
-		PermissionMode:     sess.PermissionMode,
+		Sandbox:            sess.Sandbox,
 		Model:              sess.ModelOverride,
 		Effort:             sess.ThinkOverride,
 		AppendSystemPrompt: sess.AppendSystemPrompt,
@@ -236,9 +233,13 @@ func (d *daemon) runClaude(msg queuedMsg) {
 	d.saveStore()
 
 	if result.Error != nil {
-		finalText := fmt.Sprintf("❌ Ошибка: %v", result.Error)
-		if len(progressMsgIDs) > 0 && t != nil {
-			_, err := d.syncMessageChain(ctx, msg.chatID, t, rawChatID, "", progressMsgIDs, finalText, "")
+		finalText := "..."
+		if len(toolLines) > 0 {
+			finalText = formatToolLines(toolLines, chatFmt) + "\n\n..."
+		}
+		finalText += fmt.Sprintf("\n❌ Ошибка: %v", result.Error)
+		if progressChain != nil && len(progressChain.ids) > 0 && t != nil {
+			_, err := d.syncMessageChain(ctx, msg.chatID, t, rawChatID, "", progressChain, finalText, chatFmt)
 			if err != nil {
 				log.Printf("final error delivery failed: %v", err)
 			}
@@ -270,7 +271,7 @@ func (d *daemon) runClaude(msg queuedMsg) {
 	}
 
 	if t != nil {
-		_, err := d.syncMessageChain(ctx, msg.chatID, t, rawChatID, "", progressMsgIDs, finalText, chatFmt)
+		_, err := d.syncMessageChain(ctx, msg.chatID, t, rawChatID, "", progressChain, finalText, chatFmt)
 		if err != nil {
 			log.Printf("final delivery failed: %v", err)
 		}

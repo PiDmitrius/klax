@@ -12,11 +12,7 @@ import (
 )
 
 // CodexBackend implements Backend for OpenAI Codex CLI.
-type CodexBackend struct {
-	Sandbox  string // read-only | workspace-write | danger-full-access
-	FullAuto bool
-	APIKey   string
-}
+type CodexBackend struct{}
 
 func (b *CodexBackend) Name() string { return "codex" }
 
@@ -30,10 +26,12 @@ func (b *CodexBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 		args = []string{"exec", "--json", "--skip-git-repo-check"}
 	}
 
-	if b.FullAuto {
-		args = append(args, "--full-auto")
-	} else if b.Sandbox != "" {
-		args = append(args, "--sandbox", b.Sandbox)
+	if opts.Sandbox == "" || opts.Sandbox == "off" {
+		if opts.SessionID != "" {
+			args = append(args, "--dangerously-bypass-approvals-and-sandbox")
+		} else {
+			args = append(args, "--sandbox", "danger-full-access")
+		}
 	}
 
 	if opts.Model != "" {
@@ -56,12 +54,6 @@ func (b *CodexBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 		cmd.Dir = opts.CWD
 	}
 	cmd.Stdin = strings.NewReader(opts.Prompt)
-
-	// Set API key if configured.
-	if b.APIKey != "" {
-		cmd.Env = append(os.Environ(), "CODEX_API_KEY="+b.APIKey)
-	}
-
 	return cmd, nil
 }
 

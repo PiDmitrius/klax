@@ -387,7 +387,15 @@ func tryEdit(ctx context.Context, t transport.Transport, chatID, msgID, text, fo
 	err := retryDo(ctx, func() error {
 		return t.EditMessage(chatID, msgID, text, format)
 	})
-	if err != nil && format != "" && ctx.Err() == nil {
+	if err == nil {
+		return nil
+	}
+	// "message is not modified" means the content is already correct — not an error.
+	var apiErr *transport.APIError
+	if errors.As(err, &apiErr) && strings.Contains(apiErr.Description, "not modified") {
+		return nil
+	}
+	if format != "" && ctx.Err() == nil {
 		log.Printf("edit error (%s): %v, retrying plain", format, err)
 		return retryDo(ctx, func() error {
 			return t.EditMessage(chatID, msgID, text, "")
@@ -396,36 +404,60 @@ func tryEdit(ctx context.Context, t transport.Transport, chatID, msgID, text, fo
 	return err
 }
 
-// deliverFinal sends the final response, splitting into chunks if needed.
-// The first chunk edits the progress message; remaining chunks are new messages.
-// On total failure, attempts a last-resort plain error notification.
-func (d *daemon) deliverFinal(ctx context.Context, fullChatID string, t transport.Transport, chatID, progressMsgID, text, format string) {
-	ids := []string{}
-	if progressMsgID != "" {
-		ids = append(ids, progressMsgID)
+type messageChain struct {
+	ids  []string
+	msgs map[string]string
+}
+
+func newMessageChain(ids ...string) *messageChain {
+	chain := &messageChain{msgs: make(map[string]string)}
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		chain.ids = append(chain.ids, id)
 	}
-	_, _ = d.syncMessageChain(ctx, fullChatID, t, chatID, "", ids, text, format)
+	return chain
+}
+
+func (mc *messageChain) ensure() *messageChain {
+	if mc == nil {
+		return newMessageChain()
+	}
+	if mc.msgs == nil {
+		mc.msgs = make(map[string]string)
+	}
+	return mc
 }
 
 // syncMessageChain keeps a chunked message chain in sync with the provided text.
 // It is shared by progress updates and final delivery, so HTML-safe splitting and
 // message-length handling live in exactly one place.
-func (d *daemon) syncMessageChain(ctx context.Context, fullChatID string, t transport.Transport, chatID, replyTo string, messageIDs []string, text, format string) ([]string, error) {
+func (d *daemon) syncMessageChain(ctx context.Context, fullChatID string, t transport.Transport, chatID, replyTo string, chain *messageChain, text, format string) (*messageChain, error) {
 	if format == "" {
 		text = stripHTML(text)
 	}
 	chunks := splitMessage(text, maxMessageLen, format)
 	transportName := transportPrefix(fullChatID)
-	ids := append([]string(nil), messageIDs...)
+	chain = chain.ensure()
 
 	for i, chunk := range chunks {
 		if ctx.Err() != nil {
-			return ids, ctx.Err()
+			return chain, ctx.Err()
 		}
 		var err error
 		sendCtx, sendCancel := withDeliveryTimeout(ctx)
-		if i < len(ids) && ids[i] != "" {
-			err = tryEdit(sendCtx, t, chatID, ids[i], chunk, format)
+		if i < len(chain.ids) && chain.ids[i] != "" {
+			cacheKey := chain.ids[i]
+			cacheVal := chunk + "\x00" + format
+			if chain.msgs[cacheKey] == cacheVal {
+				sendCancel()
+				continue
+			}
+			err = tryEdit(sendCtx, t, chatID, chain.ids[i], chunk, format)
+			if err == nil {
+				chain.msgs[cacheKey] = cacheVal
+			}
 		} else {
 			var msgID string
 			chunkReplyTo := ""
@@ -434,7 +466,8 @@ func (d *daemon) syncMessageChain(ctx context.Context, fullChatID string, t tran
 			}
 			msgID, err = trySendReturnID(sendCtx, t, chatID, chunkReplyTo, chunk, format)
 			if err == nil {
-				ids = append(ids, msgID)
+				chain.ids = append(chain.ids, msgID)
+				chain.msgs[msgID] = chunk + "\x00" + format
 			}
 		}
 		sendCancel()
@@ -450,11 +483,11 @@ func (d *daemon) syncMessageChain(ctx context.Context, fullChatID string, t tran
 				notifyCancel()
 				d.noteSendResult(transportName, notifyErr)
 			}
-			return ids, err
+			return chain, err
 		}
 		d.noteSendResult(transportName, nil)
 	}
-	return ids, nil
+	return chain, nil
 }
 
 func (d *daemon) sendMessage(chatID, replyTo, text string) {

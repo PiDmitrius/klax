@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/PiDmitrius/klax/internal/transport"
 )
 
 func TestSplitMessageHTMLKeepsTagsBalanced(t *testing.T) {
@@ -77,3 +81,100 @@ func validateHTMLNesting(text string) error {
 type testError struct{ msg string }
 
 func (e *testError) Error() string { return e.msg }
+
+type fakeTransport struct {
+	sendIDs   []string
+	sendCalls int
+	editCalls int
+	editErr   error
+	lastEdit  struct {
+		chatID  string
+		message string
+		text    string
+		format  string
+	}
+}
+
+func (f *fakeTransport) SendMessage(chatID, text, replyTo, format string) error {
+	f.sendCalls++
+	return nil
+}
+
+func (f *fakeTransport) SendMessageReturnID(chatID, text, replyTo, format string) (string, error) {
+	f.sendCalls++
+	if len(f.sendIDs) == 0 {
+		return "generated-id", nil
+	}
+	id := f.sendIDs[0]
+	f.sendIDs = f.sendIDs[1:]
+	return id, nil
+}
+
+func (f *fakeTransport) EditMessage(chatID, messageID, text, format string) error {
+	f.editCalls++
+	f.lastEdit.chatID = chatID
+	f.lastEdit.message = messageID
+	f.lastEdit.text = text
+	f.lastEdit.format = format
+	if f.editErr != nil && format != "" {
+		return f.editErr
+	}
+	return nil
+}
+
+func TestTryEditTreatsNotModifiedAsSuccess(t *testing.T) {
+	tp := &fakeTransport{
+		editErr: &transport.APIError{Platform: "tg", Code: 400, Description: "message is not modified"},
+	}
+	if err := tryEdit(context.Background(), tp, "chat", "msg", "same", "html"); err != nil {
+		t.Fatalf("expected not modified to be ignored, got %v", err)
+	}
+	if tp.editCalls != 1 {
+		t.Fatalf("expected one edit call, got %d", tp.editCalls)
+	}
+}
+
+func TestTryEditFallsBackToPlainFormat(t *testing.T) {
+	tp := &fakeTransport{
+		editErr: &transport.APIError{Platform: "tg", Code: 400, Description: "bad format"},
+	}
+	err := tryEdit(context.Background(), tp, "chat", "msg", "<b>hello</b>", "html")
+	if err != nil {
+		t.Fatalf("expected plain fallback to succeed, got %v", err)
+	}
+	if tp.editCalls != 2 {
+		t.Fatalf("expected formatted edit and plain fallback, got %d calls", tp.editCalls)
+	}
+	if tp.lastEdit.format != "" {
+		t.Fatalf("expected last edit to use plain format, got %q", tp.lastEdit.format)
+	}
+}
+
+func TestSyncMessageChainSkipsCachedEdits(t *testing.T) {
+	d := &daemon{
+		sendPause: make(map[string]time.Time),
+		sendFails: make(map[string]int),
+	}
+	tp := &fakeTransport{}
+	ctx := context.Background()
+	chain := newMessageChain()
+
+	chain, err := d.syncMessageChain(ctx, "tg:1", tp, "1", "", chain, "hello", "html")
+	if err != nil {
+		t.Fatalf("first sync failed: %v", err)
+	}
+	if len(chain.ids) != 1 || chain.ids[0] == "" {
+		t.Fatalf("expected one message id, got %v", chain.ids)
+	}
+	if tp.sendCalls != 1 {
+		t.Fatalf("expected one send call, got %d", tp.sendCalls)
+	}
+
+	_, err = d.syncMessageChain(ctx, "tg:1", tp, "1", "", chain, "hello", "html")
+	if err != nil {
+		t.Fatalf("second sync failed: %v", err)
+	}
+	if tp.editCalls != 0 {
+		t.Fatalf("expected cached sync to skip edits, got %d edit calls", tp.editCalls)
+	}
+}

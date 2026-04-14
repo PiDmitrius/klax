@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"os"
@@ -29,22 +30,25 @@ func runInstall() {
 	unitDir := filepath.Join(home, ".config", "systemd", "user")
 	os.MkdirAll(unitDir, 0755)
 	unitPath := filepath.Join(unitDir, "klax.service")
-	unit := fmt.Sprintf(`[Unit]
-Description=klax — AI messaging bridge
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=%s start --foreground
-Restart=always
-RestartSec=5
-StartLimitBurst=3
-StartLimitIntervalSec=60
-
-[Install]
-WantedBy=default.target
-`, dst)
-	os.WriteFile(unitPath, []byte(unit), 0644)
+	unit := renderServiceUnit(dst)
+	if drifted, err := unitDrifted(unitPath, unit); err != nil {
+		fmt.Fprintf(os.Stderr, "cannot inspect current service unit: %v\n", err)
+		os.Exit(1)
+	} else if drifted {
+		fmt.Fprintf(os.Stderr, "warning: local systemd unit drift detected, overwriting %s\n", tildePath(unitPath))
+	}
+	if err := verifyServiceUnit(unit); err != nil {
+		if ignorableVerifyError(err) {
+			fmt.Fprintf(os.Stderr, "warning: service unit verification skipped: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "service unit verification failed: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	if err := os.WriteFile(unitPath, []byte(unit), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "cannot install service unit: %v\n", err)
+		os.Exit(1)
+	}
 	fmt.Printf("installed: %s\n", tildePath(unitPath))
 
 	exec.Command("systemctl", "--user", "daemon-reload").Run()
@@ -83,4 +87,71 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	// Remove old file first to avoid "text file busy" when overwriting a running binary.
 	os.Remove(dst)
 	return os.WriteFile(dst, data, mode)
+}
+
+func renderServiceUnit(binPath string) string {
+	return fmt.Sprintf(`[Unit]
+Description=klax — AI messaging bridge
+After=network.target
+StartLimitBurst=3
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+ExecStart=%s start --foreground
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+`, binPath)
+}
+
+func unitDrifted(path, expected string) (bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return !bytes.Equal(data, []byte(expected)), nil
+}
+
+func verifyServiceUnit(unit string) error {
+	if _, err := exec.LookPath("systemd-analyze"); err != nil {
+		return fmt.Errorf("systemd-analyze not found")
+	}
+
+	tmp, err := os.CreateTemp("", "klax-service-*.service")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := tmp.WriteString(unit); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	cmd := exec.Command("systemd-analyze", "verify", tmpPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return fmt.Errorf("%s", msg)
+	}
+	return nil
+}
+
+func ignorableVerifyError(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "Operation not permitted") ||
+		strings.Contains(msg, "SO_PASSCRED failed")
 }
