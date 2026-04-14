@@ -101,7 +101,7 @@ func (d *daemon) processSessionQueue(sr *sessionRunner) {
 		}
 		sr.mu.Unlock()
 
-		d.runClaude(msg)
+		d.runBackend(msg)
 	}
 }
 
@@ -114,7 +114,7 @@ func (d *daemon) clearSessionQueue(sk string) int {
 	return n
 }
 
-func (d *daemon) runClaude(msg queuedMsg) {
+func (d *daemon) runBackend(msg queuedMsg) {
 	sk := d.sessionKey(msg.chatID)
 	sess := d.store.Active(sk)
 	if sess == nil {
@@ -236,9 +236,13 @@ func (d *daemon) runClaude(msg queuedMsg) {
 	d.saveStore()
 
 	if result.Error != nil {
-		finalText := fmt.Sprintf("❌ Ошибка: %v", result.Error)
+		finalText := "..."
+		if len(toolLines) > 0 {
+			finalText = formatToolLines(toolLines, chatFmt) + "\n\n..."
+		}
+		finalText += fmt.Sprintf("\n❌ Ошибка: %v", result.Error)
 		if len(progressMsgIDs) > 0 && t != nil {
-			_, err := d.syncMessageChain(ctx, msg.chatID, t, rawChatID, "", progressMsgIDs, finalText, "")
+			_, err := d.syncMessageChain(ctx, msg.chatID, t, rawChatID, "", progressMsgIDs, finalText, chatFmt)
 			if err != nil {
 				log.Printf("final error delivery failed: %v", err)
 			}

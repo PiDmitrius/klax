@@ -387,7 +387,15 @@ func tryEdit(ctx context.Context, t transport.Transport, chatID, msgID, text, fo
 	err := retryDo(ctx, func() error {
 		return t.EditMessage(chatID, msgID, text, format)
 	})
-	if err != nil && format != "" && ctx.Err() == nil {
+	if err == nil {
+		return nil
+	}
+	// "message is not modified" means the content is already correct — not an error.
+	var apiErr *transport.APIError
+	if errors.As(err, &apiErr) && strings.Contains(apiErr.Description, "not modified") {
+		return nil
+	}
+	if format != "" && ctx.Err() == nil {
 		log.Printf("edit error (%s): %v, retrying plain", format, err)
 		return retryDo(ctx, func() error {
 			return t.EditMessage(chatID, msgID, text, "")
@@ -425,7 +433,16 @@ func (d *daemon) syncMessageChain(ctx context.Context, fullChatID string, t tran
 		var err error
 		sendCtx, sendCancel := withDeliveryTimeout(ctx)
 		if i < len(ids) && ids[i] != "" {
+			cacheKey := ids[i]
+			cacheVal := chunk + "\x00" + format
+			if d.getEditCache(cacheKey) == cacheVal {
+				sendCancel()
+				continue
+			}
 			err = tryEdit(sendCtx, t, chatID, ids[i], chunk, format)
+			if err == nil {
+				d.setEditCache(cacheKey, cacheVal)
+			}
 		} else {
 			var msgID string
 			chunkReplyTo := ""
@@ -435,6 +452,7 @@ func (d *daemon) syncMessageChain(ctx context.Context, fullChatID string, t tran
 			msgID, err = trySendReturnID(sendCtx, t, chatID, chunkReplyTo, chunk, format)
 			if err == nil {
 				ids = append(ids, msgID)
+				d.setEditCache(msgID, chunk+"\x00"+format)
 			}
 		}
 		sendCancel()
