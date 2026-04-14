@@ -11,26 +11,23 @@ import (
 )
 
 // ClaudeBackend implements Backend for Claude Code CLI.
-type ClaudeBackend struct {
-	PermissionMode string
-}
+type ClaudeBackend struct{}
 
 func (b *ClaudeBackend) Name() string { return "claude" }
 
 func (b *ClaudeBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
-	mode := opts.PermissionMode
-	if mode == "" {
-		mode = b.PermissionMode
-	}
-	if mode == "" {
+	var mode string
+	if opts.Sandbox == "" || opts.Sandbox == "off" {
 		mode = "bypassPermissions"
 	}
 	args := []string{
 		"-p",
 		"--output-format", "stream-json",
 		"--verbose",
-		"--permission-mode", mode,
 		"--disallowed-tools", "Agent",
+	}
+	if mode != "" {
+		args = append(args, "--permission-mode", mode)
 	}
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)

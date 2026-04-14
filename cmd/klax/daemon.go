@@ -103,7 +103,7 @@ func resolveSessionBackend(sess *session.Session, def *session.ScopeDefaults, gl
 }
 
 func (d *daemon) fallbackScopeDefaults() session.ScopeDefaults {
-	return session.ScopeDefaults{Backend: d.cfg.GetDefaultBackend()}
+	return session.ScopeDefaults{Backend: d.cfg.GetDefaultBackend(), Sandbox: "off"}
 }
 
 func (d *daemon) scopeDefaults(chatID string) *session.ScopeDefaults {
@@ -113,17 +113,11 @@ func (d *daemon) scopeDefaults(chatID string) *session.ScopeDefaults {
 // backendFor returns the Backend for a given session.
 func (d *daemon) backendFor(sess *session.Session) runner.Backend {
 	name := resolveSessionBackend(sess, nil, d.fallbackScopeDefaults().Backend)
-	bc := d.cfg.BackendFor(name)
 	switch name {
 	case "codex":
-		return &runner.CodexBackend{
-			Sandbox:  bc.Sandbox,
-			FullAuto: bc.FullAuto,
-		}
+		return &runner.CodexBackend{}
 	default:
-		return &runner.ClaudeBackend{
-			PermissionMode: bc.PermissionMode,
-		}
+		return &runner.ClaudeBackend{}
 	}
 }
 

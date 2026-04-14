@@ -122,15 +122,18 @@ func TestSettingsTextContainsBackendModelAndThinkSections(t *testing.T) {
 		Backend:       "codex",
 		ModelOverride: "gpt-5.4",
 		ThinkOverride: "high",
+		Sandbox:       "on",
 	})
 
 	for _, want := range []string{
 		"⚙️ Движок:",
 		"🤖 Модель:",
 		"🧠 Мышление:",
+		"🔒 Sandbox:",
 		"<b>/backend_codex ✅</b>",
 		"<b>/m_54 GPT-5.4 ✅</b>",
 		"<b>/t_high High ✅</b>",
+		"<b>/sandbox_on ✅</b>",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("settings text missing %q in %q", want, text)
@@ -163,6 +166,7 @@ func TestSettingsTextShowsGroupModeSectionInGroupChat(t *testing.T) {
 		Backend:       "codex",
 		ModelOverride: "gpt-5.4",
 		ThinkOverride: "high",
+		Sandbox:       "off",
 	})
 
 	for _, want := range []string{
@@ -211,6 +215,7 @@ func TestSessionCreatedTextIncludesSettingsHint(t *testing.T) {
 			Backend:       "codex",
 			ModelOverride: "gpt-5.4",
 			ThinkOverride: "high",
+			Sandbox:       "off",
 		},
 	)
 
@@ -219,5 +224,27 @@ func TestSessionCreatedTextIncludesSettingsHint(t *testing.T) {
 	}
 	if strings.Contains(text, "📂 <code>") {
 		t.Fatalf("created text should not include cwd: %q", text)
+	}
+	if !strings.Contains(text, "🔒 Sandbox: <code>off</code>") {
+		t.Fatalf("created text should include sandbox mode: %q", text)
+	}
+}
+
+func TestSandboxTextListsOnBeforeOff(t *testing.T) {
+	d := newTestDaemon()
+	chatID := "tg:test"
+	d.store.UpdateScopeDefaults(chatID, func(def *session.ScopeDefaults) {
+		def.Sandbox = "off"
+	})
+
+	text := d.sandboxText(chatID, &session.Session{Sandbox: "off"})
+
+	onIdx := strings.Index(text, "/sandbox_on")
+	offIdx := strings.Index(text, "/sandbox_off")
+	if onIdx == -1 || offIdx == -1 {
+		t.Fatalf("sandbox options missing in %q", text)
+	}
+	if onIdx > offIdx {
+		t.Fatalf("sandbox_on should be listed before sandbox_off in %q", text)
 	}
 }

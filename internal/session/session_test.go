@@ -147,6 +147,7 @@ func TestNewSnapshotsScopeDefaults(t *testing.T) {
 		def.Backend = "codex"
 		def.Model = "gpt-5.4"
 		def.Think = "high"
+		def.Sandbox = "on"
 	})
 
 	sess := store.New("user:claw", "main", "/tmp/project", *store.ScopeDefaults("user:claw"))
@@ -159,11 +160,15 @@ func TestNewSnapshotsScopeDefaults(t *testing.T) {
 	if sess.ThinkOverride != "high" {
 		t.Fatalf("think = %q, want high", sess.ThinkOverride)
 	}
+	if sess.Sandbox != "on" {
+		t.Fatalf("sandbox = %q, want on", sess.Sandbox)
+	}
 
 	store.UpdateScopeDefaults("user:claw", func(def *ScopeDefaults) {
 		def.Backend = "claude"
 		def.Model = "claude-sonnet-4-6[1m]"
 		def.Think = "medium"
+		def.Sandbox = "off"
 	})
 
 	sess = store.Active("user:claw")
@@ -178,6 +183,9 @@ func TestNewSnapshotsScopeDefaults(t *testing.T) {
 	}
 	if sess.ThinkOverride != "high" {
 		t.Fatalf("snapshot think changed to %q", sess.ThinkOverride)
+	}
+	if sess.Sandbox != "on" {
+		t.Fatalf("snapshot sandbox changed to %q", sess.Sandbox)
 	}
 }
 

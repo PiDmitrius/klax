@@ -13,6 +13,7 @@ type ScopeDefaults struct {
 	Backend string `json:"backend,omitempty"`
 	Model   string `json:"model,omitempty"`
 	Think   string `json:"think,omitempty"`
+	Sandbox string `json:"sandbox,omitempty"` // "on" | "off"
 }
 
 type Session struct {
@@ -26,10 +27,10 @@ type Session struct {
 	Model              string `json:"model,omitempty"`          // last used model (from result)
 	ModelOverride      string `json:"model_override,omitempty"` // user-selected model
 	ThinkOverride      string `json:"think_override,omitempty"` // thinking level
+	Sandbox            string `json:"sandbox,omitempty"`        // "on" | "off"
 	ContextWindow      int    `json:"ctx_window,omitempty"`
 	ContextUsed        int    `json:"ctx_used,omitempty"`
 	Messages           int    `json:"messages"` // user message count
-	PermissionMode     string `json:"permission_mode,omitempty"`
 	AppendSystemPrompt string `json:"append_system_prompt,omitempty"`
 	// Deprecated: rate limits moved to global config per backend.
 	// Keep fields for JSON backward compat (old sessions.json).
@@ -286,6 +287,9 @@ func (s *Store) EnsureScopeDefaults(chatID string, fallback ScopeDefaults) *Scop
 	if def.Backend == "" {
 		def.Backend = fallback.Backend
 	}
+	if def.Sandbox == "" {
+		def.Sandbox = fallback.Sandbox
+	}
 	return cloneDefaults(def)
 }
 
@@ -329,6 +333,9 @@ func (s *Store) Ensure(chatID, name, cwd string, defaults ScopeDefaults) *Sessio
 	if def.Backend == "" {
 		def.Backend = defaults.Backend
 	}
+	if def.Sandbox == "" {
+		def.Sandbox = defaults.Sandbox
+	}
 	for _, sess := range cs.Sessions {
 		if sess.Active {
 			if cwd != "" && sess.CWD != cwd {
@@ -348,6 +355,7 @@ func (s *Store) Ensure(chatID, name, cwd string, defaults ScopeDefaults) *Sessio
 		Backend:       def.Backend,
 		ModelOverride: def.Model,
 		ThinkOverride: def.Think,
+		Sandbox:       def.Sandbox,
 	}
 	cs.Sessions = append(cs.Sessions, sess)
 	return cloneSession(sess)
@@ -361,6 +369,9 @@ func (s *Store) New(chatID, name, cwd string, defaults ScopeDefaults) *Session {
 	if def.Backend == "" {
 		def.Backend = defaults.Backend
 	}
+	if def.Sandbox == "" {
+		def.Sandbox = defaults.Sandbox
+	}
 	for _, sess := range cs.Sessions {
 		sess.Active = false
 	}
@@ -372,6 +383,7 @@ func (s *Store) New(chatID, name, cwd string, defaults ScopeDefaults) *Session {
 		Backend:       def.Backend,
 		ModelOverride: def.Model,
 		ThinkOverride: def.Think,
+		Sandbox:       def.Sandbox,
 	}
 	cs.Sessions = append(cs.Sessions, sess)
 	return cloneSession(sess)

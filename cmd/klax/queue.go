@@ -203,7 +203,7 @@ func (d *daemon) runClaude(msg queuedMsg) {
 		Prompt:             prompt,
 		SessionID:          sess.ID,
 		CWD:                sess.CWD,
-		PermissionMode:     sess.PermissionMode,
+		Sandbox:            sess.Sandbox,
 		Model:              sess.ModelOverride,
 		Effort:             sess.ThinkOverride,
 		AppendSystemPrompt: sess.AppendSystemPrompt,

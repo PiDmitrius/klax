@@ -12,10 +12,7 @@ import (
 )
 
 // CodexBackend implements Backend for OpenAI Codex CLI.
-type CodexBackend struct {
-	Sandbox  string // read-only | workspace-write | danger-full-access
-	FullAuto bool
-}
+type CodexBackend struct{}
 
 func (b *CodexBackend) Name() string { return "codex" }
 
@@ -29,18 +26,11 @@ func (b *CodexBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 		args = []string{"exec", "--json", "--skip-git-repo-check"}
 	}
 
-	if b.FullAuto {
-		args = append(args, "--full-auto")
-	} else if b.Sandbox != "" {
+	if opts.Sandbox == "" || opts.Sandbox == "off" {
 		if opts.SessionID != "" {
-			// "exec resume" does not support --sandbox; map to equivalent flags.
-			if b.Sandbox == "danger-full-access" {
-				args = append(args, "--dangerously-bypass-approvals-and-sandbox")
-			} else {
-				args = append(args, "--full-auto")
-			}
+			args = append(args, "--dangerously-bypass-approvals-and-sandbox")
 		} else {
-			args = append(args, "--sandbox", b.Sandbox)
+			args = append(args, "--sandbox", "danger-full-access")
 		}
 	}
 

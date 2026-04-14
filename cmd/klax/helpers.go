@@ -157,6 +157,29 @@ func (d *daemon) thinkText(sk string, sess *session.Session) string {
 	return sb.String()
 }
 
+func effectiveSandboxMode(def *session.ScopeDefaults, sess *session.Session) string {
+	if sess != nil && sess.Sandbox != "" {
+		return sess.Sandbox
+	}
+	if def != nil && def.Sandbox != "" {
+		return def.Sandbox
+	}
+	return "off"
+}
+
+func (d *daemon) sandboxText(sk string, sess *session.Session) string {
+	current := effectiveSandboxMode(d.scopeDefaults(sk), sess)
+	var sb strings.Builder
+	if current == "on" {
+		sb.WriteString("<b>/sandbox_on ✅</b>\n")
+		sb.WriteString("/sandbox_off\n")
+	} else {
+		sb.WriteString("/sandbox_on\n")
+		sb.WriteString("<b>/sandbox_off ✅</b>\n")
+	}
+	return sb.String()
+}
+
 func (d *daemon) groupModeText(chatID string) string {
 	if !isGroupChatID(chatID) {
 		return ""
@@ -178,6 +201,7 @@ func (d *daemon) settingsText(chatID, sk string, sess *session.Session) string {
 		"⚙️ Движок:\n" + strings.TrimSuffix(d.backendText(sk, sess), "\n"),
 		"🤖 Модель:\n" + strings.TrimSuffix(d.modelText(sk, sess), "\n"),
 		"🧠 Мышление:\n" + strings.TrimSuffix(d.thinkText(sk, sess), "\n"),
+		"🔒 Sandbox:\n" + strings.TrimSuffix(d.sandboxText(sk, sess), "\n"),
 	}
 	if groupText := d.groupModeText(chatID); groupText != "" {
 		sections = append(sections, groupText)
@@ -299,6 +323,7 @@ func (d *daemon) statusText(chatID string) string {
 	if think == "" {
 		think = "по умолчанию"
 	}
+	sandbox := effectiveSandboxMode(d.scopeDefaults(chatID), sess)
 
 	var contextLine string
 	if sess.ContextWindow > 0 {
@@ -311,8 +336,8 @@ func (d *daemon) statusText(chatID string) string {
 	rateLine := d.rateLimitText(backend)
 
 	return fmt.Sprintf(
-		"<b>klax</b> v%s\n\n📌 Сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n%s%s%s\n💬 Сообщений: %d",
-		version, html.EscapeString(sess.Name), sessionModeLabel(chatID), backend, model, think, statusLine, contextLine, rateLine, sess.Messages,
+		"<b>klax</b> v%s\n\n📌 Сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n🔒 Sandbox: <code>%s</code>\n%s%s%s\n💬 Сообщений: %d",
+		version, html.EscapeString(sess.Name), sessionModeLabel(chatID), backend, model, think, sandbox, statusLine, contextLine, rateLine, sess.Messages,
 	)
 }
 

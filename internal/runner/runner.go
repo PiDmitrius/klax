@@ -149,7 +149,7 @@ type RunOptions struct {
 	Prompt             string
 	SessionID          string // empty = new session
 	CWD                string // working directory
-	PermissionMode     string // claude: acceptEdits | bypassPermissions | auto
+	Sandbox            string // "on" = CLI defaults, "off" = unrestricted
 	Model              string // model override
 	Effort             string // reasoning effort: low | medium | high (claude also: max; codex also: xhigh)
 	AppendSystemPrompt string // appended to default system prompt
