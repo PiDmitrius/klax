@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/PiDmitrius/klax/internal/fmtutil"
 	"github.com/PiDmitrius/klax/internal/pathutil"
 )
 
@@ -102,7 +103,7 @@ func formatRateLimit(rl *RateLimitInfo) string {
 	if rl.ResetsAt > 0 {
 		d := time.Until(time.Unix(rl.ResetsAt, 0))
 		if d > 0 {
-			remaining = " " + fmtDuration(d)
+			remaining = " " + fmtutil.Duration(d)
 		}
 	}
 	switch rl.Status {
@@ -120,21 +121,6 @@ func formatRateLimit(rl *RateLimitInfo) string {
 	}
 }
 
-func fmtDuration(d time.Duration) string {
-	days := int(d.Hours()) / 24
-	hours := int(d.Hours()) % 24
-	mins := int(d.Minutes()) % 60
-	if days > 0 {
-		if hours > 0 {
-			return fmt.Sprintf("%dд%dч", days, hours)
-		}
-		return fmt.Sprintf("%dд", days)
-	}
-	if hours > 0 {
-		return fmt.Sprintf("%dч%dм", hours, mins)
-	}
-	return fmt.Sprintf("%dм", mins)
-}
 
 func truncate(s string, n int) string {
 	s = pathutil.TildePathsInText(s)

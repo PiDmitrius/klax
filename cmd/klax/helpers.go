@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PiDmitrius/klax/internal/fmtutil"
 	"github.com/PiDmitrius/klax/internal/pathutil"
 	"github.com/PiDmitrius/klax/internal/runner"
 	"github.com/PiDmitrius/klax/internal/session"
@@ -238,7 +239,7 @@ func (d *daemon) rateLimitText(backendName string) string {
 		if resetsIn <= 0 {
 			continue
 		}
-		remaining := formatDuration(resetsIn)
+		remaining := fmtutil.Duration(resetsIn)
 		switch entry.rl.Status {
 		case "throttled", "rejected":
 			line := fmt.Sprintf("🚫 Лимит (%s) %s", entry.label, remaining)
@@ -339,25 +340,6 @@ func (d *daemon) statusText(chatID string) string {
 		"<b>klax</b> v%s\n\n📌 Сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n🔒 Sandbox: <code>%s</code>\n%s%s%s\n💬 Сообщений: %d",
 		version, html.EscapeString(sess.Name), sessionModeLabel(chatID), backend, model, think, sandbox, statusLine, contextLine, rateLine, sess.Messages,
 	)
-}
-
-func formatDuration(d time.Duration) string {
-	if d < time.Minute {
-		return "менее минуты"
-	}
-	days := int(d.Hours()) / 24
-	hours := int(d.Hours()) % 24
-	mins := int(d.Minutes()) % 60
-	if days > 0 {
-		if hours > 0 {
-			return fmt.Sprintf("%dд%dч", days, hours)
-		}
-		return fmt.Sprintf("%dд", days)
-	}
-	if hours > 0 {
-		return fmt.Sprintf("%dч%dм", hours, mins)
-	}
-	return fmt.Sprintf("%dм", mins)
 }
 
 func timeAgo(t time.Time) string {

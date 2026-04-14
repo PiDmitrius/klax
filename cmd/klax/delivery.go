@@ -430,13 +430,6 @@ func (mc *messageChain) ensure() *messageChain {
 	return mc
 }
 
-// deliverFinal sends the final response, splitting into chunks if needed.
-// The first chunk edits the progress message; remaining chunks are new messages.
-// On total failure, attempts a last-resort plain error notification.
-func (d *daemon) deliverFinal(ctx context.Context, fullChatID string, t transport.Transport, chatID string, chain *messageChain, text, format string) {
-	_, _ = d.syncMessageChain(ctx, fullChatID, t, chatID, "", chain, text, format)
-}
-
 // syncMessageChain keeps a chunked message chain in sync with the provided text.
 // It is shared by progress updates and final delivery, so HTML-safe splitting and
 // message-length handling live in exactly one place.
