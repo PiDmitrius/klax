@@ -119,7 +119,6 @@ func (d *daemon) backendFor(sess *session.Session) runner.Backend {
 		return &runner.CodexBackend{
 			Sandbox:  bc.Sandbox,
 			FullAuto: bc.FullAuto,
-			APIKey:   bc.APIKey,
 		}
 	default:
 		return &runner.ClaudeBackend{
@@ -216,7 +215,28 @@ type queuedMsg struct {
 	attachments []attachment
 }
 
+// ensurePath makes sure PATH includes the directory of the running binary.
+// This is needed when klax runs as a systemd service where PATH is minimal.
+func ensurePath() {
+	current := os.Getenv("PATH")
+	dirs := make(map[string]bool)
+	for _, d := range filepath.SplitList(current) {
+		dirs[d] = true
+	}
+
+	if exe, err := os.Executable(); err == nil {
+		if d := filepath.Dir(exe); d != "" && !dirs[d] {
+			if current == "" {
+				_ = os.Setenv("PATH", d)
+			} else {
+				_ = os.Setenv("PATH", d+string(os.PathListSeparator)+current)
+			}
+		}
+	}
+}
+
 func runDaemon() {
+	ensurePath()
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("cannot load config: %v\nRun 'klax setup' first.", err)

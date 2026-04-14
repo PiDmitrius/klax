@@ -15,7 +15,6 @@ import (
 type CodexBackend struct {
 	Sandbox  string // read-only | workspace-write | danger-full-access
 	FullAuto bool
-	APIKey   string
 }
 
 func (b *CodexBackend) Name() string { return "codex" }
@@ -56,12 +55,6 @@ func (b *CodexBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 		cmd.Dir = opts.CWD
 	}
 	cmd.Stdin = strings.NewReader(opts.Prompt)
-
-	// Set API key if configured.
-	if b.APIKey != "" {
-		cmd.Env = append(os.Environ(), "CODEX_API_KEY="+b.APIKey)
-	}
-
 	return cmd, nil
 }
 

@@ -20,52 +20,37 @@ func runSetup() {
 	fmt.Println("----------")
 
 	home, _ := os.UserHomeDir()
-	cfg := &config.Config{
-		TelegramToken:      "",
-		AllowedUsers:       []int64{},
-		DefaultCWD:         home,
-		SourceDir:          "",
-		DefaultBackend:     "claude",
-		Backends:           map[string]config.BackendConfig{"claude": {}, "codex": {}},
-		MaxToken:           "",
-		MaxAllowedUsers:    []int64{},
-		VKToken:            "",
-		VKAllowedUsers:     []int{},
-		Users:              []config.UserIdentity{},
-		DisabledTransports: []string{},
-		GroupChats:         []config.GroupChat{},
+
+	// Load existing config if present; start fresh otherwise.
+	cfg, err := config.Load()
+	if err != nil {
+		if os.IsNotExist(err) {
+			cfg = &config.Config{DefaultCWD: home}
+		} else {
+			fmt.Fprintf(os.Stderr, "error: cannot load config: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
-	cfg.TelegramToken = promptValidatedToken(reader, "Telegram bot token [skip]: ", func(token string) error {
+	// Show current values in prompts so the user knows what's already set.
+	cfg.TelegramToken = promptValidatedTokenKeep(reader, "Telegram bot token", cfg.TelegramToken, func(token string) error {
 		return tg.New(token).GetMe()
 	})
-	if cfg.TelegramToken != "" {
-		cfg.AllowedUsers = promptInt64List(reader, "Telegram allowed users (comma-separated): ")
-	}
+	cfg.AllowedUsers = promptInt64ListKeep(reader, "Telegram allowed users", cfg.AllowedUsers)
 
-	cfg.MaxToken = promptValidatedToken(reader, "MAX bot token [skip]: ", func(token string) error {
+	cfg.MaxToken = promptValidatedTokenKeep(reader, "MAX bot token", cfg.MaxToken, func(token string) error {
 		_, err := max.New(token).GetMe()
 		return err
 	})
-	if cfg.MaxToken != "" {
-		cfg.MaxAllowedUsers = promptInt64List(reader, "MAX allowed users (comma-separated): ")
-	}
+	cfg.MaxAllowedUsers = promptInt64ListKeep(reader, "MAX allowed users", cfg.MaxAllowedUsers)
 
-	cfg.VKToken = promptValidatedToken(reader, "VK group token [skip]: ", func(token string) error {
+	cfg.VKToken = promptValidatedTokenKeep(reader, "VK group token", cfg.VKToken, func(token string) error {
 		_, err := vk.New(token).GetMe()
 		return err
 	})
-	if cfg.VKToken != "" {
-		cfg.VKAllowedUsers = promptIntList(reader, "VK allowed users (comma-separated): ")
-	}
+	cfg.VKAllowedUsers = promptIntListKeep(reader, "VK allowed users", cfg.VKAllowedUsers)
 
-	fmt.Print("Default working directory [~]: ")
-	cwd, _ := reader.ReadString('\n')
-	cwd = strings.TrimSpace(cwd)
-	if cwd == "" || cwd == "~" {
-		cwd = home
-	}
-	cfg.DefaultCWD = cwd
+	cfg.DefaultCWD = promptStringKeep(reader, "Default working directory", displayPathValue(cfg.DefaultCWD, home))
 
 	if err := config.Save(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -75,12 +60,21 @@ func runSetup() {
 	fmt.Println("Next: klax install && klax start")
 }
 
-func promptValidatedToken(reader *bufio.Reader, prompt string, validate func(string) error) string {
+// promptValidatedTokenKeep shows the current value (masked) and keeps it on empty input.
+func promptValidatedTokenKeep(reader *bufio.Reader, label, current string, validate func(string) error) string {
+	hint := "enter=keep empty"
+	if current != "" {
+		hint = "enter=keep " + maskToken(current)
+	}
+	hint += ", -=clear"
 	for {
-		fmt.Print(prompt)
+		fmt.Printf("%s [%s]: ", label, hint)
 		token, _ := reader.ReadString('\n')
 		token = strings.TrimSpace(token)
 		if token == "" {
+			return current
+		}
+		if token == "-" {
 			return ""
 		}
 		if err := validate(token); err != nil {
@@ -92,10 +86,46 @@ func promptValidatedToken(reader *bufio.Reader, prompt string, validate func(str
 	}
 }
 
-func promptInt64List(reader *bufio.Reader, prompt string) []int64 {
+func maskToken(s string) string {
+	if len(s) <= 8 {
+		return "***"
+	}
+	return s[:4] + "***" + s[len(s)-4:]
+}
+
+func promptStringKeep(reader *bufio.Reader, label, current string) string {
+	hint := "enter=keep empty"
+	if current != "" {
+		hint = "enter=keep " + current
+	}
+	fmt.Printf("%s [%s, -=clear]: ", label, hint)
+	line, _ := reader.ReadString('\n')
+	line = strings.TrimSpace(line)
+	switch line {
+	case "":
+		return current
+	case "-":
+		return ""
+	default:
+		return line
+	}
+}
+
+func promptInt64ListKeep(reader *bufio.Reader, label string, current []int64) []int64 {
+	hint := "enter=keep empty"
+	if len(current) > 0 {
+		hint = "enter=keep " + formatInt64List(current)
+	}
 	for {
-		fmt.Print(prompt)
+		fmt.Printf("%s [%s, -=clear, comma-separated]: ", label, hint)
 		line, _ := reader.ReadString('\n')
+		line = strings.TrimSpace(line)
+		if line == "" {
+			return current
+		}
+		if line == "-" {
+			return []int64{}
+		}
 		values, err := parseInt64List(line)
 		if err != nil {
 			fmt.Printf("Invalid list: %v\n", err)
@@ -105,10 +135,21 @@ func promptInt64List(reader *bufio.Reader, prompt string) []int64 {
 	}
 }
 
-func promptIntList(reader *bufio.Reader, prompt string) []int {
+func promptIntListKeep(reader *bufio.Reader, label string, current []int) []int {
+	hint := "enter=keep empty"
+	if len(current) > 0 {
+		hint = "enter=keep " + formatIntList(current)
+	}
 	for {
-		fmt.Print(prompt)
+		fmt.Printf("%s [%s, -=clear, comma-separated]: ", label, hint)
 		line, _ := reader.ReadString('\n')
+		line = strings.TrimSpace(line)
+		if line == "" {
+			return current
+		}
+		if line == "-" {
+			return []int{}
+		}
 		values, err := parseIntList(line)
 		if err != nil {
 			fmt.Printf("Invalid list: %v\n", err)
@@ -116,6 +157,32 @@ func promptIntList(reader *bufio.Reader, prompt string) []int {
 		}
 		return values
 	}
+}
+
+func displayPathValue(path, home string) string {
+	if path == "" {
+		return ""
+	}
+	if path == home {
+		return "~"
+	}
+	return tildePath(path)
+}
+
+func formatInt64List(values []int64) string {
+	parts := make([]string, 0, len(values))
+	for _, v := range values {
+		parts = append(parts, strconv.FormatInt(v, 10))
+	}
+	return strings.Join(parts, ",")
+}
+
+func formatIntList(values []int) string {
+	parts := make([]string, 0, len(values))
+	for _, v := range values {
+		parts = append(parts, strconv.Itoa(v))
+	}
+	return strings.Join(parts, ",")
 }
 
 func parseInt64List(line string) ([]int64, error) {

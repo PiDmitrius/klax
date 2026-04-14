@@ -84,13 +84,12 @@ func sessionCreatedText(cfg *config.Config, chatID string, def *session.ScopeDef
 		think = "по умолчанию"
 	}
 	return fmt.Sprintf(
-		"✅ Новая сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n📂 <code>%s</code>\n\n/settings — донастроить сессию",
+		"✅ Новая сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n\nНастроить: /settings",
 		html.EscapeString(sess.Name),
 		sessionModeLabel(chatID),
 		backend,
 		model,
 		think,
-		html.EscapeString(tildePath(sess.CWD)),
 	)
 }
 

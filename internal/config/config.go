@@ -20,7 +20,6 @@ type BackendConfig struct {
 	PermissionMode string `json:"permission_mode"` // claude: acceptEdits | bypassPermissions | auto
 	Sandbox        string `json:"sandbox"`         // codex: read-only | workspace-write | danger-full-access
 	FullAuto       bool   `json:"full_auto"`       // codex: --full-auto shortcut
-	APIKey         string `json:"api_key"`         // codex: CODEX_API_KEY
 }
 
 // Config is stored at ~/.config/klax/config.json

@@ -214,10 +214,10 @@ func TestSessionCreatedTextIncludesSettingsHint(t *testing.T) {
 		},
 	)
 
-	if !strings.Contains(text, "/settings — донастроить сессию") {
+	if !strings.Contains(text, "Настроить: /settings") {
 		t.Fatalf("created text should include settings hint: %q", text)
 	}
-	if !strings.Contains(text, "📂 <code>~/work</code>") {
-		t.Fatalf("created text should use tilde path: %q", text)
+	if strings.Contains(text, "📂 <code>") {
+		t.Fatalf("created text should not include cwd: %q", text)
 	}
 }
