@@ -50,7 +50,7 @@ func runSetup() {
 	})
 	cfg.VKAllowedUsers = promptIntListKeep(reader, "VK allowed users", cfg.VKAllowedUsers)
 
-	cfg.DefaultCWD = promptStringKeep(reader, "Default working directory", displayPathValue(cfg.DefaultCWD, home))
+	cfg.DefaultCWD = expandPathValue(promptStringKeep(reader, "Default working directory", displayPathValue(cfg.DefaultCWD, home)), home)
 
 	if err := config.Save(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -167,6 +167,19 @@ func displayPathValue(path, home string) string {
 		return "~"
 	}
 	return tildePath(path)
+}
+
+func expandPathValue(path, home string) string {
+	switch {
+	case path == "", path == "-", home == "":
+		return path
+	case path == "~":
+		return home
+	case strings.HasPrefix(path, "~/"):
+		return filepath.Join(home, path[2:])
+	default:
+		return path
+	}
 }
 
 func formatInt64List(values []int64) string {

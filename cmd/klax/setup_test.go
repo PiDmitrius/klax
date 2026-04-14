@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"os"
 	"strings"
 	"testing"
 )
@@ -65,5 +66,28 @@ func TestPromptStringKeepSupportsKeepAndClear(t *testing.T) {
 	clearReader := bufio.NewReader(strings.NewReader("-\n"))
 	if got := promptStringKeep(clearReader, "Path", "~/work"); got != "" {
 		t.Fatalf("expected string to be cleared, got %q", got)
+	}
+}
+
+func TestExpandPathValueExpandsHomeDisplayPaths(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{in: "~", want: home},
+		{in: "~/work", want: home + "/work"},
+		{in: "/tmp/work", want: "/tmp/work"},
+		{in: "", want: ""},
+	}
+
+	for _, tt := range tests {
+		if got := expandPathValue(tt.in, home); got != tt.want {
+			t.Fatalf("expandPathValue(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }
