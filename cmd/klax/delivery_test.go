@@ -88,10 +88,10 @@ type fakeTransport struct {
 	editCalls int
 	editErr   error
 	lastEdit  struct {
-		chatID   string
-		message  string
-		text     string
-		format   string
+		chatID  string
+		message string
+		text    string
+		format  string
 	}
 }
 
@@ -152,25 +152,25 @@ func TestTryEditFallsBackToPlainFormat(t *testing.T) {
 
 func TestSyncMessageChainSkipsCachedEdits(t *testing.T) {
 	d := &daemon{
-		editCache: make(map[string]string),
 		sendPause: make(map[string]time.Time),
 		sendFails: make(map[string]int),
 	}
 	tp := &fakeTransport{}
 	ctx := context.Background()
+	chain := newMessageChain()
 
-	ids, err := d.syncMessageChain(ctx, "tg:1", tp, "1", "", nil, "hello", "html")
+	chain, err := d.syncMessageChain(ctx, "tg:1", tp, "1", "", chain, "hello", "html")
 	if err != nil {
 		t.Fatalf("first sync failed: %v", err)
 	}
-	if len(ids) != 1 || ids[0] == "" {
-		t.Fatalf("expected one message id, got %v", ids)
+	if len(chain.ids) != 1 || chain.ids[0] == "" {
+		t.Fatalf("expected one message id, got %v", chain.ids)
 	}
 	if tp.sendCalls != 1 {
 		t.Fatalf("expected one send call, got %d", tp.sendCalls)
 	}
 
-	_, err = d.syncMessageChain(ctx, "tg:1", tp, "1", "", ids, "hello", "html")
+	_, err = d.syncMessageChain(ctx, "tg:1", tp, "1", "", chain, "hello", "html")
 	if err != nil {
 		t.Fatalf("second sync failed: %v", err)
 	}

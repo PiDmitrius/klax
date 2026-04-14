@@ -54,19 +54,6 @@ type daemon struct {
 	maxIdents  map[int64]string  // max userID -> canonical user ID
 	vkIdents   map[int]string    // vk userID -> canonical user ID
 	groupChats map[string]string // chatID -> CWD for group mode chats
-	editCache  map[string]string // messageID → text+"\x00"+format
-}
-
-func (d *daemon) getEditCache(messageID string) string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.editCache[messageID]
-}
-
-func (d *daemon) setEditCache(messageID, value string) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.editCache[messageID] = value
 }
 
 func startupBackoff(attempt int) time.Duration {
@@ -412,7 +399,6 @@ func runDaemon() {
 		maxIdents:  maxIdents,
 		vkIdents:   vkIdents,
 		groupChats: groupChats,
-		editCache:  make(map[string]string),
 	}
 
 	writePID()

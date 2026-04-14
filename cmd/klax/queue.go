@@ -135,15 +135,12 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	// Progress message — edit in place.
 	// If this message was queued, reuse the "В очереди" notification.
 	t, rawChatID, chatFmt := d.transportFor(msg.chatID)
-	var progressMsgIDs []string
-	if msg.progressID != "" {
-		progressMsgIDs = append(progressMsgIDs, msg.progressID)
-	}
+	progressChain := newMessageChain(msg.progressID)
 	if t != nil {
 		var err error
-		progressMsgIDs, err = d.syncMessageChain(ctx, msg.chatID, t, rawChatID, msg.msgID, progressMsgIDs, "...", "")
+		progressChain, err = d.syncMessageChain(ctx, msg.chatID, t, rawChatID, msg.msgID, progressChain, "...", "")
 		if err != nil {
-			progressMsgIDs = nil
+			progressChain = nil
 		}
 	}
 
@@ -157,9 +154,9 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		toolLines = append(toolLines, status)
 
 		newText := formatToolLines(toolLines, chatFmt) + "\n\n..."
-		if len(progressMsgIDs) > 0 {
+		if progressChain != nil && len(progressChain.ids) > 0 {
 			var err error
-			progressMsgIDs, err = d.syncMessageChain(ctx, msg.chatID, t, rawChatID, "", progressMsgIDs, newText, chatFmt)
+			progressChain, err = d.syncMessageChain(ctx, msg.chatID, t, rawChatID, "", progressChain, newText, chatFmt)
 			if err != nil {
 				log.Printf("progress update failed: %v", err)
 			}
@@ -241,8 +238,8 @@ func (d *daemon) runBackend(msg queuedMsg) {
 			finalText = formatToolLines(toolLines, chatFmt) + "\n\n..."
 		}
 		finalText += fmt.Sprintf("\n❌ Ошибка: %v", result.Error)
-		if len(progressMsgIDs) > 0 && t != nil {
-			_, err := d.syncMessageChain(ctx, msg.chatID, t, rawChatID, "", progressMsgIDs, finalText, chatFmt)
+		if progressChain != nil && len(progressChain.ids) > 0 && t != nil {
+			_, err := d.syncMessageChain(ctx, msg.chatID, t, rawChatID, "", progressChain, finalText, chatFmt)
 			if err != nil {
 				log.Printf("final error delivery failed: %v", err)
 			}
@@ -274,7 +271,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	}
 
 	if t != nil {
-		_, err := d.syncMessageChain(ctx, msg.chatID, t, rawChatID, "", progressMsgIDs, finalText, chatFmt)
+		_, err := d.syncMessageChain(ctx, msg.chatID, t, rawChatID, "", progressChain, finalText, chatFmt)
 		if err != nil {
 			log.Printf("final delivery failed: %v", err)
 		}

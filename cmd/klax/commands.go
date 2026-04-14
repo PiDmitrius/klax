@@ -682,7 +682,7 @@ func (d *daemon) runChatOp(chatID, msgID, subcmd, progressText string) {
 	ctx, cancel := withDeliveryTimeout(context.Background())
 	defer cancel()
 
-	messageIDs, err := d.syncMessageChain(ctx, chatID, t, rawChatID, msgID, nil, progressText, fmtStr)
+	chain, err := d.syncMessageChain(ctx, chatID, t, rawChatID, msgID, nil, progressText, fmtStr)
 	if err != nil {
 		return
 	}
@@ -694,14 +694,14 @@ func (d *daemon) runChatOp(chatID, msgID, subcmd, progressText string) {
 	if err != nil {
 		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 		detail := lines[len(lines)-1]
-		_, _ = d.syncMessageChain(ctx, chatID, t, rawChatID, "", messageIDs, fmt.Sprintf("%s\n❌ %s", progressText, detail), "")
+		_, _ = d.syncMessageChain(ctx, chatID, t, rawChatID, "", chain, fmt.Sprintf("%s\n❌ %s", progressText, detail), "")
 		return
 	}
 
 	if strings.HasPrefix(subcmd, "fallback") {
-		_, _ = d.syncMessageChain(ctx, chatID, t, rawChatID, "", messageIDs, progressText+"\n✅ Релизная версия установлена, перезапускаюсь...", "")
+		_, _ = d.syncMessageChain(ctx, chatID, t, rawChatID, "", chain, progressText+"\n✅ Релизная версия установлена, перезапускаюсь...", "")
 	} else {
-		_, _ = d.syncMessageChain(ctx, chatID, t, rawChatID, "", messageIDs, progressText+"\n✅ Обновлено, перезапускаюсь...", "")
+		_, _ = d.syncMessageChain(ctx, chatID, t, rawChatID, "", chain, progressText+"\n✅ Обновлено, перезапускаюсь...", "")
 	}
 }
 
