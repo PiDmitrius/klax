@@ -32,7 +32,16 @@ func (b *CodexBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 	if b.FullAuto {
 		args = append(args, "--full-auto")
 	} else if b.Sandbox != "" {
-		args = append(args, "--sandbox", b.Sandbox)
+		if opts.SessionID != "" {
+			// "exec resume" does not support --sandbox; map to equivalent flags.
+			if b.Sandbox == "danger-full-access" {
+				args = append(args, "--dangerously-bypass-approvals-and-sandbox")
+			} else {
+				args = append(args, "--full-auto")
+			}
+		} else {
+			args = append(args, "--sandbox", b.Sandbox)
+		}
 	}
 
 	if opts.Model != "" {

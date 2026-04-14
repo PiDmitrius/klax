@@ -65,12 +65,18 @@ func (c *Config) GetDefaultBackend() string {
 func (c *Config) BackendFor(name string) BackendConfig {
 	if c.Backends != nil {
 		if bc, ok := c.Backends[name]; ok {
+			if name == "codex" && !bc.FullAuto && bc.Sandbox == "" {
+				bc.Sandbox = "danger-full-access"
+			}
 			return bc
 		}
 	}
 	// Fallback: build from legacy fields.
 	if name == "claude" {
 		return BackendConfig{PermissionMode: c.PermissionMode}
+	}
+	if name == "codex" {
+		return BackendConfig{Sandbox: "danger-full-access"}
 	}
 	return BackendConfig{}
 }

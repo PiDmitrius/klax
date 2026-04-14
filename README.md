@@ -93,7 +93,7 @@ Minimal example:
       "permission_mode": "bypassPermissions"
     },
     "codex": {
-      "sandbox": "workspace-write",
+      "sandbox": "danger-full-access",
       "full_auto": false
     }
   },
@@ -121,7 +121,7 @@ Backend-specific fields:
 | field | description |
 |---|---|
 | `backends.claude.permission_mode` | `acceptEdits`, `bypassPermissions`, or `auto` |
-| `backends.codex.sandbox` | `read-only`, `workspace-write`, or `danger-full-access` |
+| `backends.codex.sandbox` | `read-only`, `workspace-write`, or `danger-full-access` (default) |
 | `backends.codex.full_auto` | enables `codex --full-auto` |
 
 ## Chat Commands
