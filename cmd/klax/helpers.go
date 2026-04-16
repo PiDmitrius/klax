@@ -59,9 +59,9 @@ type modelEntry struct {
 }
 
 var claudeModels = []modelEntry{
-	{"opus", "claude-opus-4-6[1m]", "Claude Opus 1M"},
-	{"sonnet", "claude-sonnet-4-6[1m]", "Claude Sonnet 1M"},
-	{"haiku", "claude-haiku-4-5-20251001", "Claude Haiku 200k"},
+	{"opus", "opus[1m]", "Claude Opus 1M"},
+	{"sonnet", "sonnet[1m]", "Claude Sonnet 1M"},
+	{"haiku", "haiku", "Claude Haiku 200k"},
 }
 
 var codexModels = []modelEntry{
@@ -276,7 +276,7 @@ func helpText() string {
 /name — переименовать сессию
 /cleanup — управление сессиями
 /cwd [путь] — рабочая директория
-/model — выбор модели
+/model [name] — выбор модели
 /think — уровень мышления
 /prompt [текст] — системный промпт
 /groups — режим группы
