@@ -39,10 +39,25 @@ func (d *daemon) enqueueWithAttachments(chatID, msgID, text string, attachments 
 	}
 
 	sk := d.sessionKey(chatID)
-	sr := d.getRunner(sk)
+	// Bind the message to whichever session is active right now. /switch and
+	// /new after this point only affect future messages — this one will run
+	// against the captured session even if the user moves on.
+	sess := d.store.Active(sk)
+	if sess == nil {
+		d.sendMessage(chatID, msgID, "❌ Нет активной сессии. Напиши /new")
+		return
+	}
+	sr := d.getRunner(sk, sess.Created)
 
 	sr.mu.Lock()
-	qm := queuedMsg{chatID: chatID, msgID: msgID, text: text, attachments: attachments}
+	qm := queuedMsg{
+		chatID:      chatID,
+		msgID:       msgID,
+		text:        text,
+		attachments: attachments,
+		sessKey:     sk,
+		sessCreated: sess.Created,
+	}
 	busy := sr.runner.IsBusy()
 	if busy {
 		// Send queue notification and capture its ID for later reuse as progress message.
@@ -105,8 +120,11 @@ func (d *daemon) processSessionQueue(sr *sessionRunner) {
 	}
 }
 
-func (d *daemon) clearSessionQueue(sk string) int {
-	sr := d.getRunner(sk)
+func (d *daemon) clearSessionQueue(sk string, created int64) int {
+	sr := d.lookupRunner(sk, created)
+	if sr == nil {
+		return 0
+	}
 	sr.mu.Lock()
 	n := len(sr.queue)
 	sr.queue = nil
@@ -115,14 +133,17 @@ func (d *daemon) clearSessionQueue(sk string) int {
 }
 
 func (d *daemon) runBackend(msg queuedMsg) {
-	sk := d.sessionKey(msg.chatID)
-	sess := d.store.Active(sk)
+	sk := msg.sessKey
+	// Look up the session bound at enqueue time. If the user deleted the
+	// session in the meantime the message has nowhere to land — surface that
+	// instead of silently picking a different session.
+	sess := d.store.Get(sk, msg.sessCreated)
 	if sess == nil {
-		d.sendMessage(msg.chatID, msg.msgID, "❌ Нет активной сессии. Напиши /new")
+		d.sendMessage(msg.chatID, msg.msgID, "❌ Сессия удалена, сообщение не обработано.")
 		return
 	}
 
-	sr := d.getRunner(sk)
+	sr := d.getRunner(sk, sess.Created)
 
 	// Create a cancellable context for this run.
 	// /abort cancels it, which stops both claude and retry loops.

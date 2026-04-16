@@ -59,9 +59,9 @@ type modelEntry struct {
 }
 
 var claudeModels = []modelEntry{
-	{"opus", "claude-opus-4-6[1m]", "Claude Opus 1M"},
-	{"sonnet", "claude-sonnet-4-6[1m]", "Claude Sonnet 1M"},
-	{"haiku", "claude-haiku-4-5-20251001", "Claude Haiku 200k"},
+	{"opus", "opus[1m]", "Claude Opus 1M"},
+	{"sonnet", "sonnet[1m]", "Claude Sonnet 1M"},
+	{"haiku", "haiku", "Claude Haiku 200k"},
 }
 
 var codexModels = []modelEntry{
@@ -276,7 +276,7 @@ func helpText() string {
 /name — переименовать сессию
 /cleanup — управление сессиями
 /cwd [путь] — рабочая директория
-/model — выбор модели
+/model [name] — выбор модели
 /think — уровень мышления
 /prompt [текст] — системный промпт
 /groups — режим группы
@@ -293,30 +293,38 @@ func (d *daemon) statusText(chatID string) string {
 		return "❌ Нет активной сессии"
 	}
 
-	sr := d.getRunner(chatID)
-	sr.mu.Lock()
-	qlen := len(sr.queue)
-	sr.mu.Unlock()
-
-	tool, toolElapsed, totalElapsed := sr.runner.Status()
+	sr := d.lookupRunner(chatID, sess.Created)
 	var statusLine string
-	if sr.runner.IsBusy() {
-		totalSec := int(totalElapsed.Seconds())
-		if tool.Name != "" {
-			toolSec := int(toolElapsed.Seconds())
-			statusLine = fmt.Sprintf("🔄 %s (%ds / %ds)", tool.String(), toolSec, totalSec)
-		} else {
-			statusLine = fmt.Sprintf("🔄 Работает (%ds)", totalSec)
-		}
-		if qlen > 0 {
-			statusLine += fmt.Sprintf(" 📬 %d", qlen)
-		}
-	} else {
+	if sr == nil {
 		statusLine = "💤 Свободен"
+	} else {
+		sr.mu.Lock()
+		qlen := len(sr.queue)
+		sr.mu.Unlock()
+		tool, toolElapsed, totalElapsed := sr.runner.Status()
+		if sr.runner.IsBusy() {
+			totalSec := int(totalElapsed.Seconds())
+			if tool.Name != "" {
+				toolSec := int(toolElapsed.Seconds())
+				statusLine = fmt.Sprintf("🔄 %s (%ds / %ds)", tool.String(), toolSec, totalSec)
+			} else {
+				statusLine = fmt.Sprintf("🔄 Работает (%ds)", totalSec)
+			}
+			if qlen > 0 {
+				statusLine += fmt.Sprintf(" 📬 %d", qlen)
+			}
+		} else if qlen > 0 {
+			statusLine = fmt.Sprintf("📬 В очереди: %d", qlen)
+		} else {
+			statusLine = "💤 Свободен"
+		}
 	}
 
 	backend := resolveSessionBackend(sess, d.scopeDefaults(chatID), d.cfg.GetDefaultBackend())
-	model := sess.ModelOverride
+	model := sess.Model
+	if model == "" {
+		model = sess.ModelOverride
+	}
 	if model == "" {
 		model = "по умолчанию"
 	}

@@ -27,6 +27,13 @@ var tgMenuCommands = []tg.BotCommand{
 
 var transportOrder = []string{"tg", "mx", "vk"}
 
+// sessionBusyText is shown when a setting that feeds into RunOptions is
+// changed while the session has work in flight. The current run captured the
+// old values; mutating the record now would only confuse future messages and
+// risk producing the kind of backend/ID mismatch this gating exists to
+// prevent.
+const sessionBusyText = "⏳ Сессия занята: настройки нельзя менять до завершения. Дождись окончания или /abort."
+
 func normalizeCommand(cmd string, args []string) (string, []string) {
 	switch {
 	case strings.HasPrefix(cmd, "/backend_") && len(cmd) > len("/backend_"):
@@ -126,12 +133,16 @@ func (d *daemon) handleBackendSet(chatID, msgID, sk, name string) {
 		d.sendMessage(chatID, msgID, "Нет активной сессии")
 		return
 	}
+	if name == "" {
+		d.sendMessage(chatID, msgID, d.backendText(sk, sess))
+		return
+	}
 	if sess.Messages > 0 {
 		d.sendMessage(chatID, msgID, "Backend нельзя изменить после первого сообщения.")
 		return
 	}
-	if name == "" {
-		d.sendMessage(chatID, msgID, d.backendText(sk, sess))
+	if d.isSessionBusy(sk, sess.Created) {
+		d.sendMessage(chatID, msgID, sessionBusyText)
 		return
 	}
 	if name != "claude" && name != "codex" {
@@ -161,6 +172,10 @@ func (d *daemon) handleModelSet(chatID, msgID, sk, alias string) {
 	sess := d.store.Active(sk)
 	if sess == nil {
 		d.sendMessage(chatID, msgID, "Нет активной сессии")
+		return
+	}
+	if d.isSessionBusy(sk, sess.Created) {
+		d.sendMessage(chatID, msgID, sessionBusyText)
 		return
 	}
 	if alias == "default" {
@@ -197,6 +212,10 @@ func (d *daemon) handleThinkSet(chatID, msgID, sk, alias string) {
 	sess := d.store.Active(sk)
 	if sess == nil {
 		d.sendMessage(chatID, msgID, "Нет активной сессии")
+		return
+	}
+	if d.isSessionBusy(sk, sess.Created) {
+		d.sendMessage(chatID, msgID, sessionBusyText)
 		return
 	}
 	if alias == "default" {
@@ -239,6 +258,10 @@ func (d *daemon) handleSandboxSet(chatID, msgID, sk, mode string) {
 		d.sendMessage(chatID, msgID, d.sandboxText(sk, sess))
 		return
 	}
+	if d.isSessionBusy(sk, sess.Created) {
+		d.sendMessage(chatID, msgID, sessionBusyText)
+		return
+	}
 	d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
 		def.Sandbox = mode
 	})
@@ -276,11 +299,17 @@ func (d *daemon) handleSessionDelete(chatID, msgID, sk, n string) {
 		d.sendMessage(chatID, msgID, fmt.Sprintf("Нет сессии #%d", idx))
 		return
 	}
-	if sessions[pos].Active {
+	target := sessions[pos]
+	if target.Active {
 		d.sendMessage(chatID, msgID, "Нельзя удалить активную сессию.")
 		return
 	}
+	if d.isSessionBusy(sk, target.Created) {
+		d.sendMessage(chatID, msgID, "⏳ Сессия занята: дождись завершения или сначала переключись и /abort.")
+		return
+	}
 	d.store.Delete(sk, pos)
+	d.dropRunner(sk, target.Created)
 	d.saveStore()
 	d.sendMessage(chatID, msgID, d.cleanupText(sk))
 }
@@ -378,6 +407,15 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			}
 			return
 		}
+		active := d.store.Active(sk)
+		if active == nil {
+			d.sendMessage(chatID, msgID, "Нет активной сессии")
+			return
+		}
+		if d.isSessionBusy(sk, active.Created) {
+			d.sendMessage(chatID, msgID, sessionBusyText)
+			return
+		}
 		sess := d.store.UpdateActive(sk, func(sess *session.Session) {
 			sess.CWD = strings.Join(args, " ")
 		})
@@ -402,6 +440,10 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			}
 			return
 		}
+		if d.isSessionBusy(sk, sess.Created) {
+			d.sendMessage(chatID, msgID, sessionBusyText)
+			return
+		}
 		sess = d.store.UpdateActive(sk, func(sess *session.Session) {
 			sess.AppendSystemPrompt = argPayload(text)
 		})
@@ -412,6 +454,10 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		sess := d.store.Active(sk)
 		if sess == nil {
 			d.sendMessage(chatID, msgID, "Нет активной сессии")
+			return
+		}
+		if len(args) > 0 {
+			d.handleModelSet(chatID, msgID, sk, args[0])
 			return
 		}
 		d.sendMessage(chatID, msgID, d.modelText(sk, sess))
@@ -472,12 +518,24 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		d.enqueue(chatID, msgID, prompt)
 
 	case "/abort":
-		sr := d.getRunner(sk)
+		// /abort targets the currently active session — that is the one the
+		// user is interacting with. Background runs in other sessions of the
+		// same chat keep going; switch to them and /abort there if needed.
+		active := d.store.Active(sk)
+		if active == nil {
+			d.sendMessage(chatID, msgID, "Нет активной сессии")
+			return
+		}
+		sr := d.lookupRunner(sk, active.Created)
+		if sr == nil {
+			d.sendMessage(chatID, msgID, "Нет активных задач.")
+			return
+		}
 		sr.mu.Lock()
 		cancelFn := sr.cancel
 		busy := sr.runner.IsBusy()
 		sr.mu.Unlock()
-		dropped := d.clearSessionQueue(sk)
+		dropped := d.clearSessionQueue(sk, active.Created)
 		if !busy && cancelFn == nil && dropped == 0 {
 			d.sendMessage(chatID, msgID, "Нет активных задач.")
 			return
