@@ -325,6 +325,19 @@ func (s *Store) UpdateSession(chatID string, created int64, fn func(*Session)) *
 	return nil
 }
 
+// Get returns a clone of the session identified by Created within chatID.
+// Returns nil if no matching session exists.
+func (s *Store) Get(chatID string, created int64) *Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, sess := range s.chat(chatID).Sessions {
+		if sess.Created == created {
+			return cloneSession(sess)
+		}
+	}
+	return nil
+}
+
 func (s *Store) Ensure(chatID, name, cwd string, defaults ScopeDefaults) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -350,7 +363,7 @@ func (s *Store) Ensure(chatID, name, cwd string, defaults ScopeDefaults) *Sessio
 	sess := &Session{
 		Name:          name,
 		CWD:           cwd,
-		Created:       time.Now().Unix(),
+		Created:       nextCreated(cs.Sessions),
 		Active:        true,
 		Backend:       def.Backend,
 		ModelOverride: def.Model,
@@ -378,7 +391,7 @@ func (s *Store) New(chatID, name, cwd string, defaults ScopeDefaults) *Session {
 	sess := &Session{
 		Name:          name,
 		CWD:           cwd,
-		Created:       time.Now().Unix(),
+		Created:       nextCreated(cs.Sessions),
 		Active:        true,
 		Backend:       def.Backend,
 		ModelOverride: def.Model,
@@ -387,6 +400,20 @@ func (s *Store) New(chatID, name, cwd string, defaults ScopeDefaults) *Session {
 	}
 	cs.Sessions = append(cs.Sessions, sess)
 	return cloneSession(sess)
+}
+
+// nextCreated returns a Created timestamp guaranteed to be unique within the
+// given slice. The Created field is the canonical key used by both UpdateSession
+// and the per-session runner map, so collisions (rapid back-to-back /new in the
+// same wall-clock second) would silently merge runs.
+func nextCreated(existing []*Session) int64 {
+	now := time.Now().Unix()
+	for _, sess := range existing {
+		if sess != nil && sess.Created >= now {
+			now = sess.Created + 1
+		}
+	}
+	return now
 }
 
 func (s *Store) Delete(chatID string, idx int) bool {

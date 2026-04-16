@@ -35,6 +35,14 @@ type sessionRunner struct {
 	cancel     context.CancelFunc // cancels current run (claude process + retry loops)
 }
 
+// runnerKey identifies a per-session runner. The Created field is the only
+// stable session identifier — sess.ID may change mid-life when a backend
+// returns a new SessionID, while Created is assigned at /new and never moves.
+type runnerKey struct {
+	sk      string
+	created int64
+}
+
 type daemon struct {
 	cfg        *config.Config
 	state      *session.State
@@ -43,7 +51,7 @@ type daemon struct {
 	disabled   map[string]bool                // disabled transports
 	pollCtx    map[string]context.CancelFunc  // cancel functions for poll goroutines
 	store      *session.Store
-	runners    map[string]*sessionRunner // sessionKey -> runner+queue
+	runners    map[runnerKey]*sessionRunner // (sessionKey, created) -> runner+queue
 	runnersMu  sync.Mutex
 	mu         sync.Mutex
 	draining   bool           // stop accepting new tasks, wait for current to finish
@@ -121,16 +129,48 @@ func (d *daemon) backendFor(sess *session.Session) runner.Backend {
 	}
 }
 
-// getRunner returns the sessionRunner for the given key, creating one if needed.
-func (d *daemon) getRunner(sessionKey string) *sessionRunner {
+// getRunner returns the sessionRunner for the given session, creating one if needed.
+func (d *daemon) getRunner(sk string, created int64) *sessionRunner {
+	key := runnerKey{sk: sk, created: created}
 	d.runnersMu.Lock()
 	defer d.runnersMu.Unlock()
-	sr, ok := d.runners[sessionKey]
+	sr, ok := d.runners[key]
 	if !ok {
 		sr = &sessionRunner{runner: runner.New()}
-		d.runners[sessionKey] = sr
+		d.runners[key] = sr
 	}
 	return sr
+}
+
+// lookupRunner returns the sessionRunner for the given session if one exists,
+// or nil otherwise. Unlike getRunner it never allocates.
+func (d *daemon) lookupRunner(sk string, created int64) *sessionRunner {
+	d.runnersMu.Lock()
+	defer d.runnersMu.Unlock()
+	return d.runners[runnerKey{sk: sk, created: created}]
+}
+
+// dropRunner removes the runner record for a session. Caller must ensure the
+// runner has finished (queue empty, no in-flight run). Used when the session
+// itself is deleted so the map does not grow without bound.
+func (d *daemon) dropRunner(sk string, created int64) {
+	d.runnersMu.Lock()
+	delete(d.runners, runnerKey{sk: sk, created: created})
+	d.runnersMu.Unlock()
+}
+
+// isSessionBusy reports whether the session has work in flight or queued.
+// Settings that feed into RunOptions (backend, model, think, sandbox, cwd,
+// system prompt) are frozen while this returns true so messages already
+// committed to the session run with the configuration the user expected.
+func (d *daemon) isSessionBusy(sk string, created int64) bool {
+	sr := d.lookupRunner(sk, created)
+	if sr == nil {
+		return false
+	}
+	sr.mu.Lock()
+	defer sr.mu.Unlock()
+	return sr.processing || len(sr.queue) > 0 || sr.runner.IsBusy()
 }
 
 // transportPrefix extracts the transport prefix from a chatID (e.g. "tg" from "tg:123").
@@ -207,6 +247,11 @@ type queuedMsg struct {
 	text        string
 	progressID  string // ID of "В очереди" message to reuse as progress
 	attachments []attachment
+	// sessKey + sessCreated identify the session this message is bound to.
+	// Captured at enqueue time so subsequent /switch or /new cannot redirect
+	// it to a different session.
+	sessKey     string
+	sessCreated int64
 }
 
 // ensurePath makes sure PATH includes the directory of the running binary.
@@ -392,7 +437,7 @@ func runDaemon() {
 		disabled:   disabled,
 		pollCtx:    make(map[string]context.CancelFunc),
 		store:      store,
-		runners:    make(map[string]*sessionRunner),
+		runners:    make(map[runnerKey]*sessionRunner),
 		sendPause:  make(map[string]time.Time),
 		sendFails:  make(map[string]int),
 		identities: tgIdents,

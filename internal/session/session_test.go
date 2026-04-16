@@ -166,7 +166,7 @@ func TestNewSnapshotsScopeDefaults(t *testing.T) {
 
 	store.UpdateScopeDefaults("user:claw", func(def *ScopeDefaults) {
 		def.Backend = "claude"
-		def.Model = "claude-sonnet-4-6[1m]"
+		def.Model = "sonnet"
 		def.Think = "medium"
 		def.Sandbox = "off"
 	})
@@ -186,6 +186,50 @@ func TestNewSnapshotsScopeDefaults(t *testing.T) {
 	}
 	if sess.Sandbox != "on" {
 		t.Fatalf("snapshot sandbox changed to %q", sess.Sandbox)
+	}
+}
+
+func TestNewAssignsUniqueCreatedAcrossRapidCalls(t *testing.T) {
+	store := &Store{
+		Chats: make(map[string]*ChatSessions),
+		Scope: make(map[string]*ScopeDefaults),
+	}
+	defaults := ScopeDefaults{Backend: "claude"}
+
+	const n = 5
+	seen := make(map[int64]bool, n)
+	for i := 0; i < n; i++ {
+		sess := store.New("user:claw", "s", "/tmp", defaults)
+		if seen[sess.Created] {
+			t.Fatalf("duplicate Created %d on iteration %d", sess.Created, i)
+		}
+		seen[sess.Created] = true
+	}
+}
+
+func TestGetReturnsCloneByCreated(t *testing.T) {
+	store := &Store{
+		Chats: make(map[string]*ChatSessions),
+		Scope: make(map[string]*ScopeDefaults),
+	}
+	sess := store.New("user:claw", "main", "/tmp", ScopeDefaults{Backend: "claude"})
+
+	got := store.Get("user:claw", sess.Created)
+	if got == nil {
+		t.Fatal("Get returned nil for existing session")
+	}
+	if got.Created != sess.Created || got.Name != sess.Name {
+		t.Fatalf("Get returned wrong session: %+v", got)
+	}
+
+	got.Name = "mutated"
+	again := store.Get("user:claw", sess.Created)
+	if again.Name != "main" {
+		t.Fatalf("Get must return a clone, got mutation leak: %q", again.Name)
+	}
+
+	if store.Get("user:claw", sess.Created+999) != nil {
+		t.Fatal("Get must return nil for unknown Created")
 	}
 }
 
