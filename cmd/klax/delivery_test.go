@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/PiDmitrius/klax/internal/transport"
 )
@@ -38,6 +39,47 @@ func TestSplitMessageHTMLPreservesVisibleText(t *testing.T) {
 	}
 	if rebuilt.String() != stripHTML(text) {
 		t.Fatalf("visible text mismatch after split")
+	}
+}
+
+func TestSplitMessagePreservesUTF8Runes(t *testing.T) {
+	text := strings.Repeat("обновлён ", 40)
+	chunks := splitMessage(text, 17, "")
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+
+	var rebuilt strings.Builder
+	for i, chunk := range chunks {
+		if !utf8.ValidString(chunk) {
+			t.Fatalf("chunk %d is not valid utf-8: %q", i, chunk)
+		}
+		rebuilt.WriteString(chunk)
+	}
+	if rebuilt.String() != text {
+		t.Fatalf("text mismatch after utf-8 split")
+	}
+}
+
+func TestSplitMessageHTMLPreservesUTF8Runes(t *testing.T) {
+	text := "<b>" + strings.Repeat("обновлён ", 30) + "</b>"
+	chunks := splitMessage(text, 23, "html")
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+
+	var rebuilt strings.Builder
+	for i, chunk := range chunks {
+		if !utf8.ValidString(chunk) {
+			t.Fatalf("chunk %d is not valid utf-8: %q", i, chunk)
+		}
+		if err := validateHTMLNesting(chunk); err != nil {
+			t.Fatalf("chunk %d invalid html nesting: %v\n%s", i, err, chunk)
+		}
+		rebuilt.WriteString(stripHTML(chunk))
+	}
+	if rebuilt.String() != stripHTML(text) {
+		t.Fatalf("visible text mismatch after html utf-8 split")
 	}
 }
 
@@ -82,11 +124,19 @@ type testError struct{ msg string }
 
 func (e *testError) Error() string { return e.msg }
 
+type fakeSendCall struct {
+	chatID  string
+	text    string
+	replyTo string
+	format  string
+}
+
 type fakeTransport struct {
 	sendIDs   []string
 	sendCalls int
 	editCalls int
 	editErr   error
+	sendLog   []fakeSendCall
 	lastEdit  struct {
 		chatID  string
 		message string
@@ -97,11 +147,13 @@ type fakeTransport struct {
 
 func (f *fakeTransport) SendMessage(chatID, text, replyTo, format string) error {
 	f.sendCalls++
+	f.sendLog = append(f.sendLog, fakeSendCall{chatID: chatID, text: text, replyTo: replyTo, format: format})
 	return nil
 }
 
 func (f *fakeTransport) SendMessageReturnID(chatID, text, replyTo, format string) (string, error) {
 	f.sendCalls++
+	f.sendLog = append(f.sendLog, fakeSendCall{chatID: chatID, text: text, replyTo: replyTo, format: format})
 	if len(f.sendIDs) == 0 {
 		return "generated-id", nil
 	}
@@ -120,6 +172,16 @@ func (f *fakeTransport) EditMessage(chatID, messageID, text, format string) erro
 		return f.editErr
 	}
 	return nil
+}
+
+func newTestDeliveryDaemon(tp transport.Transport) *daemon {
+	return &daemon{
+		transports: map[string]transport.Transport{"tg": tp},
+		formats:    map[string]string{"tg": "html"},
+		sendPause:  make(map[string]time.Time),
+		sendFails:  make(map[string]int),
+		chatEvents: make(map[string]uint64),
+	}
 }
 
 func TestTryEditTreatsNotModifiedAsSuccess(t *testing.T) {
@@ -151,15 +213,12 @@ func TestTryEditFallsBackToPlainFormat(t *testing.T) {
 }
 
 func TestSyncMessageChainSkipsCachedEdits(t *testing.T) {
-	d := &daemon{
-		sendPause: make(map[string]time.Time),
-		sendFails: make(map[string]int),
-	}
 	tp := &fakeTransport{}
+	d := newTestDeliveryDaemon(tp)
 	ctx := context.Background()
 	chain := newMessageChain()
 
-	chain, err := d.syncMessageChain(ctx, "tg:1", tp, "1", "", chain, "hello", "html")
+	chain, err := d.syncMessageChain(ctx, "tg:1", "", chain, "hello", "html")
 	if err != nil {
 		t.Fatalf("first sync failed: %v", err)
 	}
@@ -170,11 +229,87 @@ func TestSyncMessageChainSkipsCachedEdits(t *testing.T) {
 		t.Fatalf("expected one send call, got %d", tp.sendCalls)
 	}
 
-	_, err = d.syncMessageChain(ctx, "tg:1", tp, "1", "", chain, "hello", "html")
+	_, err = d.syncMessageChain(ctx, "tg:1", "", chain, "hello", "html")
 	if err != nil {
 		t.Fatalf("second sync failed: %v", err)
 	}
 	if tp.editCalls != 0 {
 		t.Fatalf("expected cached sync to skip edits, got %d edit calls", tp.editCalls)
+	}
+}
+
+func TestSyncMessageChainKeepsFollowupChunkUnrepliedWithoutGap(t *testing.T) {
+	tp := &fakeTransport{sendIDs: []string{"first", "second"}}
+	d := newTestDeliveryDaemon(tp)
+	ctx := context.Background()
+
+	chain, err := d.syncMessageChain(ctx, "tg:1", "user-msg", nil, "hello", "html")
+	if err != nil {
+		t.Fatalf("first sync failed: %v", err)
+	}
+	if len(tp.sendLog) != 1 || tp.sendLog[0].replyTo != "user-msg" {
+		t.Fatalf("expected first chunk to reply to user, got %+v", tp.sendLog)
+	}
+
+	longText := strings.Repeat("chunk ", 900)
+	_, err = d.syncMessageChain(ctx, "tg:1", "user-msg", chain, longText, "html")
+	if err != nil {
+		t.Fatalf("second sync failed: %v", err)
+	}
+	if len(tp.sendLog) < 2 {
+		t.Fatalf("expected second send for appended chunk, got %d sends", len(tp.sendLog))
+	}
+	if got := tp.sendLog[1].replyTo; got != "" {
+		t.Fatalf("expected appended chunk without reply after contiguous flow, got %q", got)
+	}
+}
+
+func TestSyncMessageChainRepliesAfterInboundGap(t *testing.T) {
+	tp := &fakeTransport{sendIDs: []string{"first", "second"}}
+	d := newTestDeliveryDaemon(tp)
+	ctx := context.Background()
+
+	chain, err := d.syncMessageChain(ctx, "tg:1", "user-msg", nil, "hello", "html")
+	if err != nil {
+		t.Fatalf("first sync failed: %v", err)
+	}
+
+	d.bumpChatActivity("tg:1")
+
+	longText := strings.Repeat("chunk ", 900)
+	_, err = d.syncMessageChain(ctx, "tg:1", "user-msg", chain, longText, "html")
+	if err != nil {
+		t.Fatalf("second sync failed: %v", err)
+	}
+	if len(tp.sendLog) < 2 {
+		t.Fatalf("expected second send for appended chunk, got %d sends", len(tp.sendLog))
+	}
+	if got := tp.sendLog[1].replyTo; got != "user-msg" {
+		t.Fatalf("expected appended chunk to reply after gap, got %q", got)
+	}
+}
+
+func TestSyncMessageChainDoesNotReplyForAppendedChunkWhenReusingExistingMessageWithoutGap(t *testing.T) {
+	tp := &fakeTransport{sendIDs: []string{"second"}}
+	d := newTestDeliveryDaemon(tp)
+	d.chatEvents["tg:1"] = 3
+	ctx := context.Background()
+
+	chain := newMessageChain("queued")
+	chain.anchorReplyTo = "user-msg"
+	chain.lastCreateActivity = 3
+
+	longText := strings.Repeat("chunk ", 900)
+	_, err := d.syncMessageChain(ctx, "tg:1", "user-msg", chain, longText, "html")
+	if err != nil {
+		t.Fatalf("sync failed: %v", err)
+	}
+	if len(tp.sendLog) == 0 {
+		t.Fatal("expected appended sends, got none")
+	}
+	for i, call := range tp.sendLog {
+		if call.replyTo != "" {
+			t.Fatalf("expected appended chunk %d without reply when no gap happened, got %q", i, call.replyTo)
+		}
 	}
 }
