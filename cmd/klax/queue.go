@@ -61,12 +61,19 @@ func (d *daemon) enqueueWithAttachments(chatID, msgID, text string, attachments 
 	busy := sr.runner.IsBusy()
 	if busy {
 		// Send queue notification and capture its ID for later reuse as progress message.
-		t, rawChatID, _ := d.transportFor(chatID)
-		if t != nil {
-			qlen := len(sr.queue) + 1 // +1 for this message being added
-			if mid, err := t.SendMessageReturnID(rawChatID, fmt.Sprintf("⏳ В очереди: %d", qlen), msgID, ""); err == nil {
-				qm.progressID = mid
-			}
+		qlen := len(sr.queue) + 1 // +1 for this message being added
+		ctx, cancel := withDeliveryTimeout(context.Background())
+		res, err := d.performTransportOp(ctx, transportOp{
+			fullChatID: chatID,
+			replyTo:    msgID,
+			text:       fmt.Sprintf("⏳ В очереди: %d", qlen),
+			returnID:   true,
+			format:     "",
+		})
+		cancel()
+		if err == nil {
+			qm.progressID = res.messageID
+			qm.progressSeq = res.activity
 		}
 	}
 	sr.queue = append(sr.queue, qm)
@@ -108,10 +115,14 @@ func (d *daemon) processSessionQueue(sr *sessionRunner) {
 		// Update queue position in remaining messages' progress notifications.
 		for i, qm := range sr.queue {
 			if qm.progressID != "" {
-				t, rawChatID, _ := d.transportFor(qm.chatID)
-				if t != nil {
-					t.EditMessage(rawChatID, qm.progressID, fmt.Sprintf("⏳ В очереди: %d", i+1), "")
-				}
+				ctx, cancel := withDeliveryTimeout(context.Background())
+				_, _ = d.performTransportOp(ctx, transportOp{
+					fullChatID: qm.chatID,
+					messageID:  qm.progressID,
+					text:       fmt.Sprintf("⏳ В очереди: %d", i+1),
+					format:     "",
+				})
+				cancel()
 			}
 		}
 		sr.mu.Unlock()
@@ -130,6 +141,10 @@ func (d *daemon) clearSessionQueue(sk string, created int64) int {
 	sr.queue = nil
 	sr.mu.Unlock()
 	return n
+}
+
+func (d *daemon) shouldReuseQueuedProgress(msg queuedMsg) bool {
+	return msg.progressID != "" && msg.progressSeq != 0 && d.chatActivity(msg.chatID) == msg.progressSeq
 }
 
 func (d *daemon) runBackend(msg queuedMsg) {
@@ -154,14 +169,30 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	defer cancel()
 
 	// Progress message — edit in place.
-	// If this message was queued, reuse the "В очереди" notification.
-	t, rawChatID, chatFmt := d.transportFor(msg.chatID)
-	progressChain := newMessageChain(msg.progressID)
+	// If this message was queued and nothing happened in the chat since then,
+	// reuse the queue notification. Otherwise point to the new answer below.
+	t, _, chatFmt := d.transportFor(msg.chatID)
+	var progressChain *messageChain
+	reuseQueuedProgress := d.shouldReuseQueuedProgress(msg)
+	needsRedirectMarker := !reuseQueuedProgress && msg.progressID != ""
+	if reuseQueuedProgress {
+		progressChain = newMessageChain(msg.progressID)
+		progressChain.lastCreateActivity = msg.progressSeq
+	}
 	if t != nil {
 		var err error
-		progressChain, err = d.syncMessageChain(ctx, msg.chatID, t, rawChatID, msg.msgID, progressChain, "...", "")
+		progressChain, err = d.syncMessageChain(ctx, msg.chatID, msg.msgID, progressChain, "...", "")
 		if err != nil {
 			progressChain = nil
+		} else if needsRedirectMarker {
+			markerCtx, markerCancel := withDeliveryTimeout(ctx)
+			_, _ = d.performTransportOp(markerCtx, transportOp{
+				fullChatID: msg.chatID,
+				messageID:  msg.progressID,
+				text:       "↓",
+				format:     "",
+			})
+			markerCancel()
 		}
 	}
 
@@ -177,7 +208,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		newText := formatToolLines(toolLines, chatFmt) + "\n\n..."
 		if progressChain != nil && len(progressChain.ids) > 0 {
 			var err error
-			progressChain, err = d.syncMessageChain(ctx, msg.chatID, t, rawChatID, "", progressChain, newText, chatFmt)
+			progressChain, err = d.syncMessageChain(ctx, msg.chatID, msg.msgID, progressChain, newText, chatFmt)
 			if err != nil {
 				log.Printf("progress update failed: %v", err)
 			}
@@ -260,7 +291,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		}
 		finalText += fmt.Sprintf("\n❌ Ошибка: %v", result.Error)
 		if progressChain != nil && len(progressChain.ids) > 0 && t != nil {
-			_, err := d.syncMessageChain(ctx, msg.chatID, t, rawChatID, "", progressChain, finalText, chatFmt)
+			_, err := d.syncMessageChain(ctx, msg.chatID, msg.msgID, progressChain, finalText, chatFmt)
 			if err != nil {
 				log.Printf("final error delivery failed: %v", err)
 			}
@@ -292,7 +323,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	}
 
 	if t != nil {
-		_, err := d.syncMessageChain(ctx, msg.chatID, t, rawChatID, "", progressChain, finalText, chatFmt)
+		_, err := d.syncMessageChain(ctx, msg.chatID, msg.msgID, progressChain, finalText, chatFmt)
 		if err != nil {
 			log.Printf("final delivery failed: %v", err)
 		}

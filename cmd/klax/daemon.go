@@ -58,6 +58,7 @@ type daemon struct {
 	drainWg    sync.WaitGroup // tracks active sessionRunners for drain
 	sendPause  map[string]time.Time
 	sendFails  map[string]int
+	chatEvents map[string]uint64
 	identities map[int64]string  // telegram userID -> canonical user ID
 	maxIdents  map[int64]string  // max userID -> canonical user ID
 	vkIdents   map[int]string    // vk userID -> canonical user ID
@@ -246,6 +247,7 @@ type queuedMsg struct {
 	msgID       string // user's message ID (for replyTo)
 	text        string
 	progressID  string // ID of "В очереди" message to reuse as progress
+	progressSeq uint64 // chat activity right after the queue message was created
 	attachments []attachment
 	// sessKey + sessCreated identify the session this message is bound to.
 	// Captured at enqueue time so subsequent /switch or /new cannot redirect
@@ -440,6 +442,7 @@ func runDaemon() {
 		runners:    make(map[runnerKey]*sessionRunner),
 		sendPause:  make(map[string]time.Time),
 		sendFails:  make(map[string]int),
+		chatEvents: make(map[string]uint64),
 		identities: tgIdents,
 		maxIdents:  maxIdents,
 		vkIdents:   vkIdents,
@@ -607,6 +610,19 @@ func (d *daemon) isDraining() bool {
 	return d.draining
 }
 
+func (d *daemon) bumpChatActivity(chatID string) uint64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.chatEvents[chatID]++
+	return d.chatEvents[chatID]
+}
+
+func (d *daemon) chatActivity(chatID string) uint64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.chatEvents[chatID]
+}
+
 func (d *daemon) watchMarker() {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -644,13 +660,14 @@ func (d *daemon) pollTG(ctx context.Context) {
 			if msg == nil {
 				continue
 			}
+			chatID := fmt.Sprintf("tg:%d", msg.Chat.ID)
+			d.bumpChatActivity(chatID)
 			// /id — respond to anyone, even unauthenticated
 			if strings.TrimSpace(msg.Text) == "/id" || strings.HasPrefix(msg.Text, "/id@") {
 				reply := fmt.Sprintf("user_id: %d\nchat_id: %d", msg.From.ID, msg.Chat.ID)
-				bot.SendMessage(fmt.Sprintf("%d", msg.Chat.ID), reply, "", "")
+				d.sendPlain(chatID, "", reply)
 				continue
 			}
-			chatID := fmt.Sprintf("tg:%d", msg.Chat.ID)
 			msgID := fmt.Sprintf("%d", msg.MessageID)
 
 			// Extract text: prefer Text, fall back to Caption for media messages.
@@ -717,24 +734,21 @@ func (d *daemon) pollMAX(ctx context.Context) {
 			}
 			senderID := upd.Message.Sender.UserID
 			text := upd.Message.Body.Text
+			var chatID string
+			if upd.Message.Recipient.ChatType == "dialog" {
+				chatID = fmt.Sprintf("mx:%d", senderID)
+			} else {
+				chatID = fmt.Sprintf("mx:%d", upd.Message.Recipient.ChatID)
+			}
+			d.bumpChatActivity(chatID)
 			// /id — respond to anyone
 			if strings.TrimSpace(text) == "/id" {
 				reply := fmt.Sprintf("user_id: %d", senderID)
 				if upd.Message.Recipient.ChatID != 0 {
 					reply += fmt.Sprintf("\nchat_id: %d", upd.Message.Recipient.ChatID)
 				}
-				if upd.Message.Recipient.ChatType == "dialog" {
-					bot.SendMessage(fmt.Sprintf("%d", senderID), reply, "", "")
-				} else {
-					bot.SendMessage(fmt.Sprintf("%d", upd.Message.Recipient.ChatID), reply, "", "")
-				}
+				d.sendPlain(chatID, "", reply)
 				continue
-			}
-			var chatID string
-			if upd.Message.Recipient.ChatType == "dialog" {
-				chatID = fmt.Sprintf("mx:%d", senderID)
-			} else {
-				chatID = fmt.Sprintf("mx:%d", upd.Message.Recipient.ChatID)
 			}
 			msgID := upd.Message.Body.Mid
 
@@ -804,16 +818,17 @@ func (d *daemon) pollVK(ctx context.Context) {
 				continue
 			}
 			msg := mn.Message
+			chatID := fmt.Sprintf("vk:%d", msg.PeerID)
+			d.bumpChatActivity(chatID)
 			// /id — respond to anyone
 			if strings.TrimSpace(msg.Text) == "/id" {
 				reply := fmt.Sprintf("from_id: %d\npeer_id: %d", msg.FromID, msg.PeerID)
-				bot.SendMessage(strconv.Itoa(msg.PeerID), reply, "", "")
+				d.sendPlain(chatID, "", reply)
 				continue
 			}
 			if msg.Text == "" {
 				continue
 			}
-			chatID := fmt.Sprintf("vk:%d", msg.PeerID)
 			msgID := strconv.Itoa(msg.ID)
 			if d.isVKAllowed(msg.FromID) {
 				d.handleMessage(chatID, msgID, msg.Text)

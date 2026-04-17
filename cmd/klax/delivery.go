@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/PiDmitrius/klax/internal/transport"
 )
@@ -31,6 +32,11 @@ func splitMessage(text string, limit int, format string) []string {
 		// Try to split on a newline.
 		if idx := strings.LastIndex(text[:limit], "\n"); idx > 0 {
 			cut = idx
+		}
+		cut = alignUTF8Cut(text, cut)
+		if cut <= 0 {
+			_, size := utf8.DecodeRuneInString(text)
+			cut = size
 		}
 		chunks = append(chunks, text[:cut])
 		text = text[cut:]
@@ -189,6 +195,11 @@ func htmlTextCut(text string, limit int) int {
 	if cut <= 0 || cut > limit {
 		cut = avoidEntitySplit(text, limit)
 	}
+	cut = alignUTF8Cut(text, cut)
+	if cut <= 0 {
+		_, size := utf8.DecodeRuneInString(text)
+		return size
+	}
 	return cut
 }
 
@@ -205,6 +216,16 @@ func avoidEntitySplit(text string, cut int) int {
 	}
 	if end := strings.IndexByte(text[amp:], ';'); end != -1 && amp < cut {
 		return amp
+	}
+	return cut
+}
+
+func alignUTF8Cut(text string, cut int) int {
+	if cut <= 0 || cut >= len(text) {
+		return cut
+	}
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
 	}
 	return cut
 }
@@ -404,9 +425,65 @@ func tryEdit(ctx context.Context, t transport.Transport, chatID, msgID, text, fo
 	return err
 }
 
+type transportOp struct {
+	fullChatID string
+	messageID  string
+	replyTo    string
+	text       string
+	format     string
+	returnID   bool
+	useDefault bool
+}
+
+type transportResult struct {
+	messageID string
+	activity  uint64
+}
+
+func (d *daemon) performTransportOp(ctx context.Context, op transportOp) (transportResult, error) {
+	t, rawChatID, fmtStr := d.transportFor(op.fullChatID)
+	if t == nil {
+		err := errors.New("no transport for " + op.fullChatID)
+		log.Printf("%v", err)
+		return transportResult{}, err
+	}
+
+	text := op.text
+	format := op.format
+	if op.useDefault {
+		format = fmtStr
+	}
+	if format == "" && op.useDefault {
+		text = stripHTML(text)
+	}
+
+	var (
+		res transportResult
+		err error
+	)
+	if op.messageID != "" {
+		err = tryEdit(ctx, t, rawChatID, op.messageID, text, format)
+	} else if op.returnID {
+		res.messageID, err = trySendReturnID(ctx, t, rawChatID, op.replyTo, text, format)
+		if err == nil {
+			res.activity = d.bumpChatActivity(op.fullChatID)
+		}
+	} else {
+		err = trySend(ctx, t, rawChatID, op.replyTo, text, format)
+		if err == nil {
+			res.activity = d.bumpChatActivity(op.fullChatID)
+		}
+	}
+
+	d.noteSendResult(transportPrefix(op.fullChatID), err)
+	return res, err
+}
+
 type messageChain struct {
-	ids  []string
-	msgs map[string]string
+	ids                []string
+	msgs               map[string]string
+	anchorReplyTo      string
+	lastCreateActivity uint64
 }
 
 func newMessageChain(ids ...string) *messageChain {
@@ -433,13 +510,15 @@ func (mc *messageChain) ensure() *messageChain {
 // syncMessageChain keeps a chunked message chain in sync with the provided text.
 // It is shared by progress updates and final delivery, so HTML-safe splitting and
 // message-length handling live in exactly one place.
-func (d *daemon) syncMessageChain(ctx context.Context, fullChatID string, t transport.Transport, chatID, replyTo string, chain *messageChain, text, format string) (*messageChain, error) {
+func (d *daemon) syncMessageChain(ctx context.Context, fullChatID, replyTo string, chain *messageChain, text, format string) (*messageChain, error) {
 	if format == "" {
 		text = stripHTML(text)
 	}
 	chunks := splitMessage(text, maxMessageLen, format)
-	transportName := transportPrefix(fullChatID)
 	chain = chain.ensure()
+	if replyTo != "" {
+		chain.anchorReplyTo = replyTo
+	}
 
 	for i, chunk := range chunks {
 		if ctx.Err() != nil {
@@ -454,72 +533,77 @@ func (d *daemon) syncMessageChain(ctx context.Context, fullChatID string, t tran
 				sendCancel()
 				continue
 			}
-			err = tryEdit(sendCtx, t, chatID, chain.ids[i], chunk, format)
+			_, err = d.performTransportOp(sendCtx, transportOp{
+				fullChatID: fullChatID,
+				messageID:  chain.ids[i],
+				text:       chunk,
+				format:     format,
+			})
 			if err == nil {
 				chain.msgs[cacheKey] = cacheVal
 			}
 		} else {
-			var msgID string
 			chunkReplyTo := ""
-			if i == 0 {
-				chunkReplyTo = replyTo
+			if len(chain.ids) == 0 {
+				chunkReplyTo = chain.anchorReplyTo
+			} else if chain.anchorReplyTo != "" && d.chatActivity(fullChatID) != chain.lastCreateActivity {
+				chunkReplyTo = chain.anchorReplyTo
 			}
-			msgID, err = trySendReturnID(sendCtx, t, chatID, chunkReplyTo, chunk, format)
+			res, sendErr := d.performTransportOp(sendCtx, transportOp{
+				fullChatID: fullChatID,
+				replyTo:    chunkReplyTo,
+				text:       chunk,
+				format:     format,
+				returnID:   true,
+			})
+			err = sendErr
 			if err == nil {
-				chain.ids = append(chain.ids, msgID)
-				chain.msgs[msgID] = chunk + "\x00" + format
+				chain.ids = append(chain.ids, res.messageID)
+				chain.msgs[res.messageID] = chunk + "\x00" + format
+				chain.lastCreateActivity = res.activity
 			}
 		}
 		sendCancel()
 		if err != nil {
-			d.noteSendResult(transportName, err)
 			log.Printf("deliver error (chunk %d/%d): %v", i+1, len(chunks), err)
 			// Last resort: try to notify user about the failure.
 			if i == 0 && ctx.Err() == nil {
 				notifyCtx, notifyCancel := withDeliveryTimeout(ctx)
-				notifyErr := retryDo(notifyCtx, func() error {
-					return t.SendMessage(chatID, "Ошибка доставки ответа. Попробуйте /status", "", "")
+				_, _ = d.performTransportOp(notifyCtx, transportOp{
+					fullChatID: fullChatID,
+					text:       "Ошибка доставки ответа. Попробуйте /status",
 				})
 				notifyCancel()
-				d.noteSendResult(transportName, notifyErr)
 			}
 			return chain, err
 		}
-		d.noteSendResult(transportName, nil)
 	}
 	return chain, nil
 }
 
 func (d *daemon) sendMessage(chatID, replyTo, text string) {
-	t, raw, fmtStr := d.transportFor(chatID)
-	if t == nil {
-		log.Printf("no transport for %s", chatID)
-		return
-	}
-	if fmtStr == "" {
-		text = stripHTML(text)
-	}
 	ctx, cancel := withDeliveryTimeout(context.Background())
-	err := trySend(ctx, t, raw, replyTo, text, fmtStr)
+	_, err := d.performTransportOp(ctx, transportOp{
+		fullChatID: chatID,
+		replyTo:    replyTo,
+		text:       text,
+		useDefault: true,
+	})
 	cancel()
-	d.noteSendResult(transportPrefix(chatID), err)
 	if err != nil {
 		log.Printf("send error: %v", err)
 	}
 }
 
 func (d *daemon) sendPlain(chatID, replyTo, text string) {
-	t, raw, _ := d.transportFor(chatID)
-	if t == nil {
-		log.Printf("no transport for %s", chatID)
-		return
-	}
 	ctx, cancel := withDeliveryTimeout(context.Background())
-	err := retryDo(ctx, func() error {
-		return t.SendMessage(raw, text, replyTo, "")
+	_, err := d.performTransportOp(ctx, transportOp{
+		fullChatID: chatID,
+		replyTo:    replyTo,
+		text:       text,
+		format:     "",
 	})
 	cancel()
-	d.noteSendResult(transportPrefix(chatID), err)
 	if err != nil {
 		log.Printf("send error: %v", err)
 	}
