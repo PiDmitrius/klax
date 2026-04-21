@@ -211,20 +211,19 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	// Progress plumbing. onProgress runs in the Runner's stdout-scanner
 	// goroutine and MUST NOT block on network: if it did, the backend's
 	// stdout pipe would fill and the child (e.g. rust codex behind the npm
-	// shim) would hang in pipe_write. Instead we hand the latest toolLines
+	// shim) would hang in pipe_write. Instead we hand the latest logItems
 	// snapshot to a worker via a mailbox channel and rate-limit Telegram
 	// edits there. Nothing is dropped: each snapshot is cumulative, so an
 	// overwritten pending snapshot loses no history — the next one carries
 	// everything the previous one would have shown plus newer entries.
-	var toolLines []string
-	lastProgress := ""
-	progressCh := make(chan []string, 1)
+	var logItems []runner.ProgressEvent
+	progressCh := make(chan []runner.ProgressEvent, 1)
 	workerDone := make(chan struct{})
 	go func() {
 		defer close(workerDone)
 		var lastSentText string
 		for snapshot := range progressCh {
-			newText := formatToolLines(snapshot, chatFmt) + "\n\n..."
+			newText := formatLogItems(snapshot, chatFmt) + "\n\n..."
 			if newText == lastSentText {
 				continue
 			}
@@ -245,13 +244,14 @@ func (d *daemon) runBackend(msg queuedMsg) {
 			}
 		}
 	}()
-	onProgress := func(status string) {
-		if status == lastProgress {
-			return
-		}
-		lastProgress = status
-		toolLines = append(toolLines, status)
-		snapshot := append([]string(nil), toolLines...)
+	onProgress := func(ev runner.ProgressEvent) {
+		// No upstream dedup here on purpose: the progress worker already
+		// suppresses duplicate edits via its `lastSentText` check, and
+		// collapsing equal ProgressEvents at this level would hide real
+		// repeats (same tool invoked twice, same rate-limit warning
+		// reappearing after a cooldown).
+		logItems = append(logItems, ev)
+		snapshot := append([]runner.ProgressEvent(nil), logItems...)
 		// Non-blocking mailbox: drop any stale pending snapshot in favour
 		// of the newer, superset one. Never blocks the scanner.
 		select {
@@ -345,8 +345,8 @@ func (d *daemon) runBackend(msg queuedMsg) {
 
 	if result.Error != nil {
 		finalText := "..."
-		if len(toolLines) > 0 {
-			finalText = formatToolLines(toolLines, chatFmt) + "\n\n..."
+		if len(logItems) > 0 {
+			finalText = formatLogItems(logItems, chatFmt) + "\n\n..."
 		}
 		finalText += fmt.Sprintf("\n❌ Ошибка: %v", result.Error)
 		if progressChain != nil && len(progressChain.ids) > 0 && t != nil {
@@ -373,10 +373,10 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		formatted = text
 	}
 
-	// Build final message: tool log + separator + answer.
+	// Build final message: progress log + separator + answer.
 	var finalText string
-	if len(toolLines) > 0 {
-		finalText = formatToolLines(toolLines, chatFmt) + "\n\n" + formatted
+	if len(logItems) > 0 {
+		finalText = formatLogItems(logItems, chatFmt) + "\n\n" + formatted
 	} else {
 		finalText = formatted
 	}

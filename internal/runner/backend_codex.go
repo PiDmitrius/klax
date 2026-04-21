@@ -96,109 +96,111 @@ type codexUsage struct {
 	OutputTokens      int `json:"output_tokens"`
 }
 
-func (b *CodexBackend) ParseEvent(line []byte) (Event, bool) {
+func (b *CodexBackend) ParseEvent(line []byte) ([]Event, bool) {
 	var ev codexEvent
 	if err := json.Unmarshal(line, &ev); err != nil {
-		return Event{}, false
+		return nil, false
 	}
+
+	single := func(e Event) ([]Event, bool) { return []Event{e}, true }
 
 	switch ev.Type {
 	case "thread.started":
-		return Event{
+		return single(Event{
 			Type:      "system",
 			SessionID: ev.ThreadID,
-		}, true
+		})
 
 	case "item.started":
 		if ev.Item == nil {
-			return Event{}, false
+			return nil, false
 		}
 		switch ev.Item.Type {
 		case "command_execution":
-			return Event{
+			return single(Event{
 				Type: "tool",
 				Tool: ToolUse{
 					Name:  "Bash",
 					Input: fmt.Sprintf(`{"command":"%s"}`, escapeJSON(ev.Item.Command)),
 				},
-			}, true
+			})
 		case "web_search":
-			return Event{
+			return single(Event{
 				Type: "tool",
 				Tool: ToolUse{Name: "WebSearch", Input: ""},
-			}, true
+			})
 		case "file_read":
-			return Event{
+			return single(Event{
 				Type: "tool",
 				Tool: ToolUse{
 					Name:  "Read",
 					Input: fmt.Sprintf(`{"file_path":"%s"}`, escapeJSON(ev.Item.FilePath)),
 				},
-			}, true
+			})
 		case "file_edit":
-			return Event{
+			return single(Event{
 				Type: "tool",
 				Tool: ToolUse{
 					Name:  "Edit",
 					Input: fmt.Sprintf(`{"file_path":"%s"}`, escapeJSON(ev.Item.FilePath)),
 				},
-			}, true
+			})
 		case "file_change":
 			name := "Edit"
 			if len(ev.Item.Changes) == 1 && ev.Item.Changes[0].Kind == "add" {
 				name = "Write"
 			}
-			return Event{
+			return single(Event{
 				Type: "tool",
 				Tool: ToolUse{
 					Name:  name,
 					Input: fmt.Sprintf(`{"file_path":"%s"}`, escapeJSON(codexChangePaths(ev.Item.Changes))),
 				},
-			}, true
+			})
 		case "todo_list":
-			return Event{
+			return single(Event{
 				Type: "tool",
 				Tool: ToolUse{Name: "TodoWrite", Input: ""},
-			}, true
+			})
 		case "mcp_tool_call":
-			return Event{
+			return single(Event{
 				Type: "tool",
 				Tool: ToolUse{
 					Name:  "MCP",
 					Input: fmt.Sprintf(`{"server":"%s","tool":"%s"}`, escapeJSON(ev.Item.Server), escapeJSON(ev.Item.Tool)),
 				},
-			}, true
+			})
 		}
-		return Event{Type: "unknown", Text: fmt.Sprintf("item.started:%s", ev.Item.Type)}, true
+		return single(Event{Type: "unknown", Text: fmt.Sprintf("item.started:%s", ev.Item.Type)})
 
 	case "item.completed":
 		if ev.Item == nil {
-			return Event{}, false
+			return nil, false
 		}
 		switch ev.Item.Type {
 		case "agent_message":
-			return Event{
+			return single(Event{
 				Type: "intermediate",
 				Text: ev.Item.Text,
-			}, true
+			})
 		case "command_execution":
-			return Event{Type: "text"}, true
+			return single(Event{Type: "text"})
 		case "web_search":
 			query := ev.Item.Query
 			if query != "" {
-				return Event{
+				return single(Event{
 					Type: "tool",
 					Tool: ToolUse{
 						Name:  "WebSearch",
 						Input: fmt.Sprintf(`{"query":"%s"}`, escapeJSON(query)),
 					},
-				}, true
+				})
 			}
-			return Event{Type: "text"}, true
+			return single(Event{Type: "text"})
 		case "file_read", "file_edit", "file_change", "todo_list", "mcp_tool_call":
-			return Event{Type: "text"}, true
+			return single(Event{Type: "text"})
 		}
-		return Event{Type: "unknown", Text: fmt.Sprintf("item.completed:%s", ev.Item.Type)}, true
+		return single(Event{Type: "unknown", Text: fmt.Sprintf("item.completed:%s", ev.Item.Type)})
 
 	case "turn.completed":
 		var e Event
@@ -212,13 +214,13 @@ func (b *CodexBackend) ParseEvent(line []byte) (Event, bool) {
 			// double-counting cached prompt tokens.
 			e.Usage.ContextUsed = ev.Usage.InputTokens
 		}
-		return e, true
+		return single(e)
 
 	case "turn.started":
-		return Event{}, false // expected, no info
+		return nil, false // expected, no info
 	}
 
-	return Event{Type: "unknown", Text: ev.Type}, true
+	return single(Event{Type: "unknown", Text: ev.Type})
 }
 
 // ReadSessionMeta reads model, effective context window, and the last turn's
