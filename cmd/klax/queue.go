@@ -172,6 +172,13 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	sr.cancel = cancel
 	sr.mu.Unlock()
 	defer cancel()
+	// Clear the cancel handle once the run is done so a later /abort on an
+	// idle session reports "Нет активных задач." instead of "❌ Прерван.".
+	defer func() {
+		sr.mu.Lock()
+		sr.cancel = nil
+		sr.mu.Unlock()
+	}()
 
 	// Progress message — edit in place.
 	// If this message was queued and nothing happened in the chat since then,
