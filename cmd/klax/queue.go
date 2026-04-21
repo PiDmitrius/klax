@@ -14,6 +14,11 @@ import (
 	"github.com/PiDmitrius/klax/internal/session"
 )
 
+// progressEditInterval is the minimum gap between two Telegram edits of the
+// same progress message. Keeps us well under Telegram's per-chat edit rate
+// limit without coupling stdout reading to network latency.
+const progressEditInterval = 500 * time.Millisecond
+
 func sanitizeAttachmentFilename(name string) string {
 	name = strings.ReplaceAll(name, "\\", "/")
 	name = filepath.Base(name)
@@ -167,6 +172,13 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	sr.cancel = cancel
 	sr.mu.Unlock()
 	defer cancel()
+	// Clear the cancel handle once the run is done so a later /abort on an
+	// idle session reports "Нет активных задач." instead of "❌ Прерван.".
+	defer func() {
+		sr.mu.Lock()
+		sr.cancel = nil
+		sr.mu.Unlock()
+	}()
 
 	// Progress message — edit in place.
 	// If this message was queued and nothing happened in the chat since then,
@@ -196,21 +208,62 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		}
 	}
 
+	// Progress plumbing. onProgress runs in the Runner's stdout-scanner
+	// goroutine and MUST NOT block on network: if it did, the backend's
+	// stdout pipe would fill and the child (e.g. rust codex behind the npm
+	// shim) would hang in pipe_write. Instead we hand the latest toolLines
+	// snapshot to a worker via a mailbox channel and rate-limit Telegram
+	// edits there. Nothing is dropped: each snapshot is cumulative, so an
+	// overwritten pending snapshot loses no history — the next one carries
+	// everything the previous one would have shown plus newer entries.
 	var toolLines []string
 	lastProgress := ""
+	progressCh := make(chan []string, 1)
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		var lastSentText string
+		for snapshot := range progressCh {
+			newText := formatToolLines(snapshot, chatFmt) + "\n\n..."
+			if newText == lastSentText {
+				continue
+			}
+			lastSentText = newText
+			if progressChain != nil && len(progressChain.ids) > 0 {
+				pc, err := d.syncMessageChain(ctx, msg.chatID, msg.msgID, progressChain, newText, chatFmt)
+				if err != nil {
+					log.Printf("progress update failed: %v", err)
+					continue
+				}
+				progressChain = pc
+			}
+			// Rate-limit edits so Telegram does not 429 us. Cancellation
+			// shortcuts the wait so /abort unblocks quickly.
+			select {
+			case <-ctx.Done():
+			case <-time.After(progressEditInterval):
+			}
+		}
+	}()
 	onProgress := func(status string) {
 		if status == lastProgress {
 			return
 		}
 		lastProgress = status
 		toolLines = append(toolLines, status)
-
-		newText := formatToolLines(toolLines, chatFmt) + "\n\n..."
-		if progressChain != nil && len(progressChain.ids) > 0 {
-			var err error
-			progressChain, err = d.syncMessageChain(ctx, msg.chatID, msg.msgID, progressChain, newText, chatFmt)
-			if err != nil {
-				log.Printf("progress update failed: %v", err)
+		snapshot := append([]string(nil), toolLines...)
+		// Non-blocking mailbox: drop any stale pending snapshot in favour
+		// of the newer, superset one. Never blocks the scanner.
+		select {
+		case progressCh <- snapshot:
+		default:
+			select {
+			case <-progressCh:
+			default:
+			}
+			select {
+			case progressCh <- snapshot:
+			default:
 			}
 		}
 	}
@@ -248,7 +301,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	}
 
 	backend := d.backendFor(sess)
-	result := sr.runner.Run(backend, runner.RunOptions{
+	result := sr.runner.Run(ctx, backend, runner.RunOptions{
 		Prompt:             prompt,
 		SessionID:          sess.ID,
 		CWD:                sess.CWD,
@@ -257,6 +310,12 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		Effort:             sess.ThinkOverride,
 		AppendSystemPrompt: sess.AppendSystemPrompt,
 	}, onProgress)
+
+	// Flush the progress worker before any final-delivery path runs: the
+	// worker mutates progressChain, so reading it here without a barrier
+	// would race.
+	close(progressCh)
+	<-workerDone
 
 	// Persist changes onto the same session record that started the run.
 	d.store.UpdateSession(sk, sess.Created, func(current *session.Session) {

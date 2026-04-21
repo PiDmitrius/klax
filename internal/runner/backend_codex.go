@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // CodexBackend implements Backend for OpenAI Codex CLI.
@@ -54,6 +55,9 @@ func (b *CodexBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 		cmd.Dir = opts.CWD
 	}
 	cmd.Stdin = strings.NewReader(opts.Prompt)
+	// Own process group so grandchildren (the npm shim spawns the real rust
+	// binary) can be signalled together via syscall.Kill(-pgid, ...).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return cmd, nil
 }
 
@@ -67,7 +71,7 @@ type codexEvent struct {
 
 type codexItem struct {
 	ID               string          `json:"id"`
-	Type             string          `json:"type"` // agent_message | command_execution | web_search | file_read | file_edit | file_change | ...
+	Type             string          `json:"type"` // agent_message | command_execution | web_search | file_read | file_edit | file_change | mcp_tool_call | ...
 	Text             string          `json:"text,omitempty"`
 	Command          string          `json:"command,omitempty"`
 	AggregatedOutput string          `json:"aggregated_output,omitempty"`
@@ -77,6 +81,8 @@ type codexItem struct {
 	FilePath         string          `json:"file_path,omitempty"` // file_read, file_edit
 	Changes          []codexChange   `json:"changes,omitempty"`   // file_change
 	Action           json.RawMessage `json:"action,omitempty"`
+	Server           string          `json:"server,omitempty"` // mcp_tool_call
+	Tool             string          `json:"tool,omitempty"`   // mcp_tool_call
 }
 
 type codexChange struct {
@@ -154,6 +160,14 @@ func (b *CodexBackend) ParseEvent(line []byte) (Event, bool) {
 				Type: "tool",
 				Tool: ToolUse{Name: "TodoWrite", Input: ""},
 			}, true
+		case "mcp_tool_call":
+			return Event{
+				Type: "tool",
+				Tool: ToolUse{
+					Name:  "MCP",
+					Input: fmt.Sprintf(`{"server":"%s","tool":"%s"}`, escapeJSON(ev.Item.Server), escapeJSON(ev.Item.Tool)),
+				},
+			}, true
 		}
 		return Event{Type: "unknown", Text: fmt.Sprintf("item.started:%s", ev.Item.Type)}, true
 
@@ -181,7 +195,7 @@ func (b *CodexBackend) ParseEvent(line []byte) (Event, bool) {
 				}, true
 			}
 			return Event{Type: "text"}, true
-		case "file_read", "file_edit", "file_change", "todo_list":
+		case "file_read", "file_edit", "file_change", "todo_list", "mcp_tool_call":
 			return Event{Type: "text"}, true
 		}
 		return Event{Type: "unknown", Text: fmt.Sprintf("item.completed:%s", ev.Item.Type)}, true

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // ClaudeBackend implements Backend for Claude Code CLI.
@@ -52,6 +53,9 @@ func (b *ClaudeBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 		cmd.Dir = opts.CWD
 	}
 	cmd.Stdin = strings.NewReader(opts.Prompt)
+	// Own process group so any grandchildren (plugins, subshells) can be
+	// signalled together via syscall.Kill(-pgid, ...).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return cmd, nil
 }
 
