@@ -549,7 +549,7 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		}
 		reply := "❌ Прерван."
 		if dropped > 0 {
-			reply += fmt.Sprintf(" Очередь очищена (%d сообщений удалено).", dropped)
+			reply += fmt.Sprintf(" Очередь очищена (сообщений: %d).", dropped)
 		}
 		d.sendMessage(chatID, msgID, reply)
 
