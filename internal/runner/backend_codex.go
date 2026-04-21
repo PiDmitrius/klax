@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // CodexBackend implements Backend for OpenAI Codex CLI.
@@ -54,6 +55,9 @@ func (b *CodexBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 		cmd.Dir = opts.CWD
 	}
 	cmd.Stdin = strings.NewReader(opts.Prompt)
+	// Own process group so grandchildren (the npm shim spawns the real rust
+	// binary) can be signalled together via syscall.Kill(-pgid, ...).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return cmd, nil
 }
 

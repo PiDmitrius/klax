@@ -1,9 +1,17 @@
 package runner
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 )
+
+func assertSetpgid(t *testing.T, cmd *exec.Cmd) {
+	t.Helper()
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
+		t.Fatalf("expected Setpgid to be set so /abort can signal grandchildren")
+	}
+}
 
 func TestClaudeSandboxOffSetsBypassPermissions(t *testing.T) {
 	cmd, err := (&ClaudeBackend{}).BuildCmd(RunOptions{Sandbox: "off"})
@@ -58,4 +66,20 @@ func TestCodexSandboxOnOmitsSandboxFlags(t *testing.T) {
 	if strings.Contains(args, "--sandbox") || strings.Contains(args, "--dangerously-bypass-approvals-and-sandbox") || strings.Contains(args, "--full-auto") {
 		t.Fatalf("expected no sandbox flags in safe mode, got %q", args)
 	}
+}
+
+func TestClaudeBuildsWithOwnProcessGroup(t *testing.T) {
+	cmd, err := (&ClaudeBackend{}).BuildCmd(RunOptions{Sandbox: "off"})
+	if err != nil {
+		t.Fatalf("BuildCmd: %v", err)
+	}
+	assertSetpgid(t, cmd)
+}
+
+func TestCodexBuildsWithOwnProcessGroup(t *testing.T) {
+	cmd, err := (&CodexBackend{}).BuildCmd(RunOptions{Sandbox: "off"})
+	if err != nil {
+		t.Fatalf("BuildCmd: %v", err)
+	}
+	assertSetpgid(t, cmd)
 }

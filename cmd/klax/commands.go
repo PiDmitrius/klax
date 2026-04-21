@@ -540,11 +540,13 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			d.sendMessage(chatID, msgID, "Нет активных задач.")
 			return
 		}
-		// Cancel context first (stops retry loops), then kill claude process.
+		// Cancel the run context. Runner.Run catches it and sends SIGTERM →
+		// SIGKILL to the backend's process group, then closes stdout to
+		// unblock its scanner. This is what makes /abort reach grandchildren
+		// (e.g. rust codex behind the npm shim).
 		if cancelFn != nil {
 			cancelFn()
 		}
-		sr.runner.Abort()
 		reply := "❌ Прерван."
 		if dropped > 0 {
 			reply += fmt.Sprintf(" Очередь очищена (%d сообщений удалено).", dropped)

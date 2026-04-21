@@ -4,16 +4,24 @@ package runner
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
+	"io"
+	"log"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/fmtutil"
 	"github.com/PiDmitrius/klax/internal/pathutil"
 )
+
+// killGracePeriod is how long we wait for a cancelled process group to exit
+// on its own after SIGTERM before following up with SIGKILL. Tune if backends
+// start doing meaningful cleanup on shutdown.
+const killGracePeriod = 3 * time.Second
 
 // ToolUse describes what the AI is doing right now.
 type ToolUse struct {
@@ -167,7 +175,6 @@ type ProgressFunc func(status string)
 // Runner executes an AI backend and tracks state.
 type Runner struct {
 	mu      sync.Mutex
-	cmd     *exec.Cmd
 	busy    bool
 	current ToolUse
 	startAt time.Time
@@ -196,18 +203,11 @@ func (r *Runner) Status() (tool ToolUse, toolElapsed, totalElapsed time.Duration
 	return r.current, te, total
 }
 
-// Abort kills the current process.
-func (r *Runner) Abort() {
-	r.mu.Lock()
-	cmd := r.cmd
-	r.mu.Unlock()
-	if cmd != nil && cmd.Process != nil {
-		cmd.Process.Kill()
-	}
-}
-
-// Run executes the backend with streaming output.
-func (r *Runner) Run(backend Backend, opts RunOptions, onProgress ProgressFunc) RunResult {
+// Run executes the backend with streaming output. Cancelling ctx sends SIGTERM
+// to the backend's process group, then SIGKILL after killGracePeriod, and
+// closes the stdout pipe so the scanner loop unblocks even if children still
+// hold write-ends (e.g. rust grandchild of the codex npm shim).
+func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onProgress ProgressFunc) RunResult {
 	r.mu.Lock()
 	r.busy = true
 	r.startAt = time.Now()
@@ -217,7 +217,6 @@ func (r *Runner) Run(backend Backend, opts RunOptions, onProgress ProgressFunc) 
 	defer func() {
 		r.mu.Lock()
 		r.busy = false
-		r.cmd = nil
 		r.current = ToolUse{}
 		r.mu.Unlock()
 	}()
@@ -226,10 +225,6 @@ func (r *Runner) Run(backend Backend, opts RunOptions, onProgress ProgressFunc) 
 	if err != nil {
 		return RunResult{Error: err}
 	}
-
-	r.mu.Lock()
-	r.cmd = cmd
-	r.mu.Unlock()
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -241,6 +236,9 @@ func (r *Runner) Run(backend Backend, opts RunOptions, onProgress ProgressFunc) 
 	if err := cmd.Start(); err != nil {
 		return RunResult{Error: fmt.Errorf("start: %w", err)}
 	}
+
+	stopWatcher := watchCancel(ctx, cmd.Process.Pid, stdout)
+	defer stopWatcher()
 
 	sessionID := opts.SessionID
 	var model string
@@ -389,4 +387,44 @@ func (r *Runner) Run(backend Backend, opts RunOptions, onProgress ProgressFunc) 
 		}
 	}
 	return result
+}
+
+// watchCancel escalates ctx cancellation into process-group termination. The
+// backend command is launched with Setpgid, so the child's pid equals the
+// pgid and we can signal every descendant (e.g. the rust grandchild behind
+// the codex npm shim) with a single Kill(-pid).
+//
+// On cancel it sends SIGTERM, waits killGracePeriod, then SIGKILL and closes
+// stdout so the scanner loop unblocks even if a grandchild still holds a
+// write-end of the pipe.
+//
+// The returned stop function must be called when the Run completes normally
+// to release the watcher goroutine.
+func watchCancel(ctx context.Context, pid int, stdout io.Closer) func() {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-done:
+			return
+		case <-ctx.Done():
+		}
+		// Signal the entire process group. Negative pid in Kill targets the
+		// group whose leader has |pid|. Errors here are best-effort: the
+		// process may have already exited.
+		_ = syscall.Kill(-pid, syscall.SIGTERM)
+		select {
+		case <-done:
+			return
+		case <-time.After(killGracePeriod):
+		}
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		// Closing stdout unblocks the scanner if a grandchild inherited and
+		// still holds the write-end after the shim exited.
+		if stdout != nil {
+			if err := stdout.Close(); err != nil {
+				log.Printf("runner: stdout close after cancel failed: %v", err)
+			}
+		}
+	}()
+	return func() { close(done) }
 }
