@@ -33,7 +33,11 @@ type Backend interface {
 	// BuildCmd creates the exec.Cmd for a given request.
 	BuildCmd(opts RunOptions) (*exec.Cmd, error)
 
-	// ParseEvent parses a single line of JSON output into a unified Event.
-	// Returns the event and true if the line was parsed, or false to skip.
-	ParseEvent(line []byte) (Event, bool)
+	// ParseEvent parses a single line of JSON output into zero or more
+	// unified events. A single backend line may carry multiple interleaved
+	// content blocks (e.g. a Claude assistant message with text + tool_use +
+	// text), and each becomes its own Event — preserving order within the
+	// stream. Returns the events and true if the line was recognised, or
+	// false/nil to skip.
+	ParseEvent(line []byte) ([]Event, bool)
 }

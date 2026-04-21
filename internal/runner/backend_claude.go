@@ -101,26 +101,26 @@ type claudeContentBlock struct {
 	Input json.RawMessage `json:"input,omitempty"`
 }
 
-func (b *ClaudeBackend) ParseEvent(line []byte) (Event, bool) {
+func (b *ClaudeBackend) ParseEvent(line []byte) ([]Event, bool) {
 	var ev claudeStreamEvent
 	if err := json.Unmarshal(line, &ev); err != nil {
-		return Event{}, false
+		return nil, false
 	}
 
 	switch ev.Type {
 	case "system":
-		return Event{
+		return []Event{{
 			Type:      "system",
 			SessionID: ev.SessionID,
 			Model:     ev.Model,
-		}, true
+		}}, true
 
 	case "user":
-		return Event{}, false
+		return nil, false
 
 	case "rate_limit_event":
 		if ev.RateLimitInfo != nil {
-			return Event{
+			return []Event{{
 				Type: "system",
 				RateLimit: &RateLimitInfo{
 					Status:         ev.RateLimitInfo.Status,
@@ -129,32 +129,44 @@ func (b *ClaudeBackend) ParseEvent(line []byte) (Event, bool) {
 					Utilization:    ev.RateLimitInfo.Utilization,
 					IsUsingOverage: ev.RateLimitInfo.IsUsingOverage,
 				},
-			}, true
+			}}, true
 		}
-		return Event{}, false
+		return nil, false
 
 	case "assistant":
 		if ev.Message == nil {
-			return Event{}, false
+			return nil, false
 		}
-		// Track context usage from message.
+		// Track context usage from message; stamp it on the first emitted
+		// event so the runner can track it without double-counting.
 		var usage ModelUsageInfo
 		if u := ev.Message.Usage; u != nil {
 			usage.ContextUsed = u.InputTokens + u.CacheRead + u.CacheCreation
 		}
+		var out []Event
 		for _, block := range ev.Message.Content {
 			switch block.Type {
 			case "tool_use":
-				return Event{
-					Type:  "tool",
-					Tool:  ToolUse{Name: block.Name, Input: string(block.Input)},
-					Usage: usage,
-				}, true
+				e := Event{
+					Type: "tool",
+					Tool: ToolUse{Name: block.Name, Input: string(block.Input)},
+				}
+				if len(out) == 0 {
+					e.Usage = usage
+				}
+				out = append(out, e)
 			case "text":
-				return Event{Type: "text", Usage: usage}, true
+				e := Event{Type: "text", Text: block.Text}
+				if len(out) == 0 {
+					e.Usage = usage
+				}
+				out = append(out, e)
 			}
 		}
-		return Event{}, false
+		if len(out) == 0 {
+			return nil, false
+		}
+		return out, true
 
 	case "result":
 		var e Event
@@ -184,10 +196,10 @@ func (b *ClaudeBackend) ParseEvent(line []byte) (Event, bool) {
 				e.Usage.CacheCreation = mu.CacheCreationTokens
 			}
 		}
-		return e, true
+		return []Event{e}, true
 	}
 
-	return Event{Type: "unknown", Text: ev.Type}, true
+	return []Event{{Type: "unknown", Text: ev.Type}}, true
 }
 
 // findBinary looks for a binary by name, with fallback paths relative to $HOME.

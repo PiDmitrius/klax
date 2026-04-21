@@ -185,8 +185,26 @@ type RunResult struct {
 	Error     error
 }
 
+// ProgressKind discriminates progress events surfaced during a run.
+type ProgressKind string
+
+const (
+	// ProgressKindTool is a tool invocation label ("⚙️ Bash: ls ~").
+	ProgressKindTool ProgressKind = "tool"
+	// ProgressKindNarration is an assistant text block that turned out not
+	// to be the final answer (another text block came after it). Frontends
+	// should render it distinctly from the final answer body.
+	ProgressKindNarration ProgressKind = "narration"
+)
+
+// ProgressEvent is a single streamed progress update.
+type ProgressEvent struct {
+	Kind ProgressKind
+	Text string
+}
+
 // ProgressFunc is called with human-readable progress updates.
-type ProgressFunc func(status string)
+type ProgressFunc func(ev ProgressEvent)
 
 // Runner executes an AI backend and tracks state.
 type Runner struct {
@@ -259,9 +277,50 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 	sessionID := opts.SessionID
 	var model string
 	var textParts []string
-	var lastIntermediate string // last intermediate message (codex thinking)
 	var usage ModelUsageInfo
 	var rateLimit *RateLimitInfo
+
+	// sawText tracks whether the stream emitted any assistant text block for
+	// this turn. When set, we ignore the redundant `result.text` field (which
+	// Claude echoes from the final assistant block) to avoid duplicating the
+	// tail of the answer in RunResult.Text.
+	var sawText bool
+
+	// pending accumulates consecutive assistant text blocks until a
+	// chronological boundary arrives — a tool invocation, an unknown
+	// progress item, a rate-limit event, or end of stream. On a boundary
+	// the accumulated block is demoted to a single narration progress
+	// event (preserving order in the log); at end of stream it is
+	// promoted to the final answer body. Accumulating across raw block
+	// boundaries keeps sequential text fragments of one logical reply
+	// together instead of artificially splitting them.
+	var pending string
+	demotePending := func() {
+		if pending == "" {
+			return
+		}
+		if onProgress != nil {
+			onProgress(ProgressEvent{Kind: ProgressKindNarration, Text: pending})
+		}
+		pending = ""
+	}
+	appendPending := func(t string) {
+		t = strings.Trim(t, "\n")
+		if t == "" {
+			return
+		}
+		if pending != "" {
+			pending += "\n\n" + t
+		} else {
+			pending = t
+		}
+		sawText = true
+	}
+
+	// done flips on `result` so later text/tool events in the stream
+	// cannot overwrite the locked-in final answer. Protects the
+	// invariant "once result arrives, the turn is over".
+	var done bool
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
@@ -270,112 +329,144 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 		if len(line) == 0 {
 			continue
 		}
+		if done {
+			// Drain further output to keep the pipe unblocked but do
+			// not touch state: the turn is finalised.
+			continue
+		}
 
-		ev, ok := backend.ParseEvent(line)
+		events, ok := backend.ParseEvent(line)
 		if !ok {
 			continue
 		}
 
-		switch ev.Type {
-		case "system":
-			if ev.SessionID != "" {
-				sessionID = ev.SessionID
-			}
-			if ev.Model != "" {
-				model = ev.Model
-			}
-			if ev.RateLimit != nil {
-				rateLimit = ev.RateLimit
-				if onProgress != nil && ev.RateLimit.Status != "allowed" {
-					onProgress(formatRateLimit(ev.RateLimit))
+		for _, ev := range events {
+			switch ev.Type {
+			case "system":
+				if ev.SessionID != "" {
+					sessionID = ev.SessionID
 				}
-			}
-
-		case "tool":
-			r.mu.Lock()
-			r.current = ev.Tool
-			r.toolAt = time.Now()
-			r.mu.Unlock()
-			if onProgress != nil {
-				onProgress(ev.Tool.String())
-			}
-			if ev.Usage.ContextUsed > 0 {
-				usage.ContextUsed = ev.Usage.ContextUsed
-			}
-
-		case "text":
-			r.mu.Lock()
-			r.current = ToolUse{}
-			r.mu.Unlock()
-			if ev.Usage.ContextUsed > 0 {
-				usage.ContextUsed = ev.Usage.ContextUsed
-			}
-
-		case "intermediate":
-			// Codex intermediate "thinking" message — overwrite previous,
-			// only the last one becomes the final answer.
-			lastIntermediate = ev.Text
-			r.mu.Lock()
-			r.current = ToolUse{}
-			r.mu.Unlock()
-
-		case "unknown":
-			if onProgress != nil && ev.Text != "" {
-				onProgress(fmt.Sprintf("❓ %s", ev.Text))
-			}
-
-		case "result":
-			if ev.Error != "" {
-				return RunResult{
-					SessionID: sessionID,
-					Error:     fmt.Errorf("%s: %s", backend.Name(), ev.Error),
+				if ev.Model != "" {
+					model = ev.Model
 				}
-			}
-			if ev.Text != "" {
-				textParts = append(textParts, ev.Text)
-			}
-			// Merge usage from result event.
-			if ev.Usage.Model != "" {
-				usage.Model = ev.Usage.Model
-			}
-			if ev.Usage.ContextWindow > 0 {
-				usage.ContextWindow = ev.Usage.ContextWindow
-			}
-			if ev.Usage.ContextUsed > 0 {
-				usage.ContextUsed = ev.Usage.ContextUsed
-			}
-			if ev.Usage.InputTokens > 0 {
-				usage.InputTokens = ev.Usage.InputTokens
-			}
-			if ev.Usage.OutputTokens > 0 {
-				usage.OutputTokens = ev.Usage.OutputTokens
-			}
-			if ev.Usage.CacheRead > 0 {
-				usage.CacheRead = ev.Usage.CacheRead
-			}
-			if ev.Usage.CacheCreation > 0 {
-				usage.CacheCreation = ev.Usage.CacheCreation
+				if ev.RateLimit != nil {
+					rateLimit = ev.RateLimit
+					if onProgress != nil && ev.RateLimit.Status != "allowed" {
+						// Flush pending first so the rate-limit line
+						// appears in the log AFTER the text that preceded
+						// it chronologically.
+						demotePending()
+						onProgress(ProgressEvent{Kind: ProgressKindTool, Text: formatRateLimit(ev.RateLimit)})
+					}
+				}
+
+			case "tool":
+				r.mu.Lock()
+				r.current = ev.Tool
+				r.toolAt = time.Now()
+				r.mu.Unlock()
+				// A tool call is the chronological boundary between
+				// narration and what comes after. Flush pending BEFORE
+				// emitting the tool so the log order matches the stream.
+				demotePending()
+				if onProgress != nil {
+					onProgress(ProgressEvent{Kind: ProgressKindTool, Text: ev.Tool.String()})
+				}
+				if ev.Usage.ContextUsed > 0 {
+					usage.ContextUsed = ev.Usage.ContextUsed
+				}
+
+			case "text":
+				r.mu.Lock()
+				r.current = ToolUse{}
+				r.mu.Unlock()
+				if ev.Usage.ContextUsed > 0 {
+					usage.ContextUsed = ev.Usage.ContextUsed
+				}
+				appendPending(ev.Text)
+
+			case "intermediate":
+				// Codex emits one `agent_message` per assistant text
+				// fragment within a turn. Accumulate; the boundary is
+				// the next tool/end-of-stream, same as Claude.
+				r.mu.Lock()
+				r.current = ToolUse{}
+				r.mu.Unlock()
+				appendPending(ev.Text)
+
+			case "unknown":
+				if onProgress != nil && ev.Text != "" {
+					demotePending()
+					onProgress(ProgressEvent{Kind: ProgressKindTool, Text: fmt.Sprintf("❓ %s", ev.Text)})
+				}
+
+			case "result":
+				done = true
+				if ev.Error != "" {
+					// Preserve any accumulated text as narration so the
+					// user still sees what the model said before the
+					// error — the queue error branch renders logItems
+					// alongside the error marker.
+					demotePending()
+					return RunResult{
+						SessionID: sessionID,
+						Error:     fmt.Errorf("%s: %s", backend.Name(), ev.Error),
+					}
+				}
+				// Trust result.text only when no assistant text blocks
+				// were seen (older Claude streams, or backends that do
+				// not emit per-block text). Otherwise result.text just
+				// duplicates the block already held in pending.
+				if ev.Text != "" && !sawText {
+					textParts = append(textParts, ev.Text)
+				}
+				// Merge usage from result event.
+				if ev.Usage.Model != "" {
+					usage.Model = ev.Usage.Model
+				}
+				if ev.Usage.ContextWindow > 0 {
+					usage.ContextWindow = ev.Usage.ContextWindow
+				}
+				if ev.Usage.ContextUsed > 0 {
+					usage.ContextUsed = ev.Usage.ContextUsed
+				}
+				if ev.Usage.InputTokens > 0 {
+					usage.InputTokens = ev.Usage.InputTokens
+				}
+				if ev.Usage.OutputTokens > 0 {
+					usage.OutputTokens = ev.Usage.OutputTokens
+				}
+				if ev.Usage.CacheRead > 0 {
+					usage.CacheRead = ev.Usage.CacheRead
+				}
+				if ev.Usage.CacheCreation > 0 {
+					usage.CacheCreation = ev.Usage.CacheCreation
+				}
 			}
 		}
 	}
 
 	waitErr := cmd.Wait()
 
-	// If cancellation drove the exit, any accumulated intermediate "thinking"
-	// is not a final answer and must not be persisted as one. Callers (see
-	// queue.go) treat a nil Error as success and would otherwise save the
-	// partial text and bump message counters as if the turn completed.
-	// SessionID is preserved so /resume can still reach the aborted thread.
+	// Cancellation path: whatever is in pending is not a sanctioned
+	// final answer, but it may be substantial narration the user was
+	// about to see. Demote it so the error branch in queue.go can surface
+	// it via logItems alongside the error marker. `Error != nil` still
+	// signals the caller that the turn did not complete, so session
+	// counters / model state do not advance.
 	if ctx.Err() != nil {
+		demotePending()
 		return RunResult{
 			SessionID: sessionID,
 			Error:     fmt.Errorf("%s: %w", backend.Name(), ctx.Err()),
 		}
 	}
 
-	// For codex: if no explicit result text, use last intermediate message.
-	if len(textParts) == 0 && lastIntermediate != "" {
-		textParts = append(textParts, lastIntermediate)
+	// The run completed normally — whatever stayed in pending past the
+	// last tool boundary is the actual reply.
+	if pending != "" {
+		textParts = append(textParts, pending)
+		pending = ""
 	}
 
 	if usage.Model == "" {

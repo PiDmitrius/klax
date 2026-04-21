@@ -88,10 +88,14 @@ func TestCodexParsesMcpToolCallAsTool(t *testing.T) {
 	b := &CodexBackend{}
 	line := []byte(`{"type":"item.started","item":{"id":"item_0","type":"mcp_tool_call","server":"codex_apps","tool":"github_get_profile","arguments":{},"status":"in_progress"}}`)
 
-	ev, ok := b.ParseEvent(line)
+	events, ok := b.ParseEvent(line)
 	if !ok {
 		t.Fatalf("ParseEvent returned ok=false")
 	}
+	if len(events) != 1 {
+		t.Fatalf("expected exactly one event, got %d", len(events))
+	}
+	ev := events[0]
 	if ev.Type != "tool" {
 		t.Fatalf("expected tool event, got %q (text=%q)", ev.Type, ev.Text)
 	}

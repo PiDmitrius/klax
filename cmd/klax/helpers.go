@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/fmtutil"
+	"github.com/PiDmitrius/klax/internal/mdhtml"
 	"github.com/PiDmitrius/klax/internal/pathutil"
 	"github.com/PiDmitrius/klax/internal/runner"
 	"github.com/PiDmitrius/klax/internal/session"
@@ -23,22 +24,49 @@ func tildePath(path string) string {
 	return path
 }
 
-// formatToolLines wraps each tool line in monospace.
-func formatToolLines(lines []string, format string) string {
-	var out []string
-	for _, l := range lines {
-		l = pathutil.TildePathsInText(l)
-		if format == "html" {
-			escaped := strings.ReplaceAll(l, "&", "&amp;")
-			escaped = strings.ReplaceAll(escaped, "<", "&lt;")
-			escaped = strings.ReplaceAll(escaped, ">", "&gt;")
-			out = append(out, "<code>"+escaped+"</code>")
-		} else {
-			escaped := strings.ReplaceAll(l, "`", "'")
-			out = append(out, "`"+escaped+"`")
+// formatLogItems renders the pre-answer progress log. Tool invocations stay
+// as inline monospace ("техлог"). Narration blocks — the intermediate
+// assistant text demoted by the runner — are full-format text rendered
+// through the same markdown-to-HTML path as the final answer, so lists,
+// code fences and emphasis survive. Adjacent tool labels share a single
+// newline so they stack tightly; any transition involving narration gets a
+// blank line so the formatted text breathes.
+func formatLogItems(items []runner.ProgressEvent, format string) string {
+	var out strings.Builder
+	var prevKind runner.ProgressKind
+	for i, item := range items {
+		text := pathutil.TildePathsInText(item.Text)
+		if i > 0 {
+			if prevKind == runner.ProgressKindTool && item.Kind == runner.ProgressKindTool {
+				out.WriteString("\n")
+			} else {
+				out.WriteString("\n\n")
+			}
 		}
+		switch item.Kind {
+		case runner.ProgressKindNarration:
+			if format == "html" {
+				out.WriteString(mdhtml.Convert(text))
+			} else {
+				out.WriteString(text)
+			}
+		default:
+			if format == "html" {
+				out.WriteString("<code>" + htmlEscapeLogText(text) + "</code>")
+			} else {
+				out.WriteString("`" + strings.ReplaceAll(text, "`", "'") + "`")
+			}
+		}
+		prevKind = item.Kind
 	}
-	return strings.Join(out, "\n")
+	return out.String()
+}
+
+func htmlEscapeLogText(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	return s
 }
 
 var reHTMLTag = regexp.MustCompile(`<[^>]+>`)
