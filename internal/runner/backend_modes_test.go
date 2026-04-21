@@ -83,3 +83,23 @@ func TestCodexBuildsWithOwnProcessGroup(t *testing.T) {
 	}
 	assertSetpgid(t, cmd)
 }
+
+func TestCodexParsesMcpToolCallAsTool(t *testing.T) {
+	b := &CodexBackend{}
+	line := []byte(`{"type":"item.started","item":{"id":"item_0","type":"mcp_tool_call","server":"codex_apps","tool":"github_get_profile","arguments":{},"status":"in_progress"}}`)
+
+	ev, ok := b.ParseEvent(line)
+	if !ok {
+		t.Fatalf("ParseEvent returned ok=false")
+	}
+	if ev.Type != "tool" {
+		t.Fatalf("expected tool event, got %q (text=%q)", ev.Type, ev.Text)
+	}
+	if ev.Tool.Name != "MCP" {
+		t.Fatalf("expected Tool.Name=MCP, got %q", ev.Tool.Name)
+	}
+	got := ev.Tool.String()
+	if !strings.Contains(got, "codex_apps.github_get_profile") {
+		t.Fatalf("expected server.tool in preview, got %q", got)
+	}
+}

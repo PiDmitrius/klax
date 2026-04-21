@@ -92,6 +92,22 @@ func (t ToolUse) String() string {
 		return "🤖 Task"
 	case "TodoWrite":
 		return "📋 TodoWrite"
+	case "MCP":
+		var inp struct {
+			Server string `json:"server"`
+			Tool   string `json:"tool"`
+		}
+		json.Unmarshal([]byte(t.Input), &inp)
+		label := inp.Tool
+		if inp.Server != "" && inp.Tool != "" {
+			label = inp.Server + "." + inp.Tool
+		} else if inp.Server != "" {
+			label = inp.Server
+		}
+		if label == "" {
+			return "🔌 MCP"
+		}
+		return fmt.Sprintf("🔌 MCP: %s", label)
 	default:
 		return fmt.Sprintf("🔧 %s", t.Name)
 	}
