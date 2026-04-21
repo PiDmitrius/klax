@@ -359,12 +359,24 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 		}
 	}
 
+	waitErr := cmd.Wait()
+
+	// If cancellation drove the exit, any accumulated intermediate "thinking"
+	// is not a final answer and must not be persisted as one. Callers (see
+	// queue.go) treat a nil Error as success and would otherwise save the
+	// partial text and bump message counters as if the turn completed.
+	// SessionID is preserved so /resume can still reach the aborted thread.
+	if ctx.Err() != nil {
+		return RunResult{
+			SessionID: sessionID,
+			Error:     fmt.Errorf("%s: %w", backend.Name(), ctx.Err()),
+		}
+	}
+
 	// For codex: if no explicit result text, use last intermediate message.
 	if len(textParts) == 0 && lastIntermediate != "" {
 		textParts = append(textParts, lastIntermediate)
 	}
-
-	waitErr := cmd.Wait()
 
 	if usage.Model == "" {
 		usage.Model = model
