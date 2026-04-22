@@ -214,7 +214,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	sr.mu.Unlock()
 	defer cancel()
 	// Clear the cancel handle once the run is done so a later /abort on an
-	// idle session reports "Нет активных задач." instead of "❌ Прерван.".
+	// idle session reports "Нет активных сообщений в сессии." instead of the abort text.
 	defer func() {
 		sr.mu.Lock()
 		sr.cancel = nil
