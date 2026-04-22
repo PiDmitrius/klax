@@ -25,8 +25,8 @@ func TestNormalizeCommandGroupAliases(t *testing.T) {
 	}
 }
 
-func TestFormatAbortReply(t *testing.T) {
-	if got := formatAbortReply(); got != "❌ Прерваны все сообщения в сессии." {
-		t.Fatalf("formatAbortReply() = %q", got)
+func TestAbortReplyText(t *testing.T) {
+	if abortReplyText != "❌ Прерваны все сообщения в сессии." {
+		t.Fatalf("abortReplyText = %q", abortReplyText)
 	}
 }

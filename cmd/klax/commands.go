@@ -34,10 +34,7 @@ var transportOrder = []string{"tg", "mx", "vk"}
 // prevent.
 const sessionBusyText = "⏳ Сессия занята: настройки нельзя менять до завершения. Дождись окончания или /abort."
 const noActiveSessionMessagesText = "Нет активных сообщений в сессии."
-
-func formatAbortReply() string {
-	return "❌ Прерваны все сообщения в сессии."
-}
+const abortReplyText = "❌ Прерваны все сообщения в сессии."
 
 func normalizeCommand(cmd string, args []string) (string, []string) {
 	switch {
@@ -554,7 +551,7 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			cancelFn()
 		}
 		d.abortQueuedMessages(queued)
-		d.sendMessage(chatID, msgID, formatAbortReply())
+		d.sendMessage(chatID, msgID, abortReplyText)
 
 	case "/__set_model":
 		d.handleModelSet(chatID, msgID, sk, args[0])
