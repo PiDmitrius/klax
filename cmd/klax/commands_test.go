@@ -24,3 +24,9 @@ func TestNormalizeCommandGroupAliases(t *testing.T) {
 		}
 	}
 }
+
+func TestAbortReplyText(t *testing.T) {
+	if abortReplyText != "❌ Прерваны все сообщения в сессии." {
+		t.Fatalf("abortReplyText = %q", abortReplyText)
+	}
+}

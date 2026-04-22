@@ -131,12 +131,20 @@ type fakeSendCall struct {
 	format  string
 }
 
+type fakeEditCall struct {
+	chatID  string
+	message string
+	text    string
+	format  string
+}
+
 type fakeTransport struct {
 	sendIDs   []string
 	sendCalls int
 	editCalls int
 	editErr   error
 	sendLog   []fakeSendCall
+	editLog   []fakeEditCall
 	lastEdit  struct {
 		chatID  string
 		message string
@@ -164,6 +172,7 @@ func (f *fakeTransport) SendMessageReturnID(chatID, text, replyTo, format string
 
 func (f *fakeTransport) EditMessage(chatID, messageID, text, format string) error {
 	f.editCalls++
+	f.editLog = append(f.editLog, fakeEditCall{chatID: chatID, message: messageID, text: text, format: format})
 	f.lastEdit.chatID = chatID
 	f.lastEdit.message = messageID
 	f.lastEdit.text = text

@@ -33,6 +33,8 @@ var transportOrder = []string{"tg", "mx", "vk"}
 // risk producing the kind of backend/ID mismatch this gating exists to
 // prevent.
 const sessionBusyText = "⏳ Сессия занята: настройки нельзя менять до завершения. Дождись окончания или /abort."
+const noActiveSessionMessagesText = "Нет активных сообщений в сессии."
+const abortReplyText = "❌ Прерваны все сообщения в сессии."
 
 func normalizeCommand(cmd string, args []string) (string, []string) {
 	switch {
@@ -527,17 +529,18 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			return
 		}
 		sr := d.lookupRunner(sk, active.Created)
-		if sr == nil {
-			d.sendMessage(chatID, msgID, "Нет активных задач.")
-			return
+		var cancelFn context.CancelFunc
+		var busy bool
+		if sr != nil {
+			sr.mu.Lock()
+			cancelFn = sr.cancel
+			busy = sr.runner.IsBusy()
+			sr.mu.Unlock()
 		}
-		sr.mu.Lock()
-		cancelFn := sr.cancel
-		busy := sr.runner.IsBusy()
-		sr.mu.Unlock()
-		dropped := d.clearSessionQueue(sk, active.Created)
-		if !busy && cancelFn == nil && dropped == 0 {
-			d.sendMessage(chatID, msgID, "Нет активных задач.")
+		queued := d.clearSessionQueue(sk, active.Created)
+		hasMessages := busy || cancelFn != nil || len(queued) > 0
+		if !hasMessages {
+			d.sendMessage(chatID, msgID, noActiveSessionMessagesText)
 			return
 		}
 		// Cancel the run context. Runner.Run catches it and sends SIGTERM →
@@ -547,11 +550,8 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		if cancelFn != nil {
 			cancelFn()
 		}
-		reply := "❌ Прерван."
-		if dropped > 0 {
-			reply += fmt.Sprintf(" Очередь очищена (сообщений: %d).", dropped)
-		}
-		d.sendMessage(chatID, msgID, reply)
+		d.abortQueuedMessages(queued)
+		d.sendMessage(chatID, msgID, abortReplyText)
 
 	case "/__set_model":
 		d.handleModelSet(chatID, msgID, sk, args[0])
