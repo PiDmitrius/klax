@@ -34,6 +34,13 @@ var transportOrder = []string{"tg", "mx", "vk"}
 // prevent.
 const sessionBusyText = "⏳ Сессия занята: настройки нельзя менять до завершения. Дождись окончания или /abort."
 
+func formatAbortReply(hasMessages bool) string {
+	if hasMessages {
+		return "❌ Прерваны все сообщения в сессии."
+	}
+	return "❌ Прервано."
+}
+
 func normalizeCommand(cmd string, args []string) (string, []string) {
 	switch {
 	case strings.HasPrefix(cmd, "/backend_") && len(cmd) > len("/backend_"):
@@ -535,8 +542,8 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		cancelFn := sr.cancel
 		busy := sr.runner.IsBusy()
 		sr.mu.Unlock()
-		dropped := d.clearSessionQueue(sk, active.Created)
-		if !busy && cancelFn == nil && dropped == 0 {
+		queued := d.clearSessionQueue(sk, active.Created)
+		if !busy && cancelFn == nil && len(queued) == 0 {
 			d.sendMessage(chatID, msgID, "Нет активных задач.")
 			return
 		}
@@ -547,11 +554,8 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		if cancelFn != nil {
 			cancelFn()
 		}
-		reply := "❌ Прерван."
-		if dropped > 0 {
-			reply += fmt.Sprintf(" Очередь очищена (сообщений: %d).", dropped)
-		}
-		d.sendMessage(chatID, msgID, reply)
+		d.abortQueuedMessages(queued)
+		d.sendMessage(chatID, msgID, formatAbortReply(busy || cancelFn != nil || len(queued) > 0))
 
 	case "/__set_model":
 		d.handleModelSet(chatID, msgID, sk, args[0])

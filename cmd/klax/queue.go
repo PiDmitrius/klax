@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -27,6 +28,27 @@ func sanitizeAttachmentFilename(name string) string {
 		return "attachment"
 	}
 	return name
+}
+
+func formatRunFailure(logItems []runner.ProgressEvent, format string, err error) string {
+	if errors.Is(err, context.Canceled) {
+		if len(logItems) > 0 {
+			return formatLogItems(logItems, format) + "\n\n❌ Прервано."
+		}
+		return "❌ Прервано."
+	}
+
+	finalText := "..."
+	if len(logItems) > 0 {
+		finalText = formatLogItems(logItems, format) + "\n\n..."
+	}
+	return finalText + fmt.Sprintf("\n❌ Ошибка: %v", err)
+}
+
+func (d *daemon) syncFinalMessageChain(fullChatID, replyTo string, chain *messageChain, text, format string) (*messageChain, error) {
+	ctx, cancel := withDeliveryTimeout(context.Background())
+	defer cancel()
+	return d.syncMessageChain(ctx, fullChatID, replyTo, chain, text, format)
 }
 
 func (d *daemon) enqueue(chatID, msgID, text string) {
@@ -136,16 +158,35 @@ func (d *daemon) processSessionQueue(sr *sessionRunner) {
 	}
 }
 
-func (d *daemon) clearSessionQueue(sk string, created int64) int {
+func (d *daemon) clearSessionQueue(sk string, created int64) []queuedMsg {
 	sr := d.lookupRunner(sk, created)
 	if sr == nil {
-		return 0
+		return nil
 	}
 	sr.mu.Lock()
-	n := len(sr.queue)
+	queued := append([]queuedMsg(nil), sr.queue...)
 	sr.queue = nil
 	sr.mu.Unlock()
-	return n
+	return queued
+}
+
+func (d *daemon) abortQueuedMessages(msgs []queuedMsg) {
+	for _, qm := range msgs {
+		if qm.progressID == "" {
+			continue
+		}
+		ctx, cancel := withDeliveryTimeout(context.Background())
+		_, err := d.performTransportOp(ctx, transportOp{
+			fullChatID: qm.chatID,
+			messageID:  qm.progressID,
+			text:       "❌ Прервано.",
+			format:     "",
+		})
+		cancel()
+		if err != nil {
+			log.Printf("failed to mark queued message as aborted: %v", err)
+		}
+	}
 }
 
 func (d *daemon) shouldReuseQueuedProgress(msg queuedMsg) bool {
@@ -344,13 +385,9 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	d.saveStore()
 
 	if result.Error != nil {
-		finalText := "..."
-		if len(logItems) > 0 {
-			finalText = formatLogItems(logItems, chatFmt) + "\n\n..."
-		}
-		finalText += fmt.Sprintf("\n❌ Ошибка: %v", result.Error)
+		finalText := formatRunFailure(logItems, chatFmt, result.Error)
 		if progressChain != nil && len(progressChain.ids) > 0 && t != nil {
-			_, err := d.syncMessageChain(ctx, msg.chatID, msg.msgID, progressChain, finalText, chatFmt)
+			_, err := d.syncFinalMessageChain(msg.chatID, msg.msgID, progressChain, finalText, chatFmt)
 			if err != nil {
 				log.Printf("final error delivery failed: %v", err)
 			}
@@ -382,7 +419,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	}
 
 	if t != nil {
-		_, err := d.syncMessageChain(ctx, msg.chatID, msg.msgID, progressChain, finalText, chatFmt)
+		_, err := d.syncFinalMessageChain(msg.chatID, msg.msgID, progressChain, finalText, chatFmt)
 		if err != nil {
 			log.Printf("final delivery failed: %v", err)
 		}
