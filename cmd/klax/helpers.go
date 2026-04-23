@@ -93,11 +93,11 @@ var claudeModels = []modelEntry{
 }
 
 var codexModels = []modelEntry{
+	{"55", "gpt-5.5", "GPT-5.5"},
 	{"54", "gpt-5.4", "GPT-5.4"},
 	{"mini", "gpt-5.4-mini", "GPT-5.4-Mini"},
 	{"codex", "gpt-5.3-codex", "GPT-5.3-Codex"},
 	{"spark", "gpt-5.3-codex-spark", "GPT-5.3-Codex-Spark"},
-	{"52", "gpt-5.2", "GPT-5.2"},
 }
 
 func modelsForBackend(backend string) []modelEntry {
