@@ -990,7 +990,7 @@ func isGroupCommand(text string) bool {
 		cmd = cmd[:at]
 	}
 	switch cmd {
-	case "/status", "/?", "/sessions", "/session", "/s", "/new", "/settings", "/setting", "/group_on", "/group_off", "/groups_on", "/groups_off", "/model", "/models", "/m", "/think", "/thinking", "/t", "/abort", "/help", "/h", "/start":
+	case "/status", "/?", "/sessions", "/session", "/s", "/new", "/name", "/settings", "/setting", "/model", "/models", "/m", "/think", "/thinking", "/t", "/abort", "/help", "/h", "/start":
 		return true
 	}
 	// /s<n> shortcuts
