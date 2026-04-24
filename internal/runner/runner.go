@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/PiDmitrius/klax/internal/fmtutil"
 	"github.com/PiDmitrius/klax/internal/pathutil"
@@ -145,13 +146,19 @@ func formatRateLimit(rl *RateLimitInfo) string {
 	}
 }
 
-
 func truncate(s string, n int) string {
 	s = pathutil.TildePathsInText(s)
-	if len(s) <= n {
+	if n <= 0 {
+		if s == "" {
+			return s
+		}
+		return "…"
+	}
+	if utf8.RuneCountInString(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	runes := []rune(s)
+	return string(runes[:n]) + "…"
 }
 
 // RunOptions configures a CLI invocation.

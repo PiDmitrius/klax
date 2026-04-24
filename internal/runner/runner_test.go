@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestToolUseStringAppliesTildeBeforeTruncate(t *testing.T) {
@@ -36,6 +37,32 @@ func TestToolUseStringAppliesTildeBeforeTruncate(t *testing.T) {
 	}
 }
 
+func TestTruncatePreservesUTF8(t *testing.T) {
+	s := `"335-й стрелковый полк" "58-я стрелковая дивизия"`
+
+	cut := 0
+	for i := 1; i < len(s); i++ {
+		if !utf8.ValidString(s[:i]) {
+			cut = i
+			break
+		}
+	}
+	if cut == 0 {
+		t.Fatal("test string did not produce a mid-rune byte boundary")
+	}
+
+	got := truncate(s, cut)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncate returned invalid UTF-8: %q", got)
+	}
+	if strings.ContainsRune(got, utf8.RuneError) {
+		t.Fatalf("truncate introduced replacement rune: %q", got)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("expected truncated string to end with ellipsis: %q", got)
+	}
+}
+
 // scriptBackend runs an arbitrary shell command. Used to simulate the
 // codex npm-shim → rust-grandchild topology in process-lifecycle tests
 // without depending on a real backend binary. parseAsIntermediate treats
@@ -43,8 +70,8 @@ func TestToolUseStringAppliesTildeBeforeTruncate(t *testing.T) {
 // can test that cancellation does not let a partial thought leak out as
 // a successful answer.
 type scriptBackend struct {
-	shellCmd             string
-	parseAsIntermediate  bool
+	shellCmd            string
+	parseAsIntermediate bool
 }
 
 func (b *scriptBackend) Name() string { return "script" }
