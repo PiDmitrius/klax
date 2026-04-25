@@ -984,19 +984,22 @@ func stripGroupTrigger(text string) (string, bool) {
 }
 
 // isGroupCommand checks if text starts with a command allowed for non-admin group members.
-// Shortcuts (/backend_codex, /s5, etc.) are folded to their canonical form via
-// normalizeCommand so the whitelist below is the single source of truth.
 func isGroupCommand(text string) bool {
 	cmd := strings.Fields(text)[0]
 	if at := strings.Index(cmd, "@"); at != -1 {
 		cmd = cmd[:at]
 	}
-	cmd, _ = normalizeCommand(cmd, nil)
 	switch cmd {
 	case "/status", "/?", "/sessions", "/session", "/s", "/new", "/name",
 		"/settings", "/setting", "/backend", "/model", "/models", "/m",
-		"/think", "/thinking", "/t", "/abort", "/help", "/h", "/start",
-		"/__switch_session":
+		"/think", "/thinking", "/t", "/abort", "/help", "/h", "/start":
+		return true
+	}
+	// Clickable shortcuts from menus (/s5, /backend_codex).
+	if hasNumericSuffixCommand(cmd, "/s") {
+		return true
+	}
+	if strings.HasPrefix(cmd, "/backend_") && len(cmd) > len("/backend_") {
 		return true
 	}
 	return false
