@@ -990,17 +990,17 @@ func isGroupCommand(text string) bool {
 		cmd = cmd[:at]
 	}
 	switch cmd {
-	case "/status", "/?", "/sessions", "/session", "/s", "/new", "/name", "/settings", "/setting", "/model", "/models", "/m", "/think", "/thinking", "/t", "/abort", "/help", "/h", "/start":
+	case "/status", "/?", "/sessions", "/session", "/s", "/new", "/name",
+		"/settings", "/setting", "/backend", "/model", "/models", "/m",
+		"/think", "/thinking", "/t", "/abort", "/help", "/h", "/start":
 		return true
 	}
-	// /s<n> shortcuts
-	if strings.HasPrefix(cmd, "/s") {
-		for _, c := range cmd[2:] {
-			if c < '0' || c > '9' {
-				return false
-			}
-		}
-		return len(cmd) > 2
+	// Clickable shortcuts from menus (/s5, /backend_codex).
+	if hasNumericSuffixCommand(cmd, "/s") {
+		return true
+	}
+	if strings.HasPrefix(cmd, "/backend_") && len(cmd) > len("/backend_") {
+		return true
 	}
 	return false
 }
