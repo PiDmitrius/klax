@@ -368,13 +368,44 @@ func backoff(attempt int) time.Duration {
 	return d
 }
 
+// isReplyTargetError reports whether err is a permanent API error caused by
+// the reply-to message being deleted/inaccessible. Such errors should not
+// fail the whole send — we drop reply_to and retry as a plain message.
+func isReplyTargetError(err error) bool {
+	var apiErr *transport.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	desc := strings.ToLower(apiErr.Description)
+	if strings.Contains(desc, "message to be replied") {
+		return true
+	}
+	if strings.Contains(desc, "reply") &&
+		(strings.Contains(desc, "not found") ||
+			strings.Contains(desc, "invalid") ||
+			strings.Contains(desc, "deleted")) {
+		return true
+	}
+	return false
+}
+
 // trySend sends text with format, retrying on transient errors.
 // Falls back to plain text if formatted send fails with a permanent error.
+// If the reply-to target is gone, retries once without reply_to.
 func trySend(ctx context.Context, t transport.Transport, chatID, replyTo, text, format string) error {
+	err := sendWithFormatFallback(ctx, t, chatID, replyTo, text, format)
+	if err != nil && replyTo != "" && isReplyTargetError(err) && ctx.Err() == nil {
+		log.Printf("send error (reply target gone): %v, retrying without reply_to", err)
+		err = sendWithFormatFallback(ctx, t, chatID, "", text, format)
+	}
+	return err
+}
+
+func sendWithFormatFallback(ctx context.Context, t transport.Transport, chatID, replyTo, text, format string) error {
 	err := retryDo(ctx, func() error {
 		return t.SendMessage(chatID, text, replyTo, format)
 	})
-	if err != nil && format != "" && ctx.Err() == nil {
+	if err != nil && format != "" && ctx.Err() == nil && !isReplyTargetError(err) {
 		log.Printf("send error (%s): %v, retrying plain", format, err)
 		return retryDo(ctx, func() error {
 			return t.SendMessage(chatID, text, replyTo, "")
@@ -385,13 +416,22 @@ func trySend(ctx context.Context, t transport.Transport, chatID, replyTo, text, 
 
 // trySendReturnID sends text with format and returns the created message ID.
 func trySendReturnID(ctx context.Context, t transport.Transport, chatID, replyTo, text, format string) (string, error) {
+	msgID, err := sendReturnIDWithFormatFallback(ctx, t, chatID, replyTo, text, format)
+	if err != nil && replyTo != "" && isReplyTargetError(err) && ctx.Err() == nil {
+		log.Printf("send error (reply target gone): %v, retrying without reply_to", err)
+		msgID, err = sendReturnIDWithFormatFallback(ctx, t, chatID, "", text, format)
+	}
+	return msgID, err
+}
+
+func sendReturnIDWithFormatFallback(ctx context.Context, t transport.Transport, chatID, replyTo, text, format string) (string, error) {
 	var msgID string
 	err := retryDo(ctx, func() error {
 		var err error
 		msgID, err = t.SendMessageReturnID(chatID, text, replyTo, format)
 		return err
 	})
-	if err != nil && format != "" && ctx.Err() == nil {
+	if err != nil && format != "" && ctx.Err() == nil && !isReplyTargetError(err) {
 		log.Printf("send error (%s): %v, retrying plain", format, err)
 		err = retryDo(ctx, func() error {
 			var err error
