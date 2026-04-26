@@ -143,6 +143,7 @@ type fakeTransport struct {
 	sendCalls int
 	editCalls int
 	editErr   error
+	sendErrFn func(call fakeSendCall) error
 	sendLog   []fakeSendCall
 	editLog   []fakeEditCall
 	lastEdit  struct {
@@ -154,14 +155,24 @@ type fakeTransport struct {
 }
 
 func (f *fakeTransport) SendMessage(chatID, text, replyTo, format string) error {
+	call := fakeSendCall{chatID: chatID, text: text, replyTo: replyTo, format: format}
 	f.sendCalls++
-	f.sendLog = append(f.sendLog, fakeSendCall{chatID: chatID, text: text, replyTo: replyTo, format: format})
+	f.sendLog = append(f.sendLog, call)
+	if f.sendErrFn != nil {
+		return f.sendErrFn(call)
+	}
 	return nil
 }
 
 func (f *fakeTransport) SendMessageReturnID(chatID, text, replyTo, format string) (string, error) {
+	call := fakeSendCall{chatID: chatID, text: text, replyTo: replyTo, format: format}
 	f.sendCalls++
-	f.sendLog = append(f.sendLog, fakeSendCall{chatID: chatID, text: text, replyTo: replyTo, format: format})
+	f.sendLog = append(f.sendLog, call)
+	if f.sendErrFn != nil {
+		if err := f.sendErrFn(call); err != nil {
+			return "", err
+		}
+	}
 	if len(f.sendIDs) == 0 {
 		return "generated-id", nil
 	}
@@ -218,6 +229,79 @@ func TestTryEditFallsBackToPlainFormat(t *testing.T) {
 	}
 	if tp.lastEdit.format != "" {
 		t.Fatalf("expected last edit to use plain format, got %q", tp.lastEdit.format)
+	}
+}
+
+func TestTrySendDropsReplyToWhenTargetGone(t *testing.T) {
+	tp := &fakeTransport{
+		sendErrFn: func(call fakeSendCall) error {
+			if call.replyTo != "" {
+				return &transport.APIError{Platform: "tg", Code: 400, Description: "Bad Request: message to be replied not found"}
+			}
+			return nil
+		},
+	}
+	if err := trySend(context.Background(), tp, "chat", "missing-msg", "hello", "html"); err != nil {
+		t.Fatalf("expected reply fallback to succeed, got %v", err)
+	}
+	if len(tp.sendLog) != 2 {
+		t.Fatalf("expected initial send + reply-less retry, got %d calls: %+v", len(tp.sendLog), tp.sendLog)
+	}
+	if tp.sendLog[0].replyTo != "missing-msg" {
+		t.Fatalf("expected first send to include reply, got %q", tp.sendLog[0].replyTo)
+	}
+	if tp.sendLog[1].replyTo != "" {
+		t.Fatalf("expected fallback send without reply, got %q", tp.sendLog[1].replyTo)
+	}
+	if tp.sendLog[1].format != "html" {
+		t.Fatalf("expected fallback to keep original format, got %q", tp.sendLog[1].format)
+	}
+}
+
+func TestTrySendReturnIDDropsReplyToWhenTargetGone(t *testing.T) {
+	tp := &fakeTransport{
+		sendIDs: []string{"new-id"},
+		sendErrFn: func(call fakeSendCall) error {
+			if call.replyTo != "" {
+				return &transport.APIError{Platform: "tg", Code: 400, Description: "Bad Request: message to be replied not found"}
+			}
+			return nil
+		},
+	}
+	id, err := trySendReturnID(context.Background(), tp, "chat", "missing-msg", "hello", "html")
+	if err != nil {
+		t.Fatalf("expected reply fallback to succeed, got %v", err)
+	}
+	if id != "new-id" {
+		t.Fatalf("expected new-id from successful fallback, got %q", id)
+	}
+	if len(tp.sendLog) != 2 {
+		t.Fatalf("expected initial + fallback send, got %d", len(tp.sendLog))
+	}
+	if tp.sendLog[1].replyTo != "" {
+		t.Fatalf("expected fallback without reply, got %q", tp.sendLog[1].replyTo)
+	}
+}
+
+func TestTrySendKeepsReplyToOnUnrelatedError(t *testing.T) {
+	tp := &fakeTransport{
+		sendErrFn: func(call fakeSendCall) error {
+			if call.format != "" {
+				return &transport.APIError{Platform: "tg", Code: 400, Description: "Bad Request: can't parse entities"}
+			}
+			return nil
+		},
+	}
+	if err := trySend(context.Background(), tp, "chat", "msg-1", "<b>hi</b>", "html"); err != nil {
+		t.Fatalf("expected plain fallback to succeed, got %v", err)
+	}
+	if len(tp.sendLog) != 2 {
+		t.Fatalf("expected formatted + plain retry, got %d", len(tp.sendLog))
+	}
+	for i, call := range tp.sendLog {
+		if call.replyTo != "msg-1" {
+			t.Fatalf("expected reply preserved on unrelated error, call %d got %q", i, call.replyTo)
+		}
 	}
 }
 
