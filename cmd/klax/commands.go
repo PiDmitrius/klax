@@ -511,6 +511,9 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			d.sendMessage(chatID, msgID, text)
 		}()
 
+	case "/usage":
+		d.handleUsage(chatID, msgID, sk)
+
 	case "/bypass":
 		if len(parts) < 2 {
 			d.sendMessage(chatID, msgID, "Использование: /bypass <команда>")

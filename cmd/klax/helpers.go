@@ -312,6 +312,7 @@ func helpText() string {
 /bypass — прямая команда
 /abort — прервать исполнение
 /backend — backend (claude/codex)
+/usage — лимиты backend
 /update — обновить`
 }
 
