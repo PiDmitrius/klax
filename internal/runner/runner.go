@@ -324,21 +324,11 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 		sawText = true
 	}
 
-	// done flips on `result` so later text/tool events in the stream
-	// cannot overwrite the locked-in final answer. Protects the
-	// invariant "once result arrives, the turn is over".
-	var done bool
-
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
-			continue
-		}
-		if done {
-			// Drain further output to keep the pipe unblocked but do
-			// not touch state: the turn is finalised.
 			continue
 		}
 
@@ -408,7 +398,14 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 				}
 
 			case "result":
-				done = true
+				// `result` marks the end of one agent-loop iteration, not
+				// the end of the run. claude -p --output-format stream-json
+				// keeps the loop alive while background tasks (run_in_background,
+				// Monitor) are pending and injects their completions as
+				// <task-notification> user messages → another assistant turn
+				// → another `result`. We let those subsequent events flow
+				// through normally; the run ends when the CLI exits and the
+				// scanner hits EOF.
 				if ev.Error != "" {
 					// Preserve any accumulated text as narration so the
 					// user still sees what the model said before the
