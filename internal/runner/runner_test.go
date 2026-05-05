@@ -285,31 +285,62 @@ func TestClaudeStreamOrdersNarrationBeforeFollowingTool(t *testing.T) {
 	}
 }
 
-// TestClaudeStreamLocksFinalAfterResult asserts that text events arriving
-// AFTER `result` do not overwrite the locked-in final answer. Backends
-// shouldn't emit such lines, but a stray one must not silently clobber
-// what the user sees.
-func TestClaudeStreamLocksFinalAfterResult(t *testing.T) {
+// TestClaudeStreamMultiTurnAgentLoop asserts that events arriving AFTER a
+// `result` are kept, not dropped. claude -p --output-format stream-json
+// emits one `result` per agent-loop iteration but stays alive while
+// background tasks (run_in_background, Monitor) are pending and resumes
+// the loop when their completions arrive as <task-notification> user
+// messages. Each subsequent turn must surface as narration + tool progress
+// in the log; the very last turn's text becomes the final answer body.
+func TestClaudeStreamMultiTurnAgentLoop(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
 	}
 
 	lines := []string{
 		`{"type":"system","session_id":"s1","model":"claude-opus-4-7"}`,
-		`{"type":"assistant","message":{"content":[{"type":"text","text":"real answer"}]}}`,
-		`{"type":"result","session_id":"s1","result":"real answer","is_error":false}`,
-		// Stray text after result — must be ignored.
-		`{"type":"assistant","message":{"content":[{"type":"text","text":"LATE GARBAGE"}]}}`,
+		// Turn 1: narration before bg-poller, then result.
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"Жду поллер"}]}}`,
+		`{"type":"result","session_id":"s1","result":"Жду поллер","is_error":false}`,
+		// Turn 2 fires after a task-notification: tool, text, result.
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/tmp/poll.out"}}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"SSH вернулся"}]}}`,
+		`{"type":"result","session_id":"s1","result":"SSH вернулся","is_error":false}`,
+		// Turn 3: final mini-report and result, then EOF.
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"uname -a"}}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"Готово"}]}}`,
+		`{"type":"result","session_id":"s1","result":"Готово","is_error":false}`,
 	}
 	script := "printf '%s\\n' " + shQuote(lines...)
 
+	rec := &progressRecorder{}
 	r := New()
-	res := r.Run(context.Background(), &stdinEchoBackend{script: script}, RunOptions{}, nil)
+	res := r.Run(context.Background(), &stdinEchoBackend{script: script}, RunOptions{}, rec.callback())
 	if res.Error != nil {
 		t.Fatalf("Run error: %v", res.Error)
 	}
-	if res.Text != "real answer" {
-		t.Fatalf("post-result events must not overwrite final, got %q", res.Text)
+	// Final answer = the last turn's trailing text (only it stayed in pending
+	// after the last tool boundary; earlier finals were demoted to narration).
+	if res.Text != "Готово" {
+		t.Fatalf("final body: got %q, want %q", res.Text, "Готово")
+	}
+	// Earlier turns' final texts must have surfaced as narration before the
+	// tool that started the next turn — otherwise the user sees nothing
+	// between the first `result` and CLI exit.
+	want := [][2]string{
+		{"narration", "Жду поллер"},
+		{"tool", "📖 Read: /tmp/poll.out"},
+		{"narration", "SSH вернулся"},
+		{"tool", "⚙️ Bash: `uname -a`"},
+	}
+	got := rec.kindPairs()
+	if len(got) != len(want) {
+		t.Fatalf("progress events = %v, want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Fatalf("progress[%d] = %v, want %v (full: %v)", i, got[i], w, got)
+		}
 	}
 }
 
