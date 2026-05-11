@@ -67,6 +67,8 @@ type Message struct {
 	Caption   string      `json:"caption"`
 	Photo     []PhotoSize `json:"photo"`
 	Document  *Document   `json:"document"`
+	Voice     *Voice      `json:"voice"`
+	Audio     *Audio      `json:"audio"`
 }
 
 type PhotoSize struct {
@@ -80,6 +82,25 @@ type PhotoSize struct {
 type Document struct {
 	FileID       string `json:"file_id"`
 	FileUniqueID string `json:"file_unique_id"`
+	FileName     string `json:"file_name"`
+	MimeType     string `json:"mime_type"`
+	FileSize     int    `json:"file_size"`
+}
+
+type Voice struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id"`
+	Duration     int    `json:"duration"`
+	MimeType     string `json:"mime_type"`
+	FileSize     int    `json:"file_size"`
+}
+
+type Audio struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id"`
+	Duration     int    `json:"duration"`
+	Performer    string `json:"performer"`
+	Title        string `json:"title"`
 	FileName     string `json:"file_name"`
 	MimeType     string `json:"mime_type"`
 	FileSize     int    `json:"file_size"`

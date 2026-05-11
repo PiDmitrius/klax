@@ -695,6 +695,23 @@ func (d *daemon) pollTG(ctx context.Context) {
 					log.Printf("tg: download document: %v", err)
 				}
 			}
+			if msg.Voice != nil {
+				if data, _, err := bot.DownloadFile(msg.Voice.FileID); err == nil {
+					attachments = append(attachments, attachment{filename: "voice.oga", data: data})
+				} else {
+					log.Printf("tg: download voice: %v", err)
+				}
+			}
+			if msg.Audio != nil {
+				if data, name, err := bot.DownloadFile(msg.Audio.FileID); err == nil {
+					if msg.Audio.FileName != "" {
+						name = msg.Audio.FileName
+					}
+					attachments = append(attachments, attachment{filename: name, data: data})
+				} else {
+					log.Printf("tg: download audio: %v", err)
+				}
+			}
 
 			if d.isTGAllowed(msg.From.ID) {
 				d.handleMessageWithAttachments(chatID, msgID, text, attachments)

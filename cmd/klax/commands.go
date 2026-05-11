@@ -326,7 +326,27 @@ func argPayload(text string) string {
 	return strings.TrimLeftFunc(text[i:], unicode.IsSpace)
 }
 
+// expandBypassUnderscore rewrites "/bypass_X ..." to "/bypass X ..." so the
+// payload is recoverable via argPayload/args. normalizeCommand can't help
+// here because /bypass uses the raw text, not split args.
+func expandBypassUnderscore(text string) string {
+	i := strings.IndexFunc(text, unicode.IsSpace)
+	first, rest := text, ""
+	if i >= 0 {
+		first, rest = text[:i], text[i:]
+	}
+	bare := first
+	if at := strings.Index(bare, "@"); at != -1 {
+		bare = bare[:at]
+	}
+	if low := strings.ToLower(bare); strings.HasPrefix(low, "/bypass_") && len(bare) > len("/bypass_") {
+		return "/bypass " + bare[len("/bypass_"):] + rest
+	}
+	return text
+}
+
 func (d *daemon) handleCommand(chatID, msgID, text string) {
+	text = expandBypassUnderscore(text)
 	parts := strings.Fields(text)
 	cmd := strings.ToLower(parts[0])
 	// Strip @botname suffix (e.g. /sessions@klax_bot → /sessions)
