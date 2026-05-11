@@ -25,6 +25,27 @@ func TestNormalizeCommandGroupAliases(t *testing.T) {
 	}
 }
 
+func TestExpandBypassUnderscore(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"/bypass_ping", "/bypass ping"},
+		{"/bypass_ping arg2", "/bypass ping arg2"},
+		{"/bypass_ping@klaxbot arg", "/bypass ping arg"},
+		{"/BYPASS_PING", "/bypass PING"},
+		{"/bypass ping", "/bypass ping"},
+		{"/bypass", "/bypass"},
+		{"/bypass_", "/bypass_"},
+		{"/sessions@klaxbot", "/sessions@klaxbot"},
+		{"/prompt_foo", "/prompt_foo"},
+	}
+	for _, tt := range tests {
+		if got := expandBypassUnderscore(tt.in); got != tt.want {
+			t.Errorf("expandBypassUnderscore(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
 func TestAbortReplyText(t *testing.T) {
 	if abortReplyText != "❌ Прерваны все сообщения в сессии." {
 		t.Fatalf("abortReplyText = %q", abortReplyText)
