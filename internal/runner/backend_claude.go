@@ -25,7 +25,11 @@ func (b *ClaudeBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 		"-p",
 		"--output-format", "stream-json",
 		"--verbose",
-		"--disallowed-tools", "Agent",
+		// Agent: sub-agent spawn — klax tracks one process per session.
+		// AskUserQuestion: needs a TTY to render its TUI; in `claude -p` it
+		// silently fails, returns no answer, and the turn ends with an empty
+		// "🔧 AskUserQuestion ✅ Готово" stub in chat.
+		"--disallowed-tools", "Agent,AskUserQuestion",
 	}
 	if mode != "" {
 		args = append(args, "--permission-mode", mode)
