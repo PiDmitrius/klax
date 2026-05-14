@@ -90,7 +90,7 @@ func (b *scriptBackend) ParseEvent(line []byte) ([]Event, bool) {
 }
 
 // collectProgress builds a ProgressFunc that records every event so tests
-// can assert the live narration/tool log.
+// can assert both the final answer body and the demoted narration/tool log.
 type progressRecorder struct {
 	events []ProgressEvent
 }
@@ -177,13 +177,16 @@ func TestRunCancelKillsProcessGroup(t *testing.T) {
 	t.Fatalf("grandchild sleep pid %d still alive after cancel", gcPid)
 }
 
-// TestClaudeStreamEmitsTextBlocksAsNarrationLive encodes the delivery
-// contract for Claude streams with multiple text blocks around tool calls.
-// Each assistant text block surfaces as a narration progress event the
-// instant it is parsed — no buffering, no waiting for a tool boundary or
-// end-of-stream. The frontend renders the live progress log directly, so the
-// runner does not need to pick a "final answer" string at end-of-run.
-func TestClaudeStreamEmitsTextBlocksAsNarrationLive(t *testing.T) {
+// TestClaudeStreamDemotesIntermediatesToNarration encodes the delivery
+// contract for Claude streams with multiple text blocks around tool calls:
+//
+//  1. Narration must appear in the log BEFORE the tool that followed it
+//     chronologically (not after), so the log reads in stream order.
+//  2. Consecutive text blocks without an intervening tool are a single
+//     logical reply — they accumulate, do not split into narration + tail.
+//  3. Only text that comes after the last tool boundary becomes the final
+//     answer body.
+func TestClaudeStreamDemotesIntermediatesToNarration(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
 	}
@@ -196,10 +199,8 @@ func TestClaudeStreamEmitsTextBlocksAsNarrationLive(t *testing.T) {
 		`{"type":"assistant","message":{"content":[{"type":"text","text":"before tool\n"}]}}`,
 		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/tmp/x"}}]}}`,
 		`{"type":"assistant","message":{"content":[{"type":"text","text":"проверка 2\n\nKLODIN"}]}}`,
-		// Second text block without an intervening tool — under live
-		// streaming each becomes its own narration event, so the
-		// frontend can render the first immediately rather than waiting
-		// for the pair to complete.
+		// Second text block without an intervening tool — must merge with
+		// the previous into one narration / final answer, not split.
 		`{"type":"assistant","message":{"content":[{"type":"text","text":"after tool"}]}}`,
 		`{"type":"result","session_id":"s1","result":"after tool","is_error":false}`,
 	}
@@ -211,11 +212,16 @@ func TestClaudeStreamEmitsTextBlocksAsNarrationLive(t *testing.T) {
 	if res.Error != nil {
 		t.Fatalf("Run error: %v", res.Error)
 	}
+	// "проверка 2 — середина\n\nKLODIN" and "after tool" arrived back-to-
+	// back (no tool between them), so they are one logical reply joined
+	// by a paragraph break.
+	wantText := "проверка 2\n\nKLODIN\n\nafter tool"
+	if res.Text != wantText {
+		t.Fatalf("final body: got %q, want %q", res.Text, wantText)
+	}
 	wantOrder := [][2]string{
 		{"narration", "before tool"},
 		{"tool", "📖 Read: /tmp/x"},
-		{"narration", "проверка 2\n\nKLODIN"},
-		{"narration", "after tool"},
 	}
 	got := rec.kindPairs()
 	if len(got) != len(wantOrder) {
@@ -259,12 +265,14 @@ func TestClaudeStreamOrdersNarrationBeforeFollowingTool(t *testing.T) {
 	if res.Error != nil {
 		t.Fatalf("Run error: %v", res.Error)
 	}
+	if res.Text != "C" {
+		t.Fatalf("final body: got %q, want %q", res.Text, "C")
+	}
 	want := [][2]string{
 		{"narration", "A"},
 		{"tool", "📖 Read: /tmp/r"},
 		{"narration", "B"},
 		{"tool", "📝 Write: /tmp/w"},
-		{"narration", "C"},
 	}
 	got := rec.kindPairs()
 	if len(got) != len(want) {
@@ -283,7 +291,7 @@ func TestClaudeStreamOrdersNarrationBeforeFollowingTool(t *testing.T) {
 // background tasks (run_in_background, Monitor) are pending and resumes
 // the loop when their completions arrive as <task-notification> user
 // messages. Each subsequent turn must surface as narration + tool progress
-// in the log, including the final text before EOF.
+// in the log; the very last turn's text becomes the final answer body.
 func TestClaudeStreamMultiTurnAgentLoop(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
@@ -311,15 +319,19 @@ func TestClaudeStreamMultiTurnAgentLoop(t *testing.T) {
 	if res.Error != nil {
 		t.Fatalf("Run error: %v", res.Error)
 	}
-	// Every turn's assistant text surfaces as narration the moment it is
-	// parsed — including the trailing one. The frontend renders these
-	// directly; there is no separate "final answer" string at end-of-run.
+	// Final answer = the last turn's trailing text (only it stayed in pending
+	// after the last tool boundary; earlier finals were demoted to narration).
+	if res.Text != "Готово" {
+		t.Fatalf("final body: got %q, want %q", res.Text, "Готово")
+	}
+	// Earlier turns' final texts must have surfaced as narration before the
+	// tool that started the next turn — otherwise the user sees nothing
+	// between the first `result` and CLI exit.
 	want := [][2]string{
 		{"narration", "Жду поллер"},
 		{"tool", "📖 Read: /tmp/poll.out"},
 		{"narration", "SSH вернулся"},
 		{"tool", "⚙️ Bash: `uname -a`"},
-		{"narration", "Готово"},
 	}
 	got := rec.kindPairs()
 	if len(got) != len(want) {
@@ -351,10 +363,11 @@ func (b *stdinEchoBackend) ParseEvent(line []byte) ([]Event, bool) {
 	return (&ClaudeBackend{}).ParseEvent(line)
 }
 
-// TestCodexStreamEmitsAgentMessagesAsNarrationLive mirrors the Claude
-// narration + ordering tests for codex: agent_message entries become
-// narration immediately, preserving order around command_execution events.
-func TestCodexStreamEmitsAgentMessagesAsNarrationLive(t *testing.T) {
+// TestCodexStreamDemotesIntermediatesToNarration mirrors the Claude
+// narration + ordering tests for codex: agent_message before a
+// command_execution becomes narration that shows BEFORE the tool in the
+// log; agent_message after the last tool becomes the final answer.
+func TestCodexStreamDemotesIntermediatesToNarration(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
 	}
@@ -376,10 +389,12 @@ func TestCodexStreamEmitsAgentMessagesAsNarrationLive(t *testing.T) {
 	if res.Error != nil {
 		t.Fatalf("Run error: %v", res.Error)
 	}
+	if res.Text != "готово" {
+		t.Fatalf("final body must be the post-tool agent_message, got %q", res.Text)
+	}
 	want := [][2]string{
 		{"narration", "начинаю"},
 		{"tool", "⚙️ Bash: `ls /tmp`"},
-		{"narration", "готово"},
 	}
 	got := rec.kindPairs()
 	if len(got) != len(want) {
@@ -429,8 +444,9 @@ func TestRunCancelAfterIntermediateReturnsErrorWithoutText(t *testing.T) {
 		t.Skip("sh not available")
 	}
 
-	// Emit one intermediate "thinking" line, then block. Cancellation must
-	// still return an error even though partial text has already streamed.
+	// Emit one intermediate "thinking" line, then block. Without the cancel
+	// guard, this partial text gets promoted to Result.Text and the run is
+	// mistaken for a successful turn.
 	backend := &scriptBackend{
 		shellCmd:            `printf 'partial-thought\n'; sleep 60`,
 		parseAsIntermediate: true,
@@ -457,16 +473,19 @@ func TestRunCancelAfterIntermediateReturnsErrorWithoutText(t *testing.T) {
 	}
 
 	if res.Error == nil {
-		t.Fatal("expected error after cancel, got success")
+		t.Fatalf("expected error after cancel, got success with Text=%q", res.Text)
+	}
+	if res.Text != "" {
+		t.Fatalf("cancelled run must not expose partial intermediate as Text: %q", res.Text)
 	}
 }
 
-// TestRunCancelKeepsStreamedNarrationVisible asserts that when the run is
-// cancelled mid-turn, the assistant text already streamed out as narration
-// stays in the recorder — so the queue's error branch can render the partial
-// reply alongside the error marker. RunResult itself only carries Error;
-// the partial body is in onProgress history, not on the result.
-func TestRunCancelKeepsStreamedNarrationVisible(t *testing.T) {
+// TestRunCancelDemotesPendingAsNarration asserts that when the run is
+// cancelled mid-turn, whatever text had accumulated in `pending` is
+// surfaced to the caller as a narration progress event — so the queue
+// error branch can render the partial reply alongside the error marker.
+// RunResult.Text must still stay empty so session state does not advance.
+func TestRunCancelDemotesPendingAsNarration(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
 	}
@@ -499,8 +518,11 @@ func TestRunCancelKeepsStreamedNarrationVisible(t *testing.T) {
 	if res.Error == nil {
 		t.Fatalf("expected cancel error, got success")
 	}
+	if res.Text != "" {
+		t.Fatalf("RunResult.Text must stay empty on cancel, got %q", res.Text)
+	}
 	narr := rec.narrationTexts()
 	if len(narr) != 1 || narr[0] != "substantial narrative about to be cancelled" {
-		t.Fatalf("narration must already be streamed before cancel, got %v", narr)
+		t.Fatalf("pending must be demoted to narration on cancel, got %v", narr)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PiDmitrius/klax/internal/mdhtml"
 	"github.com/PiDmitrius/klax/internal/runner"
 	"github.com/PiDmitrius/klax/internal/session"
 )
@@ -261,15 +262,15 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	workerDone := make(chan struct{})
 	go func() {
 		defer close(workerDone)
-		var lastSentBody string
+		var lastSentText string
 		for snapshot := range progressCh {
-			body := formatLogItems(snapshot, chatFmt)
-			if body == lastSentBody {
+			newText := formatLogItems(snapshot, chatFmt) + "\n\n..."
+			if newText == lastSentText {
 				continue
 			}
-			lastSentBody = body
+			lastSentText = newText
 			if progressChain != nil && len(progressChain.ids) > 0 {
-				pc, err := d.syncProgressChain(ctx, msg.chatID, msg.msgID, progressChain, body, "\n\n...", chatFmt)
+				pc, err := d.syncMessageChain(ctx, msg.chatID, msg.msgID, progressChain, newText, chatFmt)
 				if err != nil {
 					log.Printf("progress update failed: %v", err)
 					continue
@@ -286,7 +287,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	}()
 	onProgress := func(ev runner.ProgressEvent) {
 		// No upstream dedup here on purpose: the progress worker already
-		// suppresses duplicate edits via its `lastSentBody` check, and
+		// suppresses duplicate edits via its `lastSentText` check, and
 		// collapsing equal ProgressEvents at this level would hide real
 		// repeats (same tool invoked twice, same rate-limit warning
 		// reappearing after a cooldown).
@@ -396,14 +397,25 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		return
 	}
 
-	// All assistant text was streamed live as narration items during the
-	// run, so the final message is simply the rendered log without the
-	// trailing "..." progress marker. If the model produced neither text
-	// nor a tool call we still need *something* in the bubble (Telegram
-	// rejects an empty edit), so leave a single checkmark.
-	finalText := formatLogItems(logItems, chatFmt)
-	if finalText == "" {
-		finalText = "✅"
+	text := strings.TrimSpace(result.Text)
+	if text == "" {
+		text = "✅ Готово."
+	}
+
+	// Convert Claude's Markdown to the transport format.
+	var formatted string
+	if chatFmt == "html" {
+		formatted = mdhtml.Convert(text)
+	} else {
+		formatted = text
+	}
+
+	// Build final message: progress log + separator + answer.
+	var finalText string
+	if len(logItems) > 0 {
+		finalText = formatLogItems(logItems, chatFmt) + "\n\n" + formatted
+	} else {
+		finalText = formatted
 	}
 
 	if t != nil {

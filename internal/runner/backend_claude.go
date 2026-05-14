@@ -25,10 +25,6 @@ func (b *ClaudeBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 		"-p",
 		"--output-format", "stream-json",
 		"--verbose",
-		// Tested --include-partial-messages: per-token deltas streamed
-		// cleanly from claude, but Telegram editMessageText is a full
-		// replace — each edit reflows the bubble and the message visibly
-		// jitters as it grows. Whole-block emit reads better in chat.
 		// Agent: sub-agent spawn — klax tracks one process per session.
 		// AskUserQuestion: needs a TTY to render its TUI; in `claude -p` it
 		// silently fails, returns no answer, and the turn ends with an empty

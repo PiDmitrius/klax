@@ -24,12 +24,13 @@ func tildePath(path string) string {
 	return path
 }
 
-// formatLogItems renders the live run log. Tool invocations stay as inline
-// monospace ("техлог"). Narration blocks are assistant text rendered through
-// the markdown-to-HTML path, so lists, code fences and emphasis survive.
-// Adjacent tool labels share a single newline so they stack tightly; any
-// transition involving narration gets a blank line so the formatted text
-// breathes.
+// formatLogItems renders the pre-answer progress log. Tool invocations stay
+// as inline monospace ("техлог"). Narration blocks — the intermediate
+// assistant text demoted by the runner — are full-format text rendered
+// through the same markdown-to-HTML path as the final answer, so lists,
+// code fences and emphasis survive. Adjacent tool labels share a single
+// newline so they stack tightly; any transition involving narration gets a
+// blank line so the formatted text breathes.
 func formatLogItems(items []runner.ProgressEvent, format string) string {
 	var out strings.Builder
 	var prevKind runner.ProgressKind
