@@ -183,10 +183,14 @@ type ModelUsageInfo struct {
 	ContextUsed   int
 }
 
-// RunResult is the final result of a CLI invocation.
+// RunResult is the final result of a CLI invocation. The reply body itself is
+// not carried here — assistant text streams out through `onProgress` as it
+// arrives (one ProgressKindNarration per content block), so when Run returns
+// the chat already shows everything the model said. RunResult only carries
+// what the frontend needs *after* the run: session ID for persistence, usage
+// counters for the status line, rate-limit snapshot, and a terminal error.
 type RunResult struct {
 	SessionID string
-	Text      string
 	Usage     ModelUsageInfo
 	RateLimit *RateLimitInfo
 	Error     error
@@ -198,9 +202,8 @@ type ProgressKind string
 const (
 	// ProgressKindTool is a tool invocation label ("⚙️ Bash: ls ~").
 	ProgressKindTool ProgressKind = "tool"
-	// ProgressKindNarration is an assistant text block that turned out not
-	// to be the final answer (another text block came after it). Frontends
-	// should render it distinctly from the final answer body.
+	// ProgressKindNarration is an assistant text block streamed during the
+	// run. Frontends render these blocks directly in the live run log.
 	ProgressKindNarration ProgressKind = "narration"
 )
 
@@ -283,45 +286,30 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 
 	sessionID := opts.SessionID
 	var model string
-	var textParts []string
 	var usage ModelUsageInfo
 	var rateLimit *RateLimitInfo
 
-	// sawText tracks whether the stream emitted any assistant text block for
-	// this turn. When set, we ignore the redundant `result.text` field (which
-	// Claude echoes from the final assistant block) to avoid duplicating the
-	// tail of the answer in RunResult.Text.
+	// sawText records whether any assistant text/intermediate block was
+	// streamed out. Used to decide at end-of-run whether a non-zero exit
+	// from the backend should be surfaced as an error: if the model did
+	// produce a reply (already visible in the chat) we treat the exit as
+	// cosmetic; only a truly silent failure becomes RunResult.Error.
 	var sawText bool
 
-	// pending accumulates consecutive assistant text blocks until a
-	// chronological boundary arrives — a tool invocation, an unknown
-	// progress item, a rate-limit event, or end of stream. On a boundary
-	// the accumulated block is demoted to a single narration progress
-	// event (preserving order in the log); at end of stream it is
-	// promoted to the final answer body. Accumulating across raw block
-	// boundaries keeps sequential text fragments of one logical reply
-	// together instead of artificially splitting them.
-	var pending string
-	demotePending := func() {
-		if pending == "" {
-			return
-		}
-		if onProgress != nil {
-			onProgress(ProgressEvent{Kind: ProgressKindNarration, Text: pending})
-		}
-		pending = ""
-	}
-	appendPending := func(t string) {
+	// emitText streams an assistant text/intermediate block out as
+	// narration immediately. No buffering, no waiting for a boundary —
+	// the frontend appends it to the live progress message as soon as
+	// it arrives. Empty/whitespace-only blocks are dropped.
+	emitText := func(t string) {
 		t = strings.Trim(t, "\n")
 		if t == "" {
 			return
 		}
-		if pending != "" {
-			pending += "\n\n" + t
-		} else {
-			pending = t
-		}
 		sawText = true
+		if onProgress == nil {
+			return
+		}
+		onProgress(ProgressEvent{Kind: ProgressKindNarration, Text: t})
 	}
 
 	scanner := bufio.NewScanner(stdout)
@@ -349,10 +337,6 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 				if ev.RateLimit != nil {
 					rateLimit = ev.RateLimit
 					if onProgress != nil && ev.RateLimit.Status != "allowed" {
-						// Flush pending first so the rate-limit line
-						// appears in the log AFTER the text that preceded
-						// it chronologically.
-						demotePending()
 						onProgress(ProgressEvent{Kind: ProgressKindTool, Text: formatRateLimit(ev.RateLimit)})
 					}
 				}
@@ -362,10 +346,6 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 				r.current = ev.Tool
 				r.toolAt = time.Now()
 				r.mu.Unlock()
-				// A tool call is the chronological boundary between
-				// narration and what comes after. Flush pending BEFORE
-				// emitting the tool so the log order matches the stream.
-				demotePending()
 				if onProgress != nil {
 					onProgress(ProgressEvent{Kind: ProgressKindTool, Text: ev.Tool.String()})
 				}
@@ -373,27 +353,22 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 					usage.ContextUsed = ev.Usage.ContextUsed
 				}
 
-			case "text":
+			case "text", "intermediate":
+				// Stream each assistant text block (Claude) or agent_message
+				// fragment (codex) as it arrives. There is no "is this the
+				// final answer?" guess any more — every block is shown live,
+				// and the run's natural end (EOF, normal exit) is the
+				// finality signal for the frontend.
 				r.mu.Lock()
 				r.current = ToolUse{}
 				r.mu.Unlock()
 				if ev.Usage.ContextUsed > 0 {
 					usage.ContextUsed = ev.Usage.ContextUsed
 				}
-				appendPending(ev.Text)
-
-			case "intermediate":
-				// Codex emits one `agent_message` per assistant text
-				// fragment within a turn. Accumulate; the boundary is
-				// the next tool/end-of-stream, same as Claude.
-				r.mu.Lock()
-				r.current = ToolUse{}
-				r.mu.Unlock()
-				appendPending(ev.Text)
+				emitText(ev.Text)
 
 			case "unknown":
 				if onProgress != nil && ev.Text != "" {
-					demotePending()
 					onProgress(ProgressEvent{Kind: ProgressKindTool, Text: fmt.Sprintf("❓ %s", ev.Text)})
 				}
 
@@ -407,24 +382,14 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 				// through normally; the run ends when the CLI exits and the
 				// scanner hits EOF.
 				if ev.Error != "" {
-					// Preserve any accumulated text as narration so the
-					// user still sees what the model said before the
-					// error — the queue error branch renders logItems
-					// alongside the error marker.
-					demotePending()
 					return RunResult{
 						SessionID: sessionID,
 						Error:     fmt.Errorf("%s: %s", backend.Name(), ev.Error),
 					}
 				}
-				// Trust result.text only when no assistant text blocks
-				// were seen (older Claude streams, or backends that do
-				// not emit per-block text). Otherwise result.text just
-				// duplicates the block already held in pending.
-				if ev.Text != "" && !sawText {
-					textParts = append(textParts, ev.Text)
-				}
-				// Merge usage from result event.
+				// result.text is intentionally ignored: assistant content was
+				// already streamed block-by-block via emitText. Keeping it
+				// would duplicate the tail of the reply in the chat.
 				if ev.Usage.Model != "" {
 					usage.Model = ev.Usage.Model
 				}
@@ -452,25 +417,11 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 
 	waitErr := cmd.Wait()
 
-	// Cancellation path: whatever is in pending is not a sanctioned
-	// final answer, but it may be substantial narration the user was
-	// about to see. Demote it so the error branch in queue.go can surface
-	// it via logItems alongside the error marker. `Error != nil` still
-	// signals the caller that the turn did not complete, so session
-	// counters / model state do not advance.
 	if ctx.Err() != nil {
-		demotePending()
 		return RunResult{
 			SessionID: sessionID,
 			Error:     fmt.Errorf("%s: %w", backend.Name(), ctx.Err()),
 		}
-	}
-
-	// The run completed normally — whatever stayed in pending past the
-	// last tool boundary is the actual reply.
-	if pending != "" {
-		textParts = append(textParts, pending)
-		pending = ""
 	}
 
 	if usage.Model == "" {
@@ -494,14 +445,12 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 		}
 	}
 
-	text := strings.Join(textParts, "\n")
 	result := RunResult{
 		SessionID: sessionID,
-		Text:      text,
 		Usage:     usage,
 		RateLimit: rateLimit,
 	}
-	if text == "" && waitErr != nil {
+	if waitErr != nil && !sawText {
 		stderr := strings.TrimSpace(stderrBuf.String())
 		if stderr != "" {
 			result.Error = fmt.Errorf("%s: %s", backend.Name(), stderr)

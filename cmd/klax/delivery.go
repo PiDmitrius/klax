@@ -555,6 +555,32 @@ func (d *daemon) syncMessageChain(ctx context.Context, fullChatID, replyTo strin
 		text = stripHTML(text)
 	}
 	chunks := splitMessage(text, maxMessageLen, format)
+	return d.deliverChunks(ctx, fullChatID, replyTo, chain, chunks, format)
+}
+
+// syncProgressChain delivers a progress update whose body must always end with
+// a sentinel tail (typically "\n\n..."). The tail tells the user the run is
+// still going; on final delivery it disappears. Telegram does not let us
+// delete messages, so the tail must never end up alone in the trailing chunk —
+// otherwise final delivery (no tail) would leave that chunk orphaned. We use
+// the existing maxMessageLen→Telegram-4096 slack: body is split at the normal
+// per-chunk budget, and the tail is appended to the last chunk after the
+// split. The chunk then holds content + tail and stays well under Telegram's
+// limit; when the run ends and the tail disappears, the same chunk simply
+// shrinks by len(tail) bytes — no chunk count change, no orphan message.
+func (d *daemon) syncProgressChain(ctx context.Context, fullChatID, replyTo string, chain *messageChain, body, tail, format string) (*messageChain, error) {
+	if format == "" {
+		body = stripHTML(body)
+	}
+	chunks := splitMessage(body, maxMessageLen, format)
+	if len(chunks) == 0 {
+		chunks = []string{""}
+	}
+	chunks[len(chunks)-1] += tail
+	return d.deliverChunks(ctx, fullChatID, replyTo, chain, chunks, format)
+}
+
+func (d *daemon) deliverChunks(ctx context.Context, fullChatID, replyTo string, chain *messageChain, chunks []string, format string) (*messageChain, error) {
 	chain = chain.ensure()
 	if replyTo != "" {
 		chain.anchorReplyTo = replyTo
