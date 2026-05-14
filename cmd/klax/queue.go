@@ -398,24 +398,32 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	}
 
 	text := strings.TrimSpace(result.Text)
-	if text == "" {
-		text = "✅ Готово."
-	}
 
-	// Convert Claude's Markdown to the transport format.
+	// Convert Claude's Markdown to the transport format. Empty answer text
+	// (rare: model returned only tool calls and nothing for the user) just
+	// drops out of the final message — the progress log alone reads fine.
 	var formatted string
-	if chatFmt == "html" {
-		formatted = mdhtml.Convert(text)
-	} else {
-		formatted = text
+	if text != "" {
+		if chatFmt == "html" {
+			formatted = mdhtml.Convert(text)
+		} else {
+			formatted = text
+		}
 	}
 
 	// Build final message: progress log + separator + answer.
 	var finalText string
-	if len(logItems) > 0 {
+	switch {
+	case len(logItems) > 0 && formatted != "":
 		finalText = formatLogItems(logItems, chatFmt) + "\n\n" + formatted
-	} else {
+	case len(logItems) > 0:
+		finalText = formatLogItems(logItems, chatFmt)
+	case formatted != "":
 		finalText = formatted
+	default:
+		// Telegram rejects an empty edit, so leave a bare checkmark when
+		// the run produced literally nothing.
+		finalText = "✅"
 	}
 
 	if t != nil {
