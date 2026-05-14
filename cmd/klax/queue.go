@@ -399,7 +399,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 
 	text := strings.TrimSpace(result.Text)
 	if text == "" {
-		text = "✅ Готово."
+		text = "✅"
 	}
 
 	// Convert Claude's Markdown to the transport format.
