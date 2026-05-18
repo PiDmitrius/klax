@@ -49,9 +49,15 @@ func bumpPatch(srcDir string) error {
 
 const repo = "PiDmitrius/klax"
 
+var (
+	apiClient      = &http.Client{Timeout: 30 * time.Second}
+	downloadClient = &http.Client{Timeout: 5 * time.Minute}
+)
+
 // latestTag returns the latest release tag (e.g. "v1.2.3") via GitHub redirect.
 func latestTag() (string, error) {
 	client := &http.Client{
+		Timeout: 30 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -80,7 +86,7 @@ func downloadRelease(tag string) (string, error) {
 	url := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", repo, tag, name)
 
 	fmt.Printf("downloading %s...\n", name)
-	resp, err := http.Get(url)
+	resp, err := downloadClient.Get(url)
 	if err != nil {
 		return "", err
 	}
@@ -222,7 +228,7 @@ func fetchReleases() ([]releaseInfo, error) {
 
 func fetchReleasePage(page int) ([]releaseInfo, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=100&page=%d", repo, page)
-	resp, err := http.Get(url)
+	resp, err := apiClient.Get(url)
 	if err != nil {
 		return nil, err
 	}
