@@ -25,9 +25,49 @@ import (
 const killGracePeriod = 3 * time.Second
 
 // ToolUse describes what the AI is doing right now.
+//
+// Input is a JSON string whose shape is the *canonical* form expected by
+// ToolUse.String() — backends must normalize their native event payloads into
+// this form before constructing a ToolUse. Per-tool schemas:
+//
+//	Bash        {"command": string}
+//	Read        {"file_path": string}
+//	Edit        {"file_path": string}
+//	Write       {"file_path": string}
+//	WebFetch    {"url": string}
+//	WebSearch   {"query": string}
+//	Glob        {"pattern": string}
+//	Grep        {"pattern": string}
+//	LS          {"path": string}
+//	Task        {"description": string}                — sub-agent spawn
+//	Plan        PlanProgress (see below)               — checklist snapshot
+//	TaskCreate  {"subject": string}                    — harness task list, single create
+//	TaskUpdate  {"taskId": string, "status": string, "subject": string, "activeForm": string}
+//	TaskList    {}
+//	TaskGet     {"taskId": string}
+//	MCP         {"server": string, "tool": string}
+//
+// Unknown tool names render as "🔧 <name>" with no input inspection.
 type ToolUse struct {
 	Name  string
 	Input string
+}
+
+// PlanProgress is the canonical Plan payload — both Claude's TodoWrite
+// (`{todos:[{content,status,activeForm}]}`) and codex's todo_list items[]
+// events are normalized into this form by their respective backends. Current
+// is the in-progress (or first pending) item's user-visible label.
+type PlanProgress struct {
+	Done    int    `json:"done"`
+	Total   int    `json:"total"`
+	Current string `json:"current,omitempty"`
+}
+
+// MarshalPlanProgress packs done/total/current into the canonical JSON form
+// that ToolUse{Name:"Plan"}.String() expects.
+func MarshalPlanProgress(done, total int, current string) string {
+	b, _ := json.Marshal(PlanProgress{Done: done, Total: total, Current: current})
+	return string(b)
 }
 
 const toolPreviewLimit = 72
@@ -90,9 +130,76 @@ func (t ToolUse) String() string {
 		json.Unmarshal([]byte(t.Input), &inp)
 		return fmt.Sprintf("📂 LS: %s", inp.Path)
 	case "Task":
+		var inp struct {
+			Description string `json:"description"`
+		}
+		json.Unmarshal([]byte(t.Input), &inp)
+		if inp.Description != "" {
+			return fmt.Sprintf("🤖 Task: %s", truncate(inp.Description, toolPreviewLimit))
+		}
 		return "🤖 Task"
-	case "TodoWrite":
-		return "📋 TodoWrite"
+	case "Plan":
+		var p PlanProgress
+		if t.Input != "" {
+			json.Unmarshal([]byte(t.Input), &p)
+		}
+		if p.Total == 0 {
+			return "📌 Plan"
+		}
+		if p.Done >= p.Total {
+			return fmt.Sprintf("📌 ✓ %d/%d", p.Done, p.Total)
+		}
+		if p.Current != "" {
+			return fmt.Sprintf("📌 %s · %d/%d", truncate(p.Current, toolPreviewLimit), p.Done, p.Total)
+		}
+		return fmt.Sprintf("📌 %d/%d", p.Done, p.Total)
+	case "TaskCreate":
+		var inp struct {
+			Subject string `json:"subject"`
+		}
+		json.Unmarshal([]byte(t.Input), &inp)
+		if inp.Subject != "" {
+			return fmt.Sprintf("📌 + %s", truncate(inp.Subject, toolPreviewLimit))
+		}
+		return "📌 +"
+	case "TaskUpdate":
+		var inp struct {
+			TaskID     string `json:"taskId"`
+			Status     string `json:"status"`
+			Subject    string `json:"subject"`
+			ActiveForm string `json:"activeForm"`
+		}
+		json.Unmarshal([]byte(t.Input), &inp)
+		id := inp.TaskID
+		if id == "" {
+			id = "?"
+		}
+		switch inp.Status {
+		case "in_progress":
+			return fmt.Sprintf("📌 #%s ▶", id)
+		case "completed":
+			return fmt.Sprintf("📌 #%s ✓", id)
+		case "deleted":
+			return fmt.Sprintf("📌 #%s ✕", id)
+		case "pending":
+			return fmt.Sprintf("📌 #%s ⏸", id)
+		}
+		if inp.Subject != "" || inp.ActiveForm != "" {
+			return fmt.Sprintf("📌 #%s ✎", id)
+		}
+		return fmt.Sprintf("📌 #%s", id)
+	case "TaskList":
+		return "📌 list"
+	case "TaskGet":
+		var inp struct {
+			TaskID string `json:"taskId"`
+		}
+		json.Unmarshal([]byte(t.Input), &inp)
+		id := inp.TaskID
+		if id == "" {
+			id = "?"
+		}
+		return fmt.Sprintf("📌 #%s ?", id)
 	case "MCP":
 		var inp struct {
 			Server string `json:"server"`
