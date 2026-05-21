@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -61,6 +62,205 @@ func TestTruncatePreservesUTF8(t *testing.T) {
 	if !strings.HasSuffix(got, "…") {
 		t.Fatalf("expected truncated string to end with ellipsis: %q", got)
 	}
+}
+
+func TestToolUseString_PlanAndTask(t *testing.T) {
+	cases := []struct {
+		name  string
+		tool  ToolUse
+		want  string
+	}{
+		{
+			name: "Plan empty payload",
+			tool: ToolUse{Name: "Plan", Input: ""},
+			want: "📌 Plan",
+		},
+		{
+			name: "Plan total=0 in JSON",
+			tool: ToolUse{Name: "Plan", Input: `{"done":0,"total":0}`},
+			want: "📌 Plan",
+		},
+		{
+			name: "Plan in progress with current",
+			tool: ToolUse{Name: "Plan", Input: `{"done":1,"total":4,"current":"Running whoami"}`},
+			want: "📌 Running whoami · 1/4",
+		},
+		{
+			name: "Plan in progress without current",
+			tool: ToolUse{Name: "Plan", Input: `{"done":2,"total":4}`},
+			want: "📌 2/4",
+		},
+		{
+			name: "Plan complete",
+			tool: ToolUse{Name: "Plan", Input: `{"done":4,"total":4}`},
+			want: "📌 ✓ 4/4",
+		},
+		{
+			name: "TaskCreate with subject",
+			tool: ToolUse{Name: "TaskCreate", Input: `{"subject":"uptime","description":"Run uptime","activeForm":"Running uptime"}`},
+			want: "📌 + uptime",
+		},
+		{
+			name: "TaskCreate without subject",
+			tool: ToolUse{Name: "TaskCreate", Input: `{}`},
+			want: "📌 +",
+		},
+		{
+			name: "TaskUpdate in_progress",
+			tool: ToolUse{Name: "TaskUpdate", Input: `{"taskId":"1","status":"in_progress"}`},
+			want: "📌 #1 ▶",
+		},
+		{
+			name: "TaskUpdate completed",
+			tool: ToolUse{Name: "TaskUpdate", Input: `{"taskId":"2","status":"completed"}`},
+			want: "📌 #2 ✓",
+		},
+		{
+			name: "TaskUpdate deleted",
+			tool: ToolUse{Name: "TaskUpdate", Input: `{"taskId":"3","status":"deleted"}`},
+			want: "📌 #3 ✕",
+		},
+		{
+			name: "TaskUpdate pending",
+			tool: ToolUse{Name: "TaskUpdate", Input: `{"taskId":"4","status":"pending"}`},
+			want: "📌 #4 ⏸",
+		},
+		{
+			name: "TaskUpdate subject edit without status",
+			tool: ToolUse{Name: "TaskUpdate", Input: `{"taskId":"5","subject":"renamed"}`},
+			want: "📌 #5 ✎",
+		},
+		{
+			name: "TaskUpdate bare id",
+			tool: ToolUse{Name: "TaskUpdate", Input: `{"taskId":"6"}`},
+			want: "📌 #6",
+		},
+		{
+			name: "TaskList empty",
+			tool: ToolUse{Name: "TaskList", Input: `{}`},
+			want: "📌 list",
+		},
+		{
+			name: "TaskGet",
+			tool: ToolUse{Name: "TaskGet", Input: `{"taskId":"7"}`},
+			want: "📌 #7 ?",
+		},
+		{
+			name: "Task with description",
+			tool: ToolUse{Name: "Task", Input: `{"description":"Refactor login flow","prompt":"...long..."}`},
+			want: "🤖 Task: Refactor login flow",
+		},
+		{
+			name: "Task without description",
+			tool: ToolUse{Name: "Task", Input: `{}`},
+			want: "🤖 Task",
+		},
+		{
+			name: "unknown tool falls to wrench default",
+			tool: ToolUse{Name: "SomeNewTool", Input: `{}`},
+			want: "🔧 SomeNewTool",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.tool.String()
+			if got != tc.want {
+				t.Fatalf("ToolUse.String() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestClaudePlanInput_Normalize(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want PlanProgress
+	}{
+		{
+			name: "all pending picks first content",
+			raw:  `{"todos":[{"content":"uptime","status":"pending","activeForm":"Running uptime"},{"content":"whoami","status":"pending","activeForm":"Running whoami"}]}`,
+			want: PlanProgress{Done: 0, Total: 2, Current: "uptime"},
+		},
+		{
+			name: "in_progress wins with activeForm",
+			raw:  `{"todos":[{"content":"uptime","status":"completed","activeForm":"Running uptime"},{"content":"whoami","status":"in_progress","activeForm":"Running whoami"}]}`,
+			want: PlanProgress{Done: 1, Total: 2, Current: "Running whoami"},
+		},
+		{
+			name: "in_progress falls back to content when activeForm missing",
+			raw:  `{"todos":[{"content":"uptime","status":"in_progress"}]}`,
+			want: PlanProgress{Done: 0, Total: 1, Current: "uptime"},
+		},
+		{
+			name: "all completed has no current",
+			raw:  `{"todos":[{"content":"uptime","status":"completed"},{"content":"whoami","status":"completed"}]}`,
+			want: PlanProgress{Done: 2, Total: 2, Current: ""},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := claudePlanInput([]byte(tc.raw))
+			var p PlanProgress
+			if err := unmarshalJSON(got, &p); err != nil {
+				t.Fatalf("claudePlanInput produced invalid JSON %q: %v", got, err)
+			}
+			if p != tc.want {
+				t.Fatalf("claudePlanInput → %+v, want %+v (raw output %q)", p, tc.want, got)
+			}
+		})
+	}
+}
+
+func TestCodexPlanInput_Normalize(t *testing.T) {
+	cases := []struct {
+		name  string
+		items []codexPlanItem
+		want  PlanProgress
+	}{
+		{
+			name:  "all incomplete picks first",
+			items: []codexPlanItem{{Text: "uptime"}, {Text: "whoami"}},
+			want:  PlanProgress{Done: 0, Total: 2, Current: "uptime"},
+		},
+		{
+			name:  "partial progress",
+			items: []codexPlanItem{{Text: "uptime", Completed: true}, {Text: "whoami"}, {Text: "date"}},
+			want:  PlanProgress{Done: 1, Total: 3, Current: "whoami"},
+		},
+		{
+			name:  "all completed has no current",
+			items: []codexPlanItem{{Text: "uptime", Completed: true}, {Text: "whoami", Completed: true}},
+			want:  PlanProgress{Done: 2, Total: 2, Current: ""},
+		},
+		{
+			name:  "empty items returns empty string",
+			items: nil,
+			want:  PlanProgress{},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := codexPlanInput(tc.items)
+			if got == "" {
+				if tc.want != (PlanProgress{}) {
+					t.Fatalf("empty output but want %+v", tc.want)
+				}
+				return
+			}
+			var p PlanProgress
+			if err := unmarshalJSON(got, &p); err != nil {
+				t.Fatalf("codexPlanInput produced invalid JSON %q: %v", got, err)
+			}
+			if p != tc.want {
+				t.Fatalf("codexPlanInput → %+v, want %+v (raw output %q)", p, tc.want, got)
+			}
+		})
+	}
+}
+
+func unmarshalJSON(s string, v any) error {
+	return json.Unmarshal([]byte(s), v)
 }
 
 // scriptBackend runs an arbitrary shell command. Used to simulate the

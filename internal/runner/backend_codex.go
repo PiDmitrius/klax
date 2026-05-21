@@ -83,6 +83,12 @@ type codexItem struct {
 	Action           json.RawMessage `json:"action,omitempty"`
 	Server           string          `json:"server,omitempty"` // mcp_tool_call
 	Tool             string          `json:"tool,omitempty"`   // mcp_tool_call
+	Items            []codexPlanItem `json:"items,omitempty"`  // todo_list
+}
+
+type codexPlanItem struct {
+	Text      string `json:"text"`
+	Completed bool   `json:"completed"`
 }
 
 type codexChange struct {
@@ -160,7 +166,7 @@ func (b *CodexBackend) ParseEvent(line []byte) ([]Event, bool) {
 		case "todo_list":
 			return single(Event{
 				Type: "tool",
-				Tool: ToolUse{Name: "TodoWrite", Input: ""},
+				Tool: ToolUse{Name: "Plan", Input: codexPlanInput(ev.Item.Items)},
 			})
 		case "mcp_tool_call":
 			return single(Event{
@@ -201,6 +207,22 @@ func (b *CodexBackend) ParseEvent(line []byte) ([]Event, bool) {
 			return single(Event{Type: "text"})
 		}
 		return single(Event{Type: "unknown", Text: fmt.Sprintf("item.completed:%s", ev.Item.Type)})
+
+	case "item.updated":
+		// codex streams progress for in-flight items. Only todo_list updates
+		// carry user-visible signal (checklist ticks); other types
+		// (command_execution aggregated_output, file_change progress) just
+		// repeat what item.started/item.completed already cover.
+		if ev.Item == nil {
+			return nil, false
+		}
+		if ev.Item.Type == "todo_list" {
+			return single(Event{
+				Type: "tool",
+				Tool: ToolUse{Name: "Plan", Input: codexPlanInput(ev.Item.Items)},
+			})
+		}
+		return nil, false
 
 	case "turn.completed":
 		var e Event
@@ -284,6 +306,26 @@ func ReadCodexSessionMeta(threadID string) (model string, contextWindow int, con
 		// Stop after finding both.
 	}
 	return
+}
+
+// codexPlanInput normalizes a codex todo_list event into the canonical
+// PlanProgress JSON. Codex only tracks a per-item completed bool — we take
+// the first incomplete item as "current", which matches how codex agents
+// sequentially work through their plans.
+func codexPlanInput(items []codexPlanItem) string {
+	if len(items) == 0 {
+		return ""
+	}
+	done := 0
+	current := ""
+	for _, it := range items {
+		if it.Completed {
+			done++
+		} else if current == "" {
+			current = it.Text
+		}
+	}
+	return MarshalPlanProgress(done, len(items), current)
 }
 
 // codexChangePaths returns a comma-separated list of paths from file_change events.

@@ -151,9 +151,15 @@ func (b *ClaudeBackend) ParseEvent(line []byte) ([]Event, bool) {
 		for _, block := range ev.Message.Content {
 			switch block.Type {
 			case "tool_use":
+				name := block.Name
+				input := string(block.Input)
+				if name == "TodoWrite" {
+					name = "Plan"
+					input = claudePlanInput(block.Input)
+				}
 				e := Event{
 					Type: "tool",
-					Tool: ToolUse{Name: block.Name, Input: string(block.Input)},
+					Tool: ToolUse{Name: name, Input: input},
 				}
 				if len(out) == 0 {
 					e.Usage = usage
@@ -166,6 +172,11 @@ func (b *ClaudeBackend) ParseEvent(line []byte) ([]Event, bool) {
 				}
 				out = append(out, e)
 			}
+			// Other block types (`thinking`, `redacted_thinking`, `image`) are
+			// intentionally dropped — extended-thinking blocks would flood the
+			// chat with raw chain-of-thought, and we already surface tool calls
+			// + final text. Promote here if a future product decision wants to
+			// expose them.
 		}
 		if len(out) == 0 {
 			return nil, false
@@ -204,6 +215,49 @@ func (b *ClaudeBackend) ParseEvent(line []byte) ([]Event, bool) {
 	}
 
 	return []Event{{Type: "unknown", Text: ev.Type}}, true
+}
+
+// claudePlanInput normalizes Claude's TodoWrite tool_use input
+// ({"todos":[{"content","status","activeForm"}]}) into the canonical
+// PlanProgress JSON. "current" prefers the activeForm of the in_progress
+// item, falling back to the content of the first pending one.
+func claudePlanInput(raw json.RawMessage) string {
+	var parsed struct {
+		Todos []struct {
+			Content    string `json:"content"`
+			Status     string `json:"status"` // pending | in_progress | completed
+			ActiveForm string `json:"activeForm"`
+		} `json:"todos"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil || len(parsed.Todos) == 0 {
+		return string(raw)
+	}
+	done := 0
+	current := ""
+	for _, td := range parsed.Todos {
+		if td.Status == "completed" {
+			done++
+		}
+	}
+	for _, td := range parsed.Todos {
+		if td.Status == "in_progress" {
+			if td.ActiveForm != "" {
+				current = td.ActiveForm
+			} else {
+				current = td.Content
+			}
+			break
+		}
+	}
+	if current == "" {
+		for _, td := range parsed.Todos {
+			if td.Status == "pending" {
+				current = td.Content
+				break
+			}
+		}
+	}
+	return MarshalPlanProgress(done, len(parsed.Todos), current)
 }
 
 // findBinary looks for a binary by name, with fallback paths relative to $HOME.
