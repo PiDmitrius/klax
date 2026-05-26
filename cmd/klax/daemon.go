@@ -678,11 +678,13 @@ func (d *daemon) pollTG(ctx context.Context) {
 
 			// Download attachments (photo or document).
 			var attachments []attachment
+			var attachErrs []string
 			if photo := msg.BestPhoto(); photo != nil {
 				if data, name, err := bot.DownloadFile(photo.FileID); err == nil {
 					attachments = append(attachments, attachment{filename: name, data: data})
 				} else {
 					log.Printf("tg: download photo: %v", err)
+					attachErrs = append(attachErrs, fmt.Sprintf("фото: %v", err))
 				}
 			}
 			if msg.Document != nil {
@@ -693,6 +695,11 @@ func (d *daemon) pollTG(ctx context.Context) {
 					attachments = append(attachments, attachment{filename: name, data: data})
 				} else {
 					log.Printf("tg: download document: %v", err)
+					label := "файл"
+					if msg.Document.FileName != "" {
+						label = fmt.Sprintf("файл %q", msg.Document.FileName)
+					}
+					attachErrs = append(attachErrs, fmt.Sprintf("%s: %v", label, err))
 				}
 			}
 			if msg.Voice != nil {
@@ -700,6 +707,7 @@ func (d *daemon) pollTG(ctx context.Context) {
 					attachments = append(attachments, attachment{filename: "voice.oga", data: data})
 				} else {
 					log.Printf("tg: download voice: %v", err)
+					attachErrs = append(attachErrs, fmt.Sprintf("voice: %v", err))
 				}
 			}
 			if msg.Audio != nil {
@@ -710,16 +718,30 @@ func (d *daemon) pollTG(ctx context.Context) {
 					attachments = append(attachments, attachment{filename: name, data: data})
 				} else {
 					log.Printf("tg: download audio: %v", err)
+					label := "audio"
+					if msg.Audio.FileName != "" {
+						label = fmt.Sprintf("audio %q", msg.Audio.FileName)
+					}
+					attachErrs = append(attachErrs, fmt.Sprintf("%s: %v", label, err))
+				}
+			}
+
+			notifyAttachErrs := func() {
+				if len(attachErrs) > 0 {
+					d.sendPlain(chatID, msgID, "Не удалось скачать:\n• "+strings.Join(attachErrs, "\n• "))
 				}
 			}
 
 			if d.isTGAllowed(msg.From.ID) {
+				notifyAttachErrs()
 				d.handleMessageWithAttachments(chatID, msgID, text, attachments)
 			} else if d.isGroupChat(chatID) {
 				if strings.HasPrefix(text, "/") && isGroupCommand(text) {
+					notifyAttachErrs()
 					d.ensureSessionWithCWD(d.sessionKey(chatID), d.sessionCWD(chatID))
 					d.handleCommand(chatID, msgID, text)
 				} else if prompt, ok := stripGroupTrigger(strings.TrimSpace(text)); ok {
+					notifyAttachErrs()
 					d.ensureSessionWithCWD(d.sessionKey(chatID), d.sessionCWD(chatID))
 					d.enqueueWithAttachments(chatID, msgID, prompt, attachments)
 				}
@@ -771,26 +793,41 @@ func (d *daemon) pollMAX(ctx context.Context) {
 
 			// Download attachments from MAX message.
 			var attachments []attachment
+			var attachErrs []string
 			for _, att := range upd.Message.Body.ParseAttachments() {
 				data, err := bot.DownloadURL(att.URL)
 				if err != nil {
 					log.Printf("mx: download %s: %v", att.Type, err)
+					label := att.Type
+					if att.Filename != "" {
+						label = fmt.Sprintf("%s %q", att.Type, att.Filename)
+					}
+					attachErrs = append(attachErrs, fmt.Sprintf("%s: %v", label, err))
 					continue
 				}
 				attachments = append(attachments, attachment{filename: att.Filename, data: data})
 			}
 
-			if text == "" && len(attachments) == 0 {
+			if text == "" && len(attachments) == 0 && len(attachErrs) == 0 {
 				continue
 			}
 
+			notifyAttachErrs := func() {
+				if len(attachErrs) > 0 {
+					d.sendPlain(chatID, msgID, "Не удалось скачать:\n• "+strings.Join(attachErrs, "\n• "))
+				}
+			}
+
 			if d.isMAXAllowed(senderID) {
+				notifyAttachErrs()
 				d.handleMessageWithAttachments(chatID, msgID, text, attachments)
 			} else if d.isGroupChat(chatID) {
 				if strings.HasPrefix(text, "/") && isGroupCommand(text) {
+					notifyAttachErrs()
 					d.ensureSessionWithCWD(d.sessionKey(chatID), d.sessionCWD(chatID))
 					d.handleCommand(chatID, msgID, text)
 				} else if prompt, ok := stripGroupTrigger(strings.TrimSpace(text)); ok {
+					notifyAttachErrs()
 					d.ensureSessionWithCWD(d.sessionKey(chatID), d.sessionCWD(chatID))
 					d.enqueueWithAttachments(chatID, msgID, prompt, attachments)
 				}
