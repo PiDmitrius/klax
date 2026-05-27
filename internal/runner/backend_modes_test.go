@@ -96,7 +96,7 @@ func TestCodexParsesMcpToolCallAsTool(t *testing.T) {
 		t.Fatalf("expected exactly one event, got %d", len(events))
 	}
 	ev := events[0]
-	if ev.Type != "tool" {
+	if ev.Type != EventTool {
 		t.Fatalf("expected tool event, got %q (text=%q)", ev.Type, ev.Text)
 	}
 	if ev.Tool.Name != "MCP" {

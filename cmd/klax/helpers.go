@@ -31,6 +31,11 @@ func tildePath(path string) string {
 // code fences and emphasis survive. Adjacent tool labels share a single
 // newline so they stack tightly; any transition involving narration gets a
 // blank line so the formatted text breathes.
+//
+// Narration items are rendered one at a time because the runner cuts only
+// on paragraph boundaries — the "\n\n" between two narration items here is
+// the same separator that was consumed at the cut, so the original
+// paragraph structure of the model's reply is reproduced exactly.
 func formatLogItems(items []runner.ProgressEvent, format string) string {
 	var out strings.Builder
 	var prevKind runner.ProgressKind

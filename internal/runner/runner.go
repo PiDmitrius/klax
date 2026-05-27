@@ -24,6 +24,28 @@ import (
 // start doing meaningful cleanup on shutdown.
 const killGracePeriod = 3 * time.Second
 
+// Narration look-ahead tuning. These gate when the runner is allowed to leak
+// a partial assistant reply out as ProgressKindNarration *before* the usual
+// tool/end boundary. The invariant the user relies on is "trailing `...` in
+// the visible message ⇔ work is still in flight". We preserve it by only
+// flushing a body once we can prove a tail is queued behind it (look-ahead),
+// and by only firing the idle fallback while the backend process is still
+// alive. Vars (not consts) so tests can shrink the idle window.
+var (
+	// narrationFlushMinChars is the body size that has to accumulate before
+	// a look-ahead flush is even considered.
+	narrationFlushMinChars = 200
+	// narrationFlushLookaheadChars is the tail we keep in the buffer after a
+	// look-ahead flush as proof that more was coming. Without this tail we
+	// would be guessing — with it, the flush is justified by the bytes we
+	// actually held back.
+	narrationFlushLookaheadChars = 100
+	// narrationIdleTimeout is the ceiling on quiet time between two emits
+	// from the same pending segment. If it expires with text still buffered,
+	// we flush so the user keeps seeing the model is alive.
+	narrationIdleTimeout = 4 * time.Second
+)
+
 // ToolUse describes what the AI is doing right now.
 //
 // Input is a JSON string whose shape is the *canonical* form expected by
@@ -318,6 +340,14 @@ type ProgressEvent struct {
 }
 
 // ProgressFunc is called with human-readable progress updates.
+//
+// Callbacks run while the runner holds narrationBuffer.mu, so the function
+// must be quick and non-reentrant — anything heavier than append-to-slice
+// (network, formatting beyond cheap string ops, calling back into the
+// runner) belongs downstream behind a non-blocking mailbox. Holding mu
+// during the callback is intentional: it preserves the ordering invariant
+// that idle-timer narration emits and scanner-goroutine tool emits never
+// interleave at the consumer.
 type ProgressFunc func(ev ProgressEvent)
 
 // Runner executes an AI backend and tracks state.
@@ -349,6 +379,223 @@ func (r *Runner) Status() (tool ToolUse, toolElapsed, totalElapsed time.Duration
 		te = time.Since(r.toolAt)
 	}
 	return r.current, te, total
+}
+
+// narrationBuffer accumulates per-run assistant text and decides when to
+// emit it as ProgressKindNarration: look-ahead (on a paragraph boundary
+// with a tail as "more is coming" proof) or idle (timer fires while the
+// backend is still alive). All ProgressEvents from a Run — narration and
+// tool — flow through here; mu serializes the scanner goroutine, the idle
+// timer goroutine, and onProgress. After drain() any further AfterFunc
+// callback is a no-op.
+type narrationBuffer struct {
+	mu         sync.Mutex
+	text       string
+	timer      *time.Timer
+	onProgress ProgressFunc
+	closed     bool
+	// idleGen identifies the currently-armed idle timer. armIdleLocked
+	// bumps it; the AfterFunc closure captures the value and idleFire
+	// bails on mismatch — prevents a callback that was blocked on mu
+	// from emitting after a fresh append re-armed the timer.
+	idleGen uint64
+	// pendingJoin defers a paragraph break to the next non-empty append.
+	// Set by markBlockBoundary on a text-block end signal; consumed under
+	// mu on the next append. Harmless if no append follows.
+	pendingJoin bool
+}
+
+func newNarrationBuffer(fn ProgressFunc) *narrationBuffer {
+	return &narrationBuffer{onProgress: fn}
+}
+
+// append adds a fragment. Returns true on success so callers can maintain
+// sawText. isDelta=true means raw concat (token stream — the model's own
+// newlines carry structure). isDelta=false means paragraph-join with
+// "\n\n" against any existing buffer. A deferred block boundary (see
+// markBlockBoundary) takes precedence over either mode.
+func (b *narrationBuffer) append(text string, isDelta bool) bool {
+	if !isDelta {
+		text = strings.Trim(text, "\n")
+	}
+	if text == "" {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return false
+	}
+	// Consume any deferred block break first so the next content lands in
+	// its own paragraph regardless of mode.
+	if b.pendingJoin && b.text != "" {
+		b.text = strings.TrimRight(b.text, "\n") + "\n\n"
+	}
+	b.pendingJoin = false
+	switch {
+	case b.text == "":
+		b.text = text
+	case isDelta:
+		b.text += text
+	default:
+		// Paragraph join: trim trailing newlines from buf so a delta tail
+		// doesn't stack with the join into 3-4 consecutive newlines.
+		b.text = strings.TrimRight(b.text, "\n") + "\n\n" + text
+	}
+	b.maybeLookAheadLocked()
+	b.armIdleLocked()
+	return true
+}
+
+// demote flushes the buffer as one narration event and stops the idle
+// timer. Called at stream boundaries (tool, rate-limit, unknown, cancel,
+// result error) so log order matches stream order.
+func (b *narrationBuffer) demote() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.timer != nil {
+		b.timer.Stop()
+		b.timer = nil
+	}
+	if b.text == "" {
+		return
+	}
+	out := b.text
+	b.text = ""
+	b.emitLocked(ProgressEvent{Kind: ProgressKindNarration, Text: out})
+}
+
+// drain returns the buffer without emitting and marks it closed. Called
+// at end-of-stream: the returned text becomes RunResult.Text and no
+// further emit (including a fired-but-blocked AfterFunc) can reach
+// onProgress after this returns — queue.go closes progressCh right
+// after Run, so a late send would panic.
+func (b *narrationBuffer) drain() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.closed = true
+	if b.timer != nil {
+		b.timer.Stop()
+		b.timer = nil
+	}
+	out := b.text
+	b.text = ""
+	return out
+}
+
+// emitTool sends a non-narration event under mu so it cannot race with
+// an idle fire. Order at boundaries (demote → emitTool) is preserved
+// because both take this lock.
+func (b *narrationBuffer) emitTool(ev ProgressEvent) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.emitLocked(ev)
+}
+
+// markBlockBoundary defers a paragraph break to the next non-empty
+// append. No-op if the buffer is empty (nothing to glue to).
+func (b *narrationBuffer) markBlockBoundary() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed || b.text == "" {
+		return
+	}
+	b.pendingJoin = true
+}
+
+func (b *narrationBuffer) emitLocked(ev ProgressEvent) {
+	if b.closed || b.onProgress == nil || ev.Text == "" {
+		return
+	}
+	b.onProgress(ev)
+}
+
+// tryCutLocked emits one narration cut on the first paragraph boundary
+// past minBody (look-ahead uses narrationFlushMinChars; idle uses 0). The
+// "\n\n" it consumes doubles as the log/final separator inserted by
+// queue.go's final delivery, so concat(log + "\n\n" + final) reconstructs
+// the original text exactly. The tail must be at least
+// narrationFlushLookaheadChars to count as "more is coming" proof.
+func (b *narrationBuffer) tryCutLocked(minBody int) {
+	if minBody+2+narrationFlushLookaheadChars > len(b.text) {
+		return
+	}
+	bodyEnd := findParagraphCut(b.text, minBody)
+	if bodyEnd <= 0 {
+		return
+	}
+	tailStart := bodyEnd + 2
+	if len(b.text)-tailStart < narrationFlushLookaheadChars {
+		return
+	}
+	// Clone the body so it doesn't anchor the pre-cut backing array in
+	// queue.go's logItems — keeps memory linear in the streamed reply.
+	body := strings.Clone(b.text[:bodyEnd])
+	b.text = b.text[tailStart:]
+	b.emitLocked(ProgressEvent{Kind: ProgressKindNarration, Text: body})
+}
+
+// findParagraphCut finds the first "\n\n" outside any fenced code block at
+// body length >= minBody. Returns the byte index of the first "\n", or -1
+// if none qualifies. Stays outside fences so a code block containing a
+// blank line is never split across the log/final boundary. Tilde and
+// backtick fences are interchangeable here — mixing the two in one
+// response is exotic enough that we don't track which character opened
+// the fence.
+func findParagraphCut(text string, minBody int) int {
+	inFence := false
+	lineStart := 0
+	for {
+		rel := strings.IndexByte(text[lineStart:], '\n')
+		if rel < 0 {
+			return -1
+		}
+		nl := lineStart + rel
+		line := text[lineStart:nl]
+		if line == "" && !inFence && nl-1 >= minBody {
+			return nl - 1
+		}
+		// Fence marker: ``` or ~~~ after up to 3 cols of leading indent
+		// (CommonMark). Tabs counted as 1 col — strictly a tab is 4 cols
+		// and would disqualify, but missing a tab-indented fence on rare
+		// mixed-indent output is the worse failure mode.
+		trimmed := strings.TrimLeft(line, " \t")
+		if leadingIndent := len(line) - len(trimmed); leadingIndent <= 3 {
+			if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+				inFence = !inFence
+			}
+		}
+		lineStart = nl + 1
+	}
+}
+
+func (b *narrationBuffer) maybeLookAheadLocked() {
+	b.tryCutLocked(narrationFlushMinChars)
+}
+
+func (b *narrationBuffer) armIdleLocked() {
+	if b.timer != nil {
+		b.timer.Stop()
+	}
+	b.idleGen++
+	gen := b.idleGen
+	b.timer = time.AfterFunc(narrationIdleTimeout, func() { b.idleFire(gen) })
+}
+
+func (b *narrationBuffer) idleFire(gen uint64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return
+	}
+	if gen != b.idleGen {
+		// Stale callback: a fresh append re-armed the timer.
+		return
+	}
+	// Idle reuses tryCutLocked with minBody=0: commit any completed
+	// paragraph if buffered, otherwise wait — never split mid-sentence.
+	// End-of-run demotes whatever stays.
+	b.tryCutLocked(0)
 }
 
 // Run executes the backend with streaming output. Cancelling ctx sends SIGTERM
@@ -400,36 +647,17 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 	// tail of the answer in RunResult.Text.
 	var sawText bool
 
-	// pending accumulates consecutive assistant text blocks until a
+	// buf accumulates consecutive assistant text blocks until a
 	// chronological boundary arrives — a tool invocation, an unknown
 	// progress item, a rate-limit event, or end of stream. On a boundary
-	// the accumulated block is demoted to a single narration progress
-	// event (preserving order in the log); at end of stream it is
-	// promoted to the final answer body. Accumulating across raw block
-	// boundaries keeps sequential text fragments of one logical reply
-	// together instead of artificially splitting them.
-	var pending string
-	demotePending := func() {
-		if pending == "" {
-			return
-		}
-		if onProgress != nil {
-			onProgress(ProgressEvent{Kind: ProgressKindNarration, Text: pending})
-		}
-		pending = ""
-	}
-	appendPending := func(t string) {
-		t = strings.Trim(t, "\n")
-		if t == "" {
-			return
-		}
-		if pending != "" {
-			pending += "\n\n" + t
-		} else {
-			pending = t
-		}
-		sawText = true
-	}
+	// the accumulated block is demoted to one or more narration progress
+	// events (preserving order in the log); at end of stream the remainder
+	// is promoted to the final answer body. While text is accumulating,
+	// look-ahead / idle policy inside narrationBuffer may emit chunks
+	// early so a long answer feels alive rather than silent — but only
+	// when a tail is held back as proof more is coming, or after a long
+	// quiet stretch with the backend still alive.
+	buf := newNarrationBuffer(onProgress)
 
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
@@ -446,7 +674,7 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 
 		for _, ev := range events {
 			switch ev.Type {
-			case "system":
+			case EventSystem:
 				if ev.SessionID != "" {
 					sessionID = ev.SessionID
 				}
@@ -455,16 +683,16 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 				}
 				if ev.RateLimit != nil {
 					rateLimit = ev.RateLimit
-					if onProgress != nil && ev.RateLimit.Status != "allowed" {
+					if ev.RateLimit.Status != "allowed" {
 						// Flush pending first so the rate-limit line
 						// appears in the log AFTER the text that preceded
 						// it chronologically.
-						demotePending()
-						onProgress(ProgressEvent{Kind: ProgressKindTool, Text: formatRateLimit(ev.RateLimit)})
+						buf.demote()
+						buf.emitTool(ProgressEvent{Kind: ProgressKindTool, Text: formatRateLimit(ev.RateLimit)})
 					}
 				}
 
-			case "tool":
+			case EventTool:
 				r.mu.Lock()
 				r.current = ev.Tool
 				r.toolAt = time.Now()
@@ -472,39 +700,56 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 				// A tool call is the chronological boundary between
 				// narration and what comes after. Flush pending BEFORE
 				// emitting the tool so the log order matches the stream.
-				demotePending()
-				if onProgress != nil {
-					onProgress(ProgressEvent{Kind: ProgressKindTool, Text: ev.Tool.String()})
-				}
+				buf.demote()
+				buf.emitTool(ProgressEvent{Kind: ProgressKindTool, Text: ev.Tool.String()})
 				if ev.Usage.ContextUsed > 0 {
 					usage.ContextUsed = ev.Usage.ContextUsed
 				}
 
-			case "text":
+			case EventText:
 				r.mu.Lock()
 				r.current = ToolUse{}
 				r.mu.Unlock()
 				if ev.Usage.ContextUsed > 0 {
 					usage.ContextUsed = ev.Usage.ContextUsed
 				}
-				appendPending(ev.Text)
+				if buf.append(ev.Text, false) {
+					sawText = true
+				}
 
-			case "intermediate":
+			case EventTextDelta:
+				// Raw-concat token stream from --include-partial-messages;
+				// look-ahead inside buf emits paragraphs as they form.
+				r.mu.Lock()
+				r.current = ToolUse{}
+				r.mu.Unlock()
+				if buf.append(ev.Text, true) {
+					sawText = true
+				}
+
+			case EventTextBoundary:
+				// End of a streamed text block — defer a paragraph break
+				// before the next block's deltas start.
+				buf.markBlockBoundary()
+
+			case EventIntermediate:
 				// Codex emits one `agent_message` per assistant text
 				// fragment within a turn. Accumulate; the boundary is
 				// the next tool/end-of-stream, same as Claude.
 				r.mu.Lock()
 				r.current = ToolUse{}
 				r.mu.Unlock()
-				appendPending(ev.Text)
-
-			case "unknown":
-				if onProgress != nil && ev.Text != "" {
-					demotePending()
-					onProgress(ProgressEvent{Kind: ProgressKindTool, Text: fmt.Sprintf("❓ %s", ev.Text)})
+				if buf.append(ev.Text, false) {
+					sawText = true
 				}
 
-			case "result":
+			case EventUnknown:
+				if ev.Text != "" {
+					buf.demote()
+					buf.emitTool(ProgressEvent{Kind: ProgressKindTool, Text: fmt.Sprintf("❓ %s", ev.Text)})
+				}
+
+			case EventResult:
 				// `result` marks the end of one agent-loop iteration, not
 				// the end of the run. claude -p --output-format stream-json
 				// keeps the loop alive while background tasks (run_in_background,
@@ -518,7 +763,8 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 					// user still sees what the model said before the
 					// error — the queue error branch renders logItems
 					// alongside the error marker.
-					demotePending()
+					buf.demote()
+					_ = buf.drain()
 					return RunResult{
 						SessionID: sessionID,
 						Error:     fmt.Errorf("%s: %s", backend.Name(), ev.Error),
@@ -566,7 +812,8 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 	// signals the caller that the turn did not complete, so session
 	// counters / model state do not advance.
 	if ctx.Err() != nil {
-		demotePending()
+		buf.demote()
+		_ = buf.drain()
 		return RunResult{
 			SessionID: sessionID,
 			Error:     fmt.Errorf("%s: %w", backend.Name(), ctx.Err()),
@@ -574,10 +821,11 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 	}
 
 	// The run completed normally — whatever stayed in pending past the
-	// last tool boundary is the actual reply.
-	if pending != "" {
-		textParts = append(textParts, pending)
-		pending = ""
+	// last tool boundary is the actual reply. drain also closes the
+	// buffer so any in-flight idle-timer callback becomes a no-op before
+	// queue.go closes progressCh.
+	if remainder := buf.drain(); remainder != "" {
+		textParts = append(textParts, remainder)
 	}
 
 	if usage.Model == "" {
