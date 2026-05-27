@@ -12,11 +12,27 @@ import (
 )
 
 // ClaudeBackend implements Backend for Claude Code CLI.
-type ClaudeBackend struct{}
+//
+// Per-run parser state (reset in BuildCmd and on message_start):
+//   - partialDeltaSeen: true once a text-delta has arrived. Used to skip
+//     the assistant event's text blocks under --include-partial-messages
+//     because they duplicate what was already streamed via deltas.
+//   - inTextBlock: true while text deltas are arriving for the current
+//     content block. Used to emit EventTextBoundary on the matching
+//     content_block_stop so the runner separates back-to-back text
+//     blocks with a paragraph break.
+type ClaudeBackend struct {
+	partialDeltaSeen bool
+	inTextBlock      bool
+}
 
 func (b *ClaudeBackend) Name() string { return "claude" }
 
 func (b *ClaudeBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
+	// Reset per-run parser state on entry so a reused backend instance
+	// doesn't carry block-tracking from a prior turn.
+	b.partialDeltaSeen = false
+	b.inTextBlock = false
 	var mode string
 	if opts.Sandbox == "" || opts.Sandbox == "off" {
 		mode = "bypassPermissions"
@@ -25,6 +41,15 @@ func (b *ClaudeBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 		"-p",
 		"--output-format", "stream-json",
 		"--verbose",
+		// Stream individual text deltas as `stream_event content_block_delta
+		// text_delta` lines in addition to the final `assistant` event.
+		// Without this flag claude buffers the whole assistant message until
+		// the API call completes, so the runner sees zero output for the
+		// entire turn and then the full reply in one chunk — defeating any
+		// look-ahead streaming downstream. ParseEvent consumes the deltas and
+		// skips the redundant text blocks in the assistant event to avoid
+		// double-counting.
+		"--include-partial-messages",
 		// Agent: sub-agent spawn — klax tracks one process per session.
 		// AskUserQuestion: needs a TTY to render its TUI; in `claude -p` it
 		// silently fails, returns no answer, and the turn ends with an empty
@@ -75,6 +100,26 @@ type claudeStreamEvent struct {
 	ModelUsage    map[string]json.RawMessage `json:"modelUsage,omitempty"`
 	Message       *claudeMessage             `json:"message,omitempty"`
 	RateLimitInfo *claudeRateLimitInfo       `json:"rate_limit_info,omitempty"`
+	Event         *claudeNestedEvent         `json:"event,omitempty"`
+}
+
+// claudeNestedEvent is the inner payload of a `stream_event` outer envelope.
+// We only need the text-delta path; the other variants (message_start,
+// content_block_start, content_block_stop, message_delta, message_stop,
+// input_json_delta) carry information we already derive from the higher-
+// level assistant and result events.
+type claudeNestedEvent struct {
+	Type  string                   `json:"type"`
+	Delta *claudeContentBlockDelta `json:"delta,omitempty"`
+}
+
+type claudeContentBlockDelta struct {
+	// Type is "text_delta" for assistant text or "input_json_delta" for the
+	// partial JSON of a tool input. We only surface text_delta — tool inputs
+	// are read off the completed `assistant` event so we never have to glue
+	// a partial JSON fragment back together.
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
 }
 
 type claudeRateLimitInfo struct {
@@ -114,7 +159,7 @@ func (b *ClaudeBackend) ParseEvent(line []byte) ([]Event, bool) {
 	switch ev.Type {
 	case "system":
 		return []Event{{
-			Type:      "system",
+			Type:      EventSystem,
 			SessionID: ev.SessionID,
 			Model:     ev.Model,
 		}}, true
@@ -125,7 +170,7 @@ func (b *ClaudeBackend) ParseEvent(line []byte) ([]Event, bool) {
 	case "rate_limit_event":
 		if ev.RateLimitInfo != nil {
 			return []Event{{
-				Type: "system",
+				Type: EventSystem,
 				RateLimit: &RateLimitInfo{
 					Status:         ev.RateLimitInfo.Status,
 					ResetsAt:       ev.RateLimitInfo.ResetsAt,
@@ -134,6 +179,47 @@ func (b *ClaudeBackend) ParseEvent(line []byte) ([]Event, bool) {
 					IsUsingOverage: ev.RateLimitInfo.IsUsingOverage,
 				},
 			}}, true
+		}
+		return nil, false
+
+	case "stream_event":
+		// We consume three inner events:
+		//   - content_block_delta with text_delta is the streaming surface.
+		//   - message_start resets per-turn parser state. claude -p
+		//     produces multiple assistant messages in one Run; resetting
+		//     protects a turn that genuinely lacks deltas from being
+		//     treated as partial-mode by stale state from a prior turn.
+		//   - content_block_stop on a text block emits a boundary so the
+		//     runner inserts a paragraph break between adjacent blocks.
+		//
+		// Other inner events (content_block_start, input_json_delta,
+		// message_delta, message_stop) are no-ops — usage and tool calls
+		// come from the higher-level assistant and result events.
+		if ev.Event == nil {
+			return nil, false
+		}
+		switch ev.Event.Type {
+		case "message_start":
+			b.partialDeltaSeen = false
+			b.inTextBlock = false
+			return nil, false
+		case "content_block_delta":
+			d := ev.Event.Delta
+			if d == nil || d.Type != "text_delta" || d.Text == "" {
+				return nil, false
+			}
+			b.partialDeltaSeen = true
+			b.inTextBlock = true
+			return []Event{{Type: EventTextDelta, Text: d.Text}}, true
+		case "content_block_stop":
+			// End of a text block: emit a boundary so the runner inserts
+			// the paragraph break the legacy paragraph-join would have
+			// produced. Skip if the block was not text.
+			if !b.inTextBlock {
+				return nil, false
+			}
+			b.inTextBlock = false
+			return []Event{{Type: EventTextBoundary}}, true
 		}
 		return nil, false
 
@@ -158,7 +244,7 @@ func (b *ClaudeBackend) ParseEvent(line []byte) ([]Event, bool) {
 					input = claudePlanInput(block.Input)
 				}
 				e := Event{
-					Type: "tool",
+					Type: EventTool,
 					Tool: ToolUse{Name: name, Input: input},
 				}
 				if len(out) == 0 {
@@ -166,7 +252,14 @@ func (b *ClaudeBackend) ParseEvent(line []byte) ([]Event, bool) {
 				}
 				out = append(out, e)
 			case "text":
-				e := Event{Type: "text", Text: block.Text}
+				// Under --include-partial-messages this block mirrors the
+				// text we already streamed via deltas; skip it. Without
+				// the flag, partialDeltaSeen stays false and we emit
+				// normally.
+				if b.partialDeltaSeen {
+					continue
+				}
+				e := Event{Type: EventText, Text: block.Text}
 				if len(out) == 0 {
 					e.Usage = usage
 				}
@@ -185,7 +278,7 @@ func (b *ClaudeBackend) ParseEvent(line []byte) ([]Event, bool) {
 
 	case "result":
 		var e Event
-		e.Type = "result"
+		e.Type = EventResult
 		if ev.IsError && ev.Result != "" {
 			e.Error = ev.Result
 		} else if ev.Result != "" {
@@ -214,7 +307,7 @@ func (b *ClaudeBackend) ParseEvent(line []byte) ([]Event, bool) {
 		return []Event{e}, true
 	}
 
-	return []Event{{Type: "unknown", Text: ev.Type}}, true
+	return []Event{{Type: EventUnknown, Text: ev.Type}}, true
 }
 
 // claudePlanInput normalizes Claude's TodoWrite tool_use input

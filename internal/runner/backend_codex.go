@@ -113,7 +113,7 @@ func (b *CodexBackend) ParseEvent(line []byte) ([]Event, bool) {
 	switch ev.Type {
 	case "thread.started":
 		return single(Event{
-			Type:      "system",
+			Type: EventSystem,
 			SessionID: ev.ThreadID,
 		})
 
@@ -124,7 +124,7 @@ func (b *CodexBackend) ParseEvent(line []byte) ([]Event, bool) {
 		switch ev.Item.Type {
 		case "command_execution":
 			return single(Event{
-				Type: "tool",
+				Type: EventTool,
 				Tool: ToolUse{
 					Name:  "Bash",
 					Input: fmt.Sprintf(`{"command":"%s"}`, escapeJSON(ev.Item.Command)),
@@ -132,12 +132,12 @@ func (b *CodexBackend) ParseEvent(line []byte) ([]Event, bool) {
 			})
 		case "web_search":
 			return single(Event{
-				Type: "tool",
+				Type: EventTool,
 				Tool: ToolUse{Name: "WebSearch", Input: ""},
 			})
 		case "file_read":
 			return single(Event{
-				Type: "tool",
+				Type: EventTool,
 				Tool: ToolUse{
 					Name:  "Read",
 					Input: fmt.Sprintf(`{"file_path":"%s"}`, escapeJSON(ev.Item.FilePath)),
@@ -145,7 +145,7 @@ func (b *CodexBackend) ParseEvent(line []byte) ([]Event, bool) {
 			})
 		case "file_edit":
 			return single(Event{
-				Type: "tool",
+				Type: EventTool,
 				Tool: ToolUse{
 					Name:  "Edit",
 					Input: fmt.Sprintf(`{"file_path":"%s"}`, escapeJSON(ev.Item.FilePath)),
@@ -157,7 +157,7 @@ func (b *CodexBackend) ParseEvent(line []byte) ([]Event, bool) {
 				name = "Write"
 			}
 			return single(Event{
-				Type: "tool",
+				Type: EventTool,
 				Tool: ToolUse{
 					Name:  name,
 					Input: fmt.Sprintf(`{"file_path":"%s"}`, escapeJSON(codexChangePaths(ev.Item.Changes))),
@@ -165,19 +165,19 @@ func (b *CodexBackend) ParseEvent(line []byte) ([]Event, bool) {
 			})
 		case "todo_list":
 			return single(Event{
-				Type: "tool",
+				Type: EventTool,
 				Tool: ToolUse{Name: "Plan", Input: codexPlanInput(ev.Item.Items)},
 			})
 		case "mcp_tool_call":
 			return single(Event{
-				Type: "tool",
+				Type: EventTool,
 				Tool: ToolUse{
 					Name:  "MCP",
 					Input: fmt.Sprintf(`{"server":"%s","tool":"%s"}`, escapeJSON(ev.Item.Server), escapeJSON(ev.Item.Tool)),
 				},
 			})
 		}
-		return single(Event{Type: "unknown", Text: fmt.Sprintf("item.started:%s", ev.Item.Type)})
+		return single(Event{Type: EventUnknown, Text: fmt.Sprintf("item.started:%s", ev.Item.Type)})
 
 	case "item.completed":
 		if ev.Item == nil {
@@ -186,27 +186,27 @@ func (b *CodexBackend) ParseEvent(line []byte) ([]Event, bool) {
 		switch ev.Item.Type {
 		case "agent_message":
 			return single(Event{
-				Type: "intermediate",
+				Type: EventIntermediate,
 				Text: ev.Item.Text,
 			})
 		case "command_execution":
-			return single(Event{Type: "text"})
+			return single(Event{Type: EventText})
 		case "web_search":
 			query := ev.Item.Query
 			if query != "" {
 				return single(Event{
-					Type: "tool",
+					Type: EventTool,
 					Tool: ToolUse{
 						Name:  "WebSearch",
 						Input: fmt.Sprintf(`{"query":"%s"}`, escapeJSON(query)),
 					},
 				})
 			}
-			return single(Event{Type: "text"})
+			return single(Event{Type: EventText})
 		case "file_read", "file_edit", "file_change", "todo_list", "mcp_tool_call":
-			return single(Event{Type: "text"})
+			return single(Event{Type: EventText})
 		}
-		return single(Event{Type: "unknown", Text: fmt.Sprintf("item.completed:%s", ev.Item.Type)})
+		return single(Event{Type: EventUnknown, Text: fmt.Sprintf("item.completed:%s", ev.Item.Type)})
 
 	case "item.updated":
 		// codex streams progress for in-flight items. Only todo_list updates
@@ -218,7 +218,7 @@ func (b *CodexBackend) ParseEvent(line []byte) ([]Event, bool) {
 		}
 		if ev.Item.Type == "todo_list" {
 			return single(Event{
-				Type: "tool",
+				Type: EventTool,
 				Tool: ToolUse{Name: "Plan", Input: codexPlanInput(ev.Item.Items)},
 			})
 		}
@@ -226,7 +226,7 @@ func (b *CodexBackend) ParseEvent(line []byte) ([]Event, bool) {
 
 	case "turn.completed":
 		var e Event
-		e.Type = "result"
+		e.Type = EventResult
 		if ev.Usage != nil {
 			e.Usage.InputTokens = ev.Usage.InputTokens
 			e.Usage.OutputTokens = ev.Usage.OutputTokens
@@ -242,7 +242,7 @@ func (b *CodexBackend) ParseEvent(line []byte) ([]Event, bool) {
 		return nil, false // expected, no info
 	}
 
-	return single(Event{Type: "unknown", Text: ev.Type})
+	return single(Event{Type: EventUnknown, Text: ev.Type})
 }
 
 // ReadSessionMeta reads model, effective context window, and the last turn's

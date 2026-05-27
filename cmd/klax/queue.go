@@ -17,8 +17,10 @@ import (
 
 // progressEditInterval is the minimum gap between two Telegram edits of the
 // same progress message. Keeps us well under Telegram's per-chat edit rate
-// limit without coupling stdout reading to network latency.
-const progressEditInterval = 500 * time.Millisecond
+// limit without coupling stdout reading to network latency. Matches the
+// openclaw draft-stream default (DEFAULT_THROTTLE_MS = 1000) — at 500ms the
+// rapid look-ahead/idle bursts from the runner could flicker.
+const progressEditInterval = 1 * time.Second
 
 func sanitizeAttachmentFilename(name string) string {
 	name = strings.ReplaceAll(name, "\\", "/")

@@ -284,7 +284,7 @@ func (b *scriptBackend) BuildCmd(_ RunOptions) (*exec.Cmd, error) {
 
 func (b *scriptBackend) ParseEvent(line []byte) ([]Event, bool) {
 	if b.parseAsIntermediate {
-		return []Event{{Type: "intermediate", Text: string(line)}}, true
+		return []Event{{Type: EventIntermediate, Text: string(line)}}, true
 	}
 	return nil, false
 }
@@ -546,9 +546,13 @@ func TestClaudeStreamMultiTurnAgentLoop(t *testing.T) {
 
 // stdinEchoBackend runs a shell command that writes a Claude stream-json
 // transcript and then exits. The real ClaudeBackend parser consumes it, so
-// this test covers both ParseEvent and the runner loop end-to-end.
+// this test covers both ParseEvent and the runner loop end-to-end. The
+// parser is held by reference so its per-run state (partialDeltaSeen)
+// persists across ParseEvent calls — without that, a fixture mixing deltas
+// and a final assistant event would re-emit the text on the assistant line.
 type stdinEchoBackend struct {
 	script string
+	parser ClaudeBackend
 }
 
 func (b *stdinEchoBackend) Name() string { return "claude" }
@@ -560,7 +564,7 @@ func (b *stdinEchoBackend) BuildCmd(_ RunOptions) (*exec.Cmd, error) {
 }
 
 func (b *stdinEchoBackend) ParseEvent(line []byte) ([]Event, bool) {
-	return (&ClaudeBackend{}).ParseEvent(line)
+	return b.parser.ParseEvent(line)
 }
 
 // TestCodexStreamDemotesIntermediatesToNarration mirrors the Claude
@@ -724,5 +728,360 @@ func TestRunCancelDemotesPendingAsNarration(t *testing.T) {
 	narr := rec.narrationTexts()
 	if len(narr) != 1 || narr[0] != "substantial narrative about to be cancelled" {
 		t.Fatalf("pending must be demoted to narration on cancel, got %v", narr)
+	}
+}
+
+// TestLookAheadEmitsAtParagraphBoundary asserts that a long assistant reply
+// with a paragraph break in it leaks the first paragraph out as narration
+// during the run, while the next paragraph stays in the buffer as the
+// "more is coming" tail and is demoted to RunResult.Text at end of stream.
+// The "\n\n" the runner cut on doubles as the natural log/final separator
+// in queue.go's final delivery, so concat(log + "\n\n" + final) reproduces
+// the original text exactly — no mid-sentence splits and no extra blank
+// lines, which is the bug the paragraph-only cut policy exists to prevent.
+func TestLookAheadEmitsAtParagraphBoundary(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	// First paragraph is well above narrationFlushMinChars so the look-ahead
+	// fires; second paragraph is above narrationFlushLookaheadChars so it
+	// satisfies the "tail as proof" check.
+	para1 := strings.Repeat("a", 250)
+	para2 := strings.Repeat("b", 150)
+	body := para1 + "\n\n" + para2
+	// JSON strings cannot carry raw newlines — escape on the wire so the
+	// claude parser hands back the original bytes once it decodes the line.
+	jsonBody := strings.ReplaceAll(body, "\n", `\n`)
+	lines := []string{
+		`{"type":"system","session_id":"s1","model":"claude-opus-4-7"}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"` + jsonBody + `"}]}}`,
+		`{"type":"result","session_id":"s1","result":"` + jsonBody + `","is_error":false}`,
+	}
+	script := "printf '%s\\n' " + shQuote(lines...)
+
+	rec := &progressRecorder{}
+	r := New()
+	res := r.Run(context.Background(), &stdinEchoBackend{script: script}, RunOptions{}, rec.callback())
+	if res.Error != nil {
+		t.Fatalf("Run error: %v", res.Error)
+	}
+
+	narr := rec.narrationTexts()
+	if len(narr) != 1 || narr[0] != para1 {
+		t.Fatalf("expected one look-ahead narration with the first paragraph, got %v", narr)
+	}
+	if res.Text != para2 {
+		t.Fatalf("final text must hold the second paragraph, got %q", res.Text)
+	}
+	// The "\n\n" between log narration and final text is supplied by
+	// syncFinalMessageChain. Verifying here that body reassembles exactly
+	// guards the contract the paragraph-only cut depends on.
+	if narr[0]+"\n\n"+res.Text != body {
+		t.Fatalf("narration + \"\\n\\n\" + final must reconstruct original body")
+	}
+}
+
+// TestLookAheadStaysSilentWithoutParagraphBreak asserts that a long but
+// single-paragraph reply does NOT trigger look-ahead — there is nowhere
+// safe to cut, so the whole thing flows through RunResult.Text. This is
+// the price of the no-mid-sentence-split invariant: monolithic paragraphs
+// remain monolithic rather than getting awkwardly chopped.
+func TestLookAheadStaysSilentWithoutParagraphBreak(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	body := strings.Repeat("abcdefghij", 60) // 600 chars, no "\n\n"
+	lines := []string{
+		`{"type":"system","session_id":"s1","model":"claude-opus-4-7"}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"` + body + `"}]}}`,
+		`{"type":"result","session_id":"s1","result":"` + body + `","is_error":false}`,
+	}
+	script := "printf '%s\\n' " + shQuote(lines...)
+
+	rec := &progressRecorder{}
+	r := New()
+	res := r.Run(context.Background(), &stdinEchoBackend{script: script}, RunOptions{}, rec.callback())
+	if res.Error != nil {
+		t.Fatalf("Run error: %v", res.Error)
+	}
+	if got := rec.narrationTexts(); len(got) != 0 {
+		t.Fatalf("monolithic paragraph must not emit narration, got %v", got)
+	}
+	if res.Text != body {
+		t.Fatalf("final text must contain the full reply, got %q", res.Text)
+	}
+}
+
+// TestLookAheadStaysSilentOnShortText asserts that a short assistant reply
+// (below threshold) does NOT trigger any look-ahead emit — the entire text
+// must arrive only as RunResult.Text, preserving today's "short answer has
+// no `...` flicker" behavior (the pong-after-ping case).
+func TestLookAheadStaysSilentOnShortText(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	short := "pong"
+	lines := []string{
+		`{"type":"system","session_id":"s1","model":"claude-opus-4-7"}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"` + short + `"}]}}`,
+		`{"type":"result","session_id":"s1","result":"` + short + `","is_error":false}`,
+	}
+	script := "printf '%s\\n' " + shQuote(lines...)
+
+	rec := &progressRecorder{}
+	r := New()
+	res := r.Run(context.Background(), &stdinEchoBackend{script: script}, RunOptions{}, rec.callback())
+	if res.Error != nil {
+		t.Fatalf("Run error: %v", res.Error)
+	}
+	if got := rec.narrationTexts(); len(got) != 0 {
+		t.Fatalf("short reply must not produce any narration emit, got %v", got)
+	}
+	if res.Text != short {
+		t.Fatalf("final text: got %q, want %q", res.Text, short)
+	}
+}
+
+// TestIdleFlushCommitsCompletedParagraph asserts that when a paragraph has
+// landed in the buffer and the backend then goes quiet past the idle
+// timeout, the runner commits that completed paragraph as narration
+// instead of waiting for the next event. Idle uses minBody=0, so even a
+// short paragraph is eligible — the only requirement is a "\n\n" boundary
+// and a tail large enough to count as evidence that work is still queued.
+func TestIdleFlushCommitsCompletedParagraph(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	savedIdle := narrationIdleTimeout
+	narrationIdleTimeout = 100 * time.Millisecond
+	defer func() { narrationIdleTimeout = savedIdle }()
+
+	para1 := "первый абзац"
+	para2 := strings.Repeat("y", 150) // >= narrationFlushLookaheadChars
+	body := para1 + "\n\n" + para2
+	jsonBody := strings.ReplaceAll(body, "\n", `\n`)
+	first := `{"type":"system","session_id":"s1","model":"claude-opus-4-7"}`
+	second := `{"type":"assistant","message":{"content":[{"type":"text","text":"` + jsonBody + `"}]}}`
+	third := `{"type":"result","session_id":"s1","result":"` + jsonBody + `","is_error":false}`
+	// Emit system + text, then sleep well past the (shortened) idle window
+	// so the timer fires while the backend process is still alive. Then
+	// the result line arrives and EOF closes the run.
+	script := fmt.Sprintf("printf '%%s\\n%%s\\n' %s; sleep 0.4; printf '%%s\\n' %s",
+		shQuote(first, second), shQuote(third))
+
+	rec := &progressRecorder{}
+	r := New()
+	res := r.Run(context.Background(), &stdinEchoBackend{script: script}, RunOptions{}, rec.callback())
+	if res.Error != nil {
+		t.Fatalf("Run error: %v", res.Error)
+	}
+	narr := rec.narrationTexts()
+	if len(narr) != 1 || narr[0] != para1 {
+		t.Fatalf("idle must commit the completed first paragraph as narration, got %v", narr)
+	}
+	if res.Text != para2 {
+		t.Fatalf("final text must hold the still-pending second paragraph, got %q", res.Text)
+	}
+}
+
+// TestClaudePartialDeltaStreaming covers the --include-partial-messages
+// flow end-to-end: text deltas arrive token-by-token, the runner raw-
+// concatenates them, look-ahead fires on the paragraph boundary that
+// forms inside the stream, and the trailing `assistant` event's text
+// block is skipped (it would otherwise duplicate the whole reply because
+// the parser remembers that partial-mode is active). Result: log gets
+// the first paragraph, RunResult.Text gets the second — the visible chat
+// reads as one continuous reply with no doubled content.
+func TestClaudePartialDeltaStreaming(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	para1 := strings.Repeat("a", 250)
+	para2 := strings.Repeat("b", 150)
+	fullBody := para1 + "\n\n" + para2
+	jsonFull := strings.ReplaceAll(fullBody, "\n", `\n`)
+
+	// Three text-delta lines that together carry the full body. The split
+	// straddles the paragraph break so the runner sees deltas land on
+	// either side — the realistic shape of token streaming.
+	d1 := para1[:200]
+	d2 := para1[200:] + "\n\n" + para2[:50]
+	d3 := para2[50:]
+	deltaLine := func(text string) string {
+		esc := strings.ReplaceAll(text, "\n", `\n`)
+		return `{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"` + esc + `"}}}`
+	}
+
+	lines := []string{
+		`{"type":"system","session_id":"s1","model":"claude-opus-4-7"}`,
+		deltaLine(d1),
+		deltaLine(d2),
+		deltaLine(d3),
+		// Final assistant event mirrors the streamed text — must be skipped.
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"` + jsonFull + `"}]}}`,
+		`{"type":"result","session_id":"s1","result":"` + jsonFull + `","is_error":false}`,
+	}
+	script := "printf '%s\\n' " + shQuote(lines...)
+
+	rec := &progressRecorder{}
+	r := New()
+	res := r.Run(context.Background(), &stdinEchoBackend{script: script}, RunOptions{}, rec.callback())
+	if res.Error != nil {
+		t.Fatalf("Run error: %v", res.Error)
+	}
+
+	narr := rec.narrationTexts()
+	if len(narr) != 1 || narr[0] != para1 {
+		t.Fatalf("look-ahead on streamed deltas must emit first paragraph once, got %v", narr)
+	}
+	if res.Text != para2 {
+		t.Fatalf("final text must be the second paragraph (no duplicate from assistant event), got %q", res.Text)
+	}
+	if narr[0]+"\n\n"+res.Text != fullBody {
+		t.Fatalf("narration + sep + final must reconstruct original body exactly")
+	}
+}
+
+// TestPartialDeltaJoinsTextBlocksWithParagraphBreak mirrors the legacy
+// TestClaudeStreamDemotesIntermediatesToNarration scenario under
+// --include-partial-messages: two text-only assistant messages back to
+// back, each streamed via deltas, must end up joined by "\n\n" exactly as
+// the legacy non-delta path does. Without the content_block_stop →
+// EventTextBoundary → markBlockBoundary plumbing, the deltas from block 2
+// would raw-concat onto block 1 and the visible chat would read
+// "block1block2" with no paragraph between them.
+func TestPartialDeltaJoinsTextBlocksWithParagraphBreak(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	block1 := strings.Repeat("a", 50)
+	block2 := strings.Repeat("b", 50)
+	deltaLine := func(text string) string {
+		return `{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"` + text + `"}}}`
+	}
+	stopLine := `{"type":"stream_event","event":{"type":"content_block_stop","index":0}}`
+	startLine := `{"type":"stream_event","event":{"type":"message_start"}}`
+
+	lines := []string{
+		`{"type":"system","session_id":"s1","model":"claude-opus-4-7"}`,
+		startLine,
+		deltaLine(block1),
+		stopLine,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"` + block1 + `"}]}}`,
+		startLine,
+		deltaLine(block2),
+		stopLine,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"` + block2 + `"}]}}`,
+		`{"type":"result","session_id":"s1","result":"` + block1 + `\n\n` + block2 + `","is_error":false}`,
+	}
+	script := "printf '%s\\n' " + shQuote(lines...)
+
+	rec := &progressRecorder{}
+	r := New()
+	res := r.Run(context.Background(), &stdinEchoBackend{script: script}, RunOptions{}, rec.callback())
+	if res.Error != nil {
+		t.Fatalf("Run error: %v", res.Error)
+	}
+	// Both blocks are below look-ahead threshold, so neither leaks via
+	// narration — the whole reply ends up in RunResult.Text, joined by
+	// the inserted paragraph break.
+	if got := rec.narrationTexts(); len(got) != 0 {
+		t.Fatalf("blocks below threshold must stay in buffer, got narration %v", got)
+	}
+	want := block1 + "\n\n" + block2
+	if res.Text != want {
+		t.Fatalf("two delta blocks must join with \"\\n\\n\": got %q, want %q", res.Text, want)
+	}
+}
+
+// TestLookAheadSkipsCutInsideCodeFence asserts the cut policy never lands
+// at a "\n\n" that sits inside a fenced code block. A reply that wraps a
+// long code block can legitimately contain a blank line between hunks of
+// code; cutting there would emit narration with an opening "```" but no
+// closer, leaving the final answer body with a closer but no opener — the
+// rendered chat would show stray backticks instead of one code block. The
+// fixture below is shaped so the only "\n\n" inside the body lies between
+// the fence markers, and a real outside-fence boundary exists right after
+// the closing fence — look-ahead must pick the second one.
+func TestLookAheadSkipsCutInsideCodeFence(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	// Prelude makes the inside-fence "\n\n" sit past narrationFlushMinChars
+	// so the bug would actually trip if cut policy were fence-blind.
+	prelude := strings.Repeat("x", 250)
+	codeBlock := "```go\nline one\n\nline two\n```"
+	tail := strings.Repeat("y", 150)
+	body := prelude + "\n" + codeBlock + "\n\n" + tail
+	jsonBody := strings.ReplaceAll(body, "\n", `\n`)
+	lines := []string{
+		`{"type":"system","session_id":"s1","model":"claude-opus-4-7"}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"` + jsonBody + `"}]}}`,
+		`{"type":"result","session_id":"s1","result":"` + jsonBody + `","is_error":false}`,
+	}
+	script := "printf '%s\\n' " + shQuote(lines...)
+
+	rec := &progressRecorder{}
+	r := New()
+	res := r.Run(context.Background(), &stdinEchoBackend{script: script}, RunOptions{}, rec.callback())
+	if res.Error != nil {
+		t.Fatalf("Run error: %v", res.Error)
+	}
+
+	narr := rec.narrationTexts()
+	if len(narr) != 1 {
+		t.Fatalf("expected one narration (after the code fence), got %d: %v", len(narr), narr)
+	}
+	wantBody := prelude + "\n" + codeBlock
+	if narr[0] != wantBody {
+		t.Fatalf("narration must end at the post-fence \"\\n\\n\", got %q…%q",
+			narr[0][:40], narr[0][len(narr[0])-40:])
+	}
+	if res.Text != tail {
+		t.Fatalf("final text must be the post-fence tail, got %q", res.Text)
+	}
+	if narr[0]+"\n\n"+res.Text != body {
+		t.Fatalf("narration + sep + final must reconstruct original body exactly")
+	}
+}
+
+// TestIdleStaysSilentWithoutParagraphBreak asserts the conservative side
+// of the idle policy: a buffer that contains text but no "\n\n" never
+// fires idle, because doing so would split a sentence at a place the
+// final delivery cannot stitch back without inserting a blank line.
+func TestIdleStaysSilentWithoutParagraphBreak(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	savedIdle := narrationIdleTimeout
+	narrationIdleTimeout = 100 * time.Millisecond
+	defer func() { narrationIdleTimeout = savedIdle }()
+
+	body := "длинная цельная фраза без переноса абзаца которая просто висит"
+	first := `{"type":"system","session_id":"s1","model":"claude-opus-4-7"}`
+	second := `{"type":"assistant","message":{"content":[{"type":"text","text":"` + body + `"}]}}`
+	third := `{"type":"result","session_id":"s1","result":"` + body + `","is_error":false}`
+	script := fmt.Sprintf("printf '%%s\\n%%s\\n' %s; sleep 0.4; printf '%%s\\n' %s",
+		shQuote(first, second), shQuote(third))
+
+	rec := &progressRecorder{}
+	r := New()
+	res := r.Run(context.Background(), &stdinEchoBackend{script: script}, RunOptions{}, rec.callback())
+	if res.Error != nil {
+		t.Fatalf("Run error: %v", res.Error)
+	}
+	if got := rec.narrationTexts(); len(got) != 0 {
+		t.Fatalf("idle must not emit a half-sentence, got %v", got)
+	}
+	if res.Text != body {
+		t.Fatalf("final text: got %q, want %q", res.Text, body)
 	}
 }
