@@ -151,6 +151,19 @@ func TestWithProgressEllipsisAppendsToFullChunk(t *testing.T) {
 	}
 }
 
+func TestProgressLogChunksAlwaysEndWithEllipsis(t *testing.T) {
+	chunks := withProgressEllipsis(formatLogChunks([]runner.ProgressEvent{
+		{Kind: runner.ProgressKindTool, Text: "🔧 " + strings.Repeat("a", 20)},
+		{Kind: runner.ProgressKindTool, Text: "🔧 " + strings.Repeat("b", 20)},
+	}, "", "html", 46))
+	if len(chunks) != 2 {
+		t.Fatalf("expected split progress chunks, got %#v", chunks)
+	}
+	if !strings.HasSuffix(chunks[len(chunks)-1], "\n\n...") {
+		t.Fatalf("expected progress ellipsis on final chunk, got %#v", chunks)
+	}
+}
+
 func TestSyncFinalMessageChainUsesFreshDeliveryContext(t *testing.T) {
 	tp := &fakeTransport{}
 	d := newTestDeliveryDaemon(tp)
