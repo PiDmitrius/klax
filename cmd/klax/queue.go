@@ -266,7 +266,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		defer close(workerDone)
 		var lastSentText string
 		for snapshot := range progressCh {
-			chunks := withProgressEllipsis(formatLogChunks(snapshot, "", chatFmt, maxMessageLen), maxMessageLen)
+			chunks := withProgressEllipsis(formatLogChunks(snapshot, "", chatFmt, maxMessageLen))
 			cacheKey := fmt.Sprintf("%q", chunks)
 			if cacheKey == lastSentText {
 				continue
