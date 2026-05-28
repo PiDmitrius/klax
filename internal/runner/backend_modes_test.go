@@ -107,3 +107,34 @@ func TestCodexParsesMcpToolCallAsTool(t *testing.T) {
 		t.Fatalf("expected server.tool in preview, got %q", got)
 	}
 }
+
+func TestCodexParsesErrorItemAsVisibleError(t *testing.T) {
+	b := &CodexBackend{}
+	for _, tc := range []struct {
+		line string
+		want string
+	}{
+		{
+			line: `{"type":"item.started","item":{"id":"item_0","type":"error","status":"in_progress"}}`,
+			want: "id=item_0 status=in_progress",
+		},
+		{
+			line: `{"type":"item.completed","item":{"id":"item_1","type":"error","message":"tool output exceeded limit","status":"failed"}}`,
+			want: "tool output exceeded limit",
+		},
+	} {
+		events, ok := b.ParseEvent([]byte(tc.line))
+		if !ok {
+			t.Fatalf("ParseEvent returned ok=false for %s", tc.line)
+		}
+		if len(events) != 1 {
+			t.Fatalf("expected exactly one event for %s, got %d", tc.line, len(events))
+		}
+		if events[0].Type != EventError {
+			t.Fatalf("expected error event, got %+v", events[0])
+		}
+		if !strings.Contains(events[0].Text, tc.want) {
+			t.Fatalf("expected error text to contain %q, got %q", tc.want, events[0].Text)
+		}
+	}
+}

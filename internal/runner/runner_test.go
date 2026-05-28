@@ -628,6 +628,42 @@ func TestCodexStreamDemotesIntermediatesToNarration(t *testing.T) {
 	}
 }
 
+func TestCodexStreamSurfacesErrorItems(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	lines := []string{
+		`{"type":"thread.started","thread_id":"019d0000"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.started","item":{"id":"i1","type":"command_execution","command":"rg huge","status":"in_progress"}}`,
+		`{"type":"item.completed","item":{"id":"i2","type":"error","message":"tool output exceeded limit","status":"failed"}}`,
+		`{"type":"item.completed","item":{"id":"i3","type":"agent_message","text":"готово"}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}`,
+	}
+	script := "printf '%s\\n' " + shQuote(lines...)
+
+	rec := &progressRecorder{}
+	r := New()
+	res := r.Run(context.Background(), &codexStreamBackend{script: script}, RunOptions{}, rec.callback())
+	if res.Error != nil {
+		t.Fatalf("Run error: %v", res.Error)
+	}
+	got := rec.kindPairs()
+	want := [][2]string{
+		{"tool", "⚙️ Bash: `rg huge`"},
+		{"tool", "❌ Codex item error: tool output exceeded limit"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("progress events = %v, want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Fatalf("progress[%d] = %v, want %v (full: %v)", i, got[i], w, got)
+		}
+	}
+}
+
 type codexStreamBackend struct {
 	script string
 }
@@ -1097,5 +1133,70 @@ func TestIdleStaysSilentWithoutParagraphBreak(t *testing.T) {
 	}
 	if res.Text != body {
 		t.Fatalf("final text: got %q, want %q", res.Text, body)
+	}
+}
+
+// errResultBackend emits an errored EventResult on the "ERR" line and treats
+// every other line as assistant narration.
+type errResultBackend struct{ script string }
+
+func (b *errResultBackend) Name() string { return "errbk" }
+
+func (b *errResultBackend) BuildCmd(_ RunOptions) (*exec.Cmd, error) {
+	cmd := exec.Command("sh", "-c", b.script)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	return cmd, nil
+}
+
+func (b *errResultBackend) ParseEvent(line []byte) ([]Event, bool) {
+	if string(line) == "ERR" {
+		return []Event{{Type: EventResult, Error: "boom"}}, true
+	}
+	return []Event{{Type: EventIntermediate, Text: string(line)}}, true
+}
+
+// TestRunErroredResultReachesWaitAndReturns guards the unified cleanup path: an
+// errored result mid-stream must NOT short-circuit out of Run. The loop keeps
+// draining the backend's remaining output, reaps the process via cmd.Wait, and
+// returns the error — it must never hang or orphan a still-writing backend.
+func TestRunErroredResultReachesWaitAndReturns(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	// Error arrives, then the backend emits MORE output before exiting. The old
+	// early-return would have stopped at ERR and never consumed the trailing
+	// line; the unified path keeps draining, so the trailing line must surface
+	// as narration. That post-error consumption is what distinguishes this from
+	// the buggy behavior — a plain "returns an error" assertion would pass on
+	// both the old and new code.
+	script := "printf 'hello\\nERR\\ntrailing-after-error\\n'"
+
+	rec := &progressRecorder{}
+	r := New()
+	done := make(chan RunResult, 1)
+	go func() {
+		done <- r.Run(context.Background(), &errResultBackend{script: script}, RunOptions{}, rec.callback())
+	}()
+
+	select {
+	case res := <-done:
+		if res.Error == nil {
+			t.Fatal("expected error from errored result, got nil")
+		}
+		if !strings.Contains(res.Error.Error(), "boom") {
+			t.Fatalf("error = %v; want it to carry the backend message", res.Error)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run hung after an errored result event — cleanup path regressed")
+	}
+
+	var sawTrailing bool
+	for _, n := range rec.narrationTexts() {
+		if strings.Contains(n, "trailing-after-error") {
+			sawTrailing = true
+		}
+	}
+	if !sawTrailing {
+		t.Fatalf("output after the error event was not drained; narration = %v", rec.narrationTexts())
 	}
 }

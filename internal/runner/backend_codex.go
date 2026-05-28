@@ -73,6 +73,8 @@ type codexItem struct {
 	ID               string          `json:"id"`
 	Type             string          `json:"type"` // agent_message | command_execution | web_search | file_read | file_edit | file_change | mcp_tool_call | ...
 	Text             string          `json:"text,omitempty"`
+	Message          json.RawMessage `json:"message,omitempty"`
+	Error            json.RawMessage `json:"error,omitempty"`
 	Command          string          `json:"command,omitempty"`
 	AggregatedOutput string          `json:"aggregated_output,omitempty"`
 	ExitCode         *int            `json:"exit_code,omitempty"`
@@ -113,7 +115,7 @@ func (b *CodexBackend) ParseEvent(line []byte) ([]Event, bool) {
 	switch ev.Type {
 	case "thread.started":
 		return single(Event{
-			Type: EventSystem,
+			Type:      EventSystem,
 			SessionID: ev.ThreadID,
 		})
 
@@ -176,6 +178,8 @@ func (b *CodexBackend) ParseEvent(line []byte) ([]Event, bool) {
 					Input: fmt.Sprintf(`{"server":"%s","tool":"%s"}`, escapeJSON(ev.Item.Server), escapeJSON(ev.Item.Tool)),
 				},
 			})
+		case "error":
+			return single(Event{Type: EventError, Text: codexErrorItemText(ev.Item)})
 		}
 		return single(Event{Type: EventUnknown, Text: fmt.Sprintf("item.started:%s", ev.Item.Type)})
 
@@ -205,6 +209,8 @@ func (b *CodexBackend) ParseEvent(line []byte) ([]Event, bool) {
 			return single(Event{Type: EventText})
 		case "file_read", "file_edit", "file_change", "todo_list", "mcp_tool_call":
 			return single(Event{Type: EventText})
+		case "error":
+			return single(Event{Type: EventError, Text: codexErrorItemText(ev.Item)})
 		}
 		return single(Event{Type: EventUnknown, Text: fmt.Sprintf("item.completed:%s", ev.Item.Type)})
 
@@ -245,6 +251,59 @@ func (b *CodexBackend) ParseEvent(line []byte) ([]Event, bool) {
 	return single(Event{Type: EventUnknown, Text: ev.Type})
 }
 
+func codexErrorItemText(item *codexItem) string {
+	if item == nil {
+		return "Codex item error"
+	}
+	msg := firstNonEmpty(
+		item.Text,
+		rawCodexMessage(item.Message),
+		rawCodexMessage(item.Error),
+	)
+	if msg != "" {
+		return "Codex item error: " + truncate(oneLinePreview(msg), toolPreviewLimit)
+	}
+	var parts []string
+	if item.ID != "" {
+		parts = append(parts, "id="+item.ID)
+	}
+	if item.Status != "" {
+		parts = append(parts, "status="+item.Status)
+	}
+	if len(parts) == 0 {
+		return "Codex item error"
+	}
+	return "Codex item error: " + strings.Join(parts, " ")
+}
+
+func rawCodexMessage(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		for _, key := range []string{"message", "error", "detail", "details", "reason"} {
+			if v, ok := obj[key].(string); ok && v != "" {
+				return v
+			}
+		}
+	}
+	return string(raw)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // ReadSessionMeta reads model, effective context window, and the last turn's
 // prompt size from the local Codex session JSONL file.
 func ReadCodexSessionMeta(threadID string) (model string, contextWindow int, contextUsed int) {
@@ -265,45 +324,53 @@ func ReadCodexSessionMeta(threadID string) (model string, contextWindow int, con
 	}
 	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 256*1024), 256*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		var entry struct {
-			Type    string          `json:"type"`
-			Payload json.RawMessage `json:"payload"`
-		}
-		if json.Unmarshal(line, &entry) != nil {
-			continue
-		}
-		switch entry.Type {
-		case "event_msg":
-			var ev struct {
-				Type               string `json:"type"`
-				ModelContextWindow int    `json:"model_context_window"`
-				Info               *struct {
-					LastTokenUsage *struct {
-						InputTokens int `json:"input_tokens"`
-					} `json:"last_token_usage"`
-				} `json:"info,omitempty"`
+	// Read with the same robust line reader as the runner's stdout loop, not a
+	// bufio.Scanner: a codex rollout line can exceed any fixed scanner buffer (a
+	// turn carrying large file contents or a big message). A scanner would hit
+	// ErrTooLong and stop early, silently skipping the later token_count /
+	// turn_context lines this function exists to pick up. readEventLine consumes
+	// the whole file regardless, so the metadata is always found.
+	reader := bufio.NewReaderSize(f, 64*1024)
+	for {
+		line, readErr := readEventLine(reader)
+		if len(line) > 0 {
+			var entry struct {
+				Type    string          `json:"type"`
+				Payload json.RawMessage `json:"payload"`
 			}
-			if json.Unmarshal(entry.Payload, &ev) == nil {
-				if ev.Type == "task_started" && ev.ModelContextWindow > 0 {
-					contextWindow = ev.ModelContextWindow
+			if json.Unmarshal(line, &entry) == nil {
+				switch entry.Type {
+				case "event_msg":
+					var ev struct {
+						Type               string `json:"type"`
+						ModelContextWindow int    `json:"model_context_window"`
+						Info               *struct {
+							LastTokenUsage *struct {
+								InputTokens int `json:"input_tokens"`
+							} `json:"last_token_usage"`
+						} `json:"info,omitempty"`
+					}
+					if json.Unmarshal(entry.Payload, &ev) == nil {
+						if ev.Type == "task_started" && ev.ModelContextWindow > 0 {
+							contextWindow = ev.ModelContextWindow
+						}
+						if ev.Type == "token_count" && ev.Info != nil && ev.Info.LastTokenUsage != nil && ev.Info.LastTokenUsage.InputTokens > 0 {
+							contextUsed = ev.Info.LastTokenUsage.InputTokens
+						}
+					}
+				case "turn_context":
+					var tc struct {
+						Model string `json:"model"`
+					}
+					if json.Unmarshal(entry.Payload, &tc) == nil && tc.Model != "" {
+						model = tc.Model
+					}
 				}
-				if ev.Type == "token_count" && ev.Info != nil && ev.Info.LastTokenUsage != nil && ev.Info.LastTokenUsage.InputTokens > 0 {
-					contextUsed = ev.Info.LastTokenUsage.InputTokens
-				}
-			}
-		case "turn_context":
-			var tc struct {
-				Model string `json:"model"`
-			}
-			if json.Unmarshal(entry.Payload, &tc) == nil && tc.Model != "" {
-				model = tc.Model
 			}
 		}
-		// Stop after finding both.
+		if readErr != nil {
+			break
+		}
 	}
 	return
 }

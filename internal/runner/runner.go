@@ -350,7 +350,7 @@ type ProgressEvent struct {
 // (network, formatting beyond cheap string ops, calling back into the
 // runner) belongs downstream behind a non-blocking mailbox. Holding mu
 // during the callback is intentional: it preserves the ordering invariant
-// that idle-timer narration emits and scanner-goroutine tool emits never
+// that idle-timer narration emits and read-loop tool emits never
 // interleave at the consumer.
 type ProgressFunc func(ev ProgressEvent)
 
@@ -389,7 +389,7 @@ func (r *Runner) Status() (tool ToolUse, toolElapsed, totalElapsed time.Duration
 // emit it as ProgressKindNarration: look-ahead (on a paragraph boundary
 // with a tail as "more is coming" proof) or idle (timer fires while the
 // backend is still alive). All ProgressEvents from a Run — narration and
-// tool — flow through here; mu serializes the scanner goroutine, the idle
+// tool — flow through here; mu serializes the read-loop goroutine, the idle
 // timer goroutine, and onProgress. After drain() any further AfterFunc
 // callback is a no-op.
 type narrationBuffer struct {
@@ -604,7 +604,7 @@ func (b *narrationBuffer) idleFire(gen uint64) {
 
 // Run executes the backend with streaming output. Cancelling ctx sends SIGTERM
 // to the backend's process group, then SIGKILL after killGracePeriod, and
-// closes the stdout pipe so the scanner loop unblocks even if children still
+// closes the stdout pipe so the read loop unblocks even if children still
 // hold write-ends (e.g. rust grandchild of the codex npm shim).
 func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onProgress ProgressFunc) RunResult {
 	r.mu.Lock()
@@ -663,11 +663,33 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 	// quiet stretch with the backend still alive.
 	buf := newNarrationBuffer(onProgress)
 
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
+	// resultErr holds a failure the backend reported mid-stream (an errored
+	// `result`/error event). We record it but keep reading so the stream still
+	// drains to EOF and every run reaches the single cmd.Wait()/cleanup path
+	// below — returning early would skip Wait and risk orphaning a backend that
+	// is still writing. streamErr is how the read loop exited (io.EOF on a clean
+	// end, or a real read failure).
+	var resultErr error
+	var streamErr error
+
+	// Read events with a bufio.Reader, not a bufio.Scanner: codex can emit a
+	// single JSON event far larger than any fixed scanner buffer (a file_read
+	// with big contents, a command's aggregated output). A scanner that hit its
+	// cap returned ErrTooLong and the loop exited; stdout then went undrained,
+	// the backend blocked on a full stdout pipe, and the cmd.Wait() below hung
+	// forever — wedging the whole run. readEventLine consumes arbitrarily long
+	// lines so the stream always drains to EOF and the backend can exit.
+	reader := bufio.NewReaderSize(stdout, 64*1024)
+	for {
+		line, readErr := readEventLine(reader)
 		if len(line) == 0 {
+			if readErr != nil {
+				streamErr = readErr
+				if readErr != io.EOF {
+					log.Printf("runner: %s stdout read error: %v", backend.Name(), readErr)
+				}
+				break
+			}
 			continue
 		}
 
@@ -753,6 +775,12 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 					buf.emitTool(ProgressEvent{Kind: ProgressKindTool, Text: fmt.Sprintf("❓ %s", ev.Text)})
 				}
 
+			case EventError:
+				if ev.Text != "" {
+					buf.demote()
+					buf.emitTool(ProgressEvent{Kind: ProgressKindTool, Text: fmt.Sprintf("❌ %s", ev.Text)})
+				}
+
 			case EventResult:
 				// `result` marks the end of one agent-loop iteration, not
 				// the end of the run. claude -p --output-format stream-json
@@ -761,18 +789,20 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 				// <task-notification> user messages → another assistant turn
 				// → another `result`. We let those subsequent events flow
 				// through normally; the run ends when the CLI exits and the
-				// scanner hits EOF.
+				// read loop hits EOF.
 				if ev.Error != "" {
-					// Preserve any accumulated text as narration so the
-					// user still sees what the model said before the
-					// error — the queue error branch renders logItems
-					// alongside the error marker.
-					buf.demote()
-					_ = buf.drain()
-					return RunResult{
-						SessionID: sessionID,
-						Error:     fmt.Errorf("%s: %s", backend.Name(), ev.Error),
+					// Record the failure (first one wins) but keep reading
+					// to EOF so the cmd.Wait()/cleanup path below still runs;
+					// returning here would skip Wait and could orphan a
+					// backend that is still writing. Demote preserves any
+					// accumulated text as narration so the user still sees
+					// what the model said before the error — the queue error
+					// branch renders logItems alongside the error marker.
+					if resultErr == nil {
+						resultErr = fmt.Errorf("%s: %s", backend.Name(), ev.Error)
 					}
+					buf.demote()
+					continue
 				}
 				// Trust result.text only when no assistant text blocks
 				// were seen (older Claude streams, or backends that do
@@ -807,6 +837,16 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 		}
 	}
 
+	// A real stdout read failure (not a clean EOF, and not ctx cancellation —
+	// watchCancel already handles that) means we can no longer drain the pipe.
+	// Force the backend down so cmd.Wait() cannot hang on a child blocked
+	// writing into a now-unread pipe — the same wedge class as the
+	// oversized-line bug, reached via a different exit.
+	if streamErr != nil && streamErr != io.EOF && ctx.Err() == nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = stdout.Close()
+	}
+
 	waitErr := cmd.Wait()
 
 	// Cancellation path: whatever is in pending is not a sanctioned
@@ -821,6 +861,26 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 		return RunResult{
 			SessionID: sessionID,
 			Error:     fmt.Errorf("%s: %w", backend.Name(), ctx.Err()),
+		}
+	}
+
+	// Backend reported a failed turn mid-stream. Same narration-preserving
+	// treatment as cancellation: demote pending into the log, return the error.
+	if resultErr != nil {
+		buf.demote()
+		_ = buf.drain()
+		return RunResult{SessionID: sessionID, Error: resultErr}
+	}
+
+	// stdout read failed partway through — the turn is incomplete, so surface
+	// the read failure rather than silently treating a truncated stream as a
+	// finished answer.
+	if streamErr != nil && streamErr != io.EOF {
+		buf.demote()
+		_ = buf.drain()
+		return RunResult{
+			SessionID: sessionID,
+			Error:     fmt.Errorf("%s: stdout read error: %w", backend.Name(), streamErr),
 		}
 	}
 
@@ -871,13 +931,53 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 	return result
 }
 
+// maxEventLine caps a single backend JSON event line. Lines up to this size are
+// delivered intact; a longer line is truncated (and will simply fail to parse)
+// but the stream keeps draining. 16 MiB comfortably covers any legitimate codex
+// event (large file_read contents, command aggregated output) while bounding
+// memory if a backend ever emits something pathological.
+const maxEventLine = 16 * 1024 * 1024
+
+// readEventLine reads one '\n'-terminated line from r, capped at maxEventLine
+// bytes. Unlike bufio.Scanner it never gives up on an over-long line: bytes past
+// the cap are read and discarded up to the newline, so the caller always
+// consumes the whole stream and the backend can never wedge on a full pipe. The
+// trailing newline (and CR) is stripped. err is io.EOF at end of stream and may
+// accompany a final unterminated line.
+func readEventLine(r *bufio.Reader) (line []byte, err error) {
+	for {
+		var chunk []byte
+		chunk, err = r.ReadSlice('\n')
+		if room := maxEventLine - len(line); room > 0 {
+			if len(chunk) > room {
+				line = append(line, chunk[:room]...)
+			} else {
+				line = append(line, chunk...)
+			}
+		}
+		if err == bufio.ErrBufferFull {
+			err = nil
+			continue
+		}
+		break
+	}
+	// Strip the line terminator to match the previous scanner semantics.
+	if n := len(line); n > 0 && line[n-1] == '\n' {
+		line = line[:n-1]
+		if n = len(line); n > 0 && line[n-1] == '\r' {
+			line = line[:n-1]
+		}
+	}
+	return line, err
+}
+
 // watchCancel escalates ctx cancellation into process-group termination. The
 // backend command is launched with Setpgid, so the child's pid equals the
 // pgid and we can signal every descendant (e.g. the rust grandchild behind
 // the codex npm shim) with a single Kill(-pid).
 //
 // On cancel it sends SIGTERM, waits killGracePeriod, then SIGKILL and closes
-// stdout so the scanner loop unblocks even if a grandchild still holds a
+// stdout so the read loop unblocks even if a grandchild still holds a
 // write-end of the pipe.
 //
 // The returned stop function must be called when the Run completes normally
@@ -900,7 +1000,7 @@ func watchCancel(ctx context.Context, pid int, stdout io.Closer) func() {
 		case <-time.After(killGracePeriod):
 		}
 		_ = syscall.Kill(-pid, syscall.SIGKILL)
-		// Closing stdout unblocks the scanner if a grandchild inherited and
+		// Closing stdout unblocks the read loop if a grandchild inherited and
 		// still holds the write-end after the shim exited.
 		if stdout != nil {
 			if err := stdout.Close(); err != nil {

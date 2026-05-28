@@ -41,6 +41,10 @@ const (
 	// EventUnknown is a backend event we recognised but did not classify.
 	// Surfaced as opaque progress for forward compatibility.
 	EventUnknown EventType = "unknown"
+	// EventError is a backend error item that should be visible in progress
+	// without necessarily terminating the run; fatal turn errors use
+	// EventResult.Error.
+	EventError EventType = "error"
 	// EventResult is the end-of-turn summary: final text (if no per-block
 	// stream was emitted), usage totals, error info.
 	EventResult EventType = "result"
