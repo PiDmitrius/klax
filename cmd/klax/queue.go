@@ -261,11 +261,27 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	// everything the previous one would have shown plus newer entries.
 	var logItems []runner.ProgressEvent
 	progressCh := make(chan []runner.ProgressEvent, 1)
+	progressDone := make(chan struct{})
 	workerDone := make(chan struct{})
 	go func() {
 		defer close(workerDone)
 		var lastSentText string
-		for snapshot := range progressCh {
+		for {
+			var snapshot []runner.ProgressEvent
+			select {
+			case <-progressDone:
+				return
+			case s, ok := <-progressCh:
+				if !ok {
+					return
+				}
+				snapshot = s
+			}
+			select {
+			case <-progressDone:
+				return
+			default:
+			}
 			chunks := withProgressEllipsis(formatLogChunks(snapshot, "", chatFmt, maxMessageLen))
 			cacheKey := fmt.Sprintf("%q", chunks)
 			if cacheKey == lastSentText {
@@ -283,6 +299,8 @@ func (d *daemon) runBackend(msg queuedMsg) {
 			// Rate-limit edits so Telegram does not 429 us. Cancellation
 			// shortcuts the wait so /abort unblocks quickly.
 			select {
+			case <-progressDone:
+				return
 			case <-ctx.Done():
 			case <-time.After(progressEditInterval):
 			}
@@ -358,6 +376,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	// Flush the progress worker before any final-delivery path runs: the
 	// worker mutates progressChain, so reading it here without a barrier
 	// would race.
+	close(progressDone)
 	close(progressCh)
 	<-workerDone
 
