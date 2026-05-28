@@ -124,6 +124,20 @@ func appendLogSegment(chunks *[]string, current *strings.Builder, segment, forma
 	}
 }
 
+func withProgressEllipsis(chunks []string, limit int) []string {
+	const tail = "\n\n..."
+	if len(chunks) == 0 {
+		return []string{"..."}
+	}
+	last := len(chunks) - 1
+	if len(chunks[last])+len(tail) > limit {
+		return chunks
+	}
+	out := append([]string(nil), chunks...)
+	out[last] += tail
+	return out
+}
+
 func htmlEscapeLogText(s string) string {
 	s = strings.ReplaceAll(s, "&", "&amp;")
 	s = strings.ReplaceAll(s, "<", "&lt;")

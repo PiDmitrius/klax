@@ -131,6 +131,26 @@ func TestFormatLogChunksSplitsOversizedHTMLNarrationSafely(t *testing.T) {
 	}
 }
 
+func TestWithProgressEllipsisAppendsWhenItFits(t *testing.T) {
+	chunks := withProgressEllipsis([]string{"progress"}, 32)
+	if len(chunks) != 1 {
+		t.Fatalf("expected one chunk, got %#v", chunks)
+	}
+	if chunks[0] != "progress\n\n..." {
+		t.Fatalf("unexpected chunk: %q", chunks[0])
+	}
+}
+
+func TestWithProgressEllipsisDoesNotCreateStandaloneChunk(t *testing.T) {
+	chunks := withProgressEllipsis([]string{strings.Repeat("x", 30)}, 32)
+	if len(chunks) != 1 {
+		t.Fatalf("expected ellipsis to be omitted, got %#v", chunks)
+	}
+	if strings.Contains(chunks[0], "...") {
+		t.Fatalf("ellipsis should not be appended when it does not fit: %#v", chunks)
+	}
+}
+
 func TestSyncFinalMessageChainUsesFreshDeliveryContext(t *testing.T) {
 	tp := &fakeTransport{}
 	d := newTestDeliveryDaemon(tp)
