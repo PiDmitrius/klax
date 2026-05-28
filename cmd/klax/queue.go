@@ -261,18 +261,35 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	// everything the previous one would have shown plus newer entries.
 	var logItems []runner.ProgressEvent
 	progressCh := make(chan []runner.ProgressEvent, 1)
+	progressDone := make(chan struct{})
 	workerDone := make(chan struct{})
 	go func() {
 		defer close(workerDone)
 		var lastSentText string
-		for snapshot := range progressCh {
-			newText := formatLogItems(snapshot, chatFmt) + "\n\n..."
-			if newText == lastSentText {
+		for {
+			var snapshot []runner.ProgressEvent
+			select {
+			case <-progressDone:
+				return
+			case s, ok := <-progressCh:
+				if !ok {
+					return
+				}
+				snapshot = s
+			}
+			select {
+			case <-progressDone:
+				return
+			default:
+			}
+			chunks := withProgressEllipsis(formatLogChunks(snapshot, "", chatFmt, maxMessageLen))
+			cacheKey := fmt.Sprintf("%q", chunks)
+			if cacheKey == lastSentText {
 				continue
 			}
-			lastSentText = newText
+			lastSentText = cacheKey
 			if progressChain != nil && len(progressChain.ids) > 0 {
-				pc, err := d.syncMessageChain(ctx, msg.chatID, msg.msgID, progressChain, newText, chatFmt)
+				pc, err := d.syncMessageChainChunks(ctx, msg.chatID, msg.msgID, progressChain, chunks, chatFmt)
 				if err != nil {
 					log.Printf("progress update failed: %v", err)
 					continue
@@ -282,6 +299,8 @@ func (d *daemon) runBackend(msg queuedMsg) {
 			// Rate-limit edits so Telegram does not 429 us. Cancellation
 			// shortcuts the wait so /abort unblocks quickly.
 			select {
+			case <-progressDone:
+				return
 			case <-ctx.Done():
 			case <-time.After(progressEditInterval):
 			}
@@ -357,6 +376,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	// Flush the progress worker before any final-delivery path runs: the
 	// worker mutates progressChain, so reading it here without a barrier
 	// would race.
+	close(progressDone)
 	close(progressCh)
 	<-workerDone
 
@@ -413,15 +433,15 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	}
 
 	// Build final message: progress log + separator + answer.
-	var finalText string
+	var finalChunks []string
 	if len(logItems) > 0 {
-		finalText = formatLogItems(logItems, chatFmt) + "\n\n" + formatted
+		finalChunks = formatLogChunks(logItems, formatted, chatFmt, maxMessageLen)
 	} else {
-		finalText = formatted
+		finalChunks = splitMessage(formatted, maxMessageLen, chatFmt)
 	}
 
 	if t != nil {
-		_, err := d.syncFinalMessageChain(msg.chatID, msg.msgID, progressChain, finalText, chatFmt)
+		_, err := d.syncFinalMessageChainChunks(msg.chatID, msg.msgID, progressChain, finalChunks, chatFmt)
 		if err != nil {
 			log.Printf("final delivery failed: %v", err)
 		}

@@ -40,7 +40,6 @@ func formatLogItems(items []runner.ProgressEvent, format string) string {
 	var out strings.Builder
 	var prevKind runner.ProgressKind
 	for i, item := range items {
-		text := pathutil.TildePathsInText(item.Text)
 		if i > 0 {
 			if prevKind == runner.ProgressKindTool && item.Kind == runner.ProgressKindTool {
 				out.WriteString("\n")
@@ -48,23 +47,92 @@ func formatLogItems(items []runner.ProgressEvent, format string) string {
 				out.WriteString("\n\n")
 			}
 		}
-		switch item.Kind {
-		case runner.ProgressKindNarration:
-			if format == "html" {
-				out.WriteString(mdhtml.Convert(text))
-			} else {
-				out.WriteString(text)
-			}
-		default:
-			if format == "html" {
-				out.WriteString("<code>" + htmlEscapeLogText(text) + "</code>")
-			} else {
-				out.WriteString("`" + strings.ReplaceAll(text, "`", "'") + "`")
-			}
-		}
+		out.WriteString(formatLogItem(item, format))
 		prevKind = item.Kind
 	}
 	return out.String()
+}
+
+func formatLogItem(item runner.ProgressEvent, format string) string {
+	text := pathutil.TildePathsInText(item.Text)
+	switch item.Kind {
+	case runner.ProgressKindNarration:
+		if format == "html" {
+			return mdhtml.Convert(text)
+		}
+		return text
+	default:
+		if format == "html" {
+			return "<code>" + htmlEscapeLogText(text) + "</code>"
+		}
+		return "`" + strings.ReplaceAll(text, "`", "'") + "`"
+	}
+}
+
+func formatLogChunks(items []runner.ProgressEvent, tail, format string, limit int) []string {
+	if len(items) == 0 {
+		if tail == "" {
+			return nil
+		}
+		return splitMessage(tail, limit, format)
+	}
+
+	var chunks []string
+	var current strings.Builder
+	var prevKind runner.ProgressKind
+	for i, item := range items {
+		segment := formatLogItem(item, format)
+		if i > 0 {
+			if prevKind == runner.ProgressKindTool && item.Kind == runner.ProgressKindTool {
+				segment = "\n" + segment
+			} else {
+				segment = "\n\n" + segment
+			}
+		}
+		appendLogSegment(&chunks, &current, segment, format, limit)
+		prevKind = item.Kind
+	}
+	if tail != "" {
+		appendLogSegment(&chunks, &current, "\n\n"+tail, format, limit)
+	}
+	if current.Len() > 0 {
+		chunks = append(chunks, current.String())
+	}
+	return chunks
+}
+
+func appendLogSegment(chunks *[]string, current *strings.Builder, segment, format string, limit int) {
+	if current.Len() > 0 && current.Len()+len(segment) > limit {
+		*chunks = append(*chunks, current.String())
+		current.Reset()
+		segment = strings.TrimLeft(segment, "\n")
+	}
+	if len(segment) <= limit {
+		current.WriteString(segment)
+		return
+	}
+	for _, chunk := range splitMessage(segment, limit, format) {
+		if current.Len() > 0 {
+			*chunks = append(*chunks, current.String())
+			current.Reset()
+		}
+		if len(chunk) > limit {
+			*chunks = append(*chunks, chunk)
+			continue
+		}
+		current.WriteString(chunk)
+	}
+}
+
+func withProgressEllipsis(chunks []string) []string {
+	const tail = "\n\n..."
+	if len(chunks) == 0 {
+		return []string{"..."}
+	}
+	last := len(chunks) - 1
+	out := append([]string(nil), chunks...)
+	out[last] += tail
+	return out
 }
 
 func htmlEscapeLogText(s string) string {

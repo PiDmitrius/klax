@@ -92,14 +92,14 @@ func MarshalPlanProgress(done, total int, current string) string {
 	return string(b)
 }
 
-const toolPreviewLimit = 72
+const toolPreviewLimit = 120
 
 func (t ToolUse) String() string {
 	switch t.Name {
 	case "Bash":
 		var inp struct{ Command string }
 		json.Unmarshal([]byte(t.Input), &inp)
-		return fmt.Sprintf("⚙️ Bash: `%s`", truncate(inp.Command, toolPreviewLimit))
+		return fmt.Sprintf("⚙️ Bash: `%s`", truncate(oneLinePreview(inp.Command), toolPreviewLimit))
 	case "Read":
 		var inp struct {
 			FilePath string `json:"file_path"`
@@ -288,6 +288,10 @@ func truncate(s string, n int) string {
 	}
 	runes := []rune(s)
 	return string(runes[:n]) + "…"
+}
+
+func oneLinePreview(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // RunOptions configures a CLI invocation.
