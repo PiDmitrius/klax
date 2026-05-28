@@ -30,7 +30,7 @@ func splitMessage(text string, limit int, format string) []string {
 		}
 		cut := limit
 		// Try to split on a newline.
-		if idx := strings.LastIndex(text[:limit], "\n"); idx > 0 {
+		if idx := strings.LastIndex(text[:limit], "\n"); isGoodSoftCut(idx, limit) {
 			cut = idx
 		}
 		cut = alignUTF8Cut(text, cut)
@@ -186,9 +186,9 @@ func htmlTextCut(text string, limit int) int {
 		return len(text)
 	}
 	cut := limit
-	if idx := strings.LastIndex(text[:limit], "\n"); idx > 0 {
+	if idx := strings.LastIndex(text[:limit], "\n"); isGoodSoftCut(idx, limit) {
 		cut = idx
-	} else if idx := strings.LastIndex(text[:limit], " "); idx > 0 {
+	} else if idx := strings.LastIndex(text[:limit], " "); isGoodSoftCut(idx, limit) {
 		cut = idx
 	}
 	cut = avoidEntitySplit(text, cut)
@@ -201,6 +201,16 @@ func htmlTextCut(text string, limit int) int {
 		return size
 	}
 	return cut
+}
+
+func isGoodSoftCut(idx, limit int) bool {
+	if idx <= 0 {
+		return false
+	}
+	if limit <= 64 {
+		return true
+	}
+	return idx >= limit*3/4
 }
 
 func avoidEntitySplit(text string, cut int) int {

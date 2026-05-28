@@ -83,6 +83,33 @@ func TestSplitMessageHTMLPreservesUTF8Runes(t *testing.T) {
 	}
 }
 
+func TestSplitMessageIgnoresEarlyNewline(t *testing.T) {
+	text := "Коротко.\n\n" + strings.Repeat("длинный блок ", 30)
+	chunks := splitMessage(text, 120, "")
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+	if len(chunks[0]) < 90 {
+		t.Fatalf("first chunk split too early: len=%d text=%q", len(chunks[0]), chunks[0])
+	}
+}
+
+func TestSplitMessageHTMLIgnoresEarlyNewline(t *testing.T) {
+	text := "Коротко.\n\n" + strings.Repeat("длинный блок ", 30)
+	chunks := splitMessage(text, 120, "html")
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+	if len(chunks[0]) < 90 {
+		t.Fatalf("first chunk split too early: len=%d text=%q", len(chunks[0]), chunks[0])
+	}
+	for i, chunk := range chunks {
+		if err := validateHTMLNesting(chunk); err != nil {
+			t.Fatalf("chunk %d invalid html nesting: %v\n%s", i, err, chunk)
+		}
+	}
+}
+
 func validateHTMLNesting(text string) error {
 	var stack []string
 	for i := 0; i < len(text); {
