@@ -11,7 +11,7 @@ import (
 	"github.com/PiDmitrius/klax/internal/transport"
 )
 
-const maxMessageLen = 4000 // safe limit under Telegram's 4096
+const maxMessageLen = 2048
 
 // splitMessage splits text into chunks that fit within the message limit.
 // Splits on newlines when possible, otherwise hard-cuts.
@@ -555,6 +555,10 @@ func (d *daemon) syncMessageChain(ctx context.Context, fullChatID, replyTo strin
 		text = stripHTML(text)
 	}
 	chunks := splitMessage(text, maxMessageLen, format)
+	return d.syncMessageChainChunks(ctx, fullChatID, replyTo, chain, chunks, format)
+}
+
+func (d *daemon) syncMessageChainChunks(ctx context.Context, fullChatID, replyTo string, chain *messageChain, chunks []string, format string) (*messageChain, error) {
 	chain = chain.ensure()
 	if replyTo != "" {
 		chain.anchorReplyTo = replyTo
@@ -619,6 +623,12 @@ func (d *daemon) syncMessageChain(ctx context.Context, fullChatID, replyTo strin
 		}
 	}
 	return chain, nil
+}
+
+func (d *daemon) syncFinalMessageChainChunks(fullChatID, replyTo string, chain *messageChain, chunks []string, format string) (*messageChain, error) {
+	ctx, cancel := withDeliveryTimeout(context.Background())
+	defer cancel()
+	return d.syncMessageChainChunks(ctx, fullChatID, replyTo, chain, chunks, format)
 }
 
 func (d *daemon) sendMessage(chatID, replyTo, text string) {

@@ -266,13 +266,14 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		defer close(workerDone)
 		var lastSentText string
 		for snapshot := range progressCh {
-			newText := formatLogItems(snapshot, chatFmt) + "\n\n..."
-			if newText == lastSentText {
+			chunks := formatLogChunks(snapshot, "...", chatFmt, maxMessageLen)
+			cacheKey := fmt.Sprintf("%q", chunks)
+			if cacheKey == lastSentText {
 				continue
 			}
-			lastSentText = newText
+			lastSentText = cacheKey
 			if progressChain != nil && len(progressChain.ids) > 0 {
-				pc, err := d.syncMessageChain(ctx, msg.chatID, msg.msgID, progressChain, newText, chatFmt)
+				pc, err := d.syncMessageChainChunks(ctx, msg.chatID, msg.msgID, progressChain, chunks, chatFmt)
 				if err != nil {
 					log.Printf("progress update failed: %v", err)
 					continue
@@ -413,15 +414,15 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	}
 
 	// Build final message: progress log + separator + answer.
-	var finalText string
+	var finalChunks []string
 	if len(logItems) > 0 {
-		finalText = formatLogItems(logItems, chatFmt) + "\n\n" + formatted
+		finalChunks = formatLogChunks(logItems, formatted, chatFmt, maxMessageLen)
 	} else {
-		finalText = formatted
+		finalChunks = splitMessage(formatted, maxMessageLen, chatFmt)
 	}
 
 	if t != nil {
-		_, err := d.syncFinalMessageChain(msg.chatID, msg.msgID, progressChain, finalText, chatFmt)
+		_, err := d.syncFinalMessageChainChunks(msg.chatID, msg.msgID, progressChain, finalChunks, chatFmt)
 		if err != nil {
 			log.Printf("final delivery failed: %v", err)
 		}

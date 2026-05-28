@@ -21,7 +21,7 @@ func TestToolUseStringAppliesTildeBeforeTruncate(t *testing.T) {
 		t.Fatalf("UserHomeDir: %v", err)
 	}
 
-	cmd := `cd "` + home + `/very/long/path/with/many/segments/for/testing/that/keeps/going/and/going" && echo done`
+	cmd := `cd "` + home + `/very/long/path/with/many/segments/for/testing/that/keeps/going/and/going/through/even/more/directories/after/the/new/preview/limit" && echo done`
 	got := ToolUse{
 		Name:  "Bash",
 		Input: `{"command":"` + strings.ReplaceAll(cmd, `"`, `\"`) + `"}`,
@@ -35,6 +35,20 @@ func TestToolUseStringAppliesTildeBeforeTruncate(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "…`") {
 		t.Fatalf("expected truncated bash preview in %q", got)
+	}
+}
+
+func TestToolUseStringCompactsMultilineBashPreview(t *testing.T) {
+	got := ToolUse{
+		Name:  "Bash",
+		Input: `{"command":"set -e\nrm -f /tmp/known_hosts\n\necho done"}`,
+	}.String()
+
+	if strings.Contains(got, "\n") {
+		t.Fatalf("expected one-line bash preview, got %q", got)
+	}
+	if !strings.Contains(got, "set -e rm -f /tmp/known_hosts echo done") {
+		t.Fatalf("unexpected compacted bash preview: %q", got)
 	}
 }
 
@@ -66,9 +80,9 @@ func TestTruncatePreservesUTF8(t *testing.T) {
 
 func TestToolUseString_PlanAndTask(t *testing.T) {
 	cases := []struct {
-		name  string
-		tool  ToolUse
-		want  string
+		name string
+		tool ToolUse
+		want string
 	}{
 		{
 			name: "Plan empty payload",

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/PiDmitrius/klax/internal/runner"
@@ -48,6 +49,88 @@ func TestFormatRunFailureUsesAbortMarkerOnCancel(t *testing.T) {
 	}
 }
 
+func TestFormatLogChunksKeepsToolEntriesAtomic(t *testing.T) {
+	chunks := formatLogChunks([]runner.ProgressEvent{
+		{Kind: runner.ProgressKindTool, Text: "🔧 " + strings.Repeat("a", 20)},
+		{Kind: runner.ProgressKindTool, Text: "🔧 " + strings.Repeat("b", 20)},
+	}, "...", "", 32)
+
+	if len(chunks) != 2 {
+		t.Fatalf("expected one chunk per tool entry, got %d: %#v", len(chunks), chunks)
+	}
+	if strings.Contains(chunks[0], "b") || strings.Contains(chunks[1], "a") {
+		t.Fatalf("tool entries were mixed across chunks: %#v", chunks)
+	}
+	if !strings.HasSuffix(chunks[1], "...") {
+		t.Fatalf("expected tail on final chunk, got %#v", chunks)
+	}
+}
+
+func TestFormatLogChunksKeepsHTMLToolEntriesAtomic(t *testing.T) {
+	chunks := formatLogChunks([]runner.ProgressEvent{
+		{Kind: runner.ProgressKindTool, Text: "🔧 " + strings.Repeat("a", 20)},
+		{Kind: runner.ProgressKindTool, Text: "🔧 " + strings.Repeat("b", 20)},
+	}, "...", "html", 46)
+
+	if len(chunks) != 2 {
+		t.Fatalf("expected one chunk per tool entry, got %d: %#v", len(chunks), chunks)
+	}
+	for i, chunk := range chunks {
+		if err := validateHTMLNesting(chunk); err != nil {
+			t.Fatalf("chunk %d invalid html nesting: %v\n%s", i, err, chunk)
+		}
+	}
+	if strings.Contains(chunks[0], "b") || strings.Contains(chunks[1], "a") {
+		t.Fatalf("tool entries were mixed across chunks: %#v", chunks)
+	}
+	if !strings.HasSuffix(chunks[1], "...") {
+		t.Fatalf("expected tail on final chunk, got %#v", chunks)
+	}
+}
+
+func TestFormatLogChunksSplitsOversizedHTMLSegmentSafely(t *testing.T) {
+	text := "🔧 " + strings.Repeat("tool ", 30)
+	chunks := formatLogChunks([]runner.ProgressEvent{
+		{Kind: runner.ProgressKindTool, Text: text},
+	}, "", "html", 64)
+
+	if len(chunks) < 2 {
+		t.Fatalf("expected oversized tool entry to split, got %#v", chunks)
+	}
+	var rebuilt strings.Builder
+	for i, chunk := range chunks {
+		if len(chunk) > 64 {
+			t.Fatalf("chunk %d too large: %d", i, len(chunk))
+		}
+		if err := validateHTMLNesting(chunk); err != nil {
+			t.Fatalf("chunk %d invalid html nesting: %v\n%s", i, err, chunk)
+		}
+		rebuilt.WriteString(stripHTML(chunk))
+	}
+	if rebuilt.String() != text {
+		t.Fatalf("visible text mismatch after oversized split")
+	}
+}
+
+func TestFormatLogChunksSplitsOversizedHTMLNarrationSafely(t *testing.T) {
+	text := strings.Repeat("**важно** проверить список\n\n", 8)
+	chunks := formatLogChunks([]runner.ProgressEvent{
+		{Kind: runner.ProgressKindNarration, Text: text},
+	}, "", "html", 72)
+
+	if len(chunks) < 2 {
+		t.Fatalf("expected oversized narration to split, got %#v", chunks)
+	}
+	for i, chunk := range chunks {
+		if len(chunk) > 72 {
+			t.Fatalf("chunk %d too large: %d", i, len(chunk))
+		}
+		if err := validateHTMLNesting(chunk); err != nil {
+			t.Fatalf("chunk %d invalid html nesting: %v\n%s", i, err, chunk)
+		}
+	}
+}
+
 func TestSyncFinalMessageChainUsesFreshDeliveryContext(t *testing.T) {
 	tp := &fakeTransport{}
 	d := newTestDeliveryDaemon(tp)
@@ -62,6 +145,29 @@ func TestSyncFinalMessageChainUsesFreshDeliveryContext(t *testing.T) {
 
 	if _, err := d.syncFinalMessageChain("tg:1", "user-msg", chain, "❌ Прервано.", "html"); err != nil {
 		t.Fatalf("syncFinalMessageChain failed: %v", err)
+	}
+	if tp.editCalls != 1 {
+		t.Fatalf("expected one final edit, got %d", tp.editCalls)
+	}
+	if tp.lastEdit.text != "❌ Прервано." {
+		t.Fatalf("unexpected final edit text: %q", tp.lastEdit.text)
+	}
+}
+
+func TestSyncFinalMessageChainChunksUsesFreshDeliveryContext(t *testing.T) {
+	tp := &fakeTransport{}
+	d := newTestDeliveryDaemon(tp)
+	chain := newMessageChain("progress-1")
+	chain.msgs["progress-1"] = "...\x00html"
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := d.syncMessageChainChunks(runCtx, "tg:1", "user-msg", chain, []string{"❌ Прервано."}, "html"); err == nil {
+		t.Fatal("expected syncMessageChainChunks to fail with canceled run context")
+	}
+
+	if _, err := d.syncFinalMessageChainChunks("tg:1", "user-msg", chain, []string{"❌ Прервано."}, "html"); err != nil {
+		t.Fatalf("syncFinalMessageChainChunks failed: %v", err)
 	}
 	if tp.editCalls != 1 {
 		t.Fatalf("expected one final edit, got %d", tp.editCalls)
