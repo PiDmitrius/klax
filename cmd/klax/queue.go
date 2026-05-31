@@ -172,6 +172,40 @@ func (d *daemon) clearSessionQueue(sk string, created int64) []queuedMsg {
 	return queued
 }
 
+// abortSession cancels any in-flight run for the session and marks its queued
+// messages as aborted. Cancelling the run context makes Runner.Run SIGTERM →
+// SIGKILL the backend's process group, so this reaches grandchildren (e.g. rust
+// codex behind the npm shim). Returns true if there was anything to abort.
+//
+// When closing is set (the /nuke teardown path) the runner is flagged so a run
+// caught between dequeue and installing its cancel handle bails in runBackend
+// instead of launching the backend against a session about to be deleted. On
+// that path the active check also counts processing — not just runner.IsBusy()
+// — so the same window is reported as aborted. Plain /abort (closing=false)
+// keeps the original IsBusy()-only check: it cannot stop a run that has no
+// cancel handle yet, so claiming it did would be a lie.
+func (d *daemon) abortSession(sk string, created int64, closing bool) bool {
+	sr := d.lookupRunner(sk, created)
+	var cancelFn context.CancelFunc
+	var active bool
+	if sr != nil {
+		sr.mu.Lock()
+		if closing {
+			sr.closing = true
+		}
+		cancelFn = sr.cancel
+		active = sr.runner.IsBusy() || (closing && sr.processing)
+		sr.mu.Unlock()
+	}
+	queued := d.clearSessionQueue(sk, created)
+	hasWork := active || cancelFn != nil || len(queued) > 0
+	if cancelFn != nil {
+		cancelFn()
+	}
+	d.abortQueuedMessages(queued)
+	return hasWork
+}
+
 func (d *daemon) abortQueuedMessages(msgs []queuedMsg) {
 	for _, qm := range msgs {
 		if qm.progressID == "" {
@@ -213,6 +247,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	ctx, cancel := context.WithCancel(context.Background())
 	sr.mu.Lock()
 	sr.cancel = cancel
+	closing := sr.closing
 	sr.mu.Unlock()
 	defer cancel()
 	// Clear the cancel handle once the run is done so a later /abort on an
@@ -222,6 +257,19 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		sr.cancel = nil
 		sr.mu.Unlock()
 	}()
+
+	// Guard against /nuke racing this run. closing and sr.cancel are read/written
+	// under the same sr.mu as abortSession, so the two orderings are covered:
+	//   - abortSession ran first → we observe closing here and bail;
+	//   - we installed cancel first → abortSession sees it and cancels our ctx.
+	// The remaining case is /nuke having already dropped the runner, so getRunner
+	// above handed us a fresh sr without closing; the store.Get re-check catches
+	// it, since dropRunner only happens after the session is Deleted.
+	if closing || d.store.Get(sk, sess.Created) == nil {
+		d.dropRunner(sk, sess.Created)
+		d.abortQueuedMessages([]queuedMsg{msg})
+		return
+	}
 
 	// Progress message — edit in place.
 	// If this message was queued and nothing happened in the chat since then,

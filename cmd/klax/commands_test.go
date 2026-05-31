@@ -1,6 +1,120 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"github.com/PiDmitrius/klax/internal/runner"
+	"github.com/PiDmitrius/klax/internal/session"
+)
+
+func TestSessionNameArg(t *testing.T) {
+	if got := sessionNameArg(nil); got != "session" {
+		t.Fatalf("sessionNameArg(nil) = %q, want %q", got, "session")
+	}
+	if got := sessionNameArg([]string{"my", "work"}); got != "my work" {
+		t.Fatalf("sessionNameArg = %q, want %q", got, "my work")
+	}
+}
+
+func TestDeleteInactiveSessions(t *testing.T) {
+	const sk = "tg:1"
+	st := &session.Store{
+		Chats: make(map[string]*session.ChatSessions),
+		Scope: make(map[string]*session.ScopeDefaults),
+	}
+	st.New(sk, "one", "/tmp", session.ScopeDefaults{})
+	st.New(sk, "two", "/tmp", session.ScopeDefaults{})
+	st.New(sk, "three", "/tmp", session.ScopeDefaults{}) // newest is active
+
+	sessions := st.SessionsFor(sk)
+	if len(sessions) != 3 {
+		t.Fatalf("setup: got %d sessions, want 3", len(sessions))
+	}
+	// First session is busy (has an in-flight run cancel handle): /nuke must
+	// abort and delete it, not spare it.
+	busyCreated := sessions[0].Created
+	// Second session is idle but has a leftover runner; deleting it must also
+	// drop that runner.
+	idleCreated := sessions[1].Created
+	activeCreated := sessions[2].Created
+
+	_, cancel := context.WithCancel(context.Background())
+	cancelled := false
+	d := &daemon{store: st, runners: make(map[runnerKey]*sessionRunner)}
+	d.runners[runnerKey{sk: sk, created: busyCreated}] = &sessionRunner{
+		runner: runner.New(),
+		cancel: func() { cancelled = true; cancel() },
+	}
+	d.runners[runnerKey{sk: sk, created: idleCreated}] = &sessionRunner{runner: runner.New()}
+
+	deleted, aborted := d.deleteInactiveSessions(sk)
+	if deleted != 2 {
+		t.Fatalf("deleted = %d, want 2", deleted)
+	}
+	if aborted != 1 {
+		t.Fatalf("aborted = %d, want 1", aborted)
+	}
+	if !cancelled {
+		t.Fatal("busy session run was not cancelled")
+	}
+
+	remaining := st.SessionsFor(sk)
+	if len(remaining) != 1 {
+		t.Fatalf("remaining = %d sessions, want 1 (only the new active session)", len(remaining))
+	}
+	if !remaining[0].Active || remaining[0].Created != activeCreated {
+		t.Fatalf("surviving session = %+v, want the active one", remaining[0])
+	}
+
+	if _, ok := d.runners[runnerKey{sk: sk, created: idleCreated}]; ok {
+		t.Fatal("runner for deleted idle session was not dropped")
+	}
+	if _, ok := d.runners[runnerKey{sk: sk, created: busyCreated}]; ok {
+		t.Fatal("runner for nuked busy session was not dropped")
+	}
+}
+
+// A session whose message was dequeued but whose run has not yet installed its
+// cancel handle is "processing" with cancel == nil. /nuke must still recognise
+// that as live work, flag the runner closing, and report it as aborted.
+func TestAbortSessionDetectsProcessingAndFlagsClosing(t *testing.T) {
+	const sk = "tg:1"
+	st := &session.Store{
+		Chats: make(map[string]*session.ChatSessions),
+		Scope: make(map[string]*session.ScopeDefaults),
+	}
+	st.New(sk, "one", "/tmp", session.ScopeDefaults{})
+	created := st.SessionsFor(sk)[0].Created
+
+	d := &daemon{store: st, runners: make(map[runnerKey]*sessionRunner)}
+	sr := &sessionRunner{runner: runner.New(), processing: true} // dequeued, cancel not set yet
+	d.runners[runnerKey{sk: sk, created: created}] = sr
+
+	// Plain /abort cannot stop a run with no cancel handle yet, so it must not
+	// claim it did — original IsBusy()-only behaviour, no closing side effect.
+	if d.abortSession(sk, created, false) {
+		t.Fatal("/abort must not report work for a run with no cancel handle yet")
+	}
+	sr.mu.Lock()
+	flaggedByAbort := sr.closing
+	sr.mu.Unlock()
+	if flaggedByAbort {
+		t.Fatal("/abort must not flag the runner closing")
+	}
+
+	// /nuke (closing=true) must recognise the processing run, flag it closing so
+	// the starting run bails, and report it as aborted.
+	if !d.abortSession(sk, created, true) {
+		t.Fatal("/nuke must report work for a processing session")
+	}
+	sr.mu.Lock()
+	closing := sr.closing
+	sr.mu.Unlock()
+	if !closing {
+		t.Fatal("closing flag was not set so a starting run would not bail")
+	}
+}
 
 func TestNormalizeCommandGroupAliases(t *testing.T) {
 	tests := []struct {
