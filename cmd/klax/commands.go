@@ -316,6 +316,56 @@ func (d *daemon) handleSessionDelete(chatID, msgID, sk, n string) {
 	d.sendMessage(chatID, msgID, d.cleanupText(sk))
 }
 
+// sessionNameArg returns the session name from command args, defaulting to
+// "session" when none was given. Shared by /new and /nuke.
+func sessionNameArg(args []string) string {
+	if len(args) > 0 {
+		return strings.Join(args, " ")
+	}
+	return "session"
+}
+
+// createSession resolves the chat's CWD and scope defaults and creates a new
+// active session. Shared by /new and /nuke.
+func (d *daemon) createSession(chatID, sk, name string) (*session.Session, *session.ScopeDefaults) {
+	cwd := d.sessionCWD(chatID)
+	if cwd == "" {
+		cwd = d.cfg.DefaultCWD
+	}
+	if cwd == "" {
+		cwd, _ = os.UserHomeDir()
+	}
+	def := d.scopeDefaults(sk)
+	sess := d.store.New(sk, name, cwd, *def)
+	return sess, def
+}
+
+// deleteInactiveSessions aborts and removes every non-active session in the
+// chat — /nuke wipes the slate, so a session with work in flight is aborted
+// (run cancelled, queued messages marked aborted) before being deleted, not
+// spared. The aborted run unwinds on its own goroutine; its final persist via
+// UpdateSession becomes a no-op once the record is gone (same as a session
+// deleted mid-run). Returns how many sessions were deleted and how many of
+// those had to be aborted. Iterates the SessionsFor snapshot high-to-low so
+// each Store.Delete only shifts indices already passed.
+func (d *daemon) deleteInactiveSessions(sk string) (deleted, aborted int) {
+	sessions := d.store.SessionsFor(sk)
+	for i := len(sessions) - 1; i >= 0; i-- {
+		s := sessions[i]
+		if s.Active {
+			continue
+		}
+		if d.abortSession(sk, s.Created, true) {
+			aborted++
+		}
+		if d.store.Delete(sk, i) {
+			d.dropRunner(sk, s.Created)
+			deleted++
+		}
+	}
+	return deleted, aborted
+}
+
 // argPayload returns everything after the first whitespace-delimited word in text.
 // Handles @botname suffixes correctly: "/prompt@bot hello" → "hello".
 func argPayload(text string) string {
@@ -390,21 +440,20 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		d.sendMessage(chatID, msgID, "✅ Меню установлено.")
 
 	case "/new":
-		name := "session"
-		if len(args) > 0 {
-			name = strings.Join(args, " ")
-		}
-		cwd := d.sessionCWD(chatID)
-		if cwd == "" {
-			cwd = d.cfg.DefaultCWD
-		}
-		if cwd == "" {
-			cwd, _ = os.UserHomeDir()
-		}
-		def := d.scopeDefaults(sk)
-		sess := d.store.New(sk, name, cwd, *def)
+		sess, def := d.createSession(chatID, sk, sessionNameArg(args))
 		d.saveStore()
 		d.sendMessage(chatID, msgID, sessionCreatedText(d.cfg, chatID, def, sess))
+
+	case "/nuke":
+		sess, def := d.createSession(chatID, sk, sessionNameArg(args))
+		deleted, aborted := d.deleteInactiveSessions(sk)
+		d.saveStore()
+		msg := sessionCreatedText(d.cfg, chatID, def, sess)
+		msg += fmt.Sprintf("\n\n💥 Снесено сессий: %d", deleted)
+		if aborted > 0 {
+			msg += fmt.Sprintf("\n❌ Прервано занятых: %d", aborted)
+		}
+		d.sendMessage(chatID, msgID, msg)
 
 	case "/name":
 		if len(args) == 0 {
@@ -551,29 +600,10 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			d.sendMessage(chatID, msgID, "Нет активной сессии")
 			return
 		}
-		sr := d.lookupRunner(sk, active.Created)
-		var cancelFn context.CancelFunc
-		var busy bool
-		if sr != nil {
-			sr.mu.Lock()
-			cancelFn = sr.cancel
-			busy = sr.runner.IsBusy()
-			sr.mu.Unlock()
-		}
-		queued := d.clearSessionQueue(sk, active.Created)
-		hasMessages := busy || cancelFn != nil || len(queued) > 0
-		if !hasMessages {
+		if !d.abortSession(sk, active.Created, false) {
 			d.sendMessage(chatID, msgID, noActiveSessionMessagesText)
 			return
 		}
-		// Cancel the run context. Runner.Run catches it and sends SIGTERM →
-		// SIGKILL to the backend's process group, then closes stdout to
-		// unblock its scanner. This is what makes /abort reach grandchildren
-		// (e.g. rust codex behind the npm shim).
-		if cancelFn != nil {
-			cancelFn()
-		}
-		d.abortQueuedMessages(queued)
 		d.sendMessage(chatID, msgID, abortReplyText)
 
 	case "/__set_model":

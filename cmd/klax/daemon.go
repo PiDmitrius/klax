@@ -33,6 +33,11 @@ type sessionRunner struct {
 	queue      []queuedMsg
 	processing bool
 	cancel     context.CancelFunc // cancels current run (claude process + retry loops)
+	// closing is set by /nuke when this session is being torn down. A run that
+	// is starting (dequeued but cancel not yet installed) observes it under mu
+	// in runBackend and bails before launching the backend, so /nuke's guarantee
+	// "no old session keeps running" holds even in the dequeue→cancel window.
+	closing bool
 }
 
 // runnerKey identifies a per-session runner. The Created field is the only

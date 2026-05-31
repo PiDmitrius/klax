@@ -375,6 +375,7 @@ func helpText() string {
 /status — статус
 /sessions — сессии
 /new [имя] — новая сессия
+/nuke [имя] — новая сессия, остальные снести (с прерыванием)
 /settings — backend, model, think
 /name — переименовать сессию
 /cleanup — управление сессиями
@@ -543,6 +544,8 @@ func (d *daemon) cleanupText(chatID string) string {
 	}
 	if inactive == 0 {
 		sb.WriteString("\nНечего удалять.")
+	} else {
+		sb.WriteString("\n/nuke — новая сессия, остальные снести (с прерыванием)")
 	}
 	return sb.String()
 }
