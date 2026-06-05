@@ -448,10 +448,12 @@ func (d *daemon) statusText(chatID string) string {
 	}
 
 	rateLine := d.rateLimitText(backend)
+	versionPad := strings.Repeat("\u2800", 8)
+	statusBlankLine := strings.Repeat("\u2800", 16)
 
 	return fmt.Sprintf(
-		"<b>klax</b> v%s\n\n📌 Сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n🔒 Sandbox: <code>%s</code>\n%s%s%s\n💬 Сообщений: %d",
-		version, html.EscapeString(sess.Name), sessionModeLabel(chatID), backend, model, think, sandbox, statusLine, contextLine, rateLine, sess.Messages,
+		"<b>✅ klax</b> v%s%s\n%s\n📌 Сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n🔒 Sandbox: <code>%s</code>\n%s%s%s\n💬 Сообщений: %d",
+		version, versionPad, statusBlankLine, html.EscapeString(sess.Name), sessionModeLabel(chatID), backend, model, think, sandbox, statusLine, contextLine, rateLine, sess.Messages,
 	)
 }
 
