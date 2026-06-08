@@ -417,13 +417,14 @@ func (d *daemon) runBackend(msg queuedMsg) {
 
 	backend := d.backendFor(sess)
 	result := sr.runner.Run(ctx, backend, runner.RunOptions{
-		Prompt:             prompt,
-		SessionID:          sess.ID,
-		CWD:                sess.CWD,
-		Sandbox:            sess.Sandbox,
-		Model:              sess.ModelOverride,
-		Effort:             sess.ThinkOverride,
-		AppendSystemPrompt: sess.AppendSystemPrompt,
+		Prompt:                    prompt,
+		SessionID:                 sess.ID,
+		CWD:                       sess.CWD,
+		Sandbox:                   sess.Sandbox,
+		Model:                     sess.ModelOverride,
+		Effort:                    sess.ThinkOverride,
+		AppendSystemPrompt:        sess.AppendSystemPrompt,
+		SuppressNarrationProgress: !verbose,
 	}, onProgress)
 
 	// Flush the progress worker before any final-delivery path runs: the

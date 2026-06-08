@@ -628,6 +628,38 @@ func TestCodexStreamDemotesIntermediatesToNarration(t *testing.T) {
 	}
 }
 
+func TestCodexSuppressedNarrationKeepsLongReplyInFinalText(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	para1 := strings.Repeat("a", 250)
+	para2 := strings.Repeat("b", 150)
+	body := para1 + "\n\n" + para2
+	jsonBody := strings.ReplaceAll(body, "\n", `\n`)
+	lines := []string{
+		`{"type":"thread.started","thread_id":"019d0000"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.completed","item":{"id":"i0","type":"agent_message","text":"` + jsonBody + `"}}`,
+		`{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1}}`,
+	}
+	script := "printf '%s\\n' " + shQuote(lines...)
+
+	rec := &progressRecorder{}
+	r := New()
+	res := r.Run(context.Background(), &codexStreamBackend{script: script}, RunOptions{SuppressNarrationProgress: true}, rec.callback())
+	if res.Error != nil {
+		t.Fatalf("Run error: %v", res.Error)
+	}
+
+	if narr := rec.narrationTexts(); len(narr) != 0 {
+		t.Fatalf("suppressed narration must not emit progress narration, got %v", narr)
+	}
+	if res.Text != body {
+		t.Fatalf("final text must keep the full codex body when narration is suppressed")
+	}
+}
+
 func TestCodexStreamSurfacesErrorItems(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
@@ -832,6 +864,37 @@ func TestLookAheadEmitsAtParagraphBoundary(t *testing.T) {
 	}
 }
 
+func TestSuppressedNarrationKeepsLongReplyInFinalText(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	para1 := strings.Repeat("a", 250)
+	para2 := strings.Repeat("b", 150)
+	body := para1 + "\n\n" + para2
+	jsonBody := strings.ReplaceAll(body, "\n", `\n`)
+	lines := []string{
+		`{"type":"system","session_id":"s1","model":"claude-opus-4-7"}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"` + jsonBody + `"}]}}`,
+		`{"type":"result","session_id":"s1","result":"` + jsonBody + `","is_error":false}`,
+	}
+	script := "printf '%s\\n' " + shQuote(lines...)
+
+	rec := &progressRecorder{}
+	r := New()
+	res := r.Run(context.Background(), &stdinEchoBackend{script: script}, RunOptions{SuppressNarrationProgress: true}, rec.callback())
+	if res.Error != nil {
+		t.Fatalf("Run error: %v", res.Error)
+	}
+
+	if narr := rec.narrationTexts(); len(narr) != 0 {
+		t.Fatalf("suppressed narration must not emit progress narration, got %v", narr)
+	}
+	if res.Text != body {
+		t.Fatalf("final text must keep the full body when narration is suppressed")
+	}
+}
+
 // TestLookAheadStaysSilentWithoutParagraphBreak asserts that a long but
 // single-paragraph reply does NOT trigger look-ahead — there is nowhere
 // safe to cut, so the whole thing flows through RunResult.Text. This is
@@ -994,6 +1057,49 @@ func TestClaudePartialDeltaStreaming(t *testing.T) {
 	}
 	if narr[0]+"\n\n"+res.Text != fullBody {
 		t.Fatalf("narration + sep + final must reconstruct original body exactly")
+	}
+}
+
+func TestClaudePartialDeltaSuppressedNarrationKeepsFullFinalText(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	para1 := strings.Repeat("a", 250)
+	para2 := strings.Repeat("b", 150)
+	fullBody := para1 + "\n\n" + para2
+	jsonFull := strings.ReplaceAll(fullBody, "\n", `\n`)
+
+	d1 := para1[:200]
+	d2 := para1[200:] + "\n\n" + para2[:50]
+	d3 := para2[50:]
+	deltaLine := func(text string) string {
+		esc := strings.ReplaceAll(text, "\n", `\n`)
+		return `{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"` + esc + `"}}}`
+	}
+
+	lines := []string{
+		`{"type":"system","session_id":"s1","model":"claude-opus-4-7"}`,
+		deltaLine(d1),
+		deltaLine(d2),
+		deltaLine(d3),
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"` + jsonFull + `"}]}}`,
+		`{"type":"result","session_id":"s1","result":"` + jsonFull + `","is_error":false}`,
+	}
+	script := "printf '%s\\n' " + shQuote(lines...)
+
+	rec := &progressRecorder{}
+	r := New()
+	res := r.Run(context.Background(), &stdinEchoBackend{script: script}, RunOptions{SuppressNarrationProgress: true}, rec.callback())
+	if res.Error != nil {
+		t.Fatalf("Run error: %v", res.Error)
+	}
+
+	if narr := rec.narrationTexts(); len(narr) != 0 {
+		t.Fatalf("suppressed narration must not emit progress narration, got %v", narr)
+	}
+	if res.Text != fullBody {
+		t.Fatalf("final text must keep the full streamed body when narration is suppressed")
 	}
 }
 
