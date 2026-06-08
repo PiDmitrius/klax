@@ -895,6 +895,35 @@ func TestSuppressedNarrationKeepsLongReplyInFinalText(t *testing.T) {
 	}
 }
 
+func TestSuppressedNarrationKeepsReplyAcrossRateLimitEvent(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	body := "готовый ответ"
+	lines := []string{
+		`{"type":"system","session_id":"s1","model":"claude-opus-4-7"}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"` + body + `"}]}}`,
+		`{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resets_at":2000000000,"rateLimitType":"five_hour","utilization":0.9}}`,
+		`{"type":"result","session_id":"s1","result":"` + body + `","is_error":false}`,
+	}
+	script := "printf '%s\\n' " + shQuote(lines...)
+
+	rec := &progressRecorder{}
+	r := New()
+	res := r.Run(context.Background(), &stdinEchoBackend{script: script}, RunOptions{SuppressNarrationProgress: true}, rec.callback())
+	if res.Error != nil {
+		t.Fatalf("Run error: %v", res.Error)
+	}
+
+	if narr := rec.narrationTexts(); len(narr) != 0 {
+		t.Fatalf("suppressed narration must not emit progress narration, got %v", narr)
+	}
+	if res.Text != body {
+		t.Fatalf("final text must survive a rate-limit progress event, got %q", res.Text)
+	}
+}
+
 // TestLookAheadStaysSilentWithoutParagraphBreak asserts that a long but
 // single-paragraph reply does NOT trigger look-ahead — there is nowhere
 // safe to cut, so the whole thing flows through RunResult.Text. This is

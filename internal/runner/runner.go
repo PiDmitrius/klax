@@ -721,7 +721,9 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 						// Flush pending first so the rate-limit line
 						// appears in the log AFTER the text that preceded
 						// it chronologically.
-						buf.demote()
+						if !opts.SuppressNarrationProgress {
+							buf.demote()
+						}
 						buf.emitTool(ProgressEvent{Kind: ProgressKindTool, Text: formatRateLimit(ev.RateLimit)})
 					}
 				}
@@ -779,13 +781,17 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 
 			case EventUnknown:
 				if ev.Text != "" {
-					buf.demote()
+					if !opts.SuppressNarrationProgress {
+						buf.demote()
+					}
 					buf.emitTool(ProgressEvent{Kind: ProgressKindTool, Text: fmt.Sprintf("❓ %s", ev.Text)})
 				}
 
 			case EventError:
 				if ev.Text != "" {
-					buf.demote()
+					if !opts.SuppressNarrationProgress {
+						buf.demote()
+					}
 					buf.emitTool(ProgressEvent{Kind: ProgressKindTool, Text: fmt.Sprintf("❌ %s", ev.Text)})
 				}
 
