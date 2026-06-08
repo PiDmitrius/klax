@@ -44,6 +44,8 @@ func normalizeCommand(cmd string, args []string) (string, []string) {
 		return "/groups", append([]string{cmd[len("/groups_"):]}, args...)
 	case strings.HasPrefix(cmd, "/group_") && len(cmd) > len("/group_"):
 		return "/groups", append([]string{cmd[len("/group_"):]}, args...)
+	case strings.HasPrefix(cmd, "/verbose_") && len(cmd) > len("/verbose_"):
+		return "/verbose", append([]string{cmd[len("/verbose_"):]}, args...)
 	case strings.HasPrefix(cmd, "/m_") && len(cmd) > len("/m_"):
 		return "/__set_model", []string{cmd[len("/m_"):]}
 	case strings.HasPrefix(cmd, "/t_") && len(cmd) > len("/t_"):
@@ -271,6 +273,28 @@ func (d *daemon) handleSandboxSet(chatID, msgID, sk, mode string) {
 		sess.Sandbox = mode
 	})
 	d.saveStore()
+	d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
+}
+
+func (d *daemon) handleVerboseSet(chatID, msgID, sk, mode string) {
+	if !isGroupChatID(chatID) {
+		d.sendMessage(chatID, msgID, "❌ Команда /verbose работает только в групповых чатах.")
+		return
+	}
+	if !d.isGroupChat(chatID) {
+		d.sendMessage(chatID, msgID, "❌ Сначала включи режим группы: /group_on")
+		return
+	}
+	sess := d.store.Active(sk)
+	if mode != "on" && mode != "off" {
+		d.sendMessage(chatID, msgID, d.verboseText(chatID))
+		return
+	}
+	d.setGroupVerbose(chatID, mode == "on")
+	if sess == nil {
+		d.sendMessage(chatID, msgID, d.verboseText(chatID))
+		return
+	}
 	d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
 }
 
@@ -549,6 +573,13 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		}
 		d.sendMessage(chatID, msgID, d.sandboxText(sk, sess))
 
+	case "/verbose":
+		mode := ""
+		if len(args) > 0 {
+			mode = strings.ToLower(args[0])
+		}
+		d.handleVerboseSet(chatID, msgID, sk, mode)
+
 	case "/settings", "/setting":
 		sess := d.store.Active(sk)
 		if sess == nil {
@@ -706,7 +737,11 @@ func (d *daemon) groupsText() string {
 	var sb strings.Builder
 	sb.WriteString("Группы:\n")
 	for _, id := range keys {
-		sb.WriteString(fmt.Sprintf("- <code>%s</code>\n  📂 <code>%s</code>\n", html.EscapeString(id), html.EscapeString(tildePath(d.groupChats[id]))))
+		verbose := "on"
+		if enabled, ok := d.groupVerb[id]; ok && !enabled {
+			verbose = "off"
+		}
+		sb.WriteString(fmt.Sprintf("- <code>%s</code>\n  📂 <code>%s</code>\n  🗣 verbose: <code>%s</code>\n", html.EscapeString(id), html.EscapeString(tildePath(d.groupChats[id])), verbose))
 	}
 	return sb.String()
 }

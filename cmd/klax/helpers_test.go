@@ -15,6 +15,7 @@ func newTestDaemon() *daemon {
 		cfg:        &config.Config{DefaultBackend: "codex", DefaultCWD: "/tmp"},
 		store:      &session.Store{Chats: map[string]*session.ChatSessions{}, Scope: map[string]*session.ScopeDefaults{}},
 		groupChats: map[string]string{},
+		groupVerb:  map[string]bool{},
 	}
 }
 
@@ -90,6 +91,31 @@ func TestThinkTextMarksDefaultWhenThinkIsEmpty(t *testing.T) {
 	}
 }
 
+func TestVerboseTextDefaultsOn(t *testing.T) {
+	d := newTestDaemon()
+	chatID := "tg:-1001"
+	d.groupChats[chatID] = "/tmp/groups/tg_-1001"
+
+	text := d.verboseText(chatID)
+
+	if !strings.Contains(text, "<b>/verbose_on ✅</b>") {
+		t.Fatalf("verbose should default to on: %q", text)
+	}
+}
+
+func TestVerboseTextMarksOff(t *testing.T) {
+	d := newTestDaemon()
+	chatID := "tg:-1001"
+	d.groupChats[chatID] = "/tmp/groups/tg_-1001"
+	d.groupVerb[chatID] = false
+
+	text := d.verboseText(chatID)
+
+	if !strings.Contains(text, "<b>/verbose_off ✅</b>") {
+		t.Fatalf("verbose off should be highlighted: %q", text)
+	}
+}
+
 func TestTildePathsInTextHandlesQuotesAndSpaces(t *testing.T) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -139,6 +165,9 @@ func TestSettingsTextContainsBackendModelAndThinkSections(t *testing.T) {
 			t.Fatalf("settings text missing %q in %q", want, text)
 		}
 	}
+	if strings.Contains(text, "🗣 Verbose:") {
+		t.Fatalf("personal settings should not show group verbose: %q", text)
+	}
 	for _, want := range []string{
 		"✅</b>\n\n🤖",
 		"По умолчанию\n\n🧠",
@@ -173,6 +202,9 @@ func TestSettingsTextShowsGroupModeSectionInGroupChat(t *testing.T) {
 		"<b>Режим группы</b>",
 		"<b>/group_on ✅</b>",
 		"/group_off",
+		"🗣 Verbose:",
+		"<b>/verbose_on ✅</b>",
+		"/verbose_off",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("group settings missing %q in %q", want, text)

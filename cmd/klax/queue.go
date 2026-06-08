@@ -299,6 +299,8 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		}
 	}
 
+	verbose := d.chatVerboseEnabled(msg.chatID)
+
 	// Progress plumbing. onProgress runs in the Runner's stdout-scanner
 	// goroutine and MUST NOT block on network: if it did, the backend's
 	// stdout pipe would fill and the child (e.g. rust codex behind the npm
@@ -355,6 +357,9 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		}
 	}()
 	onProgress := func(ev runner.ProgressEvent) {
+		if !verbose {
+			return
+		}
 		// No upstream dedup here on purpose: the progress worker already
 		// suppresses duplicate edits via its `lastSentText` check, and
 		// collapsing equal ProgressEvents at this level would hide real
@@ -412,13 +417,14 @@ func (d *daemon) runBackend(msg queuedMsg) {
 
 	backend := d.backendFor(sess)
 	result := sr.runner.Run(ctx, backend, runner.RunOptions{
-		Prompt:             prompt,
-		SessionID:          sess.ID,
-		CWD:                sess.CWD,
-		Sandbox:            sess.Sandbox,
-		Model:              sess.ModelOverride,
-		Effort:             sess.ThinkOverride,
-		AppendSystemPrompt: sess.AppendSystemPrompt,
+		Prompt:                    prompt,
+		SessionID:                 sess.ID,
+		CWD:                       sess.CWD,
+		Sandbox:                   sess.Sandbox,
+		Model:                     sess.ModelOverride,
+		Effort:                    sess.ThinkOverride,
+		AppendSystemPrompt:        sess.AppendSystemPrompt,
+		SuppressNarrationProgress: !verbose,
 	}, onProgress)
 
 	// Flush the progress worker before any final-delivery path runs: the

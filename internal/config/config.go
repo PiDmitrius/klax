@@ -49,8 +49,9 @@ type Config struct {
 
 // GroupChat stores group mode settings for a chat.
 type GroupChat struct {
-	ID  string `json:"id"`  // chat ID (e.g. "tg:-100123456")
-	CWD string `json:"cwd"` // working directory for the group
+	ID      string `json:"id"`                // chat ID (e.g. "tg:-100123456")
+	CWD     string `json:"cwd"`               // working directory for the group
+	Verbose *bool  `json:"verbose,omitempty"` // nil = on, for backward-compatible progress output
 }
 
 // GetDefaultBackend returns the default backend name.

@@ -296,13 +296,14 @@ func oneLinePreview(s string) string {
 
 // RunOptions configures a CLI invocation.
 type RunOptions struct {
-	Prompt             string
-	SessionID          string // empty = new session
-	CWD                string // working directory
-	Sandbox            string // "on" = CLI defaults, "off" = unrestricted
-	Model              string // model override
-	Effort             string // reasoning effort: low | medium | high (claude also: max; codex also: xhigh)
-	AppendSystemPrompt string // appended to default system prompt
+	Prompt                    string
+	SessionID                 string // empty = new session
+	CWD                       string // working directory
+	Sandbox                   string // "on" = CLI defaults, "off" = unrestricted
+	Model                     string // model override
+	Effort                    string // reasoning effort: low | medium | high (claude also: max; codex also: xhigh)
+	AppendSystemPrompt        string // appended to default system prompt
+	SuppressNarrationProgress bool   // keep final-answer text buffered instead of streaming it as narration
 }
 
 // ModelUsageInfo captures context window usage from a run.
@@ -397,6 +398,7 @@ type narrationBuffer struct {
 	text       string
 	timer      *time.Timer
 	onProgress ProgressFunc
+	suppress   bool
 	closed     bool
 	// idleGen identifies the currently-armed idle timer. armIdleLocked
 	// bumps it; the AfterFunc closure captures the value and idleFire
@@ -409,8 +411,8 @@ type narrationBuffer struct {
 	pendingJoin bool
 }
 
-func newNarrationBuffer(fn ProgressFunc) *narrationBuffer {
-	return &narrationBuffer{onProgress: fn}
+func newNarrationBuffer(fn ProgressFunc, suppress bool) *narrationBuffer {
+	return &narrationBuffer{onProgress: fn, suppress: suppress}
 }
 
 // append adds a fragment. Returns true on success so callers can maintain
@@ -574,10 +576,16 @@ func findParagraphCut(text string, minBody int) int {
 }
 
 func (b *narrationBuffer) maybeLookAheadLocked() {
+	if b.suppress {
+		return
+	}
 	b.tryCutLocked(narrationFlushMinChars)
 }
 
 func (b *narrationBuffer) armIdleLocked() {
+	if b.suppress {
+		return
+	}
 	if b.timer != nil {
 		b.timer.Stop()
 	}
@@ -661,7 +669,7 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 	// early so a long answer feels alive rather than silent — but only
 	// when a tail is held back as proof more is coming, or after a long
 	// quiet stretch with the backend still alive.
-	buf := newNarrationBuffer(onProgress)
+	buf := newNarrationBuffer(onProgress, opts.SuppressNarrationProgress)
 
 	// resultErr holds a failure the backend reported mid-stream (an errored
 	// `result`/error event). We record it but keep reading so the stream still
@@ -713,7 +721,9 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 						// Flush pending first so the rate-limit line
 						// appears in the log AFTER the text that preceded
 						// it chronologically.
-						buf.demote()
+						if !opts.SuppressNarrationProgress {
+							buf.demote()
+						}
 						buf.emitTool(ProgressEvent{Kind: ProgressKindTool, Text: formatRateLimit(ev.RateLimit)})
 					}
 				}
@@ -771,13 +781,17 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 
 			case EventUnknown:
 				if ev.Text != "" {
-					buf.demote()
+					if !opts.SuppressNarrationProgress {
+						buf.demote()
+					}
 					buf.emitTool(ProgressEvent{Kind: ProgressKindTool, Text: fmt.Sprintf("❓ %s", ev.Text)})
 				}
 
 			case EventError:
 				if ev.Text != "" {
-					buf.demote()
+					if !opts.SuppressNarrationProgress {
+						buf.demote()
+					}
 					buf.emitTool(ProgressEvent{Kind: ProgressKindTool, Text: fmt.Sprintf("❌ %s", ev.Text)})
 				}
 
