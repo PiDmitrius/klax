@@ -68,6 +68,7 @@ type daemon struct {
 	maxIdents  map[int64]string  // max userID -> canonical user ID
 	vkIdents   map[int]string    // vk userID -> canonical user ID
 	groupChats map[string]string // chatID -> CWD for group mode chats
+	groupVerb  map[string]bool   // chatID -> verbose progress output for group mode chats
 }
 
 func startupBackoff(attempt int) time.Duration {
@@ -432,8 +433,10 @@ func runDaemon() {
 	}
 
 	groupChats := make(map[string]string)
+	groupVerb := make(map[string]bool)
 	for _, gc := range cfg.GroupChats {
 		groupChats[gc.ID] = gc.CWD
+		groupVerb[gc.ID] = gc.Verbose == nil || *gc.Verbose
 	}
 
 	d := &daemon{
@@ -452,6 +455,7 @@ func runDaemon() {
 		maxIdents:  maxIdents,
 		vkIdents:   vkIdents,
 		groupChats: groupChats,
+		groupVerb:  groupVerb,
 	}
 
 	writePID()
@@ -978,15 +982,44 @@ func (d *daemon) sessionCWD(chatID string) string {
 // enableGroupChat enables group mode for a chat with the given CWD.
 func (d *daemon) enableGroupChat(chatID, cwd string) {
 	d.mu.Lock()
+	if d.groupVerb == nil {
+		d.groupVerb = make(map[string]bool)
+	}
 	d.groupChats[chatID] = cwd
+	if _, ok := d.groupVerb[chatID]; !ok {
+		d.groupVerb[chatID] = true
+	}
 	d.mu.Unlock()
 	d.saveGroupChats()
+}
+
+func (d *daemon) setGroupVerbose(chatID string, enabled bool) {
+	d.mu.Lock()
+	if d.groupVerb == nil {
+		d.groupVerb = make(map[string]bool)
+	}
+	d.groupVerb[chatID] = enabled
+	d.mu.Unlock()
+	d.saveGroupChats()
+}
+
+func (d *daemon) chatVerboseEnabled(chatID string) bool {
+	if !isGroupChatID(chatID) {
+		return true
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if enabled, ok := d.groupVerb[chatID]; ok {
+		return enabled
+	}
+	return true
 }
 
 // disableGroupChat disables group mode for a chat.
 func (d *daemon) disableGroupChat(chatID string) {
 	d.mu.Lock()
 	delete(d.groupChats, chatID)
+	delete(d.groupVerb, chatID)
 	d.mu.Unlock()
 	d.saveGroupChats()
 }
@@ -1000,7 +1033,15 @@ func (d *daemon) saveGroupChats() {
 	sort.Strings(keys)
 	list := make([]config.GroupChat, 0, len(keys))
 	for _, id := range keys {
-		list = append(list, config.GroupChat{ID: id, CWD: d.groupChats[id]})
+		verbose := true
+		if enabled, ok := d.groupVerb[id]; ok {
+			verbose = enabled
+		}
+		gc := config.GroupChat{ID: id, CWD: d.groupChats[id]}
+		if !verbose {
+			gc.Verbose = &verbose
+		}
+		list = append(list, gc)
 	}
 	d.mu.Unlock()
 	d.cfg.GroupChats = list

@@ -284,6 +284,18 @@ func (d *daemon) sandboxText(sk string, sess *session.Session) string {
 	return sb.String()
 }
 
+func (d *daemon) verboseText(chatID string) string {
+	var sb strings.Builder
+	if d.chatVerboseEnabled(chatID) {
+		sb.WriteString("<b>/verbose_on ✅</b>\n")
+		sb.WriteString("/verbose_off\n")
+	} else {
+		sb.WriteString("/verbose_on\n")
+		sb.WriteString("<b>/verbose_off ✅</b>\n")
+	}
+	return sb.String()
+}
+
 func (d *daemon) groupModeText(chatID string) string {
 	if !isGroupChatID(chatID) {
 		return ""
@@ -309,6 +321,7 @@ func (d *daemon) settingsText(chatID, sk string, sess *session.Session) string {
 	}
 	if groupText := d.groupModeText(chatID); groupText != "" {
 		sections = append(sections, groupText)
+		sections = append(sections, "🗣 Verbose:\n"+strings.TrimSuffix(d.verboseText(chatID), "\n"))
 	}
 	return strings.Join(sections, "\n\n")
 }
@@ -384,6 +397,7 @@ func helpText() string {
 /think — уровень мышления
 /prompt [текст] — системный промпт
 /groups — режим группы
+/verbose — промежуточный вывод группы
 /transports — управление транспортами
 /bypass — прямая команда
 /abort — прервать исполнение
@@ -438,6 +452,14 @@ func (d *daemon) statusText(chatID string) string {
 		think = "по умолчанию"
 	}
 	sandbox := effectiveSandboxMode(d.scopeDefaults(chatID), sess)
+	verboseLine := ""
+	if isGroupChatID(chatID) {
+		verbose := "off"
+		if d.chatVerboseEnabled(chatID) {
+			verbose = "on"
+		}
+		verboseLine = fmt.Sprintf("🗣 Verbose: <code>%s</code>\n", verbose)
+	}
 
 	var contextLine string
 	if sess.ContextWindow > 0 {
@@ -452,8 +474,8 @@ func (d *daemon) statusText(chatID string) string {
 	statusBlankLine := strings.Repeat("\u2800", 16)
 
 	return fmt.Sprintf(
-		"<b>✅ klax</b> v%s%s\n%s\n📌 Сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n🔒 Sandbox: <code>%s</code>\n%s%s%s\n💬 Сообщений: %d",
-		version, versionPad, statusBlankLine, html.EscapeString(sess.Name), sessionModeLabel(chatID), backend, model, think, sandbox, statusLine, contextLine, rateLine, sess.Messages,
+		"<b>✅ klax</b> v%s%s\n%s\n📌 Сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n🔒 Sandbox: <code>%s</code>\n%s%s%s%s\n💬 Сообщений: %d",
+		version, versionPad, statusBlankLine, html.EscapeString(sess.Name), sessionModeLabel(chatID), backend, model, think, sandbox, verboseLine, statusLine, contextLine, rateLine, sess.Messages,
 	)
 }
 
