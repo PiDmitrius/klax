@@ -1092,7 +1092,7 @@ func isGroupCommand(text string) bool {
 	switch cmd {
 	case "/status", "/?", "/sessions", "/session", "/s", "/new", "/name",
 		"/settings", "/setting", "/backend", "/model", "/models", "/m",
-		"/think", "/thinking", "/t", "/abort", "/help", "/h", "/start":
+		"/think", "/thinking", "/t", "/tty", "/abort", "/help", "/h", "/start":
 		return true
 	}
 	// Clickable shortcuts from menus (/s5, /backend_codex).
@@ -1100,6 +1100,9 @@ func isGroupCommand(text string) bool {
 		return true
 	}
 	if strings.HasPrefix(cmd, "/backend_") && len(cmd) > len("/backend_") {
+		return true
+	}
+	if strings.HasPrefix(cmd, "/tty_") && len(cmd) > len("/tty_") {
 		return true
 	}
 	return false

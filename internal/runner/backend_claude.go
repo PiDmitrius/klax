@@ -28,11 +28,11 @@ type ClaudeBackend struct {
 
 func (b *ClaudeBackend) Name() string { return "claude" }
 
-func (b *ClaudeBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
-	// Reset per-run parser state on entry so a reused backend instance
-	// doesn't carry block-tracking from a prior turn.
-	b.partialDeltaSeen = false
-	b.inTextBlock = false
+// BuildClaudeArgs assembles the claude CLI flag list for a run, independent of
+// binary resolution and the klax-tty wrapping done in BuildCmd. Kept separate
+// so the tty arg parser can be coupled to the real flag set in a test without
+// the claude binary being installed.
+func BuildClaudeArgs(opts RunOptions) []string {
 	var mode string
 	if opts.Sandbox == "" || opts.Sandbox == "off" {
 		mode = "bypassPermissions"
@@ -71,10 +71,27 @@ func (b *ClaudeBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 	if opts.SessionID != "" {
 		args = append(args, "--resume", opts.SessionID)
 	}
+	return args
+}
+
+func (b *ClaudeBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
+	// Reset per-run parser state on entry so a reused backend instance
+	// doesn't carry block-tracking from a prior turn.
+	b.partialDeltaSeen = false
+	b.inTextBlock = false
+	args := BuildClaudeArgs(opts)
 
 	bin := findBinary("claude", []string{".local/bin/claude"})
 	if bin == "" {
 		return nil, errors.New("claude not found. Install: curl -fsSL https://claude.ai/install.sh | bash")
+	}
+	if opts.ClaudeTTY {
+		self, err := os.Executable()
+		if err != nil {
+			return nil, fmt.Errorf("locate klax executable: %w", err)
+		}
+		args = append([]string{"tty", bin}, args...)
+		bin = self
 	}
 
 	cmd := exec.Command(bin, args...)

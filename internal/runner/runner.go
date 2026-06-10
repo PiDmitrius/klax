@@ -303,6 +303,7 @@ type RunOptions struct {
 	Model                     string // model override
 	Effort                    string // reasoning effort: low | medium | high (claude also: max; codex also: xhigh)
 	AppendSystemPrompt        string // appended to default system prompt
+	ClaudeTTY                 bool   // run Claude through klax tty instead of claude -p directly
 	SuppressNarrationProgress bool   // keep final-answer text buffered instead of streaming it as narration
 }
 

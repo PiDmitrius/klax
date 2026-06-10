@@ -52,6 +52,8 @@ func normalizeCommand(cmd string, args []string) (string, []string) {
 		return "/__set_think", []string{cmd[len("/t_"):]}
 	case strings.HasPrefix(cmd, "/sandbox_") && len(cmd) > len("/sandbox_"):
 		return "/__set_sandbox", []string{cmd[len("/sandbox_"):]}
+	case strings.HasPrefix(cmd, "/tty_") && len(cmd) > len("/tty_"):
+		return "/tty", append([]string{cmd[len("/tty_"):]}, args...)
 	case strings.HasPrefix(cmd, "/v_") && len(cmd) > len("/v_"):
 		return "/__install_version", []string{cmd[len("/v_"):]}
 	case hasNumericSuffixCommand(cmd, "/s"):
@@ -97,14 +99,16 @@ func sessionCreatedText(cfg *config.Config, chatID string, def *session.ScopeDef
 		think = "по умолчанию"
 	}
 	sandbox := effectiveSandboxMode(def, sess)
+	tty := claudeTTYLabel(sess)
 	return fmt.Sprintf(
-		"✅ Новая сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n🔒 Sandbox: <code>%s</code>\n\nНастроить: /settings",
+		"✅ Новая сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n🔒 Sandbox: <code>%s</code>\n🖥 TTY: <code>%s</code>\n\nНастроить: /settings",
 		html.EscapeString(sess.Name),
 		sessionModeLabel(chatID),
 		backend,
 		model,
 		think,
 		sandbox,
+		tty,
 	)
 }
 
@@ -119,14 +123,16 @@ func sessionSwitchedText(cfg *config.Config, chatID string, def *session.ScopeDe
 		think = "по умолчанию"
 	}
 	sandbox := effectiveSandboxMode(def, sess)
+	tty := claudeTTYLabel(sess)
 	return fmt.Sprintf(
-		"📌 Сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n🔒 Sandbox: <code>%s</code>\n\n%s",
+		"📌 Сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n🔒 Sandbox: <code>%s</code>\n🖥 TTY: <code>%s</code>\n\n%s",
 		html.EscapeString(sess.Name),
 		sessionModeLabel(chatID),
 		backend,
 		model,
 		think,
 		sandbox,
+		tty,
 		sessionsText,
 	)
 }
@@ -271,6 +277,35 @@ func (d *daemon) handleSandboxSet(chatID, msgID, sk, mode string) {
 	})
 	sess = d.store.UpdateActive(sk, func(sess *session.Session) {
 		sess.Sandbox = mode
+	})
+	d.saveStore()
+	d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
+}
+
+func (d *daemon) handleTTYSet(chatID, msgID, sk, mode string) {
+	sess := d.store.Active(sk)
+	if sess == nil {
+		d.sendMessage(chatID, msgID, "Нет активной сессии")
+		return
+	}
+	if mode != "on" && mode != "off" {
+		d.sendMessage(chatID, msgID, d.ttyText(sk, sess))
+		return
+	}
+	if resolveSessionBackend(sess, d.scopeDefaults(sk), d.cfg.GetDefaultBackend()) != "claude" {
+		d.sendMessage(chatID, msgID, "TTY (только claude)")
+		return
+	}
+	if d.isSessionBusy(sk, sess.Created) {
+		d.sendMessage(chatID, msgID, sessionBusyText)
+		return
+	}
+	on := mode == "on"
+	d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
+		def.ClaudeTTY = on
+	})
+	sess = d.store.UpdateActive(sk, func(sess *session.Session) {
+		sess.ClaudeTTY = on
 	})
 	d.saveStore()
 	d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
@@ -572,6 +607,13 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			return
 		}
 		d.sendMessage(chatID, msgID, d.sandboxText(sk, sess))
+
+	case "/tty":
+		mode := ""
+		if len(args) > 0 {
+			mode = strings.ToLower(args[0])
+		}
+		d.handleTTYSet(chatID, msgID, sk, mode)
 
 	case "/verbose":
 		mode := ""

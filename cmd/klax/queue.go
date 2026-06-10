@@ -424,6 +424,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		Model:                     sess.ModelOverride,
 		Effort:                    sess.ThinkOverride,
 		AppendSystemPrompt:        sess.AppendSystemPrompt,
+		ClaudeTTY:                 sess.ClaudeTTY,
 		SuppressNarrationProgress: !verbose,
 	}, onProgress)
 
