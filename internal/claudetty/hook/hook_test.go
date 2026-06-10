@@ -95,3 +95,39 @@ func TestHarnessRoundTrip(t *testing.T) {
 		t.Fatal("Close did not remove tmp dir")
 	}
 }
+
+func TestSweepStaleTmpDirs(t *testing.T) {
+	dir := t.TempDir()
+	mk := func(name string) string {
+		p := dir + "/" + name
+		if err := os.MkdirAll(p, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p+"/hook.sh", []byte("#!/bin/sh\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	dead := mk("claudetty-111-aaa")
+	live := mk("claudetty-222-bbb")
+	foreign := mk("unrelated-111-ccc")
+	noPid := mk("claudetty-nopid")
+	badPid := mk("claudetty-xyz-ddd")
+	plainFile := dir + "/claudetty-333-file"
+	if err := os.WriteFile(plainFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	removed := sweepStaleTmpDirs(dir, func(pid int) bool { return pid == 222 })
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	if _, err := os.Stat(dead); !os.IsNotExist(err) {
+		t.Fatal("dead wrapper's dir survived the sweep")
+	}
+	for _, p := range []string{live, foreign, noPid, badPid, plainFile} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("sweep touched %s: %v", p, err)
+		}
+	}
+}

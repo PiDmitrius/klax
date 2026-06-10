@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -65,6 +67,53 @@ func New() (*Harness, error) {
 // Close removes the temp dir and everything in it.
 func (h *Harness) Close() {
 	os.RemoveAll(h.TmpDir)
+}
+
+// SweepStaleTmpDirs removes claudetty temp dirs left by wrappers that died
+// without running their defers (hard SIGKILL, OOM, crash) — the one teardown
+// path Close cannot cover. A dir is reclaimed only when the pid embedded in
+// its name no longer runs, so live runs are never touched. Returns the number
+// of dirs removed. Meant for daemon start: by then the previous generation's
+// wrappers are gone (drain waits out in-flight runs before systemd restarts).
+func SweepStaleTmpDirs() int {
+	return sweepStaleTmpDirs(os.TempDir(), pidAlive)
+}
+
+func sweepStaleTmpDirs(dir string, alive func(int) bool) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	removed := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		// MkdirTemp pattern "claudetty-<pid>-" + random suffix.
+		rest, ok := strings.CutPrefix(e.Name(), "claudetty-")
+		if !ok {
+			continue
+		}
+		pidStr, _, ok := strings.Cut(rest, "-")
+		if !ok {
+			continue
+		}
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil || pid <= 0 || alive(pid) {
+			continue
+		}
+		if os.RemoveAll(filepath.Join(dir, e.Name())) == nil {
+			removed++
+		}
+	}
+	return removed
+}
+
+// pidAlive reports whether a process with this pid exists. EPERM means it
+// exists but belongs to someone else — treat it as alive and keep its dir.
+func pidAlive(pid int) bool {
+	err := unix.Kill(pid, 0)
+	return err == nil || err == unix.EPERM
 }
 
 // settingsJSON builds the inline --settings document wiring SessionStart and

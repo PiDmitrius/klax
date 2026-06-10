@@ -110,6 +110,10 @@ type Summary struct {
 	IsError   bool
 	NumTurns  int
 	Usage     Usage
+	// ContextWindow is the model's context size for the result envelope.
+	// The transcript never carries it, so the driver stamps an estimate
+	// derived from the model alias it launched claude with.
+	ContextWindow int
 }
 
 type assistantMsg struct {

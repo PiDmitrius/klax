@@ -100,3 +100,48 @@ func TestEmitterForwardsCompactBoundary(t *testing.T) {
 		t.Fatalf("compactMetadata = %#v", cb["compactMetadata"])
 	}
 }
+
+func TestEmitterInitWaitsForSessionID(t *testing.T) {
+	var buf bytes.Buffer
+	em := NewEmitter(&buf)
+	summary := transcript.Summary{}
+	// Too early — no session id yet. Must not emit AND must not latch, or the
+	// real init below would be suppressed and klax could never bind the session.
+	em.Init(&summary)
+	if buf.Len() != 0 {
+		t.Fatalf("init emitted without session id: %s", buf.String())
+	}
+	summary.SessionID = "s1"
+	em.Init(&summary)
+	em.Init(&summary) // idempotent once sent
+	sc := bufio.NewScanner(&buf)
+	var lines []map[string]any
+	for sc.Scan() {
+		var obj map[string]any
+		if err := json.Unmarshal(sc.Bytes(), &obj); err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, obj)
+	}
+	if len(lines) != 1 || lines[0]["subtype"] != "init" || lines[0]["session_id"] != "s1" {
+		t.Fatalf("init lines = %#v", lines)
+	}
+}
+
+func TestEmitterResultCarriesContextWindow(t *testing.T) {
+	var buf bytes.Buffer
+	em := NewEmitter(&buf)
+	summary := transcript.Summary{SessionID: "s1", Model: "m", ContextWindow: 1_000_000}
+	em.Result(&summary, time.Second)
+	var obj struct {
+		ModelUsage map[string]struct {
+			ContextWindow int `json:"contextWindow"`
+		} `json:"modelUsage"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &obj); err != nil {
+		t.Fatal(err)
+	}
+	if obj.ModelUsage["m"].ContextWindow != 1_000_000 {
+		t.Fatalf("contextWindow = %#v", obj.ModelUsage)
+	}
+}

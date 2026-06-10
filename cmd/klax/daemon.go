@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/PiDmitrius/klax/internal/claudetty/hook"
 	"github.com/PiDmitrius/klax/internal/config"
 	"github.com/PiDmitrius/klax/internal/max"
 	"github.com/PiDmitrius/klax/internal/runner"
@@ -284,6 +285,11 @@ func ensurePath() {
 
 func runDaemon() {
 	ensurePath()
+	// Reclaim claudetty temp dirs orphaned by a hard kill of a tty wrapper;
+	// every graceful path cleans up after itself (see hook.SweepStaleTmpDirs).
+	if n := hook.SweepStaleTmpDirs(); n > 0 {
+		log.Printf("swept %d stale claudetty temp dir(s)", n)
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("cannot load config: %v\nRun 'klax setup' first.", err)

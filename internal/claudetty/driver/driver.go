@@ -161,7 +161,7 @@ func Run(ctx context.Context, w io.Writer, opts Options) (int, error) {
 			n, err := master.Read(buf)
 			if n > 0 {
 				lastOutputNS.Store(time.Now().UnixNano())
-				if resp := term.RespondToDecQueries(buf[:n]); len(resp) > 0 {
+				if resp := term.RespondToDecQueries(buf[:n], opts.Rows, opts.Cols); len(resp) > 0 {
 					master.Write(resp)
 				}
 				recentMu.Lock()
@@ -219,6 +219,7 @@ func Run(ctx context.Context, w io.Writer, opts Options) (int, error) {
 		}
 	}()
 	summary.Model = opts.Model
+	summary.ContextWindow = contextWindowForModel(opts.Model)
 
 	// emitReady reports whether transcript lines now belong to this turn and
 	// may be summarized/emitted. On a resume the file still holds the prior
@@ -520,14 +521,11 @@ func Run(ctx context.Context, w io.Writer, opts Options) (int, error) {
 	}
 
 	// Every exit path funnels here so the consumer always gets a terminal
-	// result envelope. Init is idempotent; emit it only when we actually have a
-	// session id, so a turn that died before any SessionStart (claude crashed
-	// at startup) doesn't emit a bogus init with an empty session_id that klax
-	// might bind a session from. A terminal result with no preceding init is
-	// fine for that error case.
-	if summary.SessionID != "" {
-		em.Init(&summary)
-	}
+	// result envelope. Init self-guards: idempotent, and a no-op while the
+	// session id is unknown — a turn that died before any SessionStart
+	// (claude crashed at startup) emits no bogus empty-id init. A terminal
+	// result with no preceding init is fine for that error case.
+	em.Init(&summary)
 	em.Result(&summary, time.Since(start))
 	trace("result envelope emitted")
 	if summary.IsError {
@@ -542,6 +540,21 @@ func terminationReason(s *transcript.Summary) string {
 		return "error"
 	}
 	return "completed"
+}
+
+// contextWindowForModel estimates the context window from the --model value
+// klax launched claude with. claude -p computes the authoritative number from
+// its internal model table, but the interactive CLI has no surface to report
+// it and the transcript never carries it — without an estimate the tty path
+// would report 0 and klax's context gauge would never update. The rule
+// mirrors claude's own alias semantics (and klax's model picker): a "[1m]"
+// alias opts into the 1M window; everything else — full model ids and the
+// default model included — runs the standard 200k.
+func contextWindowForModel(model string) int {
+	if strings.Contains(model, "[1m]") {
+		return 1_000_000
+	}
+	return 200_000
 }
 
 // promptNeedle returns a short search key proving the prompt reached the

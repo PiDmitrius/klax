@@ -483,3 +483,18 @@ func TestRunAbortReapsClaude(t *testing.T) {
 		t.Fatalf("claude (pid %d) still alive after abort — teardown defer did not reap it", pid)
 	}
 }
+
+func TestContextWindowForModel(t *testing.T) {
+	cases := map[string]int{
+		"fable[1m]":      1_000_000,
+		"sonnet[1m]":     1_000_000,
+		"fable":          200_000,
+		"claude-fable-5": 200_000,
+		"":               200_000,
+	}
+	for model, want := range cases {
+		if got := contextWindowForModel(model); got != want {
+			t.Errorf("contextWindowForModel(%q) = %d, want %d", model, got, want)
+		}
+	}
+}

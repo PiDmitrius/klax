@@ -10,11 +10,14 @@
 //   - Window-size report: `ESC [ 18 t`  -> "8 ; rows ; cols t"
 package term
 
+import "fmt"
+
 // RespondToDecQueries scans incoming PTY bytes for terminal queries and
-// returns the response bytes to write back to the PTY. Stateless: callers
+// returns the response bytes to write back to the PTY. rows/cols feed the
+// window-size report and must match the PTY's actual size. Stateless: callers
 // pass each output chunk; sequences split across chunk boundaries are at
 // worst ignored (Ink re-queries on its own timer).
-func RespondToDecQueries(bytes []byte) []byte {
+func RespondToDecQueries(bytes []byte, rows, cols uint16) []byte {
 	var out []byte
 	for i := 0; i < len(bytes); i++ {
 		if bytes[i] != 0x1b { // ESC
@@ -58,7 +61,7 @@ func RespondToDecQueries(bytes []byte) []byte {
 			}
 		case 't':
 			if params == "18" {
-				out = append(out, "\x1b[8;40;120t"...)
+				out = append(out, fmt.Sprintf("\x1b[8;%d;%dt", rows, cols)...)
 			}
 		}
 		i = j

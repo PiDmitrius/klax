@@ -32,10 +32,12 @@ func (e *Emitter) emit(v any) {
 	e.w.Write(append(b, '\n'))
 }
 
-// Init emits the system/init line once. Call as soon as the session id is
-// known — klax binds new sessions to the id from this line.
+// Init emits the system/init line once the session id is known — klax binds
+// new sessions to the id from this line. Safe to call eagerly: while the id
+// is still empty it no-ops WITHOUT latching, so an early call can never burn
+// the one init on an empty session_id.
 func (e *Emitter) Init(s *transcript.Summary) {
-	if e.initSent {
+	if e.initSent || s.SessionID == "" {
 		return
 	}
 	e.initSent = true
@@ -106,7 +108,7 @@ func (e *Emitter) Result(s *transcript.Summary, duration time.Duration) {
 				"outputTokens":             s.Usage.OutputTokens,
 				"cacheReadInputTokens":     s.Usage.CacheReadTokens,
 				"cacheCreationInputTokens": s.Usage.CacheCreationTokens,
-				"contextWindow":            0,
+				"contextWindow":            s.ContextWindow,
 			},
 		},
 	})
