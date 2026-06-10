@@ -815,9 +815,14 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 
 			case EventCompact:
 				if ev.Compact != nil {
-					// A compaction is a chronological event in the log, like a
-					// tool call — flush pending narration first so order holds.
-					buf.demote()
+					// Like a rate-limit line: an out-of-band event, not a content
+					// boundary. Flush pending narration first so the log reads in
+					// stream order — but never in suppressed mode, where the
+					// buffer holds the final answer and demoting it here would
+					// silently drop everything written before the compaction.
+					if !opts.SuppressNarrationProgress {
+						buf.demote()
+					}
 					buf.emitTool(ProgressEvent{Kind: ProgressKindTool, Text: formatCompact(ev.Compact)})
 				}
 
