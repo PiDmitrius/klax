@@ -53,8 +53,25 @@ func (e *Emitter) Line(l transcript.Line, s *transcript.Summary) {
 	case "assistant":
 		e.Init(s) // safety net if no hook carried the session id
 		e.w.Write(append([]byte(l.Raw), '\n'))
+	case "system":
+		// Forward a context-compaction boundary as a slim stream-json line.
+		// The transcript's own line also carries the large preserved segment,
+		// which the wire consumer does not need; other system transcript lines
+		// are not part of the stream-json contract klax parses.
+		if l.Subtype == "compact_boundary" && l.Compact != nil {
+			e.Init(s)
+			e.emit(map[string]any{
+				"type":    "system",
+				"subtype": "compact_boundary",
+				"compactMetadata": map[string]any{
+					"trigger":    l.Compact.Trigger,
+					"preTokens":  l.Compact.PreTokens,
+					"postTokens": l.Compact.PostTokens,
+				},
+			})
+		}
 	default:
-		// user, summary, file-history-snapshot, progress, system…
+		// user, summary, file-history-snapshot, progress…
 		// — not part of the stream-json contract klax parses.
 	}
 }

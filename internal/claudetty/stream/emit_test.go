@@ -63,3 +63,40 @@ func TestEmitterDropsTranscriptOnlyLines(t *testing.T) {
 		t.Fatalf("unexpected output: %s", buf.String())
 	}
 }
+
+func TestEmitterForwardsCompactBoundary(t *testing.T) {
+	var buf bytes.Buffer
+	em := NewEmitter(&buf)
+	summary := transcript.Summary{SessionID: "s1"}
+	line, ok := transcript.Parse([]byte(`{"type":"system","subtype":"compact_boundary","sessionId":"s1","compactMetadata":{"trigger":"manual","preTokens":144630,"postTokens":7315},"preservedSegment":{"fat":"payload"}}`))
+	if !ok {
+		t.Fatal("compact_boundary rejected")
+	}
+	em.Line(line, &summary)
+
+	sc := bufio.NewScanner(&buf)
+	var got []map[string]any
+	for sc.Scan() {
+		var obj map[string]any
+		if err := json.Unmarshal(sc.Bytes(), &obj); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, obj)
+	}
+	// init line (session id) followed by the slim compact line.
+	if len(got) != 2 {
+		t.Fatalf("emitted %d lines: %#v", len(got), got)
+	}
+	cb := got[1]
+	if cb["type"] != "system" || cb["subtype"] != "compact_boundary" {
+		t.Fatalf("compact line = %#v", cb)
+	}
+	if _, leaked := cb["preservedSegment"]; leaked {
+		t.Fatalf("preservedSegment leaked onto the wire: %#v", cb)
+	}
+	cm, _ := cb["compactMetadata"].(map[string]any)
+	if cm == nil || cm["trigger"] != "manual" ||
+		cm["preTokens"].(float64) != 144630 || cm["postTokens"].(float64) != 7315 {
+		t.Fatalf("compactMetadata = %#v", cb["compactMetadata"])
+	}
+}

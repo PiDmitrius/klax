@@ -243,6 +243,23 @@ func (t ToolUse) String() string {
 	}
 }
 
+// humanTokens renders a token count compactly: 144630 → "144k", 730 → "730".
+func humanTokens(n int) string {
+	if n >= 1000 {
+		return fmt.Sprintf("%dk", n/1000)
+	}
+	return fmt.Sprintf("%d", n)
+}
+
+// formatCompact renders a context-compaction boundary for the chat log.
+func formatCompact(c *CompactInfo) string {
+	trigger := c.Trigger
+	if trigger == "" {
+		trigger = "auto"
+	}
+	return fmt.Sprintf("🗜 Контекст свёрнут: %s→%s токенов (%s)", humanTokens(c.PreTokens), humanTokens(c.PostTokens), trigger)
+}
+
 func formatRateLimit(rl *RateLimitInfo) string {
 	typeLabel := ""
 	switch rl.RateLimitType {
@@ -794,6 +811,14 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 						buf.demote()
 					}
 					buf.emitTool(ProgressEvent{Kind: ProgressKindTool, Text: fmt.Sprintf("❌ %s", ev.Text)})
+				}
+
+			case EventCompact:
+				if ev.Compact != nil {
+					// A compaction is a chronological event in the log, like a
+					// tool call — flush pending narration first so order holds.
+					buf.demote()
+					buf.emitTool(ProgressEvent{Kind: ProgressKindTool, Text: formatCompact(ev.Compact)})
 				}
 
 			case EventResult:

@@ -24,19 +24,36 @@ import (
 // routes on. Raw retains the original bytes for pass-through.
 type Line struct {
 	Type       string
+	Subtype    string
 	SessionID  string
 	IsAPIError bool
 	Error      string
+	Compact    *CompactInfo
 	Raw        json.RawMessage
+}
+
+// CompactInfo carries the token deltas from a compact_boundary line so the
+// emitter can forward a slim stream-json line without the (large) preserved
+// segment the transcript stores alongside it.
+type CompactInfo struct {
+	Trigger    string
+	PreTokens  int
+	PostTokens int
 }
 
 type rawLine struct {
 	Type              string `json:"type"`
+	Subtype           string `json:"subtype"`
 	SessionID         string `json:"sessionId"`
 	SessionIDp        string `json:"session_id"`
 	IsSidechain       bool   `json:"isSidechain"`
 	IsAPIErrorMessage bool   `json:"isApiErrorMessage"`
 	Error             string `json:"error"`
+	CompactMetadata   *struct {
+		Trigger    string `json:"trigger"`
+		PreTokens  int    `json:"preTokens"`
+		PostTokens int    `json:"postTokens"`
+	} `json:"compactMetadata"`
 }
 
 // Parse parses a single transcript line. ok=false for malformed/empty lines.
@@ -57,11 +74,21 @@ func Parse(line []byte) (Line, bool) {
 		// Subagent traffic — never part of the top-level stream-json.
 		return Line{}, false
 	}
+	var compact *CompactInfo
+	if r.Subtype == "compact_boundary" && r.CompactMetadata != nil {
+		compact = &CompactInfo{
+			Trigger:    r.CompactMetadata.Trigger,
+			PreTokens:  r.CompactMetadata.PreTokens,
+			PostTokens: r.CompactMetadata.PostTokens,
+		}
+	}
 	return Line{
 		Type:       r.Type,
+		Subtype:    r.Subtype,
 		SessionID:  sid,
 		IsAPIError: r.IsAPIErrorMessage,
 		Error:      r.Error,
+		Compact:    compact,
 		Raw:        json.RawMessage(trimmed),
 	}, true
 }

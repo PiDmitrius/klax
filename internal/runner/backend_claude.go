@@ -107,17 +107,26 @@ func (b *ClaudeBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 
 // claudeStreamEvent is the raw JSON from claude --output-format stream-json.
 type claudeStreamEvent struct {
-	Type          string                     `json:"type"`
-	Name          string                     `json:"name,omitempty"`
-	Input         json.RawMessage            `json:"input,omitempty"`
-	Result        string                     `json:"result,omitempty"`
-	IsError       bool                       `json:"is_error,omitempty"`
-	SessionID     string                     `json:"session_id,omitempty"`
-	Model         string                     `json:"model,omitempty"`
-	ModelUsage    map[string]json.RawMessage `json:"modelUsage,omitempty"`
-	Message       *claudeMessage             `json:"message,omitempty"`
-	RateLimitInfo *claudeRateLimitInfo       `json:"rate_limit_info,omitempty"`
-	Event         *claudeNestedEvent         `json:"event,omitempty"`
+	Type            string                     `json:"type"`
+	Subtype         string                     `json:"subtype,omitempty"`
+	Name            string                     `json:"name,omitempty"`
+	Input           json.RawMessage            `json:"input,omitempty"`
+	Result          string                     `json:"result,omitempty"`
+	IsError         bool                       `json:"is_error,omitempty"`
+	SessionID       string                     `json:"session_id,omitempty"`
+	Model           string                     `json:"model,omitempty"`
+	ModelUsage      map[string]json.RawMessage `json:"modelUsage,omitempty"`
+	Message         *claudeMessage             `json:"message,omitempty"`
+	RateLimitInfo   *claudeRateLimitInfo       `json:"rate_limit_info,omitempty"`
+	Event           *claudeNestedEvent         `json:"event,omitempty"`
+	CompactMetadata *claudeCompactMetadata     `json:"compactMetadata,omitempty"`
+}
+
+// claudeCompactMetadata is the token-delta payload of a compact_boundary line.
+type claudeCompactMetadata struct {
+	Trigger    string `json:"trigger"`
+	PreTokens  int    `json:"preTokens"`
+	PostTokens int    `json:"postTokens"`
 }
 
 // claudeNestedEvent is the inner payload of a `stream_event` outer envelope.
@@ -175,6 +184,16 @@ func (b *ClaudeBackend) ParseEvent(line []byte) ([]Event, bool) {
 
 	switch ev.Type {
 	case "system":
+		if ev.Subtype == "compact_boundary" && ev.CompactMetadata != nil {
+			return []Event{{
+				Type: EventCompact,
+				Compact: &CompactInfo{
+					Trigger:    ev.CompactMetadata.Trigger,
+					PreTokens:  ev.CompactMetadata.PreTokens,
+					PostTokens: ev.CompactMetadata.PostTokens,
+				},
+			}}, true
+		}
 		return []Event{{
 			Type:      EventSystem,
 			SessionID: ev.SessionID,

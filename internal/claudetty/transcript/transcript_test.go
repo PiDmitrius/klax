@@ -23,6 +23,20 @@ func TestParseFiltersSidechain(t *testing.T) {
 	}
 }
 
+func TestParseCompactBoundary(t *testing.T) {
+	line, ok := Parse([]byte(`{"type":"system","subtype":"compact_boundary","sessionId":"s1","compactMetadata":{"trigger":"manual","preTokens":144630,"postTokens":7315}}`))
+	if !ok {
+		t.Fatal("compact_boundary rejected")
+	}
+	if line.Type != "system" || line.Subtype != "compact_boundary" {
+		t.Fatalf("line = %+v", line)
+	}
+	if line.Compact == nil || line.Compact.Trigger != "manual" ||
+		line.Compact.PreTokens != 144630 || line.Compact.PostTokens != 7315 {
+		t.Fatalf("compact = %+v", line.Compact)
+	}
+}
+
 func TestSummaryAddAssistant(t *testing.T) {
 	var s Summary
 	line, ok := Parse([]byte(`{"type":"assistant","sessionId":"s1","message":{"model":"model-a","content":[{"type":"text","text":"hi"},{"type":"text","text":" there"}],"usage":{"input_tokens":2,"output_tokens":3,"cache_read_input_tokens":5,"cache_creation_input_tokens":7}}}`))

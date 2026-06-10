@@ -13,6 +13,14 @@ type RateLimitInfo struct {
 	IsUsingOverage bool
 }
 
+// CompactInfo describes a context-compaction boundary: how the session
+// history was summarized and the token counts on either side of it.
+type CompactInfo struct {
+	Trigger    string // "auto" | "manual"
+	PreTokens  int
+	PostTokens int
+}
+
 // EventType discriminates the unified Event stream the runner consumes from
 // any backend. Constants are the only valid values — direct string literals
 // in switch cases or emits are a typo waiting to happen.
@@ -48,6 +56,11 @@ const (
 	// EventResult is the end-of-turn summary: final text (if no per-block
 	// stream was emitted), usage totals, error info.
 	EventResult EventType = "result"
+	// EventCompact is a context-compaction boundary: the session history was
+	// summarized — trigger "auto" (reactive, near the model's context ceiling)
+	// or "manual" (/compact or the harness's continuation). Surfaced to the
+	// chat so the user sees a compaction happened and how much it reclaimed.
+	EventCompact EventType = "compact"
 )
 
 // Event is a unified event from any backend's JSON stream.
@@ -60,6 +73,7 @@ type Event struct {
 	Usage     ModelUsageInfo
 	Error     string
 	RateLimit *RateLimitInfo
+	Compact   *CompactInfo
 }
 
 // Backend abstracts the CLI tool that executes prompts (claude, codex, etc).
