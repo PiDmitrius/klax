@@ -160,7 +160,7 @@ type modelEntry struct {
 }
 
 var claudeModels = []modelEntry{
-	{"fable", "fable", "Claude Fable 1M"},
+	{"fable", "fable[1m]", "Claude Fable 1M"},
 	{"opus1m", "opus[1m]", "Claude Opus 1M"},
 	{"opus", "opus", "Claude Opus 200k"},
 	{"sonnet1m", "sonnet[1m]", "Claude Sonnet 1M"},

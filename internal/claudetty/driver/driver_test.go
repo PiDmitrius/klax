@@ -484,23 +484,6 @@ func TestRunAbortReapsClaude(t *testing.T) {
 	}
 }
 
-func TestContextWindowForModel(t *testing.T) {
-	cases := map[string]int{
-		"fable[1m]":      1_000_000,
-		"sonnet[1m]":     1_000_000,
-		"fable":          1_000_000,
-		"claude-fable-5": 1_000_000,
-		"opus":           200_000,
-		"sonnet":         200_000,
-		"":               200_000,
-	}
-	for model, want := range cases {
-		if got := contextWindowForModel(model); got != want {
-			t.Errorf("contextWindowForModel(%q) = %d, want %d", model, got, want)
-		}
-	}
-}
-
 // fakeClaudeCompact models the TUI's pre-flight auto-compact: after the
 // prompt is typed (read off the tty) but BEFORE its echo reaches the
 // transcript, a fresh compact_boundary is appended — exactly the window in

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/PiDmitrius/klax/internal/claudemodel"
 )
 
 // ClaudeBackend implements Backend for Claude Code CLI.
@@ -60,7 +62,11 @@ func BuildClaudeArgs(opts RunOptions) []string {
 		args = append(args, "--permission-mode", mode)
 	}
 	if opts.Model != "" {
-		args = append(args, "--model", opts.Model)
+		// Launch the bare "fable" alias as fable[1m]: without the marker the
+		// CLI believes a 200k window off the first-party lane and compacts a
+		// resumed session at ~200k. This is the single choke point for both
+		// the -p path and the tty driver (which re-parses these same args).
+		args = append(args, "--model", claudemodel.Normalize(opts.Model))
 	}
 	if opts.Effort != "" {
 		args = append(args, "--effort", opts.Effort)

@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/PiDmitrius/klax/internal/claudemodel"
 	"github.com/PiDmitrius/klax/internal/claudetty/hook"
 	"github.com/PiDmitrius/klax/internal/claudetty/pty"
 	"github.com/PiDmitrius/klax/internal/claudetty/stream"
@@ -224,8 +225,8 @@ func Run(ctx context.Context, w io.Writer, opts Options) (int, error) {
 			tailer.Close()
 		}
 	}()
-	summary.Model = opts.Model
-	summary.ContextWindow = contextWindowForModel(opts.Model)
+	summary.Model = claudemodel.Normalize(opts.Model)
+	summary.ContextWindow = claudemodel.ContextWindow(opts.Model)
 
 	// emitReady reports whether transcript lines now belong to this turn and
 	// may be summarized/emitted. On a resume the file still holds the prior
@@ -578,22 +579,6 @@ func terminationReason(s *transcript.Summary) string {
 	return "completed"
 }
 
-// contextWindowForModel estimates the context window from the --model value
-// klax launched claude with. claude -p computes the authoritative number from
-// its internal model table, but the interactive CLI has no surface to report
-// it and the transcript never carries it — without an estimate the tty path
-// would report 0 and klax's context gauge would never update. The rule
-// mirrors claude's own model table: fable (claude-fable-5) is natively 1M —
-// the CLI reports contextWindow 1000000 for it and resolves "fable[1m]" to
-// the same model; for the older families a "[1m]" alias opts into the 1M
-// window; everything else runs the standard 200k.
-func contextWindowForModel(model string) int {
-	if strings.Contains(model, "[1m]") || strings.Contains(model, "fable") {
-		return 1_000_000
-	}
-	return 200_000
-}
-
 // promptNeedle returns a short search key proving the prompt reached the
 // transcript: the JSON-encoded form of its head, as claude writes it into
 // the user line. HTML escaping is off to match JS JSON.stringify.
@@ -637,7 +622,9 @@ func needleMatch(needle string, raw json.RawMessage) bool {
 func buildArgv(settingsJSON string, opts Options) []string {
 	argv := []string{"--settings", settingsJSON}
 	if opts.Model != "" {
-		argv = append(argv, "--model", opts.Model)
+		// Defensive: the -p arg builder normalizes too, but the driver must
+		// never launch a bare "fable" (200k believed window) on its own.
+		argv = append(argv, "--model", claudemodel.Normalize(opts.Model))
 	}
 	if opts.Effort != "" {
 		argv = append(argv, "--effort", opts.Effort)
@@ -657,9 +644,16 @@ func buildArgv(settingsJSON string, opts Options) []string {
 	return argv
 }
 
-// childEnv is the parent env plus FIFO path, TERM and the auto-compact
-// opt-out, minus CLAUDE_CODE_ENTRYPOINT — the child must compute its own
-// entrypoint from its genuinely interactive launch, not inherit ours.
+// childEnv is the parent env plus FIFO path and TERM, minus
+// CLAUDE_CODE_ENTRYPOINT — the child must compute its own entrypoint from its
+// genuinely interactive launch, not inherit ours.
+//
+// It deliberately does NOT set DISABLE_AUTO_COMPACT: the premature compaction
+// the bridge suffered was the model's believed window collapsing to 200k (a
+// bare "fable" alias), not the auto-compact policy — fixed by launching
+// fable[1m]. With the real 1M window the only compaction left fires at the
+// ceiling, exactly as it does for the bridge's other sessions, and must stay
+// on so a turn at the limit survives instead of hard-failing.
 func childEnv(fifoPath string) []string {
 	var env []string
 	for _, e := range os.Environ() {
@@ -671,14 +665,6 @@ func childEnv(fifoPath string) []string {
 	return append(env,
 		"CLAUDETTY_FIFO="+fifoPath,
 		"TERM=xterm-256color",
-		// The TUI proactively compacts a near-full session the moment a
-		// prompt is submitted, judged against its own window estimate —
-		// observed truncating live sessions as early as 144k into a 1M
-		// model, invisibly and minutes-long. claude -p never compacts
-		// proactively, and the bridge wants -p parity: a turn must not
-		// silently shrink the session it resumes. Reactive compaction at
-		// the real context ceiling is gated separately and stays on.
-		"DISABLE_AUTO_COMPACT=1",
 	)
 }
 
