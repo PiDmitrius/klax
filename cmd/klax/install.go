@@ -101,6 +101,10 @@ Type=simple
 ExecStart=%s start --foreground
 Restart=always
 RestartSec=5
+# An OOM kill inside the cgroup (a runaway turn subprocess) must not take
+# down the daemon and every other session with it; systemd's default
+# OOMPolicy=stop would stop the whole unit.
+OOMPolicy=continue
 
 [Install]
 WantedBy=default.target
