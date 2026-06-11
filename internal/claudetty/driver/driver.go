@@ -547,11 +547,12 @@ func terminationReason(s *transcript.Summary) string {
 // its internal model table, but the interactive CLI has no surface to report
 // it and the transcript never carries it — without an estimate the tty path
 // would report 0 and klax's context gauge would never update. The rule
-// mirrors claude's own alias semantics (and klax's model picker): a "[1m]"
-// alias opts into the 1M window; everything else — full model ids and the
-// default model included — runs the standard 200k.
+// mirrors claude's own model table: fable (claude-fable-5) is natively 1M —
+// the CLI reports contextWindow 1000000 for it and resolves "fable[1m]" to
+// the same model; for the older families a "[1m]" alias opts into the 1M
+// window; everything else runs the standard 200k.
 func contextWindowForModel(model string) int {
-	if strings.Contains(model, "[1m]") {
+	if strings.Contains(model, "[1m]") || strings.Contains(model, "fable") {
 		return 1_000_000
 	}
 	return 200_000

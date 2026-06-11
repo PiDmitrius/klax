@@ -488,8 +488,10 @@ func TestContextWindowForModel(t *testing.T) {
 	cases := map[string]int{
 		"fable[1m]":      1_000_000,
 		"sonnet[1m]":     1_000_000,
-		"fable":          200_000,
-		"claude-fable-5": 200_000,
+		"fable":          1_000_000,
+		"claude-fable-5": 1_000_000,
+		"opus":           200_000,
+		"sonnet":         200_000,
 		"":               200_000,
 	}
 	for model, want := range cases {
