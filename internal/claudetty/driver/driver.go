@@ -195,20 +195,26 @@ func Run(ctx context.Context, w io.Writer, opts Options) (int, error) {
 
 	em := stream.NewEmitter(w)
 	var (
-		fifoBuf        []byte
-		fifoReadBuf    = make([]byte, 4096)
-		transcriptPath string
-		stopPayload    string
-		promptSent     bool
-		promptSentAt   time.Time
-		enterRetries   int
-		rearms         int
-		promptEchoSeen bool
-		lastActivity   = start
-		trustDismissed bool
-		tailer         *transcript.Tailer
-		summary        transcript.Summary
+		fifoBuf         []byte
+		fifoReadBuf     = make([]byte, 4096)
+		transcriptPath  string
+		stopPayload     string
+		promptSent      bool
+		promptSentAt    time.Time
+		enterRetries    int
+		rearms          int
+		promptEchoSeen  bool
+		lastActivity    = start
+		trustDismissed  bool
+		tailer          *transcript.Tailer
+		summary         transcript.Summary
+		pendingCompacts []transcript.Line
+		compactSeen     = map[string]bool{}
 	)
+	// Boundaries stamped before this turn began are resumed history; ones
+	// stamped after are this turn's own events. The margin absorbs the
+	// sub-second slack between our clock read and claude's first write.
+	turnEpoch := start.Add(-2 * time.Second)
 	// A successfully submitted prompt is echoed back as a `user` transcript
 	// line; its presence is the proof of submission the retry/re-arm logic
 	// keys on.
@@ -266,7 +272,32 @@ func Run(ctx context.Context, w io.Writer, opts Options) (int, error) {
 				if l.IsAPIError {
 					summary.Add(l)
 				}
+				// A compact boundary stamped during this turn is a fresh event,
+				// not replayed history: the TUI's pre-flight auto-compact runs
+				// between our typing and the prompt echo, exactly inside this
+				// window. Hold it for emission once the turn is emit-ready.
+				// Boundaries replayed from resumed history carry pre-turn
+				// timestamps and stay absorbed; the seen-set keeps a tailer
+				// reopen (transcript path chase) from queueing one twice.
+				if l.Compact != nil && l.Time.After(turnEpoch) {
+					key := l.Time.String() + "/" + fmt.Sprint(l.Compact.PreTokens)
+					if !compactSeen[key] {
+						compactSeen[key] = true
+						pendingCompacts = append(pendingCompacts, l)
+						trace("fresh compact boundary held pre-echo (%d→%d, %s)",
+							l.Compact.PreTokens, l.Compact.PostTokens, l.Compact.Trigger)
+					}
+				}
 				continue
+			}
+			if len(pendingCompacts) > 0 {
+				// Flush boundaries held during the pre-echo window ahead of this
+				// turn's first content line, so the wire reads in stream order.
+				em.Init(&summary)
+				for _, c := range pendingCompacts {
+					em.Line(c, &summary)
+				}
+				pendingCompacts = nil
 			}
 			summary.Add(l)
 			em.Line(l, &summary)
@@ -526,6 +557,11 @@ func Run(ctx context.Context, w io.Writer, opts Options) (int, error) {
 	// (claude crashed at startup) emits no bogus empty-id init. A terminal
 	// result with no preceding init is fine for that error case.
 	em.Init(&summary)
+	// A turn that never became emit-ready (stall, abort) may still hold a
+	// fresh boundary: the compaction happened regardless, so report it.
+	for _, c := range pendingCompacts {
+		em.Line(c, &summary)
+	}
 	em.Result(&summary, time.Since(start))
 	trace("result envelope emitted")
 	if summary.IsError {
@@ -621,9 +657,9 @@ func buildArgv(settingsJSON string, opts Options) []string {
 	return argv
 }
 
-// childEnv is the parent env plus FIFO path and TERM, minus
-// CLAUDE_CODE_ENTRYPOINT — the child must compute its own entrypoint from
-// its genuinely interactive launch, not inherit ours.
+// childEnv is the parent env plus FIFO path, TERM and the auto-compact
+// opt-out, minus CLAUDE_CODE_ENTRYPOINT — the child must compute its own
+// entrypoint from its genuinely interactive launch, not inherit ours.
 func childEnv(fifoPath string) []string {
 	var env []string
 	for _, e := range os.Environ() {
@@ -635,6 +671,14 @@ func childEnv(fifoPath string) []string {
 	return append(env,
 		"CLAUDETTY_FIFO="+fifoPath,
 		"TERM=xterm-256color",
+		// The TUI proactively compacts a near-full session the moment a
+		// prompt is submitted, judged against its own window estimate —
+		// observed truncating live sessions as early as 144k into a 1M
+		// model, invisibly and minutes-long. claude -p never compacts
+		// proactively, and the bridge wants -p parity: a turn must not
+		// silently shrink the session it resumes. Reactive compaction at
+		// the real context ceiling is gated separately and stays on.
+		"DISABLE_AUTO_COMPACT=1",
 	)
 }
 

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestParseAssistantLine(t *testing.T) {
@@ -92,5 +93,32 @@ func TestTailerHoldsPartialLines(t *testing.T) {
 	lines = tailer.Pump()
 	if len(lines) != 1 || string(lines[0]) != `{"type":"assistant","sessionId":"s1"}` {
 		t.Fatalf("lines = %q", lines)
+	}
+}
+
+func TestParseLineTimestamp(t *testing.T) {
+	l, ok := Parse([]byte(`{"type":"system","subtype":"compact_boundary","timestamp":"2026-06-11T06:32:00.631Z","compactMetadata":{"trigger":"manual","preTokens":212091,"postTokens":7841}}`))
+	if !ok {
+		t.Fatal("line rejected")
+	}
+	want := time.Date(2026, 6, 11, 6, 32, 0, 631_000_000, time.UTC)
+	if !l.Time.Equal(want) {
+		t.Fatalf("Time = %v, want %v", l.Time, want)
+	}
+
+	l, ok = Parse([]byte(`{"type":"user","message":{"role":"user","content":"hi"}}`))
+	if !ok {
+		t.Fatal("line rejected")
+	}
+	if !l.Time.IsZero() {
+		t.Fatalf("Time = %v, want zero when the line has no timestamp", l.Time)
+	}
+
+	l, ok = Parse([]byte(`{"type":"user","timestamp":"not-a-time"}`))
+	if !ok {
+		t.Fatal("line rejected")
+	}
+	if !l.Time.IsZero() {
+		t.Fatalf("Time = %v, want zero for an unparseable timestamp", l.Time)
 	}
 }

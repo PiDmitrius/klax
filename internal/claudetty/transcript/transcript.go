@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"os"
 	"strings"
+	"time"
 )
 
 // Line is one parsed transcript line, holding only the fields claudetty
@@ -29,7 +30,11 @@ type Line struct {
 	IsAPIError bool
 	Error      string
 	Compact    *CompactInfo
-	Raw        json.RawMessage
+	// Time is the line's transcript timestamp; zero when absent or
+	// unparseable. The driver uses it to tell a boundary written during
+	// this turn from one replayed out of resumed history.
+	Time time.Time
+	Raw  json.RawMessage
 }
 
 // CompactInfo carries the token deltas from a compact_boundary line so the
@@ -46,6 +51,7 @@ type rawLine struct {
 	Subtype           string `json:"subtype"`
 	SessionID         string `json:"sessionId"`
 	SessionIDp        string `json:"session_id"`
+	Timestamp         string `json:"timestamp"`
 	IsSidechain       bool   `json:"isSidechain"`
 	IsAPIErrorMessage bool   `json:"isApiErrorMessage"`
 	Error             string `json:"error"`
@@ -82,6 +88,12 @@ func Parse(line []byte) (Line, bool) {
 			PostTokens: r.CompactMetadata.PostTokens,
 		}
 	}
+	var ts time.Time
+	if r.Timestamp != "" {
+		if parsed, err := time.Parse(time.RFC3339Nano, r.Timestamp); err == nil {
+			ts = parsed
+		}
+	}
 	return Line{
 		Type:       r.Type,
 		Subtype:    r.Subtype,
@@ -89,6 +101,7 @@ func Parse(line []byte) (Line, bool) {
 		IsAPIError: r.IsAPIErrorMessage,
 		Error:      r.Error,
 		Compact:    compact,
+		Time:       ts,
 		Raw:        json.RawMessage(trimmed),
 	}, true
 }

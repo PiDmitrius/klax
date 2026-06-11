@@ -500,3 +500,75 @@ func TestContextWindowForModel(t *testing.T) {
 		}
 	}
 }
+
+// fakeClaudeCompact models the TUI's pre-flight auto-compact: after the
+// prompt is typed (read off the tty) but BEFORE its echo reaches the
+// transcript, a fresh compact_boundary is appended — exactly the window in
+// which the real TUI compacts a near-full resumed session.
+const fakeClaudeCompact = `#!/bin/bash
+dir=$(dirname "$CLAUDETTY_FIFO")
+hook="$dir/hook.sh"
+tp="%[1]s"
+sid="%[2]s"
+printf '{"session_id":"%%s","transcript_path":"%%s"}' "$sid" "$tp" | "$hook" SessionStart
+IFS= read -r prompt
+now=$(date -u +%%Y-%%m-%%dT%%H:%%M:%%S.000Z)
+printf '{"type":"system","subtype":"compact_boundary","sessionId":"%%s","timestamp":"%%s","compactMetadata":{"trigger":"auto","preTokens":212091,"postTokens":7841}}\n' "$sid" "$now" >> "$tp"
+sleep 0.4
+printf '{"type":"user","sessionId":"%%s","message":{"role":"user","content":"%%s"}}\n' "$sid" "$prompt" >> "$tp"
+printf '{"type":"assistant","sessionId":"%%s","message":{"model":"fake-model","content":[{"type":"text","text":"PONG"}],"usage":{"input_tokens":2,"output_tokens":1}}}\n' "$sid" >> "$tp"
+printf '{"session_id":"%%s","transcript_path":"%%s"}' "$sid" "$tp" | "$hook" Stop
+sleep 60
+`
+
+// TestRunResumeForwardsFreshPreEchoCompact: a boundary written during this
+// turn (pre-flight auto-compact) must reach the wire even though it lands
+// before the prompt echo — while a boundary replayed out of resumed history
+// must stay absorbed.
+func TestRunResumeForwardsFreshPreEchoCompact(t *testing.T) {
+	tp := filepath.Join(t.TempDir(), "transcript.jsonl")
+	history := `{"type":"user","sessionId":"sess-cb","message":{"role":"user","content":"old question"}}
+{"type":"system","subtype":"compact_boundary","sessionId":"sess-cb","timestamp":"2026-01-01T00:00:00.000Z","compactMetadata":{"trigger":"manual","preTokens":31337,"postTokens":900}}
+{"type":"assistant","sessionId":"sess-cb","message":{"model":"fake-model","content":[{"type":"text","text":"HISTORY-1"}],"usage":{"input_tokens":5,"output_tokens":5}}}
+`
+	if err := os.WriteFile(tp, []byte(history), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "fake-claude")
+	body := fmt.Sprintf(fakeClaudeCompact, tp, "sess-cb")
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	code, err := Run(context.Background(), &out, Options{
+		Prompt:     "ping",
+		Resume:     "sess-cb",
+		ClaudePath: path,
+		Timeout:    30 * time.Second,
+	})
+	if err != nil || code != 0 {
+		t.Fatalf("Run = %d, %v\noutput:\n%s", code, err, out.String())
+	}
+
+	s := out.String()
+	if strings.Contains(s, "31337") || strings.Contains(s, "HISTORY") {
+		t.Fatalf("resumed history (old boundary) leaked into output:\n%s", s)
+	}
+	if n := strings.Count(s, `"compact_boundary"`); n != 1 {
+		t.Fatalf("compact_boundary lines = %d, want exactly the fresh one:\n%s", n, s)
+	}
+	if !strings.Contains(s, "212091") {
+		t.Fatalf("fresh pre-echo boundary was absorbed:\n%s", s)
+	}
+	if strings.Index(s, "212091") > strings.Index(s, "PONG") {
+		t.Fatalf("boundary must be emitted before the turn's content:\n%s", s)
+	}
+	evs := parseWire(t, out.Bytes())
+	if evs[0].Type != "system" || evs[0].SessionID != "sess-cb" {
+		t.Fatalf("first event = %+v, want system init", evs[0])
+	}
+	if got := assistantTexts(evs); len(got) != 1 || got[0] != "PONG" {
+		t.Fatalf("assistant texts = %q, want [PONG]", got)
+	}
+}
