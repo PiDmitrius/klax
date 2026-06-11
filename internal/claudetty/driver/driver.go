@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -98,6 +99,18 @@ func Run(ctx context.Context, w io.Writer, opts Options) (int, error) {
 		if opts.Debug != nil {
 			fmt.Fprintf(opts.Debug, "[claudetty +%dms] %s\n",
 				time.Since(start).Milliseconds(), fmt.Sprintf(format, args...))
+		}
+	}
+
+	// The resume-return nudge must never render under the driver: typing the
+	// prompt into that dialog submits its recommended action, which /compacts
+	// the session (observed three times as trigger:"manual" boundaries at
+	// 186k–212k tokens). Best effort — a failed write is traced, not fatal.
+	if home, err := os.UserHomeDir(); err == nil {
+		if changed, err := ensureResumeReturnDismissed(filepath.Join(home, ".claude.json")); err != nil {
+			trace("resumeReturnDismissed ensure failed: %v", err)
+		} else if changed {
+			trace("resumeReturnDismissed set in ~/.claude.json")
 		}
 	}
 
