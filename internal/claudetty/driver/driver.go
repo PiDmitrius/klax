@@ -102,15 +102,19 @@ func Run(ctx context.Context, w io.Writer, opts Options) (int, error) {
 		}
 	}
 
-	// The resume-return nudge must never render under the driver: typing the
-	// prompt into that dialog submits its recommended action, which /compacts
-	// the session (observed three times as trigger:"manual" boundaries at
-	// 186k–212k tokens). Best effort — a failed write is traced, not fatal.
+	// Pin the config contract the tty path assumes (resume-return nudge off,
+	// onboarding done, spawn cwd trusted) so no startup dialog can steal the
+	// typed prompt's keystrokes. Best effort — a failed write is traced, not
+	// fatal; the loop below still string-matches the trust dialog as fallback.
 	if home, err := os.UserHomeDir(); err == nil {
-		if changed, err := ensureResumeReturnDismissed(filepath.Join(home, ".claude.json")); err != nil {
-			trace("resumeReturnDismissed ensure failed: %v", err)
+		cwd := opts.Cwd
+		if cwd == "" {
+			cwd = home
+		}
+		if changed, err := ensureClaudeContract(filepath.Join(home, ".claude.json"), cwd); err != nil {
+			trace("claude config contract ensure failed: %v", err)
 		} else if changed {
-			trace("resumeReturnDismissed set in ~/.claude.json")
+			trace("claude config contract pinned in ~/.claude.json")
 		}
 	}
 
@@ -633,7 +637,7 @@ func needleMatch(needle string, raw json.RawMessage) bool {
 // buildArgv assembles the interactive claude argv. No -p: the whole point
 // is a genuine interactive session.
 func buildArgv(settingsJSON string, opts Options) []string {
-	argv := []string{"--settings", settingsJSON}
+	argv := []string{"--settings", withBypassAccepted(settingsJSON, opts.PermissionMode)}
 	if opts.Model != "" {
 		// Defensive: the -p arg builder normalizes too, but the driver must
 		// never launch a bare "fable" (200k believed window) on its own.
