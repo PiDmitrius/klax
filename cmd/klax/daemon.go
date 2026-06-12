@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/PiDmitrius/klax/internal/claudetty/hook"
 	"github.com/PiDmitrius/klax/internal/config"
 	"github.com/PiDmitrius/klax/internal/max"
 	"github.com/PiDmitrius/klax/internal/runner"
@@ -284,6 +285,11 @@ func ensurePath() {
 
 func runDaemon() {
 	ensurePath()
+	// Reclaim claudetty temp dirs orphaned by a hard kill of a tty wrapper;
+	// every graceful path cleans up after itself (see hook.SweepStaleTmpDirs).
+	if n := hook.SweepStaleTmpDirs(); n > 0 {
+		log.Printf("swept %d stale claudetty temp dir(s)", n)
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("cannot load config: %v\nRun 'klax setup' first.", err)
@@ -1092,7 +1098,7 @@ func isGroupCommand(text string) bool {
 	switch cmd {
 	case "/status", "/?", "/sessions", "/session", "/s", "/new", "/name",
 		"/settings", "/setting", "/backend", "/model", "/models", "/m",
-		"/think", "/thinking", "/t", "/abort", "/help", "/h", "/start":
+		"/think", "/thinking", "/t", "/tty", "/abort", "/help", "/h", "/start":
 		return true
 	}
 	// Clickable shortcuts from menus (/s5, /backend_codex).
@@ -1100,6 +1106,9 @@ func isGroupCommand(text string) bool {
 		return true
 	}
 	if strings.HasPrefix(cmd, "/backend_") && len(cmd) > len("/backend_") {
+		return true
+	}
+	if strings.HasPrefix(cmd, "/tty_") && len(cmd) > len("/tty_") {
 		return true
 	}
 	return false

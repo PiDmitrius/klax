@@ -11,6 +11,9 @@ func TestRenderServiceUnitPlacesStartLimitInUnitSection(t *testing.T) {
 	unit := renderServiceUnit("/home/test/.local/bin/klax")
 
 	want := "[Unit]\nDescription=klax — AI messaging bridge\nAfter=network.target\nStartLimitBurst=3\nStartLimitIntervalSec=60\n\n[Service]\nType=simple\nExecStart=/home/test/.local/bin/klax start --foreground\nRestart=always\nRestartSec=5\n"
+	if !strings.Contains(unit, "OOMPolicy=continue") {
+		t.Fatalf("service unit must keep the daemon alive across member OOM kills:\n%s", unit)
+	}
 	if !strings.Contains(unit, want) {
 		t.Fatalf("service unit missing expected structure:\n%s", unit)
 	}

@@ -10,10 +10,11 @@ import (
 )
 
 type ScopeDefaults struct {
-	Backend string `json:"backend,omitempty"`
-	Model   string `json:"model,omitempty"`
-	Think   string `json:"think,omitempty"`
-	Sandbox string `json:"sandbox,omitempty"` // "on" | "off"
+	Backend   string `json:"backend,omitempty"`
+	Model     string `json:"model,omitempty"`
+	Think     string `json:"think,omitempty"`
+	Sandbox   string `json:"sandbox,omitempty"`    // "on" | "off"
+	ClaudeTTY bool   `json:"claude_tty,omitempty"` // drive Claude through klax tty
 }
 
 type Session struct {
@@ -28,6 +29,7 @@ type Session struct {
 	ModelOverride      string `json:"model_override,omitempty"` // user-selected model
 	ThinkOverride      string `json:"think_override,omitempty"` // thinking level
 	Sandbox            string `json:"sandbox,omitempty"`        // "on" | "off"
+	ClaudeTTY          bool   `json:"claude_tty,omitempty"`     // drive Claude through klax tty
 	ContextWindow      int    `json:"ctx_window,omitempty"`
 	ContextUsed        int    `json:"ctx_used,omitempty"`
 	Messages           int    `json:"messages"` // user message count
@@ -369,6 +371,7 @@ func (s *Store) Ensure(chatID, name, cwd string, defaults ScopeDefaults) *Sessio
 		ModelOverride: def.Model,
 		ThinkOverride: def.Think,
 		Sandbox:       def.Sandbox,
+		ClaudeTTY:     def.ClaudeTTY,
 	}
 	cs.Sessions = append(cs.Sessions, sess)
 	return cloneSession(sess)
@@ -397,6 +400,7 @@ func (s *Store) New(chatID, name, cwd string, defaults ScopeDefaults) *Session {
 		ModelOverride: def.Model,
 		ThinkOverride: def.Think,
 		Sandbox:       def.Sandbox,
+		ClaudeTTY:     def.ClaudeTTY,
 	}
 	cs.Sessions = append(cs.Sessions, sess)
 	return cloneSession(sess)

@@ -8,7 +8,7 @@ import (
 	"os"
 )
 
-const version = "0.5.161"
+const version = "0.5.178"
 
 func main() {
 	log.SetPrefix("klax: ")
@@ -19,6 +19,8 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "tty":
+		runTTY(os.Args[2:])
 	case "start":
 		fg := len(os.Args) > 2 && os.Args[2] == "--foreground"
 		if fg {

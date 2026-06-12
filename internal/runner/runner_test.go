@@ -1335,3 +1335,31 @@ func TestRunErroredResultReachesWaitAndReturns(t *testing.T) {
 		t.Fatalf("output after the error event was not drained; narration = %v", rec.narrationTexts())
 	}
 }
+
+func TestSuppressedNarrationKeepsReplyAcrossCompactEvent(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	body := "готовый ответ"
+	lines := []string{
+		`{"type":"system","session_id":"s1","model":"claude-opus-4-7"}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"` + body + `"}]}}`,
+		`{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto","preTokens":180000,"postTokens":9000}}`,
+		`{"type":"result","session_id":"s1","result":"` + body + `","is_error":false}`,
+	}
+	script := "printf '%s\\n' " + shQuote(lines...)
+
+	rec := &progressRecorder{}
+	r := New()
+	res := r.Run(context.Background(), &stdinEchoBackend{script: script}, RunOptions{SuppressNarrationProgress: true}, rec.callback())
+	if res.Error != nil {
+		t.Fatalf("Run error: %v", res.Error)
+	}
+	if narr := rec.narrationTexts(); len(narr) != 0 {
+		t.Fatalf("suppressed narration must not emit progress narration, got %v", narr)
+	}
+	if res.Text != body {
+		t.Fatalf("final text must survive a compact progress event, got %q", res.Text)
+	}
+}

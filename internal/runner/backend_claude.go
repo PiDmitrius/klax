@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/PiDmitrius/klax/internal/claudemodel"
 )
 
 // ClaudeBackend implements Backend for Claude Code CLI.
@@ -28,11 +30,11 @@ type ClaudeBackend struct {
 
 func (b *ClaudeBackend) Name() string { return "claude" }
 
-func (b *ClaudeBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
-	// Reset per-run parser state on entry so a reused backend instance
-	// doesn't carry block-tracking from a prior turn.
-	b.partialDeltaSeen = false
-	b.inTextBlock = false
+// BuildClaudeArgs assembles the claude CLI flag list for a run, independent of
+// binary resolution and the klax-tty wrapping done in BuildCmd. Kept separate
+// so the tty arg parser can be coupled to the real flag set in a test without
+// the claude binary being installed.
+func BuildClaudeArgs(opts RunOptions) []string {
 	var mode string
 	if opts.Sandbox == "" || opts.Sandbox == "off" {
 		mode = "bypassPermissions"
@@ -60,7 +62,11 @@ func (b *ClaudeBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 		args = append(args, "--permission-mode", mode)
 	}
 	if opts.Model != "" {
-		args = append(args, "--model", opts.Model)
+		// Launch the bare "fable" alias as fable[1m]: without the marker the
+		// CLI believes a 200k window off the first-party lane and compacts a
+		// resumed session at ~200k. This is the single choke point for both
+		// the -p path and the tty driver (which re-parses these same args).
+		args = append(args, "--model", claudemodel.Normalize(opts.Model))
 	}
 	if opts.Effort != "" {
 		args = append(args, "--effort", opts.Effort)
@@ -71,10 +77,27 @@ func (b *ClaudeBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 	if opts.SessionID != "" {
 		args = append(args, "--resume", opts.SessionID)
 	}
+	return args
+}
+
+func (b *ClaudeBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
+	// Reset per-run parser state on entry so a reused backend instance
+	// doesn't carry block-tracking from a prior turn.
+	b.partialDeltaSeen = false
+	b.inTextBlock = false
+	args := BuildClaudeArgs(opts)
 
 	bin := findBinary("claude", []string{".local/bin/claude"})
 	if bin == "" {
 		return nil, errors.New("claude not found. Install: curl -fsSL https://claude.ai/install.sh | bash")
+	}
+	if opts.ClaudeTTY {
+		self, err := os.Executable()
+		if err != nil {
+			return nil, fmt.Errorf("locate klax executable: %w", err)
+		}
+		args = append([]string{"tty", bin}, args...)
+		bin = self
 	}
 
 	cmd := exec.Command(bin, args...)
@@ -90,17 +113,26 @@ func (b *ClaudeBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 
 // claudeStreamEvent is the raw JSON from claude --output-format stream-json.
 type claudeStreamEvent struct {
-	Type          string                     `json:"type"`
-	Name          string                     `json:"name,omitempty"`
-	Input         json.RawMessage            `json:"input,omitempty"`
-	Result        string                     `json:"result,omitempty"`
-	IsError       bool                       `json:"is_error,omitempty"`
-	SessionID     string                     `json:"session_id,omitempty"`
-	Model         string                     `json:"model,omitempty"`
-	ModelUsage    map[string]json.RawMessage `json:"modelUsage,omitempty"`
-	Message       *claudeMessage             `json:"message,omitempty"`
-	RateLimitInfo *claudeRateLimitInfo       `json:"rate_limit_info,omitempty"`
-	Event         *claudeNestedEvent         `json:"event,omitempty"`
+	Type            string                     `json:"type"`
+	Subtype         string                     `json:"subtype,omitempty"`
+	Name            string                     `json:"name,omitempty"`
+	Input           json.RawMessage            `json:"input,omitempty"`
+	Result          string                     `json:"result,omitempty"`
+	IsError         bool                       `json:"is_error,omitempty"`
+	SessionID       string                     `json:"session_id,omitempty"`
+	Model           string                     `json:"model,omitempty"`
+	ModelUsage      map[string]json.RawMessage `json:"modelUsage,omitempty"`
+	Message         *claudeMessage             `json:"message,omitempty"`
+	RateLimitInfo   *claudeRateLimitInfo       `json:"rate_limit_info,omitempty"`
+	Event           *claudeNestedEvent         `json:"event,omitempty"`
+	CompactMetadata *claudeCompactMetadata     `json:"compactMetadata,omitempty"`
+}
+
+// claudeCompactMetadata is the token-delta payload of a compact_boundary line.
+type claudeCompactMetadata struct {
+	Trigger    string `json:"trigger"`
+	PreTokens  int    `json:"preTokens"`
+	PostTokens int    `json:"postTokens"`
 }
 
 // claudeNestedEvent is the inner payload of a `stream_event` outer envelope.
@@ -158,6 +190,16 @@ func (b *ClaudeBackend) ParseEvent(line []byte) ([]Event, bool) {
 
 	switch ev.Type {
 	case "system":
+		if ev.Subtype == "compact_boundary" && ev.CompactMetadata != nil {
+			return []Event{{
+				Type: EventCompact,
+				Compact: &CompactInfo{
+					Trigger:    ev.CompactMetadata.Trigger,
+					PreTokens:  ev.CompactMetadata.PreTokens,
+					PostTokens: ev.CompactMetadata.PostTokens,
+				},
+			}}, true
+		}
 		return []Event{{
 			Type:      EventSystem,
 			SessionID: ev.SessionID,

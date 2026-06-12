@@ -160,8 +160,7 @@ type modelEntry struct {
 }
 
 var claudeModels = []modelEntry{
-	{"fable1m", "fable[1m]", "Claude Fable 1M"},
-	{"fable", "fable", "Claude Fable 200k"},
+	{"fable", "fable[1m]", "Claude Fable 1M"},
 	{"opus1m", "opus[1m]", "Claude Opus 1M"},
 	{"opus", "opus", "Claude Opus 200k"},
 	{"sonnet1m", "sonnet[1m]", "Claude Sonnet 1M"},
@@ -273,6 +272,13 @@ func effectiveSandboxMode(def *session.ScopeDefaults, sess *session.Session) str
 	return "off"
 }
 
+func claudeTTYLabel(sess *session.Session) string {
+	if sess != nil && sess.ClaudeTTY {
+		return "on"
+	}
+	return "off"
+}
+
 func (d *daemon) sandboxText(sk string, sess *session.Session) string {
 	current := effectiveSandboxMode(d.scopeDefaults(sk), sess)
 	var sb strings.Builder
@@ -282,6 +288,21 @@ func (d *daemon) sandboxText(sk string, sess *session.Session) string {
 	} else {
 		sb.WriteString("/sandbox_on\n")
 		sb.WriteString("<b>/sandbox_off ✅</b>\n")
+	}
+	return sb.String()
+}
+
+func (d *daemon) ttyText(sk string, sess *session.Session) string {
+	if resolveSessionBackend(sess, d.scopeDefaults(sk), d.cfg.GetDefaultBackend()) != "claude" {
+		return "TTY (только claude)"
+	}
+	var sb strings.Builder
+	if sess != nil && sess.ClaudeTTY {
+		sb.WriteString("<b>/tty_on ✅</b>\n")
+		sb.WriteString("/tty_off\n")
+	} else {
+		sb.WriteString("/tty_on\n")
+		sb.WriteString("<b>/tty_off ✅</b>\n")
 	}
 	return sb.String()
 }
@@ -320,6 +341,7 @@ func (d *daemon) settingsText(chatID, sk string, sess *session.Session) string {
 		"🤖 Модель:\n" + strings.TrimSuffix(d.modelText(sk, sess), "\n"),
 		"🧠 Мышление:\n" + strings.TrimSuffix(d.thinkText(sk, sess), "\n"),
 		"🔒 Sandbox:\n" + strings.TrimSuffix(d.sandboxText(sk, sess), "\n"),
+		"🖥 TTY:\n" + strings.TrimSuffix(d.ttyText(sk, sess), "\n"),
 	}
 	if groupText := d.groupModeText(chatID); groupText != "" {
 		sections = append(sections, groupText)
@@ -397,6 +419,7 @@ func helpText() string {
 /cwd [путь] — рабочая директория
 /model [name] — выбор модели
 /think — уровень мышления
+/tty — TTY (только claude)
 /prompt [текст] — системный промпт
 /groups — режим группы
 /verbose — промежуточный вывод группы
@@ -454,6 +477,7 @@ func (d *daemon) statusText(chatID string) string {
 		think = "по умолчанию"
 	}
 	sandbox := effectiveSandboxMode(d.scopeDefaults(chatID), sess)
+	tty := claudeTTYLabel(sess)
 	verboseLine := ""
 	if isGroupChatID(chatID) {
 		verbose := "off"
@@ -476,8 +500,8 @@ func (d *daemon) statusText(chatID string) string {
 	statusBlankLine := strings.Repeat("\u2800", 16)
 
 	return fmt.Sprintf(
-		"<b>✅ klax</b> v%s%s\n%s\n📌 Сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n🔒 Sandbox: <code>%s</code>\n%s%s%s%s\n💬 Сообщений: %d",
-		version, versionPad, statusBlankLine, html.EscapeString(sess.Name), sessionModeLabel(chatID), backend, model, think, sandbox, verboseLine, statusLine, contextLine, rateLine, sess.Messages,
+		"<b>✅ klax</b> v%s%s\n%s\n📌 Сессия: <code>%s</code>\n🧩 Тип: <code>%s</code>\n⚙️ Движок: <code>%s</code>\n🤖 Модель: <code>%s</code>\n🧠 Мышление: <code>%s</code>\n🔒 Sandbox: <code>%s</code>\n🖥 TTY: <code>%s</code>\n%s%s%s%s\n💬 Сообщений: %d",
+		version, versionPad, statusBlankLine, html.EscapeString(sess.Name), sessionModeLabel(chatID), backend, model, think, sandbox, tty, verboseLine, statusLine, contextLine, rateLine, sess.Messages,
 	)
 }
 

@@ -76,6 +76,27 @@ func TestClaudeBuildsWithOwnProcessGroup(t *testing.T) {
 	assertSetpgid(t, cmd)
 }
 
+func TestClaudeTTYWrapsOriginalClaudeInvocation(t *testing.T) {
+	cmd, err := (&ClaudeBackend{}).BuildCmd(RunOptions{Sandbox: "off", ClaudeTTY: true})
+	if err != nil {
+		t.Fatalf("BuildCmd: %v", err)
+	}
+	if len(cmd.Args) < 4 {
+		t.Fatalf("args too short: %v", cmd.Args)
+	}
+	if cmd.Args[1] != "tty" {
+		t.Fatalf("expected self subcommand tty, got args %v", cmd.Args)
+	}
+	if !strings.HasSuffix(cmd.Args[2], "claude") {
+		t.Fatalf("expected original claude binary as wrapped command, got args %v", cmd.Args)
+	}
+	args := strings.Join(cmd.Args, " ")
+	if !strings.Contains(args, "-p --output-format stream-json") {
+		t.Fatalf("expected original claude -p args after wrapper, got %q", args)
+	}
+	assertSetpgid(t, cmd)
+}
+
 func TestCodexBuildsWithOwnProcessGroup(t *testing.T) {
 	cmd, err := (&CodexBackend{}).BuildCmd(RunOptions{Sandbox: "off"})
 	if err != nil {
