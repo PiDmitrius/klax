@@ -132,7 +132,7 @@ func TestFormatLogChunksSplitsOversizedHTMLNarrationSafely(t *testing.T) {
 }
 
 func TestWithProgressEllipsisAppendsWhenItFits(t *testing.T) {
-	chunks := withProgressEllipsis([]string{"progress"})
+	chunks := withProgressEllipsis([]string{"progress"}, "", maxMessageLen)
 	if len(chunks) != 1 {
 		t.Fatalf("expected one chunk, got %#v", chunks)
 	}
@@ -142,7 +142,7 @@ func TestWithProgressEllipsisAppendsWhenItFits(t *testing.T) {
 }
 
 func TestWithProgressEllipsisAppendsToFullChunk(t *testing.T) {
-	chunks := withProgressEllipsis([]string{strings.Repeat("x", 30)})
+	chunks := withProgressEllipsis([]string{strings.Repeat("x", 30)}, "", maxMessageLen)
 	if len(chunks) != 1 {
 		t.Fatalf("expected ellipsis on existing chunk, got %#v", chunks)
 	}
@@ -155,7 +155,7 @@ func TestProgressLogChunksAlwaysEndWithEllipsis(t *testing.T) {
 	chunks := withProgressEllipsis(formatLogChunks([]runner.ProgressEvent{
 		{Kind: runner.ProgressKindTool, Text: "🔧 " + strings.Repeat("a", 20)},
 		{Kind: runner.ProgressKindTool, Text: "🔧 " + strings.Repeat("b", 20)},
-	}, "", "html", 46))
+	}, "", "html", 46), "", maxMessageLen)
 	if len(chunks) != 2 {
 		t.Fatalf("expected split progress chunks, got %#v", chunks)
 	}

@@ -19,6 +19,9 @@ func splitMessage(text string, limit int, format string) []string {
 	if format == "html" {
 		return splitHTMLMessage(text, limit)
 	}
+	if format == "rich" {
+		return splitRichMessage(text, limit)
+	}
 	if len(text) <= limit {
 		return []string{text}
 	}
@@ -101,9 +104,19 @@ func splitHTMLMessage(text string, limit int) []string {
 		for len(segment) > 0 {
 			remaining := limit - current.Len() - len(renderClosingTags(stack))
 			if remaining <= 0 && current.Len() > 0 {
-				chunks = append(chunks, current.String()+renderClosingTags(stack))
-				current.Reset()
-				current.WriteString(renderOpeningTags(stack))
+				opening := renderOpeningTags(stack)
+				if current.Len() > len(opening) {
+					chunks = append(chunks, current.String()+renderClosingTags(stack))
+					current.Reset()
+					current.WriteString(opening)
+					continue
+				}
+				// Tag overhead alone meets the limit — re-flushing can't make
+				// progress, so write one rune to guarantee forward progress
+				// regardless of how unbalanced the open-tag stack is.
+				_, size := utf8.DecodeRuneInString(segment)
+				current.WriteString(segment[:size])
+				segment = segment[size:]
 				continue
 			}
 			if len(segment) <= remaining {
@@ -138,6 +151,147 @@ func splitHTMLMessage(text string, limit int) []string {
 	return chunks
 }
 
+// splitRichMessage splits a Rich HTML message (mdhtml.ConvertRich output) into
+// chunks of at most `limit` bytes. It cuts on top-level block boundaries so a
+// table, list or code block is normally kept intact; a block that is itself larger
+// than the limit is split internally (so no chunk — nor the plain-text fallback —
+// overruns Telegram's ceiling). Our 2048 is a soft target for one-message-per-answer.
+func splitRichMessage(text string, limit int) []string {
+	if len(text) <= limit {
+		return []string{text}
+	}
+	// Split any over-limit block so it can't ship as one over-ceiling chunk: a
+	// <pre> is split on its internal newlines; any other oversized block (a giant
+	// paragraph, list, table or blockquote) goes through the inline-tag-aware
+	// splitter, which re-balances tags across the cut.
+	var blocks []string
+	for _, b := range topLevelRichBlocks(text) {
+		switch {
+		case len(b) <= limit:
+			blocks = append(blocks, b)
+		case strings.HasPrefix(b, "<pre>"):
+			blocks = append(blocks, splitPreBlock(b, limit)...)
+		default:
+			// Any other oversized block (a huge paragraph, list, or table) — split
+			// with the inline-tag-aware splitter, which re-closes/re-opens tags so
+			// each piece stays balanced. This keeps every chunk (and therefore the
+			// plain-text fallback) under the limit, so no single block can overrun
+			// Telegram's ceiling.
+			blocks = append(blocks, splitHTMLMessage(b, limit)...)
+		}
+	}
+	var chunks []string
+	var cur strings.Builder
+	for _, b := range blocks {
+		switch {
+		case cur.Len() == 0:
+			cur.WriteString(b)
+		case cur.Len()+1+len(b) > limit:
+			chunks = append(chunks, cur.String())
+			cur.Reset()
+			cur.WriteString(b)
+		default:
+			cur.WriteString("\n")
+			cur.WriteString(b)
+		}
+	}
+	if cur.Len() > 0 {
+		chunks = append(chunks, cur.String())
+	}
+	return chunks
+}
+
+// splitPreBlock breaks an over-limit <pre><code…> block into several smaller <pre>
+// blocks on its internal newlines, re-wrapping each piece with the same opening
+// tag. A single line longer than the limit is kept whole (rare).
+func splitPreBlock(block string, limit int) []string {
+	codeOpen := strings.Index(block, "<code")
+	closeIdx := strings.LastIndex(block, "</code></pre>")
+	if codeOpen < 0 || closeIdx < 0 {
+		return []string{block}
+	}
+	openEnd := strings.IndexByte(block[codeOpen:], '>')
+	if openEnd < 0 {
+		return []string{block}
+	}
+	prefix := block[:codeOpen+openEnd+1] // "<pre><code …>"
+	const suffix = "</code></pre>"
+	inner := block[codeOpen+openEnd+1 : closeIdx]
+
+	budget := limit - len(prefix) - len(suffix)
+	if budget < 1 {
+		budget = 1
+	}
+	var out []string
+	var cur []string
+	curLen := 0
+	flush := func() {
+		if len(cur) > 0 {
+			out = append(out, prefix+strings.Join(cur, "\n")+suffix)
+			cur, curLen = nil, 0
+		}
+	}
+	for _, line := range strings.Split(inner, "\n") {
+		// A single code line longer than the budget is hard-split (UTF-8/entity-safe
+		// via htmlTextCut) so one unbroken line can't ship as an over-ceiling chunk.
+		for len(line) > budget {
+			flush()
+			cut := htmlTextCut(line, budget)
+			out = append(out, prefix+line[:cut]+suffix)
+			line = line[cut:]
+		}
+		add := len(line)
+		if len(cur) > 0 {
+			add++ // newline joiner
+		}
+		if len(cur) > 0 && curLen+add > budget {
+			flush()
+			add = len(line)
+		}
+		cur = append(cur, line)
+		curLen += add
+	}
+	flush()
+	if len(out) == 0 {
+		return []string{block}
+	}
+	return out
+}
+
+// topLevelRichBlocks splits ConvertRich output back into its top-level blocks.
+// Blocks are newline-separated; a <pre>…</pre> code block is the only block that
+// may itself span multiple lines, so its lines are kept together.
+func topLevelRichBlocks(text string) []string {
+	var blocks []string
+	var pre []string
+	inPre := false
+	for _, line := range strings.Split(text, "\n") {
+		if inPre {
+			pre = append(pre, line)
+			if strings.Contains(line, "</pre>") {
+				blocks = append(blocks, strings.Join(pre, "\n"))
+				pre = nil
+				inPre = false
+			}
+			continue
+		}
+		opens := strings.Count(line, "<pre>") + strings.Count(line, "<pre ")
+		if opens > strings.Count(line, "</pre>") {
+			inPre = true
+			pre = []string{line}
+			continue
+		}
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		blocks = append(blocks, line)
+	}
+	if len(pre) > 0 {
+		blocks = append(blocks, strings.Join(pre, "\n"))
+	}
+	return blocks
+}
+
 func parseHTMLTag(token string) (name string, closing bool, selfClosing bool, ok bool) {
 	if len(token) < 3 || token[0] != '<' || token[len(token)-1] != '>' {
 		return "", false, false, false
@@ -160,7 +314,20 @@ func parseHTMLTag(token string) (name string, closing bool, selfClosing bool, ok
 	if idx := strings.IndexAny(body, " \t\r\n"); idx != -1 {
 		body = body[:idx]
 	}
-	return strings.ToLower(body), closing, selfClosing, true
+	name = strings.ToLower(body)
+	if voidHTMLElements[name] {
+		// Void elements (e.g. <br>) have no close tag, so they must never be pushed
+		// onto the open-tag stack — otherwise an unclosed <br> per line accumulates
+		// unbounded and can spin the splitter forever (rich blockquotes use <br>).
+		selfClosing = true
+	}
+	return name, closing, selfClosing, true
+}
+
+var voidHTMLElements = map[string]bool{
+	"br": true, "hr": true, "img": true, "wbr": true, "area": true, "base": true,
+	"col": true, "embed": true, "input": true, "link": true, "meta": true,
+	"source": true, "track": true,
 }
 
 func renderOpeningTags(stack []htmlOpenTag) string {
@@ -418,7 +585,7 @@ func sendWithFormatFallback(ctx context.Context, t transport.Transport, chatID, 
 	if err != nil && format != "" && ctx.Err() == nil && !isReplyTargetError(err) {
 		log.Printf("send error (%s): %v, retrying plain", format, err)
 		return retryDo(ctx, func() error {
-			return t.SendMessage(chatID, text, replyTo, "")
+			return t.SendMessage(chatID, plainFallback(text, format), replyTo, "")
 		})
 	}
 	return err
@@ -445,7 +612,7 @@ func sendReturnIDWithFormatFallback(ctx context.Context, t transport.Transport, 
 		log.Printf("send error (%s): %v, retrying plain", format, err)
 		err = retryDo(ctx, func() error {
 			var err error
-			msgID, err = t.SendMessageReturnID(chatID, text, replyTo, "")
+			msgID, err = t.SendMessageReturnID(chatID, plainFallback(text, format), replyTo, "")
 			return err
 		})
 	}
@@ -469,7 +636,7 @@ func tryEdit(ctx context.Context, t transport.Transport, chatID, msgID, text, fo
 	if format != "" && ctx.Err() == nil {
 		log.Printf("edit error (%s): %v, retrying plain", format, err)
 		return retryDo(ctx, func() error {
-			return t.EditMessage(chatID, msgID, text, "")
+			return t.EditMessage(chatID, msgID, plainFallback(text, format), "")
 		})
 	}
 	return err

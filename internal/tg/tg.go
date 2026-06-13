@@ -225,24 +225,29 @@ func (b *Bot) SendMessageReturnID(chatID, text, replyTo, format string) (string,
 }
 
 func (b *Bot) sendMsg(chatID, text, replyTo, format string) (string, error) {
-	payload := map[string]interface{}{
-		"chat_id": chatID,
-		"text":    text,
+	method := "sendMessage"
+	payload := map[string]interface{}{"chat_id": chatID}
+	if format == "rich" {
+		// Rich Messages (Bot API 10.1): structured HTML in rich_message.html.
+		method = "sendRichMessage"
+		payload["rich_message"] = map[string]interface{}{"html": text}
+	} else {
+		payload["text"] = text
+		switch format {
+		case "markdown":
+			payload["parse_mode"] = "Markdown"
+		case "markdownv2":
+			payload["parse_mode"] = "MarkdownV2"
+		case "html":
+			payload["parse_mode"] = "HTML"
+		}
 	}
 	if replyTo != "" {
 		if id, err := strconv.Atoi(replyTo); err == nil {
 			payload["reply_parameters"] = map[string]interface{}{"message_id": id}
 		}
 	}
-	switch format {
-	case "markdown":
-		payload["parse_mode"] = "Markdown"
-	case "markdownv2":
-		payload["parse_mode"] = "MarkdownV2"
-	case "html":
-		payload["parse_mode"] = "HTML"
-	}
-	raw, err := b.call("sendMessage", payload)
+	raw, err := b.call(method, payload)
 	if err != nil {
 		return "", err
 	}
@@ -302,15 +307,20 @@ func (b *Bot) EditMessage(chatID, messageID, text, format string) error {
 	payload := map[string]interface{}{
 		"chat_id":    chatID,
 		"message_id": msgID,
-		"text":       text,
 	}
-	switch format {
-	case "markdown":
-		payload["parse_mode"] = "Markdown"
-	case "markdownv2":
-		payload["parse_mode"] = "MarkdownV2"
-	case "html":
-		payload["parse_mode"] = "HTML"
+	if format == "rich" {
+		// editMessageText edits rich messages too, via rich_message (Bot API 10.1).
+		payload["rich_message"] = map[string]interface{}{"html": text}
+	} else {
+		payload["text"] = text
+		switch format {
+		case "markdown":
+			payload["parse_mode"] = "Markdown"
+		case "markdownv2":
+			payload["parse_mode"] = "MarkdownV2"
+		case "html":
+			payload["parse_mode"] = "HTML"
+		}
 	}
 	_, err := b.call("editMessageText", payload)
 	return err

@@ -41,11 +41,8 @@ func formatLogItems(items []runner.ProgressEvent, format string) string {
 	var prevKind runner.ProgressKind
 	for i, item := range items {
 		if i > 0 {
-			if prevKind == runner.ProgressKindTool && item.Kind == runner.ProgressKindTool {
-				out.WriteString("\n")
-			} else {
-				out.WriteString("\n\n")
-			}
+			tight := prevKind == runner.ProgressKindTool && item.Kind == runner.ProgressKindTool
+			out.WriteString(logSeparator(format, tight))
 		}
 		out.WriteString(formatLogItem(item, format))
 		prevKind = item.Kind
@@ -53,16 +50,43 @@ func formatLogItems(items []runner.ProgressEvent, format string) string {
 	return out.String()
 }
 
+// richSpacerBlock is an empty (zero-width) paragraph used as a visual gap between
+// rich blocks. Rich renderers ignore inter-block whitespace, so the "\n\n" blank
+// line that breathes legacy log sections apart has no effect — the gap must be a
+// real block.
+const richSpacerBlock = "<p>\u200b</p>" // zero-width-space spacer (\u200b escape, so the plain fallback shows nothing, not "&#8203;")
+
+// logSeparator is the separator placed before a progress-log segment. A tight
+// separator (tool→tool) is a single newline; otherwise legacy/plain get a blank
+// line and rich gets a spacer block so the gap actually renders.
+func logSeparator(format string, tight bool) string {
+	if tight {
+		return "\n"
+	}
+	if format == "rich" {
+		return "\n" + richSpacerBlock + "\n"
+	}
+	return "\n\n"
+}
+
 func formatLogItem(item runner.ProgressEvent, format string) string {
 	text := pathutil.TildePathsInText(item.Text)
 	switch item.Kind {
 	case runner.ProgressKindNarration:
-		if format == "html" {
+		switch format {
+		case "rich":
+			return mdhtml.ConvertRich(text)
+		case "html":
 			return mdhtml.Convert(text)
 		}
 		return text
 	default:
-		if format == "html" {
+		switch format {
+		case "rich":
+			// Tool log as a paragraph block (top-level inline isn't a valid rich
+			// block); collapse newlines so it stays a single block for the splitter.
+			return "<p><code>" + strings.ReplaceAll(htmlEscapeLogText(text), "\n", " ") + "</code></p>"
+		case "html":
 			return "<code>" + htmlEscapeLogText(text) + "</code>"
 		}
 		return "`" + strings.ReplaceAll(text, "`", "'") + "`"
@@ -83,17 +107,14 @@ func formatLogChunks(items []runner.ProgressEvent, tail, format string, limit in
 	for i, item := range items {
 		segment := formatLogItem(item, format)
 		if i > 0 {
-			if prevKind == runner.ProgressKindTool && item.Kind == runner.ProgressKindTool {
-				segment = "\n" + segment
-			} else {
-				segment = "\n\n" + segment
-			}
+			tight := prevKind == runner.ProgressKindTool && item.Kind == runner.ProgressKindTool
+			segment = logSeparator(format, tight) + segment
 		}
 		appendLogSegment(&chunks, &current, segment, format, limit)
 		prevKind = item.Kind
 	}
 	if tail != "" {
-		appendLogSegment(&chunks, &current, "\n\n"+tail, format, limit)
+		appendLogSegment(&chunks, &current, logSeparator(format, false)+tail, format, limit)
 	}
 	if current.Len() > 0 {
 		chunks = append(chunks, current.String())
@@ -124,14 +145,29 @@ func appendLogSegment(chunks *[]string, current *strings.Builder, segment, forma
 	}
 }
 
-func withProgressEllipsis(chunks []string) []string {
-	const tail = "\n\n..."
+func withProgressEllipsis(chunks []string, format string, limit int) []string {
+	if format == "rich" {
+		// Keep the "still working" marker a real block (rich ignores loose
+		// top-level text). If appending it to the last chunk would push it over the
+		// limit — e.g. the last chunk is an over-soft-limit single block — emit the
+		// marker as its own chunk instead of overflowing the block.
+		const block = "<p>…</p>"
+		if len(chunks) == 0 {
+			return []string{block}
+		}
+		out := append([]string(nil), chunks...)
+		last := len(out) - 1
+		if len(out[last])+1+len(block) > limit {
+			return append(out, block)
+		}
+		out[last] += "\n" + block
+		return out
+	}
 	if len(chunks) == 0 {
 		return []string{"..."}
 	}
-	last := len(chunks) - 1
 	out := append([]string(nil), chunks...)
-	out[last] += tail
+	out[len(out)-1] += "\n\n..."
 	return out
 }
 
@@ -151,6 +187,32 @@ func stripHTML(s string) string {
 	s = strings.ReplaceAll(s, "&gt;", ">")
 	s = strings.ReplaceAll(s, "&amp;", "&")
 	return s
+}
+
+var reBlockClose = regexp.MustCompile(`(?i)</(p|li|h[1-6]|tr|blockquote|pre|ul|ol|table|figure|details)>|<br\s*/?>|<hr\s*/?>`)
+
+// htmlToPlain flattens HTML / rich markup into readable plain text for the
+// markup→plain fallback: block-closing tags become newlines, then all tags are
+// stripped. Without it, a rejected rich message would reach the user as a wall of
+// literal <p>/<ul>/<li> tags (stripHTML alone collapses block boundaries to a
+// run-on line).
+func htmlToPlain(s string) string {
+	s = reBlockClose.ReplaceAllString(s, "$0\n")
+	s = stripHTML(s)
+	for strings.Contains(s, "\n\n\n") {
+		s = strings.ReplaceAll(s, "\n\n\n", "\n\n")
+	}
+	return strings.TrimSpace(s)
+}
+
+// plainFallback turns formatted text into the plain text used when a formatted
+// send is rejected. Only HTML-shaped formats are flattened; any other format
+// (e.g. markdown, were it ever wired up) is passed through unchanged.
+func plainFallback(text, format string) string {
+	if format == "html" || format == "rich" {
+		return htmlToPlain(text)
+	}
+	return text
 }
 
 type modelEntry struct {
@@ -423,6 +485,7 @@ func helpText() string {
 /prompt [текст] — системный промпт
 /groups — режим группы
 /verbose — промежуточный вывод группы
+/rich — Rich-форматирование Telegram (глобально)
 /transports — управление транспортами
 /bypass — прямая команда
 /abort — прервать исполнение

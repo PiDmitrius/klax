@@ -45,6 +45,11 @@ type Config struct {
 	Users              []UserIdentity `json:"users"`               // cross-platform identity mapping
 	DisabledTransports []string       `json:"disabled_transports"` // transports disabled via /transports off
 	GroupChats         []GroupChat    `json:"group_chats"`         // chats with group mode enabled
+
+	// TelegramRich renders Telegram replies as Rich Messages (sendRichMessage /
+	// editMessageText with rich_message) instead of legacy parse_mode=HTML.
+	// Global, toggled via /rich on|off. Telegram only; MAX/VK stay legacy.
+	TelegramRich bool `json:"tg_rich,omitempty"`
 }
 
 // GroupChat stores group mode settings for a chat.
