@@ -33,18 +33,39 @@ func sanitizeAttachmentFilename(name string) string {
 }
 
 func formatRunFailure(logItems []runner.ProgressEvent, format string, err error) string {
-	if errors.Is(err, context.Canceled) {
-		if len(logItems) > 0 {
-			return formatLogItems(logItems, format) + "\n\n❌ Прервано."
+	// In rich mode each trailing marker must be its own block, and the error text
+	// must be escaped so stray <, > or & don't break the rich parser.
+	mark := func(s string) string {
+		if format == "rich" {
+			return "<p>" + s + "</p>"
 		}
-		return "❌ Прервано."
+		return s
+	}
+	errLine := func(e error) string {
+		s := fmt.Sprintf("❌ Ошибка: %v", e)
+		if format == "rich" {
+			return "<p>" + htmlEscapeLogText(s) + "</p>"
+		}
+		return s
 	}
 
-	finalText := "..."
-	if len(logItems) > 0 {
-		finalText = formatLogItems(logItems, format) + "\n\n..."
+	// sep is the breathing gap between the log and the trailing markers — a real
+	// spacer block in rich (inter-block whitespace is ignored), a blank line in
+	// legacy.
+	sep := logSeparator(format, false)
+
+	if errors.Is(err, context.Canceled) {
+		if len(logItems) > 0 {
+			return formatLogItems(logItems, format) + sep + mark("❌ Прервано.")
+		}
+		return mark("❌ Прервано.")
 	}
-	return finalText + fmt.Sprintf("\n❌ Ошибка: %v", err)
+
+	head := mark("...")
+	if len(logItems) > 0 {
+		head = formatLogItems(logItems, format) + sep + mark("...")
+	}
+	return head + "\n" + errLine(err)
 }
 
 func (d *daemon) syncFinalMessageChain(fullChatID, replyTo string, chain *messageChain, text, format string) (*messageChain, error) {
@@ -274,9 +295,15 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	// Progress message — edit in place.
 	// If this message was queued and nothing happened in the chat since then,
 	// reuse the queue notification. Otherwise point to the new answer below.
-	t, _, chatFmt := d.transportFor(msg.chatID)
+	t, _, _ := d.transportFor(msg.chatID)
+	chatFmt := d.answerFormat(msg.chatID)
+	// Rich messages have their own message type: a Rich Message can only be
+	// edit-streamed from a message that was *born* rich (editMessageText with
+	// rich_message). So in rich mode we never reuse the plain/HTML queued
+	// notification, and the placeholder itself is created as rich.
+	richMode := chatFmt == "rich"
 	var progressChain *messageChain
-	reuseQueuedProgress := d.shouldReuseQueuedProgress(msg)
+	reuseQueuedProgress := !richMode && d.shouldReuseQueuedProgress(msg)
 	needsRedirectMarker := !reuseQueuedProgress && msg.progressID != ""
 	if reuseQueuedProgress {
 		progressChain = newMessageChain(msg.progressID)
@@ -284,7 +311,11 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	}
 	if t != nil {
 		var err error
-		progressChain, err = d.syncMessageChain(ctx, msg.chatID, msg.msgID, progressChain, "...", "")
+		placeholder, placeFmt := "...", ""
+		if richMode {
+			placeholder, placeFmt = "<p>…</p>", "rich"
+		}
+		progressChain, err = d.syncMessageChain(ctx, msg.chatID, msg.msgID, progressChain, placeholder, placeFmt)
 		if err != nil {
 			progressChain = nil
 		} else if needsRedirectMarker {
@@ -332,7 +363,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 				return
 			default:
 			}
-			chunks := withProgressEllipsis(formatLogChunks(snapshot, "", chatFmt, maxMessageLen))
+			chunks := withProgressEllipsis(formatLogChunks(snapshot, "", chatFmt, maxMessageLen), chatFmt, maxMessageLen)
 			cacheKey := fmt.Sprintf("%q", chunks)
 			if cacheKey == lastSentText {
 				continue
@@ -463,9 +494,10 @@ func (d *daemon) runBackend(msg queuedMsg) {
 
 	if result.Error != nil {
 		finalText := formatRunFailure(logItems, chatFmt, result.Error)
-		if progressChain != nil && len(progressChain.ids) > 0 && t != nil {
-			_, err := d.syncFinalMessageChain(msg.chatID, msg.msgID, progressChain, finalText, chatFmt)
-			if err != nil {
+		if t != nil {
+			// Deliver with chatFmt so a rich-formatted failure goes out as a Rich
+			// Message (and reuses the rich-born progress chain when present).
+			if _, err := d.syncFinalMessageChain(msg.chatID, msg.msgID, progressChain, finalText, chatFmt); err != nil {
 				log.Printf("final error delivery failed: %v", err)
 			}
 		} else {
@@ -481,9 +513,12 @@ func (d *daemon) runBackend(msg queuedMsg) {
 
 	// Convert Claude's Markdown to the transport format.
 	var formatted string
-	if chatFmt == "html" {
+	switch chatFmt {
+	case "rich":
+		formatted = mdhtml.ConvertRich(text)
+	case "html":
 		formatted = mdhtml.Convert(text)
-	} else {
+	default:
 		formatted = text
 	}
 

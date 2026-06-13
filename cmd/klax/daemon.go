@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode"
@@ -70,6 +71,7 @@ type daemon struct {
 	vkIdents   map[int]string    // vk userID -> canonical user ID
 	groupChats map[string]string // chatID -> CWD for group mode chats
 	groupVerb  map[string]bool   // chatID -> verbose progress output for group mode chats
+	tgRich     atomic.Bool       // global: render Telegram replies as Rich Messages (/rich)
 }
 
 func startupBackoff(attempt int) time.Duration {
@@ -203,6 +205,19 @@ func (d *daemon) transportFor(chatID string) (transport.Transport, string, strin
 		return t, chatID, d.formats["tg"]
 	}
 	return nil, chatID, ""
+}
+
+// answerFormat is the delivery format for a rendered agent answer (and its
+// progress log) in a chat: the static per-transport default, upgraded to "rich"
+// when the global Telegram rich-message toggle (/rich) is on. Command/UI replies
+// deliberately keep the static default (hand-written legacy HTML), so only the
+// agent's Markdown answer becomes a Rich Message.
+func (d *daemon) answerFormat(chatID string) string {
+	if transportPrefix(chatID) == "tg" && d.tgRich.Load() {
+		return "rich"
+	}
+	_, _, f := d.transportFor(chatID)
+	return f
 }
 
 // sessionKey resolves a chatID to the key used for session storage.
@@ -463,6 +478,8 @@ func runDaemon() {
 		groupChats: groupChats,
 		groupVerb:  groupVerb,
 	}
+
+	d.tgRich.Store(cfg.TelegramRich)
 
 	writePID()
 	log.Printf("klax %s started (pid %d)", version, os.Getpid())
