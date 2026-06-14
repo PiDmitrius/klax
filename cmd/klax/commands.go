@@ -636,6 +636,9 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 	case "/transports":
 		d.handleTransports(chatID, msgID, parts)
 
+	case "/rich":
+		d.handleRich(chatID, msgID, parts)
+
 	case "/backend":
 		name := ""
 		if len(args) > 0 {
@@ -908,4 +911,46 @@ func (d *daemon) saveDisabled() {
 	if err := config.Save(d.cfg); err != nil {
 		log.Printf("save config: %v", err)
 	}
+}
+
+// handleRich toggles Rich Message formatting for Telegram. It is a global setting
+// (not per-session, not per-chat): all Telegram replies switch between Rich HTML
+// (sendRichMessage) and legacy parse_mode=HTML. MAX/VK are unaffected.
+func (d *daemon) handleRich(chatID, msgID string, parts []string) {
+	if len(parts) < 2 {
+		d.sendPlain(chatID, msgID, d.richStatusText())
+		return
+	}
+	switch strings.ToLower(parts[1]) {
+	case "on":
+		d.setRich(true)
+		d.sendPlain(chatID, msgID, d.richStatusText())
+	case "off":
+		d.setRich(false)
+		d.sendPlain(chatID, msgID, d.richStatusText())
+	default:
+		d.sendMessage(chatID, msgID, "Использование: /rich [on|off]")
+	}
+}
+
+func (d *daemon) setRich(v bool) {
+	// Persist first, then commit the live atomic only on success, so a failed save
+	// can't leave the in-memory and on-disk values disagreeing.
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	prev := d.cfg.TelegramRich
+	d.cfg.TelegramRich = v
+	if err := config.Save(d.cfg); err != nil {
+		d.cfg.TelegramRich = prev
+		log.Printf("save config: %v", err)
+		return
+	}
+	d.tgRich.Store(v)
+}
+
+func (d *daemon) richStatusText() string {
+	if d.tgRich.Load() {
+		return "Rich-форматирование Telegram: вкл\n/rich off — вернуть legacy HTML"
+	}
+	return "Rich-форматирование Telegram: выкл (legacy HTML)\n/rich on — включить"
 }

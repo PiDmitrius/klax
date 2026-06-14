@@ -4,13 +4,17 @@
 package mdhtml
 
 import (
+	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
-// Convert transforms Markdown text into HTML suitable for
-// Telegram and MAX APIs (format: "html").
-func Convert(md string) string {
+// Convert transforms Markdown text into HTML suitable for the Telegram and MAX
+// "html" parse mode. useBlockquote renders ">" quotes as <blockquote> (Telegram
+// parse_mode=HTML supports it since Bot API 7.0); when false, quotes stay as the
+// legacy <pre> block (MAX, whose blockquote support is unverified).
+func Convert(md string, useBlockquote bool) string {
 	// Normalize line endings.
 	md = strings.ReplaceAll(md, "\r\n", "\n")
 
@@ -38,15 +42,30 @@ func Convert(md string) string {
 		}
 
 		// Blockquote block: consecutive lines starting with >
-		// NB: ">" markers are kept intentionally — Telegram has no blockquote,
-		// so the raw marker serves as a visual cue.
 		if strings.HasPrefix(line, ">") {
-			var block []string
+			var ql []string
 			for i < len(lines) && strings.HasPrefix(lines[i], ">") {
-				block = append(block, escapeHTML(lines[i]))
+				ql = append(ql, lines[i])
 				i++
 			}
-			out = append(out, "<pre>"+strings.Join(block, "\n")+"</pre>")
+			if useBlockquote {
+				// Telegram: real <blockquote> — strip the > markers, keep inline
+				// formatting. Legacy parse_mode=HTML does NOT support <br>; line
+				// breaks inside the quote are plain "\n" (see the docs' example).
+				var b []string
+				for _, l := range ql {
+					q := strings.TrimPrefix(strings.TrimPrefix(l, ">"), " ")
+					b = append(b, convertInline(escapeHTML(q), false))
+				}
+				out = append(out, "<blockquote>"+strings.Join(b, "\n")+"</blockquote>")
+			} else {
+				// MAX: keep the legacy <pre> with raw markers (blockquote unverified).
+				var b []string
+				for _, l := range ql {
+					b = append(b, escapeHTML(l))
+				}
+				out = append(out, "<pre>"+strings.Join(b, "\n")+"</pre>")
+			}
 			continue
 		}
 
@@ -54,13 +73,13 @@ func Convert(md string) string {
 		// NB: "#" markers are kept intentionally — Telegram has no header tag,
 		// so the raw marker serves as a visual cue alongside <b>.
 		if strings.HasPrefix(line, "#") {
-			out = append(out, "<b>"+convertInline(escapeHTML(line))+"</b>")
+			out = append(out, "<b>"+convertInline(escapeHTML(line), false)+"</b>")
 			i++
 			continue
 		}
 
 		// Regular line: inline conversion.
-		out = append(out, convertInline(escapeHTML(line)))
+		out = append(out, convertInline(escapeHTML(line), false))
 		i++
 	}
 
@@ -74,8 +93,12 @@ func escapeHTML(s string) string {
 	return s
 }
 
-// convertInline handles inline formatting on an already HTML-escaped line.
-func convertInline(line string) string {
+// convertInline handles inline formatting on an already HTML-escaped line. When
+// strict is true (rich messages) a link is only emitted for a URL Telegram
+// accepts and its href is quote-escaped, since one bad URL makes Telegram reject
+// the whole rich message; legacy callers pass strict=false to keep byte-identical
+// output.
+func convertInline(line string, strict bool) string {
 	// 1. Inline code: `...` — atomic, no further parsing inside.
 	var codeParts []string
 	line = reInlineCode.ReplaceAllStringFunc(line, func(m string) string {
@@ -84,10 +107,20 @@ func convertInline(line string) string {
 		return "\x00CODE\x00"
 	})
 
-	// 2. Links: [text](url)
+	// 2. Links: [text](url). In strict (rich) mode only emit a link for a target
+	// Telegram accepts — an unsupported URL (relative path, bare word like "url",
+	// a value with spaces, etc.) makes Telegram reject the ENTIRE rich message
+	// (RICH_MESSAGE_URL_INVALID) and it drops to plain text — so fall back to the
+	// link text alone. Legacy keeps its previous unconditional behavior.
 	line = reLink.ReplaceAllStringFunc(line, func(m string) string {
 		sub := reLink.FindStringSubmatch(m)
-		return `<a href="` + sub[2] + `">` + sub[1] + `</a>`
+		if !strict {
+			return `<a href="` + sub[2] + `">` + sub[1] + `</a>`
+		}
+		if !validLinkURL(sub[2]) {
+			return sub[1]
+		}
+		return `<a href="` + strings.ReplaceAll(sub[2], `"`, "&quot;") + `">` + sub[1] + `</a>`
 	})
 
 	// 3. Bold: **text** (before italic)
@@ -106,6 +139,41 @@ func convertInline(line string) string {
 	}
 
 	return line
+}
+
+// validLinkURL reports whether u is a link target Telegram accepts in a message.
+// Anything else is rendered as plain text rather than a link, so one bad URL can't
+// make Telegram reject the whole (rich) message. u is already HTML-escaped, so a
+// literal space or control char (which Telegram rejects) survives here and must be
+// caught — a valid scheme prefix alone is not enough.
+func validLinkURL(u string) bool {
+	if u == "" {
+		return false
+	}
+	for _, r := range u {
+		// No URL Telegram accepts contains whitespace or control/zero-width chars;
+		// these survive HTML-escaping and would still trigger a whole-message reject.
+		// unicode.Cf (format) covers zero-width spaces / BOM that IsSpace misses.
+		if r <= ' ' || unicode.IsSpace(r) || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return false
+		}
+	}
+	// Validate per scheme, not just by prefix: an empty host/payload (e.g.
+	// "https://", "https://?q=1", "mailto:", "tel:") would also be rejected.
+	switch {
+	case strings.HasPrefix(u, "http://"), strings.HasPrefix(u, "https://"):
+		p, err := url.Parse(u)
+		return err == nil && p.Host != ""
+	case strings.HasPrefix(u, "mailto:"):
+		return len(u) > len("mailto:")
+	case strings.HasPrefix(u, "tel:"):
+		return len(u) > len("tel:")
+	case strings.HasPrefix(u, "tg://"):
+		return len(u) > len("tg://")
+	case strings.HasPrefix(u, "#"):
+		return len(u) > len("#")
+	}
+	return false
 }
 
 var (
