@@ -77,7 +77,9 @@ func formatLogItem(item runner.ProgressEvent, format string) string {
 		case "rich":
 			return mdhtml.ConvertRich(text)
 		case "html":
-			return mdhtml.Convert(text)
+			// Progress-log narration keeps <pre> for quotes (rare, ephemeral); the
+			// final answer is what switches to <blockquote> on Telegram.
+			return mdhtml.Convert(text, false)
 		}
 		return text
 	default:

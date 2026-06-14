@@ -10,9 +10,11 @@ import (
 	"unicode"
 )
 
-// Convert transforms Markdown text into HTML suitable for
-// Telegram and MAX APIs (format: "html").
-func Convert(md string) string {
+// Convert transforms Markdown text into HTML suitable for the Telegram and MAX
+// "html" parse mode. useBlockquote renders ">" quotes as <blockquote> (Telegram
+// parse_mode=HTML supports it since Bot API 7.0); when false, quotes stay as the
+// legacy <pre> block (MAX, whose blockquote support is unverified).
+func Convert(md string, useBlockquote bool) string {
 	// Normalize line endings.
 	md = strings.ReplaceAll(md, "\r\n", "\n")
 
@@ -40,15 +42,30 @@ func Convert(md string) string {
 		}
 
 		// Blockquote block: consecutive lines starting with >
-		// NB: ">" markers are kept intentionally — Telegram has no blockquote,
-		// so the raw marker serves as a visual cue.
 		if strings.HasPrefix(line, ">") {
-			var block []string
+			var ql []string
 			for i < len(lines) && strings.HasPrefix(lines[i], ">") {
-				block = append(block, escapeHTML(lines[i]))
+				ql = append(ql, lines[i])
 				i++
 			}
-			out = append(out, "<pre>"+strings.Join(block, "\n")+"</pre>")
+			if useBlockquote {
+				// Telegram: real <blockquote> — strip the > markers, keep inline
+				// formatting. Legacy parse_mode=HTML does NOT support <br>; line
+				// breaks inside the quote are plain "\n" (see the docs' example).
+				var b []string
+				for _, l := range ql {
+					q := strings.TrimPrefix(strings.TrimPrefix(l, ">"), " ")
+					b = append(b, convertInline(escapeHTML(q), false))
+				}
+				out = append(out, "<blockquote>"+strings.Join(b, "\n")+"</blockquote>")
+			} else {
+				// MAX: keep the legacy <pre> with raw markers (blockquote unverified).
+				var b []string
+				for _, l := range ql {
+					b = append(b, escapeHTML(l))
+				}
+				out = append(out, "<pre>"+strings.Join(b, "\n")+"</pre>")
+			}
 			continue
 		}
 

@@ -137,8 +137,28 @@ func TestConvertRichFenceLangSanitized(t *testing.T) {
 func TestConvertLegacyLinkUnchanged(t *testing.T) {
 	// Legacy Convert keeps its previous unconditional link behavior — no URL
 	// validation — so non-rich output stays byte-identical.
-	if got := Convert("[x](foo/bar)"); !strings.Contains(got, `<a href="foo/bar">x</a>`) {
+	if got := Convert("[x](foo/bar)", false); !strings.Contains(got, `<a href="foo/bar">x</a>`) {
 		t.Errorf("legacy link behavior changed: %s", got)
+	}
+}
+
+func TestConvertBlockquote(t *testing.T) {
+	// Telegram (useBlockquote=true): real <blockquote> — markers stripped, inline
+	// kept, lines joined with "\n" (legacy parse_mode=HTML has NO <br>).
+	if got := Convert("> a\n> **b**", true); got != "<blockquote>a\n<b>b</b></blockquote>" {
+		t.Errorf("tg blockquote: %q", got)
+	}
+	// MAX (useBlockquote=false): unchanged legacy <pre> with raw > markers.
+	if got := Convert("> a\n> b", false); got != "<pre>&gt; a\n&gt; b</pre>" {
+		t.Errorf("max pre: %q", got)
+	}
+	// Regression guard: legacy parse_mode=HTML rejects <br>, so Convert must never
+	// emit it (a <br> in a legacy message makes Telegram drop the WHOLE message to
+	// plain text, killing all formatting).
+	for _, flag := range []bool{true, false} {
+		if got := Convert("> q1\n> q2\n\npara **x**", flag); strings.Contains(got, "<br>") {
+			t.Errorf("legacy Convert(useBlockquote=%v) emitted <br>: %q", flag, got)
+		}
 	}
 }
 

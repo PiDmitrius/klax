@@ -517,7 +517,9 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	case "rich":
 		formatted = mdhtml.ConvertRich(text)
 	case "html":
-		formatted = mdhtml.Convert(text)
+		// Telegram parse_mode=HTML supports <blockquote>; MAX's support is
+		// unverified, so it keeps the legacy <pre> for quotes.
+		formatted = mdhtml.Convert(text, transportPrefix(msg.chatID) == "tg")
 	default:
 		formatted = text
 	}
