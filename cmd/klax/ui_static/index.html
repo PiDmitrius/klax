@@ -475,7 +475,13 @@ function renderLog(){
 }
 
 function push(created, e){
-  mergeOrPush(logs[created] = logs[created] || [], e);
+  const arr = logs[created] = logs[created] || [];
+  // For a background tab, never merge the FIRST event-since-leaving into an
+  // already-read last block: a merge wouldn't grow logs.length, so the unread
+  // badge / read-line would miss it (e.g. an assistant-only final). Force a fresh
+  // block so the new content is always counted and lands below the read-line.
+  if(created !== active && readMark[created] !== undefined && arr.length === readMark[created]) arr.push(e);
+  else mergeOrPush(arr, e);
   if(created===active) renderLog(); else renderTabs(); // background: refresh its unread badge
 }
 
@@ -532,6 +538,9 @@ function loadHistory(created, before){
       });
       savePending();
     }
+    // A full reload (reconnect) rebuilds logs from a fresh page — clamp a stale mark
+    // so the read-line invariant (readMark <= logs.length) always holds.
+    if(!before && readMark[created] !== undefined && readMark[created] > logs[created].length) readMark[created] = logs[created].length;
     offset[created] = data.more ? data.offset : 0;
     loaded[created] = true;
     if(created===active) renderLog();
@@ -648,7 +657,13 @@ function rollbackSend(created, time){
   }
   if(logs[created]){
     const i = logs[created].findIndex(e => e.cls === "user" && e.unix === time);
-    if(i !== -1){ logs[created].splice(i, 1); if(created === active) renderLog(); }
+    if(i !== -1){
+      logs[created].splice(i, 1);
+      // Removing an entry before the read mark shifts it — keep it on the same item,
+      // else a later background message wouldn't count as unread.
+      if(readMark[created] !== undefined && i < readMark[created]) readMark[created]--;
+      if(created === active) renderLog(); else renderTabs();
+    }
   }
 }
 
@@ -766,7 +781,14 @@ function closeSession(created, name){
     if(!ok) return;
     api("/api/close", { method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({ session: created }) })
-      .then(r => { if(!r.ok) r.text().then(t => showNotice(t.trim() || "не удалось закрыть")); });
+      .then(r => {
+        if(!r.ok){ r.text().then(t => showNotice(t.trim() || "не удалось закрыть")); return; }
+        // Drop all per-session client state so a later session reusing this
+        // (second-granular) created id can't inherit stale logs/readMark/pending.
+        delete logs[created]; delete loaded[created]; delete offset[created];
+        delete readMark[created]; delete pending[created]; busy.delete(created);
+        savePending();
+      });
   });
 }
 
