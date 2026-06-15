@@ -9,10 +9,11 @@ import (
 // UserIdentity maps platform-specific IDs to a canonical user.
 // Sessions in DMs are shared across platforms for the same user.
 type UserIdentity struct {
-	ID         string `json:"id"`              // canonical user ID (e.g. "claw")
-	TelegramID int64  `json:"tg_id,omitempty"` // Telegram user ID
-	MaxID      int64  `json:"mx_id,omitempty"` // MAX user ID
-	VKID       int64  `json:"vk_id,omitempty"` // VK user ID
+	ID         string `json:"id"`                 // canonical user ID (e.g. "claw")
+	TelegramID int64  `json:"tg_id,omitempty"`    // Telegram user ID
+	MaxID      int64  `json:"mx_id,omitempty"`    // MAX user ID
+	VKID       int64  `json:"vk_id,omitempty"`    // VK user ID
+	UIToken    string `json:"ui_token,omitempty"` // bearer token authenticating as this user in the web UI
 }
 
 // BackendConfig holds per-backend settings.
@@ -50,6 +51,14 @@ type Config struct {
 	// editMessageText with rich_message) instead of legacy parse_mode=HTML.
 	// Global, toggled via /rich on|off. Telegram only; MAX/VK stay legacy.
 	TelegramRich bool `json:"tg_rich,omitempty"`
+
+	// UIListen is the address the web UI server binds to (e.g. "127.0.0.1:8799").
+	// Empty disables the UI. Access is per-user via UserIdentity.UIToken.
+	UIListen string `json:"ui_listen,omitempty"`
+
+	// UITitle is the product name shown in the web UI (browser tab title and the
+	// login screen heading). Empty falls back to "klax".
+	UITitle string `json:"ui_title,omitempty"`
 }
 
 // GroupChat stores group mode settings for a chat.
@@ -65,6 +74,14 @@ func (c *Config) GetDefaultBackend() string {
 		return c.DefaultBackend
 	}
 	return "claude"
+}
+
+// GetUITitle returns the web UI product name, defaulting to "klax".
+func (c *Config) GetUITitle() string {
+	if c.UITitle != "" {
+		return c.UITitle
+	}
+	return "klax"
 }
 
 // BackendFor returns config for a named backend, falling back to legacy fields.

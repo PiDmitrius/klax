@@ -51,27 +51,31 @@ type runnerKey struct {
 }
 
 type daemon struct {
-	cfg        *config.Config
-	state      *session.State
-	transports map[string]transport.Transport // "tg" -> tg.Bot, "mx" -> max.Bot
-	formats    map[string]string              // "tg" -> "html", "vk" -> ""
-	disabled   map[string]bool                // disabled transports
-	pollCtx    map[string]context.CancelFunc  // cancel functions for poll goroutines
-	store      *session.Store
-	runners    map[runnerKey]*sessionRunner // (sessionKey, created) -> runner+queue
-	runnersMu  sync.Mutex
-	mu         sync.Mutex
-	draining   bool           // stop accepting new tasks, wait for current to finish
-	drainWg    sync.WaitGroup // tracks active sessionRunners for drain
-	sendPause  map[string]time.Time
-	sendFails  map[string]int
-	chatEvents map[string]uint64
-	identities map[int64]string  // telegram userID -> canonical user ID
-	maxIdents  map[int64]string  // max userID -> canonical user ID
-	vkIdents   map[int]string    // vk userID -> canonical user ID
-	groupChats map[string]string // chatID -> CWD for group mode chats
-	groupVerb  map[string]bool   // chatID -> verbose progress output for group mode chats
-	tgRich     atomic.Bool       // global: render Telegram replies as Rich Messages (/rich)
+	cfg           *config.Config
+	state         *session.State
+	transports    map[string]transport.Transport // "tg" -> tg.Bot, "mx" -> max.Bot
+	formats       map[string]string              // "tg" -> "html", "vk" -> ""
+	disabled      map[string]bool                // disabled transports
+	pollCtx       map[string]context.CancelFunc  // cancel functions for poll goroutines
+	sources       map[string]Source              // inbound channels by name (tg/mx/vk/ui)
+	store         *session.Store
+	runners       map[runnerKey]*sessionRunner // (sessionKey, created) -> runner+queue
+	runnersMu     sync.Mutex
+	mu            sync.Mutex
+	draining      bool           // stop accepting new tasks, wait for current to finish
+	drainWg       sync.WaitGroup // tracks active sessionRunners for drain
+	sendPause     map[string]time.Time
+	sendFails     map[string]int
+	chatEvents    map[string]uint64
+	identities    map[int64]string  // telegram userID -> canonical user ID
+	maxIdents     map[int64]string  // max userID -> canonical user ID
+	vkIdents      map[int]string    // vk userID -> canonical user ID
+	groupChats    map[string]string // chatID -> CWD for group mode chats
+	groupVerb     map[string]bool   // chatID -> verbose progress output for group mode chats
+	tgRich        atomic.Bool       // global: render Telegram replies as Rich Messages (/rich)
+	uiHub         *uiHub            // web UI event hub; nil when the UI is not configured
+	startedAt     time.Time         // daemon start (for the post-restart UI notice window)
+	startupNotice string            // restart/update banner handed to reconnecting UI clients
 }
 
 func startupBackoff(attempt int) time.Duration {
@@ -101,7 +105,18 @@ func isPermanentStartupError(err error) bool {
 }
 
 func hasConfiguredTransport(cfg *config.Config) bool {
-	return cfg.TelegramToken != "" || cfg.MaxToken != "" || cfg.VKToken != ""
+	if cfg.TelegramToken != "" || cfg.MaxToken != "" || cfg.VKToken != "" {
+		return true
+	}
+	// The web UI can be the only configured channel.
+	if cfg.UIListen != "" {
+		for _, u := range cfg.Users {
+			if u.UIToken != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func resolveSessionBackend(sess *session.Session, def *session.ScopeDefaults, globalDefault string) string {
@@ -252,6 +267,12 @@ func (d *daemon) sessionKey(chatID string) string {
 						return "user:" + canonical
 					}
 				}
+			}
+		case "ui":
+			// The UI authenticates as a canonical user, so raw is already that
+			// id. Share the session list with tg/mx/vk DMs for the same person.
+			if raw != "" {
+				return "user:" + raw
 			}
 		}
 	}
@@ -481,10 +502,39 @@ func runDaemon() {
 
 	d.tgRich.Store(cfg.TelegramRich)
 
+	// Register inbound sources. tg/mx/vk are the legacy poll loops wrapped as
+	// Sources; the web UI registers itself here too when configured.
+	d.sources = map[string]Source{}
+	if tgBot != nil {
+		d.sources["tg"] = &legacySource{name: "tg", poll: d.pollTG}
+	}
+	if maxBot != nil {
+		d.sources["mx"] = &legacySource{name: "mx", poll: d.pollMAX}
+	}
+	if vkBot != nil {
+		d.sources["vk"] = &legacySource{name: "vk", poll: d.pollVK}
+	}
+
+	// Web UI source (HTTP/SSE), gated by config. It joins the same canonical
+	// user identity, so its tabs share sessions with the messengers.
+	if cfg.UIListen != "" {
+		uiTokens, err := buildUITokens(cfg.Users)
+		if err != nil {
+			log.Fatalf("ui config: %v", err)
+		}
+		if len(uiTokens) > 0 {
+			d.uiHub = newUIHub()
+			d.transports["ui"] = &uiTransport{d: d}
+			d.formats["ui"] = ""
+			d.sources["ui"] = &uiServer{d: d, addr: cfg.UIListen, tokens: uiTokens}
+		}
+	}
+
 	writePID()
 	log.Printf("klax %s started (pid %d)", version, os.Getpid())
 
 	// Startup notification: if restart marker exists, notify users we're back.
+	d.startedAt = time.Now()
 	if m := readMarker(); m != nil {
 		var text string
 		switch m.Reason {
@@ -493,6 +543,9 @@ func runDaemon() {
 		default:
 			text = fmt.Sprintf("✅ klax перезапущен (v%s)", version)
 		}
+		// UI clients are still reconnecting at this point, so the broadcast below
+		// reaches none of them — hand it to each on (re)connect instead.
+		d.startupNotice = text
 		d.notifyAllUsers(text)
 		removeMarker()
 	}
@@ -519,30 +572,32 @@ func runDaemon() {
 	if vkBot != nil && !disabled["vk"] {
 		d.startPoll("vk")
 	}
+	if d.sources["ui"] != nil && !disabled["ui"] {
+		d.startPoll("ui")
+	}
 
 	// Block forever (goroutines do the work).
 	select {}
 }
 
-// startPoll starts the polling goroutine for the given transport.
+// startPoll starts the inbound source loop for the given name.
 func (d *daemon) startPoll(name string) {
 	d.mu.Lock()
-	// Stop existing poll if running.
+	// Stop existing loop if running.
 	if cancel, ok := d.pollCtx[name]; ok {
 		cancel()
+	}
+	src := d.sources[name]
+	if src == nil {
+		d.mu.Unlock()
+		log.Printf("poll start skipped: no source %q", name)
+		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	d.pollCtx[name] = cancel
 	d.mu.Unlock()
 
-	switch name {
-	case "tg":
-		go d.pollTG(ctx)
-	case "mx":
-		go d.pollMAX(ctx)
-	case "vk":
-		go d.pollVK(ctx)
-	}
+	go src.Run(ctx)
 	log.Printf("poll started: %s", name)
 }
 
@@ -581,6 +636,7 @@ func (d *daemon) notifyAllUsers(text string) {
 			d.sendMessage(chatID, "", text)
 		}
 	}
+	d.uiNotifyAll(text)
 }
 
 // startDrain puts the daemon into draining mode.
@@ -1136,32 +1192,45 @@ func (d *daemon) handleMessage(chatID, msgID, text string) {
 }
 
 func (d *daemon) handleMessageWithAttachments(chatID, msgID, text string, attachments []attachment) {
-	text = strings.TrimSpace(text)
-	if text == "" && len(attachments) == 0 {
+	d.handleInbound(Inbound{ChatID: chatID, MsgID: msgID, Text: text, Attachments: attachments})
+}
+
+// handleInbound is the unified intake for every source. It trims, ensures a
+// session, then routes: a "/"-command goes to handleCommand; in group mode the
+// trigger prefix is required; otherwise the message is queued. TargetCreated is
+// threaded to the enqueue so a UI tab can address a specific session (0 = the
+// active one, which every messenger uses).
+func (d *daemon) handleInbound(in Inbound) {
+	text := strings.TrimSpace(in.Text)
+	if text == "" && len(in.Attachments) == 0 {
 		return
 	}
 
 	// Ensure chat has at least one session.
-	sk := d.sessionKey(chatID)
-	d.ensureSessionWithCWD(sk, d.sessionCWD(chatID))
+	sk := d.sessionKey(in.ChatID)
+	d.ensureSessionWithCWD(sk, d.sessionCWD(in.ChatID))
 
-	// Handle built-in commands (allowed users only — enforced by poll loops)
-	if strings.HasPrefix(text, "/") {
-		d.handleCommand(chatID, msgID, text)
+	// Handle built-in commands (allowed users only — enforced by sources). The web
+	// UI opts out (RawMessage): it has no chat commands, so "/"-text is a message.
+	if !in.RawMessage && strings.HasPrefix(text, "/") {
+		d.handleCommand(in.ChatID, in.MsgID, text)
+		// A command may have changed the session list/state (/new, /switch,
+		// /model, ...) — refresh any UI tab strip watching this user.
+		d.broadcastSessions(sk)
 		return
 	}
 
 	// In group mode, require trigger prefix for all users
-	if d.isGroupChat(chatID) {
+	if d.isGroupChat(in.ChatID) {
 		if prompt, ok := stripGroupTrigger(text); ok {
-			d.enqueueWithAttachments(chatID, msgID, prompt, attachments)
+			d.enqueueToSession(in.ChatID, in.MsgID, prompt, in.Attachments, in.TargetCreated)
 		}
 		// No prefix — ignore silently
 		return
 	}
 
 	// Queue for Claude
-	d.enqueueWithAttachments(chatID, msgID, text, attachments)
+	d.enqueueToSession(in.ChatID, in.MsgID, text, in.Attachments, in.TargetCreated)
 }
 
 func (d *daemon) ensureSession(sessionKey string) {

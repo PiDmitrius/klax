@@ -1,0 +1,780 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__KLAX_UI_TITLE__</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='%231ec21e'/><stop offset='0.5' stop-color='%2300b500'/><stop offset='1' stop-color='%23008e00'/></linearGradient></defs><rect x='1.25' y='1.25' width='29.5' height='29.5' rx='8' fill='url(%23g)' stroke='%23006400' stroke-width='0.8'/><text x='16' y='23' font-family='ui-monospace,monospace' font-size='21' font-weight='bold' fill='%23ffffff' text-anchor='middle'>k</text></svg>">
+<style>
+  /* Light theme (default) */
+  :root {
+    --bg:#ffffff; --panel:#f5f6f8; --chat:#e6e8ec; --fg:#1f2328; --muted:#6b7280; --border:#e3e5ea;
+    --bubble-user:#dbeafe; --bubble-assistant:#ffffff; --tool-bg:#eef0f3; --tool-fg:#4b5563;
+    --code-bg:#eceef1; --error-bg:#fdecea; --error-fg:#b3261e; --accent:#2f6feb;
+    --dot:#c2c7d0; --dot-busy:#d9a441;
+  }
+  html[data-theme="dark"] {
+    --bg:#15171c; --panel:#1a1d23; --chat:#15171c; --fg:#d8dee9; --muted:#8b92a0; --border:#2a2e37;
+    --bubble-user:#28344a; --bubble-assistant:#232730; --tool-bg:#1c1f26; --tool-fg:#9aa4b6;
+    --code-bg:#14161b; --error-bg:#3a2326; --error-fg:#f0b3b3; --accent:#7aa2f7;
+    --dot:#4b5263; --dot-busy:#d9a441;
+  }
+  * { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: var(--muted) transparent; }
+  ::-webkit-scrollbar { width: 11px; height: 11px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background-color: var(--muted); border-radius: 6px;
+                              border: 2px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background-color: var(--fg); }
+  body { margin: 0; font: 14px/1.5 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+         background: var(--bg); color: var(--fg); height: 100vh; height: 100dvh;
+         display: flex; flex-direction: column; }
+  #gate { margin: auto; max-width: 360px; padding: 24px; text-align: center; }
+  #gate input { width: 100%; padding: 10px; margin: 12px 0; border-radius: 8px;
+                border: 1px solid var(--border); background: var(--panel); color: var(--fg); }
+  button { cursor: pointer; border: 1px solid var(--border); background: var(--panel); color: var(--fg);
+           border-radius: 8px; padding: 8px 12px; }
+  button:hover { border-color: var(--accent); }
+  #app { display: none; flex-direction: column; flex: 1; min-height: 0; }
+  #app.active { display: flex; }
+
+  /* Single top panel: tabs + controls */
+  #bar { display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+         background: var(--panel); border-bottom: 1px solid var(--border); }
+  #bar .logo { flex: none; display: block; filter: drop-shadow(0 1px 1px rgba(0,0,0,.14)); }
+  #tabs { display: flex; gap: 4px; overflow-x: auto; flex: 1; min-width: 0; }
+  #bar > button { flex: none; padding: 4px 10px; font-size: 15px; line-height: 1; }
+  .tab { padding: 6px 12px; border-radius: 8px; white-space: nowrap; cursor: pointer;
+         border: 1px solid transparent; display: flex; align-items: center; gap: 6px; }
+  .tab.active { background: var(--bg); border-color: var(--border); }
+  .tab .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dot); }
+  .tab.busy .dot { background: var(--dot-busy); animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  .tab.unread { font-weight: 600; }
+  .tab .badge { background: var(--accent); color: #fff; font-size: 11px; font-weight: 700;
+                min-width: 16px; height: 16px; padding: 0 5px; border-radius: 9px;
+                display: inline-flex; align-items: center; justify-content: center; }
+  .tab .queued { font-size: 11px; color: var(--muted); }
+  .qnote { margin-left: 10px; font-size: 12px; color: var(--muted); }
+  .tab .tname { overflow: hidden; text-overflow: ellipsis; max-width: 22ch; }
+  .tab .tx { margin-left: 2px; color: var(--muted); opacity: 0; font-size: 12px; cursor: pointer; }
+  .tab:hover .tx, .tab.active .tx { opacity: .65; }
+  .tab .tx:hover { opacity: 1; color: var(--error-fg); }
+  .stop { margin-left: 10px; padding: 2px 8px; font-size: 12px; border-radius: 6px; cursor: pointer;
+          background: var(--error-bg); color: var(--error-fg); border: 1px solid var(--border); }
+
+  /* Centred conversation column — on wide desktop the chat does not span the
+     whole screen, so left (klax) and right (user) messages stay close. */
+  #logwrap { flex: 1; min-height: 0; position: relative; display: flex; }
+  #log { flex: 1; overflow-y: auto; scrollbar-gutter: stable both-edges;
+         display: flex; flex-direction: column; align-items: center; background: var(--chat); }
+  #logcol { width: 100%; max-width: 820px; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { position: relative; padding: 8px 12px; border-radius: 10px; word-wrap: break-word; }
+  /* klax-side blocks fill the column for a consistent width — only the colour
+     differs between text, tool, error and command output. */
+  .msg.assistant, .msg.tool, .msg.error, .msg.notice { align-self: stretch; }
+  .msg.user { align-self: flex-end; max-width: 85%; background: var(--bubble-user); }
+  .msg.assistant { background: var(--bubble-assistant); }
+  .msg.system { align-self: center; font-size: 12px; color: var(--muted); background: transparent; }
+  .msg.tool { font-family: ui-monospace, monospace; font-size: 12px; color: var(--tool-fg); background: var(--tool-bg); }
+  .msg.error { background: var(--error-bg); color: var(--error-fg); }
+  .msg.notice { background: var(--tool-bg); color: var(--fg); font-size: 12px; }
+  /* typing indicator (work-in-progress marker, like Telegram's "...") */
+  .msg.typing { align-self: flex-start; width: fit-content; padding: 12px 14px; }
+  .dots { display: inline-flex; gap: 5px; align-items: center; }
+  .dots span { width: 7px; height: 7px; border-radius: 50%; background: var(--muted);
+               animation: blink 1.2s infinite both; }
+  .dots span:nth-child(2) { animation-delay: .2s; }
+  .dots span:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+
+  /* Every block is separated by exactly one line — consistent everywhere, so
+     headings clearly stand out without leaving oversized gaps. */
+  .body p, .body h3, .body ul, .body pre { margin: 1.5em 0; }
+  .body > :first-child { margin-top: 0; }
+  .body > :last-child { margin-bottom: 0; }
+  .body h3 { font-size: 1.05em; font-weight: 700; }
+  .body ul { padding-left: 1.4em; }
+  .body pre { background: var(--code-bg); padding: 8px; border-radius: 6px; overflow-x: auto; }
+  .body code { background: var(--code-bg); padding: 1px 4px; border-radius: 4px; }
+  .body pre code { background: none; padding: 0; }
+
+  /* cmon-style timestamp: subtle, top-right, revealed on hover */
+  .meta { position: absolute; top: 2px; right: 6px; font-size: 11px; color: var(--muted);
+          opacity: 0; transition: opacity .15s; pointer-events: none; white-space: nowrap;
+          background: var(--panel); padding: 0 4px; border-radius: 4px; }
+  .msg:hover .meta { opacity: 1; }
+  #more { align-self: center; font-size: 12px; }
+
+  #tobottom { position: absolute; right: 16px; bottom: 14px; width: 32px; height: 32px;
+              border-radius: 50%; padding: 0; border: none; cursor: pointer;
+              display: flex; align-items: center; justify-content: center;
+              box-shadow: 0 2px 8px rgba(0,0,0,.3); background: #6b7280; color: #fff; }
+  #tobottom:hover { filter: brightness(1.08); }
+  #tobottom svg { display: block; }
+  #composer { display: flex; justify-content: center; padding: 10px 16px;
+              border-top: 1px solid var(--border); background: var(--panel); }
+  #cbar { position: relative; width: 100%; max-width: 788px; }
+  #cbar textarea { display: block; width: 100%; resize: none; min-height: 44px; max-height: 240px; height: 44px;
+                   padding: 11px 48px 11px 14px; border-radius: 12px; border: 1px solid var(--border);
+                   background: var(--bg); color: var(--fg); font: inherit; line-height: 1.4;
+                   overflow-y: auto; scrollbar-width: none; }
+  #cbar textarea::-webkit-scrollbar { display: none; }
+  #cbar .send { position: absolute; right: 7px; top: 50%; transform: translateY(-50%); width: 32px; height: 32px;
+                padding: 0; border: none; border-radius: 50%; background: var(--accent); color: #fff; cursor: pointer;
+                display: flex; align-items: center; justify-content: center; }
+  #cbar .send:hover { filter: brightness(1.08); }
+  #cbar .send svg { display: block; }
+  #notice { position: fixed; bottom: 84px; right: 16px; max-width: 40ch;
+            background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px;
+            font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.25);
+            opacity: 0; transition: opacity .2s; pointer-events: none; }
+  #notice.show { opacity: 1; }
+  /* custom dialog (replaces system confirm/prompt, keeps the UI style) */
+  #modal { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center;
+           background: rgba(0,0,0,.45); }
+  .modal-box { width: 340px; max-width: 90vw; background: var(--bg); color: var(--fg);
+               border: 1px solid var(--border); border-radius: 12px; padding: 18px;
+               box-shadow: 0 12px 44px rgba(0,0,0,.35); }
+  .modal-msg { margin-bottom: 12px; }
+  .modal-input { width: 100%; padding: 9px 11px; margin-bottom: 14px; border-radius: 8px;
+                 border: 1px solid var(--border); background: var(--panel); color: var(--fg); font: inherit; }
+  .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+  .modal-actions button { padding: 7px 16px; }
+  .modal-ok { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .modal-ok.danger { background: #d92d20; border-color: #d92d20; }
+  /* per-session settings dialog (double-click a tab) */
+  #smodal { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center;
+            background: rgba(0,0,0,.45); }
+  .smodal-box { width: 430px; max-width: 92vw; background: var(--bg); color: var(--fg);
+                border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px 18px;
+                box-shadow: 0 12px 44px rgba(0,0,0,.35); }
+  .smodal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .smodal-title { font-weight: 600; font-size: 15px; }
+  .smodal-x { background: none; border: none; color: var(--muted); font-size: 15px; cursor: pointer;
+              line-height: 1; padding: 2px 6px; border-radius: 6px; }
+  .smodal-x:hover { color: var(--error-fg); }
+  .srow { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 32px; margin-bottom: 8px; }
+  .srow > label { color: var(--muted); font-size: 13px; flex: none; }
+  .srow .sctl { flex: 1; display: flex; justify-content: flex-end; }
+  .srow select, .sname { width: 240px; max-width: 100%; padding: 7px 9px; border-radius: 8px;
+               border: 1px solid var(--border); background: var(--panel); color: var(--fg); font: inherit; }
+  .srow select:disabled, .sname:disabled, .stoggle input:disabled { opacity: .45; cursor: not-allowed; }
+  .stoggle { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; font-size: 13px; }
+  .stoggle input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+  .shint { color: var(--muted); font-size: 11px; margin: 0 0 8px; }
+  .sfield { margin-bottom: 10px; }
+  .sfield > label { display: block; color: var(--muted); font-size: 13px; margin-bottom: 5px; }
+  .sfield input, .sfield textarea { width: 100%; padding: 7px 9px; border-radius: 8px;
+                 border: 1px solid var(--border); background: var(--panel); color: var(--fg); font: inherit; }
+  .sfield textarea { resize: vertical; min-height: 38px; line-height: 1.4; }
+  .sfield input:disabled, .sfield textarea:disabled { opacity: .45; cursor: not-allowed; }
+  .sbusy { background: var(--tool-bg); color: var(--tool-fg); border-radius: 8px; padding: 7px 10px;
+           font-size: 12px; margin-bottom: 12px; }
+  .ssep { height: 1px; background: var(--border); margin: 12px 0; opacity: .6; }
+  .sctx-label { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+  .sctx-bar { height: 7px; border-radius: 4px; background: var(--tool-bg); overflow: hidden; }
+  .sctx-fill { height: 100%; background: var(--accent); border-radius: 4px; transition: width .25s; }
+  .sctx-fill.hot { background: var(--dot-busy); }
+  .sctx-fill.crit { background: var(--error-fg); }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div id="gate">
+  <h2>__KLAX_UI_TITLE__</h2>
+  <p>Введите токен доступа</p>
+  <input id="token" type="password" placeholder="ui_token" autocomplete="off">
+  <button onclick="saveToken()">Войти</button>
+</div>
+
+<div id="app">
+  <div id="bar">
+    <svg class="logo" viewBox="0 0 32 32" width="26" height="26" aria-label="klax"><defs><linearGradient id="lg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1ec21e"/><stop offset="0.5" stop-color="#00b500"/><stop offset="1" stop-color="#008e00"/></linearGradient></defs><rect x="1.25" y="1.25" width="29.5" height="29.5" rx="8" fill="url(#lg)" stroke="#006400" stroke-width="0.8"/><text x="16" y="23" font-family="ui-monospace,monospace" font-size="21" font-weight="bold" fill="#ffffff" text-anchor="middle">k</text></svg>
+    <div id="tabs"></div>
+    <button class="new" onclick="newSession()" title="Новая сессия">+</button>
+    <button id="theme" onclick="toggleTheme()" title="Тема">🌙</button>
+  </div>
+  <div id="logwrap">
+    <div id="log"><div id="logcol"></div></div>
+    <button id="tobottom" class="hidden" onclick="scrollBottom()" title="Вниз" aria-label="Вниз"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M6 13l6 6 6-6"/></svg></button>
+  </div>
+  <div id="composer">
+    <div id="cbar">
+      <textarea id="input" rows="1" placeholder="Сообщение…"></textarea>
+      <button class="send" onclick="send()" title="Отправить" aria-label="Отправить"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button>
+    </div>
+  </div>
+</div>
+<div id="notice"></div>
+<div id="modal" class="hidden">
+  <div class="modal-box">
+    <div class="modal-msg"></div>
+    <input class="modal-input hidden" type="text" autocomplete="off">
+    <div class="modal-actions">
+      <button class="modal-cancel">Отмена</button>
+      <button class="modal-ok">OK</button>
+    </div>
+  </div>
+</div>
+<div id="smodal" class="hidden">
+  <div class="smodal-box">
+    <div class="smodal-head">
+      <span class="smodal-title">Настройки сессии</span>
+      <button class="smodal-x" onclick="closeSettings()" title="Закрыть">✕</button>
+    </div>
+    <div id="sbody"></div>
+  </div>
+</div>
+
+<script>
+const TOKEN_KEY = "klax_ui_token", THEME_KEY = "klax_theme2"; // bumped: ignore the old auto-persisted theme so the default is light
+let token = localStorage.getItem(TOKEN_KEY) || "";
+let sessions = [];          // tab strip
+let active = 0;             // active session Created
+let busy = new Set();       // sessions with a turn in flight (turn_start/final/error)
+let logs = {};              // created -> array of {cls, html, unix}
+let loaded = {};            // created -> history fetched?
+let offset = {};            // created -> pagination cursor
+let unread = {};            // created -> count of new klax messages while not viewing the tab
+let pending = {};           // created -> [{text,time}] in-flight user echoes, persisted across reload
+let es = null, opened = false, stick = true, seedBusy = true, settingsFor = 0;
+
+function esc(s){ return (s||"").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function stripTags(s){ return (s||"").replace(/<[^>]+>/g, ""); }
+
+// In-flight user messages persist in localStorage so a page reload before the
+// turn is written to the transcript doesn't lose them. Entries older than 30 min
+// are dropped (the transcript has them by then).
+function loadPending(){
+  try {
+    const p = JSON.parse(localStorage.getItem("klax_pending") || "{}");
+    const cutoff = Date.now() - 1800000;
+    for(const k in p){ p[k] = (p[k]||[]).filter(m => m.time > cutoff); if(!p[k].length) delete p[k]; }
+    return p;
+  } catch(e){ return {}; }
+}
+function savePending(){ try { localStorage.setItem("klax_pending", JSON.stringify(pending)); } catch(e){} }
+pending = loadPending();
+// Command output is Telegram HTML; render it as plain text but keep line breaks.
+function noticeText(s){ return stripTags((s||"").replace(/<br\s*\/?>/gi, "\n")).trim(); }
+
+// --- theme ---
+function applyTheme(t){
+  document.documentElement.dataset.theme = t;
+  localStorage.setItem(THEME_KEY, t);
+  const b = document.getElementById("theme");
+  if(b) b.textContent = (t === "dark" ? "☀️" : "🌙");
+}
+function toggleTheme(){
+  applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+}
+applyTheme(localStorage.getItem(THEME_KEY) || "light");
+
+// --- time (cmon-style: hover-revealed delta @ HH:MM:SS) ---
+function fmtTime(unix){
+  if(!unix) return "";
+  const d = new Date(unix), p = n => String(n).padStart(2,"0");
+  return p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds());
+}
+function fmtDelta(ms){
+  if(ms < 1000) return ms+"ms";
+  const s = ms/1000; if(s < 60) return s.toFixed(1)+"s";
+  const m = s/60;    if(m < 60) return m.toFixed(1)+"min";
+  return (m/60).toFixed(1)+"h";
+}
+
+// Inline-level Markdown applied to a single line (escapes first, then a safe set).
+function inline(s){
+  let h = esc(s);
+  h = h.replace(/`([^`]+)`/g, '<code>$1</code>');
+  h = h.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+  h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  return h;
+}
+
+// Block-level Markdown: produces real <p>/<h3>/<ul>/<pre> blocks so spacing is a
+// single uniform one-line margin (CSS), never <br>-stacked gaps. Code fences are
+// isolated by splitting so their contents are never transformed.
+function md(src){
+  let html = "";
+  (src||"").split(/(```[\s\S]*?```)/g).forEach(seg => {
+    const fence = seg.match(/^```(\w*)\n?([\s\S]*?)```$/);
+    if(fence){ html += '<pre><code>'+esc(fence[2].replace(/\n+$/,""))+'</code></pre>'; return; }
+    const lines = seg.split("\n");
+    let para = [];
+    const flush = () => { if(para.length){ html += '<p>'+para.map(inline).join("<br>")+'</p>'; para = []; } };
+    for(let i = 0; i < lines.length; i++){
+      const line = lines[i];
+      if(line.trim() === ""){ flush(); continue; }
+      const hm = line.match(/^#{1,6} ?(.*)$/);
+      if(hm){ flush(); html += '<h3>'+inline(hm[1])+'</h3>'; continue; }
+      if(/^\s*[-*] /.test(line)){
+        flush();
+        let items = [];
+        while(i < lines.length && /^\s*[-*] /.test(lines[i])){
+          items.push('<li>'+inline(lines[i].replace(/^\s*[-*] /,""))+'</li>'); i++;
+        }
+        i--;
+        html += '<ul>'+items.join("")+'</ul>';
+        continue;
+      }
+      para.push(line);
+    }
+    flush();
+  });
+  return html;
+}
+
+function api(path, opts){
+  opts = opts || {};
+  opts.headers = Object.assign({ "Authorization": "Bearer "+token }, opts.headers||{});
+  return fetch(path, opts);
+}
+
+function saveToken(){
+  token = document.getElementById("token").value.trim();
+  if(!token) return;
+  localStorage.setItem(TOKEN_KEY, token);
+  start();
+}
+
+function showNotice(text){
+  const n = document.getElementById("notice");
+  n.textContent = text; n.classList.add("show");
+  clearTimeout(n._t); n._t = setTimeout(() => n.classList.remove("show"), 4000);
+}
+
+// Themed modal dialog (replaces system confirm/prompt). Resolves to false/null on
+// cancel; to true (confirm) or the entered string (prompt) on OK.
+function showModal(opts){
+  return new Promise(resolve => {
+    const m = document.getElementById("modal");
+    const inp = m.querySelector(".modal-input");
+    const ok = m.querySelector(".modal-ok");
+    const cancel = m.querySelector(".modal-cancel");
+    m.querySelector(".modal-msg").textContent = opts.message || "";
+    if(opts.input){ inp.classList.remove("hidden"); inp.value = opts.value || ""; }
+    else inp.classList.add("hidden");
+    ok.textContent = opts.okText || "OK";
+    ok.classList.toggle("danger", !!opts.danger);
+    m.classList.remove("hidden");
+    setTimeout(() => { if(opts.input){ inp.focus(); inp.select(); } else ok.focus(); }, 0);
+    function done(result){
+      m.classList.add("hidden");
+      ok.onclick = cancel.onclick = m.onclick = null;
+      document.removeEventListener("keydown", onKey, true);
+      resolve(result);
+    }
+    function onKey(e){
+      if(e.key === "Escape"){ e.preventDefault(); done(opts.input ? null : false); }
+      else if(opts.input && e.key === "Enter" && e.target === inp){ e.preventDefault(); done(inp.value); }
+    }
+    ok.onclick = () => done(opts.input ? inp.value : true);
+    cancel.onclick = () => done(opts.input ? null : false);
+    m.onclick = (e) => { if(e.target === m) done(opts.input ? null : false); };
+    document.addEventListener("keydown", onKey, true);
+  });
+}
+function uiConfirm(message, okText, danger){ return showModal({ message, okText, danger }); }
+function uiPrompt(message, value){ return showModal({ message, input: true, value }); }
+
+function renderTabs(){
+  const el = document.getElementById("tabs");
+  el.innerHTML = "";
+  sessions.forEach(s => {
+    const t = document.createElement("div");
+    const n = unread[s.created] || 0;
+    const q = s.queued || 0;
+    t.className = "tab" + (s.created===active?" active":"") + (busy.has(s.created)?" busy":"") + (n>0?" unread":"");
+    t.onclick = () => selectTab(s.created);
+    t.ondblclick = () => openSettings(s.created);
+    t.innerHTML = '<span class="dot"></span><span class="tname">' + esc(s.name || ("#"+s.created)) + '</span>'
+                + (q>0 ? '<span class="queued">⏳'+q+'</span>' : "")
+                + (n>0 ? '<span class="badge">'+n+'</span>' : "")
+                + '<span class="tx" title="Закрыть">✕</span>';
+    t.querySelector(".tx").onclick = (e) => { e.stopPropagation(); closeSession(s.created, s.name); };
+    el.appendChild(t);
+  });
+}
+
+function entry(cls, html, unix){ return { cls, html, unix: unix||0 }; }
+
+// Consecutive same-kind blocks collapse into one bubble: tools (one line per
+// tool) and assistant text (narration + answer), matching how history shows a
+// turn as a single consolidated block.
+function mergeOrPush(arr, e){
+  const last = arr[arr.length-1];
+  if(last && last.cls === e.cls && (e.cls === "tool" || e.cls === "assistant")){
+    last.html += (e.cls === "tool" ? "<br>" : "") + e.html;
+    if(e.unix) last.unix = e.unix;
+  } else {
+    arr.push(e);
+  }
+}
+
+function nearBottom(){
+  const el = document.getElementById("log");
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+}
+function toggleToBottom(){
+  document.getElementById("tobottom").classList.toggle("hidden", stick);
+}
+function scrollBottom(){
+  const el = document.getElementById("log");
+  el.scrollTop = el.scrollHeight;
+  stick = true; toggleToBottom();
+}
+
+function renderLog(){
+  const el = document.getElementById("logcol");
+  el.innerHTML = "";
+  if (offset[active] > 0){
+    const m = document.createElement("button");
+    m.id = "more"; m.textContent = "↑ Загрузить раньше";
+    m.onclick = () => loadHistory(active, offset[active]);
+    el.appendChild(m);
+  }
+  let prev = 0;
+  (logs[active] || []).forEach(it => {
+    const d = document.createElement("div");
+    d.className = "msg " + it.cls;
+    let meta = fmtTime(it.unix);
+    if(it.cls !== "user" && prev && it.unix) meta = fmtDelta(it.unix - prev) + " @ " + meta;
+    if(it.unix) prev = it.unix;
+    d.innerHTML = '<div class="body">'+it.html+'</div>' + (meta ? '<span class="meta">'+esc(meta)+'</span>' : "");
+    el.appendChild(d);
+  });
+  if(busy.has(active)){
+    const s = sessions.find(x => x.created === active);
+    const q = (s && s.queued) || 0;
+    const t = document.createElement("div");
+    t.className = "msg assistant typing";
+    t.innerHTML = '<span class="dots"><span></span><span></span><span></span></span>'
+                + (q>0 ? '<span class="qnote">+'+q+' в очереди</span>' : "")
+                + '<button class="stop" onclick="abortActive()" title="Прервать">✕</button>';
+    el.appendChild(t);
+  }
+  if(stick) scrollBottom(); else toggleToBottom();
+}
+
+function push(created, e){
+  mergeOrPush(logs[created] = logs[created] || [], e);
+  if(created===active) renderLog();
+}
+
+// A history item can carry both assistant text and tool calls — render both, so
+// prose is never hidden by a co-located tool_use; tools show their rich label.
+function itemToEntries(it){
+  const u = it.time ? Date.parse(it.time) : 0;
+  if(it.role === "user") return [entry("user", md(it.text), u)];
+  if(it.role === "system" && it.kind === "compact") return [entry("system", "🗜 контекст свёрнут", u)];
+  if(it.role === "system" && it.kind === "error") return [entry("error", esc(it.text||"ошибка"), u)];
+  if(it.role === "assistant"){
+    const out = [];
+    if(it.text) out.push(entry("assistant", md(it.text), u));
+    (it.tools||[]).forEach(t => out.push(entry("tool", esc(t.label||t.name), u)));
+    return out;
+  }
+  return [entry("system", esc(it.text||""), u)];
+}
+
+function selectTab(created){
+  active = created;
+  unread[created] = 0;
+  stick = true;
+  if(location.hash !== "#"+created) location.hash = created;
+  renderTabs();
+  if(!loaded[created]){ logs[created]=[]; loadHistory(created, 0); }
+  else renderLog();
+}
+
+function loadHistory(created, before){
+  const q = "session="+created + (before? "&before="+before : "");
+  api("/api/transcript?"+q).then(r=>r.json()).then(data => {
+    const prepend = [];
+    (data.turns||[]).forEach(it => itemToEntries(it).forEach(e => mergeOrPush(prepend, e)));
+    logs[created] = prepend.concat(logs[created] || []);
+    if(!before){
+      // Re-show in-flight user messages not yet in the transcript (sent, queued, or
+      // mid-turn); drop those the transcript now covers. Exact match is sufficient
+      // and safe: the client sends no attachments, so an accepted message appears
+      // verbatim as a user turn, and a refused send is rolled back at send time and
+      // never reaches here. Match as a MULTISET — consume one transcript user-turn
+      // per pending entry — so N identical pending sends clear against N turns, not
+      // all off the first (a plain Set would over-clear duplicate "ok"-style sends).
+      const counts = {};
+      (data.turns||[]).filter(it => it.role === "user").forEach(it => { counts[it.text] = (counts[it.text]||0) + 1; });
+      pending[created] = (pending[created] || []).filter(p => {
+        if(counts[p.text] > 0){ counts[p.text]--; return false; }
+        logs[created].push(entry("user", md(p.text), p.time));
+        return true;
+      });
+      savePending();
+    }
+    offset[created] = data.more ? data.offset : 0;
+    loaded[created] = true;
+    if(created===active) renderLog();
+  }).catch(()=>{ loaded[created]=true; });
+}
+
+function onEvent(ev){
+  const d = JSON.parse(ev.data);
+  switch(d.type){
+    case "sessions":
+      sessions = d.sessions || [];
+      // Clear stale spinners; and on the FIRST snapshot after a (re)connect,
+      // SEED busy from it so a turn already running survives a page reload
+      // (its turn_start was missed). Later snapshots only clear — turn_start/final
+      // own turning the dot on, so a stale post-turn snapshot can't re-stick it.
+      sessions.forEach(s => {
+        if(s.busy){ if(seedBusy) busy.add(s.created); }
+        else busy.delete(s.created);
+      });
+      seedBusy = false;
+      if(!sessions.find(s=>s.created===active)){
+        const want = parseInt(location.hash.slice(1));
+        const a = sessions.find(s=>s.created===want) || sessions.find(s=>s.active) || sessions[0];
+        if(a){ selectTab(a.created); return; }
+      }
+      renderTabs();
+      if(busy.has(active)) renderLog(); // refresh the typing indicator's queue count
+      break;
+    case "turn_start":
+      busy.add(d.session); renderTabs();
+      if(d.session === active) renderLog();
+      maybeRefreshSettings(d.session);
+      break;
+    case "progress":
+      // Narration is the assistant's own text (intermediate blocks between tools)
+      // — render it like the final answer (formatted bubble), not gray plain text.
+      if(d.kind === "tool") push(d.session, entry("tool", esc(d.text), Date.now()));
+      else push(d.session, entry("assistant", md(d.text), Date.now()));
+      break;
+    case "final":
+      busy.delete(d.session);
+      if(d.session !== active) unread[d.session] = (unread[d.session]||0) + 1;
+      renderTabs();
+      maybeRefreshSettings(d.session);
+      push(d.session, entry("assistant", md(d.markdown), Date.now()));
+      break;
+    case "error":
+      busy.delete(d.session);
+      if(d.session !== active) unread[d.session] = (unread[d.session]||0) + 1;
+      renderTabs();
+      maybeRefreshSettings(d.session);
+      push(d.session, entry("error", esc(d.text||"ошибка"), Date.now()));
+      break;
+    case "compact":
+      push(d.session, entry("system", "🗜 контекст свёрнут", Date.now()));
+      break;
+    case "notice": {
+      const t = noticeText(d.text);
+      push(active, entry("notice", esc(t).replace(/\n/g, "<br>"), Date.now()));
+      showNotice(t);
+      break;
+    }
+  }
+}
+
+function connect(){
+  if(es) es.close();
+  es = new EventSource("/api/events?token="+encodeURIComponent(token));
+  es.onmessage = onEvent;
+  es.onopen = () => {
+    seedBusy = true; // recover in-flight busy state from the next sessions snapshot
+    // On a reconnect (not the first open), re-sync the active tab from the
+    // transcript: any progress/final lost while disconnected is in the JSONL.
+    if(opened && active){ loaded[active]=false; logs[active]=[]; stick=true; loadHistory(active, 0); }
+    opened = true;
+  };
+  es.onerror = () => { /* EventSource auto-reconnects */ };
+}
+
+function autoGrow(){
+  const ta = document.getElementById("input");
+  ta.style.height = "auto";
+  // +2 compensates the 1px top/bottom border (box-sizing:border-box) so the box
+  // fits the content exactly and no spurious scrollbar appears.
+  ta.style.height = Math.min(ta.scrollHeight + 2, 240) + "px";
+}
+
+function send(){
+  const ta = document.getElementById("input");
+  const text = ta.value.trim();
+  if(!text) return;
+  if(!active){ showNotice("нет выбранной вкладки"); return; }
+  ta.value = "";
+  ta.style.height = "";
+  const now = Date.now(), target = active;
+  push(target, entry("user", md(text), now));
+  (pending[target] = pending[target] || []).push({ text, time: now });
+  savePending();
+  api("/api/send", { method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ session: target, text }) })
+    .then(r => {
+      // A definitive refusal (e.g. 503 while klax drains for a restart) means the
+      // turn was NOT accepted — roll back so it can't linger as a reload ghost.
+      if(!r.ok){ rollbackSend(target, now); showNotice(r.status===503 ? "klax перезапускается — сообщение не принято" : "ошибка отправки ("+r.status+")"); }
+    })
+    .catch(()=> showNotice("ошибка сети — доставка не подтверждена")); // unknown: keep pending
+}
+
+// Undo an optimistic send the backend refused: drop its pending entry (so a reload
+// won't resurrect it) and remove its echo bubble.
+function rollbackSend(created, time){
+  if(pending[created]){
+    pending[created] = pending[created].filter(p => p.time !== time);
+    if(!pending[created].length) delete pending[created];
+    savePending();
+  }
+  if(logs[created]){
+    const i = logs[created].findIndex(e => e.cls === "user" && e.unix === time);
+    if(i !== -1){ logs[created].splice(i, 1); if(created === active) renderLog(); }
+  }
+}
+
+function abortActive(){
+  if(!active) return;
+  const target = active;
+  api("/api/abort", { method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ session: target }) })
+    .then(r => {
+      // Abort drops the queue server-side; those queued UI sends will never reach a
+      // transcript turn, so clear their pending echoes to avoid reload ghosts. The
+      // running turn's user message is already in the transcript, so it survives.
+      if(r.ok && pending[target]){ delete pending[target]; savePending(); }
+    });
+}
+
+function newSession(){
+  api("/api/new", { method:"POST" }).then(r => r.json()).then(d => { if(d.created) selectTab(d.created); })
+    .catch(() => showNotice("не удалось создать сессию"));
+}
+
+// --- Per-session settings dialog (double-click a tab) ---
+function ctxClass(pct){ return pct >= 90 ? "crit" : pct >= 70 ? "hot" : ""; }
+
+function fetchSettings(created){
+  return api("/api/settings?session="+created).then(r => r.ok ? r.json() : Promise.reject(r));
+}
+
+function openSettings(created){
+  settingsFor = created;
+  document.getElementById("smodal").classList.remove("hidden");
+  document.getElementById("sbody").innerHTML = '<div class="shint">Загрузка…</div>';
+  fetchSettings(created).then(d => { if(settingsFor === created) renderSettings(d); })
+    .catch(() => { if(settingsFor === created) document.getElementById("sbody").innerHTML = '<div class="shint">Не удалось загрузить настройки</div>'; });
+}
+
+function closeSettings(){ settingsFor = 0; document.getElementById("smodal").classList.add("hidden"); }
+
+function renderSettings(d){
+  if(settingsFor !== d.created) return;
+  const opts = (list, cur, withDefault) => {
+    let h = withDefault ? '<option value=""'+(cur===""?" selected":"")+'>По умолчанию</option>' : "";
+    list.forEach(o => { h += '<option value="'+esc(o.value)+'"'+(o.value===cur?" selected":"")+'>'+esc(o.label)+'</option>'; });
+    return h;
+  };
+  const lock = d.busy, dis = lock ? " disabled" : "";
+  let h = "";
+  if(lock) h += '<div class="sbusy">⏳ Сессия занята — параметры запуска нельзя менять до завершения.</div>';
+  h += '<div class="srow"><label>Имя</label><div class="sctl"><input class="sname" type="text" maxlength="80" value="'+esc(d.name)+'"></div></div>';
+  h += '<div class="srow"><label>Движок</label><div class="sctl"><select id="s-backend"'+((d.backend_locked||lock)?" disabled":"")+'>'+opts(d.backends, d.backend, false)+'</select></div></div>';
+  if(d.backend_locked) h += '<div class="shint">Движок зафиксирован после первого сообщения.</div>';
+  h += '<div class="srow"><label>Модель</label><div class="sctl"><select id="s-model"'+dis+'>'+opts(d.models, d.model, true)+'</select></div></div>';
+  h += '<div class="srow"><label>Мышление</label><div class="sctl"><select id="s-think"'+dis+'>'+opts(d.efforts, d.think, true)+'</select></div></div>';
+  h += '<div class="srow"><label>Sandbox</label><div class="sctl"><label class="stoggle"><input type="checkbox" id="s-sandbox"'+(d.sandbox==="on"?" checked":"")+dis+'><span>'+(d.sandbox==="on"?"вкл":"выкл")+'</span></label></div></div>';
+  if(d.tty_available)
+    h += '<div class="srow"><label>TTY</label><div class="sctl"><label class="stoggle"><input type="checkbox" id="s-tty"'+(d.tty?" checked":"")+dis+'><span>'+(d.tty?"вкл":"выкл")+'</span></label></div></div>';
+  h += '<div class="sfield"><label>Рабочий каталог</label><input class="scwd" type="text"'+dis+' value="'+esc(d.cwd||"")+'"></div>';
+  h += '<div class="sfield"><label>Системный промпт</label><textarea class="sprompt" rows="2"'+dis+' placeholder="добавляется к системному промпту">'+esc(d.prompt||"")+'</textarea></div>';
+  h += '<div class="ssep"></div>';
+  if(d.ctx_window > 0){
+    const pct = Math.min(100, Math.round(d.ctx_used*100/d.ctx_window));
+    h += '<div class="sctx-label"><span>Контекст</span><span>'+Math.round(d.ctx_used/1000)+'k / '+Math.round(d.ctx_window/1000)+'k · '+pct+'%</span></div>'
+       + '<div class="sctx-bar"><div class="sctx-fill '+ctxClass(pct)+'" style="width:'+pct+'%"></div></div>';
+  } else {
+    h += '<div class="sctx-label"><span>Контекст</span><span>—</span></div>';
+  }
+  h += '<div class="shint" style="margin-top:8px">💬 Сообщений: '+(d.messages||0)+'</div>';
+  const b = document.getElementById("sbody");
+  b.innerHTML = h;
+
+  const nameInput = b.querySelector(".sname");
+  const applyName = () => { const v = nameInput.value.trim(); if(v && v !== d.name) patchSettings(d.created, { name: v }); };
+  nameInput.addEventListener("keydown", e => { if(e.key === "Enter"){ e.preventDefault(); nameInput.blur(); } });
+  nameInput.addEventListener("blur", applyName);
+  const wire = (sel, fn) => { const el = b.querySelector(sel); if(el) el.onchange = fn; };
+  wire("#s-backend", e => patchSettings(d.created, { backend: e.target.value }));
+  wire("#s-model",   e => patchSettings(d.created, { model: e.target.value }));
+  wire("#s-think",   e => patchSettings(d.created, { think: e.target.value }));
+  wire("#s-sandbox", e => patchSettings(d.created, { sandbox: e.target.checked ? "on" : "off" }));
+  wire("#s-tty",     e => patchSettings(d.created, { tty: e.target.checked }));
+  const cwd = b.querySelector(".scwd");
+  if(cwd){
+    const applyCwd = () => { const v = cwd.value.trim(); if(v && v !== d.cwd) patchSettings(d.created, { cwd: v }); };
+    cwd.addEventListener("keydown", e => { if(e.key === "Enter"){ e.preventDefault(); cwd.blur(); } });
+    cwd.addEventListener("blur", applyCwd);
+  }
+  const prompt = b.querySelector(".sprompt");
+  if(prompt) prompt.addEventListener("blur", () => { const v = prompt.value.trim(); if(v !== (d.prompt||"")) patchSettings(d.created, { prompt: v }); });
+}
+
+function patchSettings(created, patch){
+  patch.session = created;
+  api("/api/settings", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(patch) })
+    .then(r => {
+      if(r.ok) return r.json();
+      r.text().then(t => showNotice(t.trim() || "не удалось применить"));
+      return fetchSettings(created); // re-sync controls to the true state
+    })
+    .then(d => { if(d && settingsFor === created) renderSettings(d); })
+    .catch(() => showNotice("не удалось применить"));
+}
+
+// Refresh an open dialog when its session's run state flips (busy locks/unlocks
+// the controls and ctx updates) — but never while the user is editing the name.
+function maybeRefreshSettings(created){
+  if(settingsFor !== created) return;
+  const ae = document.activeElement, body = document.getElementById("sbody");
+  // Don't yank a field out from under the user mid-edit (name/cwd/prompt).
+  if(ae && body && body.contains(ae) && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return;
+  fetchSettings(created).then(d => { if(settingsFor === created) renderSettings(d); }).catch(()=>{});
+}
+
+function closeSession(created, name){
+  uiConfirm("Закрыть сессию «"+(name||("#"+created))+"»?", "Закрыть", true).then(ok => {
+    if(!ok) return;
+    api("/api/close", { method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ session: created }) })
+      .then(r => { if(!r.ok) r.text().then(t => showNotice(t.trim() || "не удалось закрыть")); });
+  });
+}
+
+function start(){
+  document.getElementById("gate").classList.add("hidden");
+  document.getElementById("app").classList.add("active");
+  connect();
+}
+
+document.getElementById("input").addEventListener("keydown", e => {
+  if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); send(); }
+});
+document.getElementById("input").addEventListener("input", autoGrow);
+document.getElementById("token").addEventListener("keydown", e => {
+  if(e.key === "Enter"){ e.preventDefault(); saveToken(); }
+});
+document.getElementById("log").addEventListener("scroll", () => {
+  stick = nearBottom(); toggleToBottom();
+});
+window.addEventListener("hashchange", () => {
+  const want = parseInt(location.hash.slice(1));
+  if(want && want !== active && sessions.find(s=>s.created===want)) selectTab(want);
+});
+document.getElementById("smodal").addEventListener("click", e => { if(e.target.id === "smodal") closeSettings(); });
+document.addEventListener("keydown", e => { if(e.key === "Escape" && settingsFor) closeSettings(); });
+
+if(token) start();
+</script>
+</body>
+</html>

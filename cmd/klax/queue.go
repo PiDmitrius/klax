@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PiDmitrius/klax/internal/mdhtml"
 	"github.com/PiDmitrius/klax/internal/runner"
 	"github.com/PiDmitrius/klax/internal/session"
 )
@@ -79,6 +78,16 @@ func (d *daemon) enqueue(chatID, msgID, text string) {
 }
 
 func (d *daemon) enqueueWithAttachments(chatID, msgID, text string, attachments []attachment) {
+	d.enqueueToSession(chatID, msgID, text, attachments, 0)
+}
+
+// enqueueToSession queues a message against a session in the chat. targetCreated
+// selects which: 0 binds to whichever session is active right now (every
+// messenger path — /switch and /new after this only affect future messages),
+// while a positive value binds to exactly that session (a web-UI tab), validated
+// up front so a stale tab gets a clear error instead of silently hitting the
+// active session.
+func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []attachment, targetCreated int64) {
 	if text == "" && len(attachments) == 0 {
 		d.sendMessage(chatID, msgID, "∅")
 		return
@@ -89,13 +98,23 @@ func (d *daemon) enqueueWithAttachments(chatID, msgID, text string, attachments 
 	}
 
 	sk := d.sessionKey(chatID)
-	// Bind the message to whichever session is active right now. /switch and
-	// /new after this point only affect future messages — this one will run
-	// against the captured session even if the user moves on.
-	sess := d.store.Active(sk)
-	if sess == nil {
-		d.sendMessage(chatID, msgID, "❌ Нет активной сессии. Напиши /new")
-		return
+	var sess *session.Session
+	if targetCreated > 0 {
+		// Explicit target (a UI tab): bind to exactly that session.
+		sess = d.store.Get(sk, targetCreated)
+		if sess == nil {
+			d.sendMessage(chatID, msgID, "❌ Сессия не найдена.")
+			return
+		}
+	} else {
+		// Bind the message to whichever session is active right now. /switch and
+		// /new after this point only affect future messages — this one will run
+		// against the captured session even if the user moves on.
+		sess = d.store.Active(sk)
+		if sess == nil {
+			d.sendMessage(chatID, msgID, "❌ Нет активной сессии. Напиши /new")
+			return
+		}
 	}
 	sr := d.getRunner(sk, sess.Created)
 
@@ -109,7 +128,12 @@ func (d *daemon) enqueueWithAttachments(chatID, msgID, text string, attachments 
 		sessCreated: sess.Created,
 	}
 	busy := sr.runner.IsBusy()
-	if busy {
+	// The "В очереди" notice is a messenger placeholder later reused as the
+	// progress message and edited in place. The UI streams independently (the
+	// busy dot, typing indicator and unread badge already show the queued/working
+	// state), and uiDelivery never touches this placeholder — so on the UI it
+	// would just linger as a stale notice that never updates. Skip it there.
+	if busy && transportPrefix(chatID) != uiPrefix {
 		// Send queue notification and capture its ID for later reuse as progress message.
 		qlen := len(sr.queue) + 1 // +1 for this message being added
 		ctx, cancel := withDeliveryTimeout(context.Background())
@@ -128,6 +152,9 @@ func (d *daemon) enqueueWithAttachments(chatID, msgID, text string, attachments 
 	}
 	sr.queue = append(sr.queue, qm)
 	sr.mu.Unlock()
+
+	// Surface the new queue depth (the UI shows how many are waiting).
+	d.broadcastSessions(sk)
 
 	if busy {
 		return
@@ -176,6 +203,9 @@ func (d *daemon) processSessionQueue(sr *sessionRunner) {
 			}
 		}
 		sr.mu.Unlock()
+
+		// A message just left the queue to run — refresh the queue depth.
+		d.broadcastSessions(msg.sessKey)
 
 		d.runBackend(msg)
 	}
@@ -292,156 +322,16 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		return
 	}
 
-	// Progress message — edit in place.
-	// If this message was queued and nothing happened in the chat since then,
-	// reuse the queue notification. Otherwise point to the new answer below.
-	t, _, _ := d.transportFor(msg.chatID)
-	chatFmt := d.answerFormat(msg.chatID)
-	// Rich messages have their own message type: a Rich Message can only be
-	// edit-streamed from a message that was *born* rich (editMessageText with
-	// rich_message). So in rich mode we never reuse the plain/HTML queued
-	// notification, and the placeholder itself is created as rich.
-	richMode := chatFmt == "rich"
-	var progressChain *messageChain
-	reuseQueuedProgress := !richMode && d.shouldReuseQueuedProgress(msg)
-	needsRedirectMarker := !reuseQueuedProgress && msg.progressID != ""
-	if reuseQueuedProgress {
-		progressChain = newMessageChain(msg.progressID)
-		progressChain.lastCreateActivity = msg.progressSeq
-	}
-	if t != nil {
-		var err error
-		placeholder, placeFmt := "...", ""
-		if richMode {
-			placeholder, placeFmt = "<p>…</p>", "rich"
-		}
-		progressChain, err = d.syncMessageChain(ctx, msg.chatID, msg.msgID, progressChain, placeholder, placeFmt)
-		if err != nil {
-			progressChain = nil
-		} else if needsRedirectMarker {
-			markerCtx, markerCancel := withDeliveryTimeout(ctx)
-			_, _ = d.performTransportOp(markerCtx, transportOp{
-				fullChatID: msg.chatID,
-				messageID:  msg.progressID,
-				text:       "↓",
-				format:     "",
-			})
-			markerCancel()
-		}
-	}
-
+	// Output for this turn goes through a per-turn Delivery, picked by the
+	// chat's transport. The messenger delivery owns the progress message chain,
+	// the rate-limited edit worker and the final render/split; the UI delivery
+	// streams raw events. Persisting the session below stays here (not in the
+	// delivery) so business logic is not duplicated across delivery backends.
 	verbose := d.chatVerboseEnabled(msg.chatID)
+	del := d.deliveryFor(ctx, msg, verbose)
+	defer del.Close()
 
-	// Progress plumbing. onProgress runs in the Runner's stdout-scanner
-	// goroutine and MUST NOT block on network: if it did, the backend's
-	// stdout pipe would fill and the child (e.g. rust codex behind the npm
-	// shim) would hang in pipe_write. Instead we hand the latest logItems
-	// snapshot to a worker via a mailbox channel and rate-limit Telegram
-	// edits there. Nothing is dropped: each snapshot is cumulative, so an
-	// overwritten pending snapshot loses no history — the next one carries
-	// everything the previous one would have shown plus newer entries.
-	var logItems []runner.ProgressEvent
-	progressCh := make(chan []runner.ProgressEvent, 1)
-	progressDone := make(chan struct{})
-	workerDone := make(chan struct{})
-	go func() {
-		defer close(workerDone)
-		var lastSentText string
-		for {
-			var snapshot []runner.ProgressEvent
-			select {
-			case <-progressDone:
-				return
-			case s, ok := <-progressCh:
-				if !ok {
-					return
-				}
-				snapshot = s
-			}
-			select {
-			case <-progressDone:
-				return
-			default:
-			}
-			chunks := withProgressEllipsis(formatLogChunks(snapshot, "", chatFmt, maxMessageLen), chatFmt, maxMessageLen)
-			cacheKey := fmt.Sprintf("%q", chunks)
-			if cacheKey == lastSentText {
-				continue
-			}
-			lastSentText = cacheKey
-			if progressChain != nil && len(progressChain.ids) > 0 {
-				pc, err := d.syncMessageChainChunks(ctx, msg.chatID, msg.msgID, progressChain, chunks, chatFmt)
-				if err != nil {
-					log.Printf("progress update failed: %v", err)
-					continue
-				}
-				progressChain = pc
-			}
-			// Rate-limit edits so Telegram does not 429 us. Cancellation
-			// shortcuts the wait so /abort unblocks quickly.
-			select {
-			case <-progressDone:
-				return
-			case <-ctx.Done():
-			case <-time.After(progressEditInterval):
-			}
-		}
-	}()
-	onProgress := func(ev runner.ProgressEvent) {
-		if !verbose {
-			return
-		}
-		// No upstream dedup here on purpose: the progress worker already
-		// suppresses duplicate edits via its `lastSentText` check, and
-		// collapsing equal ProgressEvents at this level would hide real
-		// repeats (same tool invoked twice, same rate-limit warning
-		// reappearing after a cooldown).
-		logItems = append(logItems, ev)
-		snapshot := append([]runner.ProgressEvent(nil), logItems...)
-		// Non-blocking mailbox: drop any stale pending snapshot in favour
-		// of the newer, superset one. Never blocks the scanner.
-		select {
-		case progressCh <- snapshot:
-		default:
-			select {
-			case <-progressCh:
-			default:
-			}
-			select {
-			case progressCh <- snapshot:
-			default:
-			}
-		}
-	}
-
-	// Save attachments to a temp directory and build prompt with file paths.
-	prompt := msg.text
-	var tmpDir string
-	if len(msg.attachments) > 0 {
-		var err error
-		tmpDir, err = os.MkdirTemp("", "klax-attach-*")
-		if err != nil {
-			log.Printf("failed to create temp dir for attachments: %v", err)
-		} else {
-			var filePaths []string
-			for _, att := range msg.attachments {
-				fp := filepath.Join(tmpDir, sanitizeAttachmentFilename(att.filename))
-				if err := os.WriteFile(fp, att.data, 0644); err != nil {
-					log.Printf("failed to write attachment %s: %v", att.filename, err)
-					continue
-				}
-				filePaths = append(filePaths, fp)
-			}
-			if len(filePaths) > 0 {
-				fileList := strings.Join(filePaths, "\n")
-				if prompt == "" {
-					prompt = fmt.Sprintf("Пользователь отправил файлы. Прочитай и проанализируй их:\n%s", fileList)
-				} else {
-					prompt = fmt.Sprintf("%s\n\nПрикреплённые файлы:\n%s", prompt, fileList)
-				}
-			}
-		}
-	}
+	prompt, tmpDir := d.buildTurnPrompt(msg)
 	if tmpDir != "" {
 		defer os.RemoveAll(tmpDir)
 	}
@@ -457,14 +347,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		AppendSystemPrompt:        sess.AppendSystemPrompt,
 		ClaudeTTY:                 sess.ClaudeTTY,
 		SuppressNarrationProgress: !verbose,
-	}, onProgress)
-
-	// Flush the progress worker before any final-delivery path runs: the
-	// worker mutates progressChain, so reading it here without a barrier
-	// would race.
-	close(progressDone)
-	close(progressCh)
-	<-workerDone
+	}, del.Progress)
 
 	// Persist changes onto the same session record that started the run.
 	d.store.UpdateSession(sk, sess.Created, func(current *session.Session) {
@@ -492,50 +375,43 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	}
 	d.saveStore()
 
-	if result.Error != nil {
-		finalText := formatRunFailure(logItems, chatFmt, result.Error)
-		if t != nil {
-			// Deliver with chatFmt so a rich-formatted failure goes out as a Rich
-			// Message (and reuses the rich-born progress chain when present).
-			if _, err := d.syncFinalMessageChain(msg.chatID, msg.msgID, progressChain, finalText, chatFmt); err != nil {
-				log.Printf("final error delivery failed: %v", err)
-			}
+	del.Final(result)
+	// Refresh any UI tab strip watching this session (new id, message count,
+	// model/ctx). The live busy dot is driven client-side by turn_start/final.
+	d.broadcastSessions(sk)
+}
+
+// buildTurnPrompt writes the message's attachments to a temp directory and
+// folds their paths into the prompt. It returns the prompt and the temp dir
+// (empty when there are no attachments or the dir could not be created); the
+// caller owns removing a non-empty tmpDir.
+func (d *daemon) buildTurnPrompt(msg queuedMsg) (prompt, tmpDir string) {
+	prompt = msg.text
+	if len(msg.attachments) == 0 {
+		return prompt, ""
+	}
+	var err error
+	tmpDir, err = os.MkdirTemp("", "klax-attach-*")
+	if err != nil {
+		log.Printf("failed to create temp dir for attachments: %v", err)
+		return prompt, ""
+	}
+	var filePaths []string
+	for _, att := range msg.attachments {
+		fp := filepath.Join(tmpDir, sanitizeAttachmentFilename(att.filename))
+		if err := os.WriteFile(fp, att.data, 0644); err != nil {
+			log.Printf("failed to write attachment %s: %v", att.filename, err)
+			continue
+		}
+		filePaths = append(filePaths, fp)
+	}
+	if len(filePaths) > 0 {
+		fileList := strings.Join(filePaths, "\n")
+		if prompt == "" {
+			prompt = fmt.Sprintf("Пользователь отправил файлы. Прочитай и проанализируй их:\n%s", fileList)
 		} else {
-			d.sendMessage(msg.chatID, msg.msgID, finalText)
-		}
-		return
-	}
-
-	text := strings.TrimSpace(result.Text)
-	if text == "" {
-		text = "✅"
-	}
-
-	// Convert Claude's Markdown to the transport format.
-	var formatted string
-	switch chatFmt {
-	case "rich":
-		formatted = mdhtml.ConvertRich(text)
-	case "html":
-		// Telegram parse_mode=HTML supports <blockquote>; MAX's support is
-		// unverified, so it keeps the legacy <pre> for quotes.
-		formatted = mdhtml.Convert(text, transportPrefix(msg.chatID) == "tg")
-	default:
-		formatted = text
-	}
-
-	// Build final message: progress log + separator + answer.
-	var finalChunks []string
-	if len(logItems) > 0 {
-		finalChunks = formatLogChunks(logItems, formatted, chatFmt, maxMessageLen)
-	} else {
-		finalChunks = splitMessage(formatted, maxMessageLen, chatFmt)
-	}
-
-	if t != nil {
-		_, err := d.syncFinalMessageChainChunks(msg.chatID, msg.msgID, progressChain, finalChunks, chatFmt)
-		if err != nil {
-			log.Printf("final delivery failed: %v", err)
+			prompt = fmt.Sprintf("%s\n\nПрикреплённые файлы:\n%s", prompt, fileList)
 		}
 	}
+	return prompt, tmpDir
 }
