@@ -811,6 +811,13 @@ func (d *daemon) handleTransports(chatID, msgID string, parts []string) {
 			name = "tg"
 		}
 
+		// The web UI is a transport for reply delivery but not a pollable
+		// messenger — it is not toggleable here.
+		if name == uiPrefix {
+			d.sendMessage(chatID, msgID, "Транспорт ui не управляется через /transports.")
+			return
+		}
+
 		if _, ok := d.transports[name]; !ok {
 			d.sendMessage(chatID, msgID, fmt.Sprintf("Транспорт %q не настроен.", name))
 			return
