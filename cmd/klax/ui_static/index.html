@@ -296,7 +296,27 @@ function inline(s){
   h = h.replace(/`([^`]+)`/g, '<code>$1</code>');
   h = h.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
   h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  h = linkifyBare(h);
   return h;
+}
+
+// Turn bare http(s) URLs into links, leaving existing <a>/<code> spans untouched.
+// Safe: h is already escaped, so a URL match holds no raw <, >, or " (it can't break
+// out of the href attribute or inject markup); only https?:// matches, so javascript:
+// URLs are excluded.
+function linkifyBare(h){
+  return h.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<code>[\s\S]*?<\/code>)|(https?:\/\/[^\s<]+)/g, function(m, span, url){
+    if(span) return span;
+    var u = url, tail = "";
+    var p = u.match(/[.,;:!?]+$/);             // don't swallow trailing sentence punctuation
+    if(p){ tail = p[0]; u = u.slice(0, -p[0].length); }
+    var opens = 0, closes = 0;                 // count parens once (O(n)), then trim trailing UNbalanced ")"
+    for(var k = 0; k < u.length; k++){ var c = u[k]; if(c === "(") opens++; else if(c === ")") closes++; }
+    var t = 0; while(t < u.length && u[u.length-1-t] === ")") t++;
+    var strip = Math.min(t, closes - opens);
+    if(strip > 0){ tail = u.slice(u.length - strip) + tail; u = u.slice(0, u.length - strip); }
+    return '<a href="' + u + '" target="_blank" rel="noopener">' + u + '</a>' + tail;
+  });
 }
 
 // Block-level Markdown: produces real <p>/<h3>/<ul>/<pre> blocks so spacing is a
@@ -550,7 +570,8 @@ function loadHistory(created, before){
 function onEvent(ev){
   const d = JSON.parse(ev.data);
   switch(d.type){
-    case "sessions":
+    case "sessions": {
+      const wasActiveBusy = busy.has(active);
       sessions = d.sessions || [];
       // Clear stale spinners; and on the FIRST snapshot after a (re)connect,
       // SEED busy from it so a turn already running survives a page reload
@@ -567,8 +588,12 @@ function onEvent(ev){
         if(a){ selectTab(a.created); return; }
       }
       renderTabs();
-      if(busy.has(active)) renderLog(); // refresh the typing indicator's queue count
+      // Re-render the log if the active tab's busy state CHANGED — to drop a stale
+      // typing indicator when a turn ended/was interrupted (e.g. by a restart) with no
+      // final/error reaching us — or, when still busy, to refresh the queue count.
+      if(wasActiveBusy || busy.has(active)) renderLog();
       break;
+    }
     case "turn_start":
       busy.add(d.session); renderTabs();
       if(d.session === active) renderLog();
@@ -641,8 +666,15 @@ function send(){
     body: JSON.stringify({ session: target, text }) })
     .then(r => {
       // A definitive refusal (e.g. 503 while klax drains for a restart) means the
-      // turn was NOT accepted — roll back so it can't linger as a reload ghost.
-      if(!r.ok){ rollbackSend(target, now); showNotice(r.status===503 ? "klax перезапускается — сообщение не принято" : "ошибка отправки ("+r.status+")"); }
+      // turn was NOT accepted — roll it back AND restore the text to the composer so
+      // it isn't lost (only if the user hasn't already started typing something new).
+      if(!r.ok){
+        rollbackSend(target, now);
+        // Restore only if we're still on the tab we sent from (don't drop A's text
+        // into tab B's composer) and the user hasn't started typing something new.
+        if(active === target && !ta.value){ ta.value = text; autoGrow(); }
+        showNotice(r.status===503 ? "klax перезапускается — текст возвращён в поле, попробуйте снова" : "ошибка отправки ("+r.status+") — текст возвращён");
+      }
     })
     .catch(()=> showNotice("ошибка сети — доставка не подтверждена")); // unknown: keep pending
 }
