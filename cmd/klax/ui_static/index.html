@@ -228,6 +228,11 @@
 
 <script>
 const TOKEN_KEY = "klax_ui_token", THEME_KEY = "klax_theme2"; // bumped: ignore the old auto-persisted theme so the default is light
+// Mount-path aware base so the SPA works behind a path-stripping reverse proxy
+// (e.g. Caddy `uri strip_prefix /klax`): every API/SSE URL is built relative to
+// where the page is served, not the origin root — "/" for direct access,
+// "/klax/" when mounted under /klax, with or without a trailing slash.
+const BASE = location.pathname.endsWith("/") ? location.pathname : location.pathname + "/";
 let token = localStorage.getItem(TOKEN_KEY) || "";
 let sessions = [];          // tab strip
 let active = 0;             // active session Created
@@ -328,7 +333,7 @@ function md(src){
 function api(path, opts){
   opts = opts || {};
   opts.headers = Object.assign({ "Authorization": "Bearer "+token }, opts.headers||{});
-  return fetch(path, opts);
+  return fetch(BASE + (path[0] === "/" ? path.slice(1) : path), opts);
 }
 
 function saveToken(){
@@ -578,7 +583,7 @@ function onEvent(ev){
 
 function connect(){
   if(es) es.close();
-  es = new EventSource("/api/events?token="+encodeURIComponent(token));
+  es = new EventSource(BASE + "api/events?token="+encodeURIComponent(token));
   es.onmessage = onEvent;
   es.onopen = () => {
     seedBusy = true; // recover in-flight busy state from the next sessions snapshot
