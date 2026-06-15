@@ -69,6 +69,8 @@
          display: flex; flex-direction: column; align-items: center; background: var(--chat); }
   #logcol { width: 100%; max-width: 820px; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
   .msg { position: relative; padding: 8px 12px; border-radius: 10px; word-wrap: break-word; }
+  .readline { display: flex; align-items: center; gap: 8px; align-self: stretch; color: var(--accent); font-size: 11px; opacity: .9; }
+  .readline::before, .readline::after { content: ""; flex: 1; height: 1px; background: var(--accent); opacity: .45; }
   /* klax-side blocks fill the column for a consistent width — only the colour
      differs between text, tool, error and command output. */
   .msg.assistant, .msg.tool, .msg.error, .msg.notice { align-self: stretch; }
@@ -240,7 +242,7 @@ let busy = new Set();       // sessions with a turn in flight (turn_start/final/
 let logs = {};              // created -> array of {cls, html, unix}
 let loaded = {};            // created -> history fetched?
 let offset = {};            // created -> pagination cursor
-let unread = {};            // created -> count of new klax messages while not viewing the tab
+let readMark = {};          // created -> logs index read up to; drives the unread badge AND the read-line
 let pending = {};           // created -> [{text,time}] in-flight user echoes, persisted across reload
 let es = null, opened = false, stick = true, seedBusy = true, settingsFor = 0;
 
@@ -388,7 +390,8 @@ function renderTabs(){
   el.innerHTML = "";
   sessions.forEach(s => {
     const t = document.createElement("div");
-    const n = unread[s.created] || 0;
+    const total = (logs[s.created]||[]).length;
+    const n = (s.created===active) ? 0 : Math.max(0, total - (readMark[s.created]||0)); // new blocks since last viewed
     const q = s.queued || 0;
     t.className = "tab" + (s.created===active?" active":"") + (busy.has(s.created)?" busy":"") + (n>0?" unread":"");
     t.onclick = () => selectTab(s.created);
@@ -439,8 +442,17 @@ function renderLog(){
     m.onclick = () => loadHistory(active, offset[active]);
     el.appendChild(m);
   }
+  const items = logs[active] || [];
+  const mark = readMark[active];
+  const showLine = (mark !== undefined && mark > 0 && mark < items.length); // a "read up to here" divider
   let prev = 0;
-  (logs[active] || []).forEach(it => {
+  items.forEach((it, idx) => {
+    if(showLine && idx === mark){
+      const ln = document.createElement("div");
+      ln.className = "readline";
+      ln.innerHTML = "<span>новые сообщения</span>";
+      el.appendChild(ln);
+    }
     const d = document.createElement("div");
     d.className = "msg " + it.cls;
     let meta = fmtTime(it.unix);
@@ -464,7 +476,7 @@ function renderLog(){
 
 function push(created, e){
   mergeOrPush(logs[created] = logs[created] || [], e);
-  if(created===active) renderLog();
+  if(created===active) renderLog(); else renderTabs(); // background: refresh its unread badge
 }
 
 // A history item can carry both assistant text and tool calls — render both, so
@@ -484,8 +496,10 @@ function itemToEntries(it){
 }
 
 function selectTab(created){
+  // Mark the tab we're leaving as read up to its current end — that index becomes
+  // the read-line / unread baseline for when we return to it.
+  if(active && active !== created) readMark[active] = (logs[active]||[]).length;
   active = created;
-  unread[created] = 0;
   stick = true;
   if(location.hash !== "#"+created) location.hash = created;
   renderTabs();
@@ -499,6 +513,8 @@ function loadHistory(created, before){
     const prepend = [];
     (data.turns||[]).forEach(it => itemToEntries(it).forEach(e => mergeOrPush(prepend, e)));
     logs[created] = prepend.concat(logs[created] || []);
+    // Older history was prepended — shift the read-line so it stays on the same item.
+    if(before && readMark[created] !== undefined) readMark[created] += prepend.length;
     if(!before){
       // Re-show in-flight user messages not yet in the transcript (sent, queued, or
       // mid-turn); drop those the transcript now covers. Exact match is sufficient
@@ -557,14 +573,12 @@ function onEvent(ev){
       break;
     case "final":
       busy.delete(d.session);
-      if(d.session !== active) unread[d.session] = (unread[d.session]||0) + 1;
       renderTabs();
       maybeRefreshSettings(d.session);
       push(d.session, entry("assistant", md(d.markdown), Date.now()));
       break;
     case "error":
       busy.delete(d.session);
-      if(d.session !== active) unread[d.session] = (unread[d.session]||0) + 1;
       renderTabs();
       maybeRefreshSettings(d.session);
       push(d.session, entry("error", esc(d.text||"ошибка"), Date.now()));
