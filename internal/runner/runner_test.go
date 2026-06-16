@@ -185,6 +185,38 @@ func TestToolUseString_PlanAndTask(t *testing.T) {
 	}
 }
 
+// TestToolPreviewLimit locks the dual-width contract: String() clips at the
+// narrow Telegram default while Preview(UIToolPreviewLimit) shows far more, so
+// the web UI keeps long commands the chat path has to cut. UIToolPreviewLimit
+// must be well above toolPreviewLimit or the UI gains nothing.
+func TestToolPreviewLimit(t *testing.T) {
+	if UIToolPreviewLimit <= toolPreviewLimit {
+		t.Fatalf("UIToolPreviewLimit (%d) must exceed toolPreviewLimit (%d)", UIToolPreviewLimit, toolPreviewLimit)
+	}
+	cmd := strings.Repeat("x", UIToolPreviewLimit+50)
+	tool := ToolUse{Name: "Bash", Input: `{"command":"` + cmd + `"}`}
+
+	narrow := tool.String()
+	if narrow != tool.Preview(toolPreviewLimit) {
+		t.Fatalf("String() must equal Preview(toolPreviewLimit)")
+	}
+	if !strings.Contains(narrow, "…") {
+		t.Fatalf("narrow label not truncated: %q", narrow)
+	}
+	if !strings.Contains(narrow, strings.Repeat("x", toolPreviewLimit)) ||
+		strings.Contains(narrow, strings.Repeat("x", toolPreviewLimit+1)) {
+		t.Fatalf("narrow label not clipped exactly at toolPreviewLimit")
+	}
+
+	wide := tool.Preview(UIToolPreviewLimit)
+	if utf8.RuneCountInString(wide) <= utf8.RuneCountInString(narrow) {
+		t.Fatalf("Preview(UIToolPreviewLimit)=%d runes not wider than String()=%d", utf8.RuneCountInString(wide), utf8.RuneCountInString(narrow))
+	}
+	if !strings.Contains(wide, strings.Repeat("x", UIToolPreviewLimit)) {
+		t.Fatalf("wide label dropped command content before the wider limit")
+	}
+}
+
 func TestClaudePlanInput_Normalize(t *testing.T) {
 	cases := []struct {
 		name string

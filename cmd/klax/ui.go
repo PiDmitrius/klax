@@ -454,7 +454,11 @@ func (s *uiServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "data: %s\n\n", payload)
 			flusher.Flush()
 		case <-heartbeat.C:
-			fmt.Fprint(w, ": ping\n\n")
+			// A real data event, not an SSE ": ping" comment: EventSource.onmessage
+			// never fires for comment lines, so the client's liveness watchdog can
+			// only observe a data frame. Lets it detect a dead-but-held-open stream
+			// (e.g. behind a reverse proxy after an abrupt daemon exit) and reconnect.
+			fmt.Fprint(w, "data: {\"type\":\"ping\"}\n\n")
 			flusher.Flush()
 		}
 	}

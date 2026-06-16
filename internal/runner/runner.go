@@ -94,12 +94,24 @@ func MarshalPlanProgress(done, total int, current string) string {
 
 const toolPreviewLimit = 120
 
-func (t ToolUse) String() string {
+// UIToolPreviewLimit is the wider tool-label width used by frontends with more
+// room than a Telegram chat (the web UI). They pass it to Preview instead of
+// the default toolPreviewLimit, so commands, queries and descriptions render
+// in near-full rather than being clipped to a chat-sized line.
+const UIToolPreviewLimit = 256
+
+// String renders the tool label at the default (Telegram-width) preview limit.
+func (t ToolUse) String() string { return t.Preview(toolPreviewLimit) }
+
+// Preview renders the tool label, truncating the one variable-length field
+// (command, URL, query, description, plan/task subject) to limit runes. Fixed,
+// inherently short fields like file paths and patterns are never truncated.
+func (t ToolUse) Preview(limit int) string {
 	switch t.Name {
 	case "Bash":
 		var inp struct{ Command string }
 		json.Unmarshal([]byte(t.Input), &inp)
-		return fmt.Sprintf("⚙️ Bash: `%s`", truncate(oneLinePreview(inp.Command), toolPreviewLimit))
+		return fmt.Sprintf("⚙️ Bash: `%s`", truncate(oneLinePreview(inp.Command), limit))
 	case "Read":
 		var inp struct {
 			FilePath string `json:"file_path"`
@@ -123,14 +135,14 @@ func (t ToolUse) String() string {
 			URL string `json:"url"`
 		}
 		json.Unmarshal([]byte(t.Input), &inp)
-		return fmt.Sprintf("🌐 Fetch: %s", truncate(inp.URL, toolPreviewLimit))
+		return fmt.Sprintf("🌐 Fetch: %s", truncate(inp.URL, limit))
 	case "WebSearch":
 		var inp struct {
 			Query string `json:"query"`
 		}
 		json.Unmarshal([]byte(t.Input), &inp)
 		if inp.Query != "" {
-			return fmt.Sprintf("🔎 Search: %s", truncate(inp.Query, toolPreviewLimit))
+			return fmt.Sprintf("🔎 Search: %s", truncate(inp.Query, limit))
 		}
 		return "🔎 Search..."
 	case "Glob", "GlobTool":
@@ -157,7 +169,7 @@ func (t ToolUse) String() string {
 		}
 		json.Unmarshal([]byte(t.Input), &inp)
 		if inp.Description != "" {
-			return fmt.Sprintf("🤖 Task: %s", truncate(inp.Description, toolPreviewLimit))
+			return fmt.Sprintf("🤖 Task: %s", truncate(inp.Description, limit))
 		}
 		return "🤖 Task"
 	case "Plan":
@@ -172,7 +184,7 @@ func (t ToolUse) String() string {
 			return fmt.Sprintf("📌 ✓ %d/%d", p.Done, p.Total)
 		}
 		if p.Current != "" {
-			return fmt.Sprintf("📌 %s · %d/%d", truncate(p.Current, toolPreviewLimit), p.Done, p.Total)
+			return fmt.Sprintf("📌 %s · %d/%d", truncate(p.Current, limit), p.Done, p.Total)
 		}
 		return fmt.Sprintf("📌 %d/%d", p.Done, p.Total)
 	case "TaskCreate":
@@ -181,7 +193,7 @@ func (t ToolUse) String() string {
 		}
 		json.Unmarshal([]byte(t.Input), &inp)
 		if inp.Subject != "" {
-			return fmt.Sprintf("📌 + %s", truncate(inp.Subject, toolPreviewLimit))
+			return fmt.Sprintf("📌 + %s", truncate(inp.Subject, limit))
 		}
 		return "📌 +"
 	case "TaskUpdate":
@@ -360,6 +372,13 @@ const (
 type ProgressEvent struct {
 	Kind ProgressKind
 	Text string
+	// Tool is the structured tool invocation behind a ProgressKindTool event
+	// whose label came from a real ToolUse. It is nil for synthesized
+	// tool-kind events (rate-limit, unknown, error, compact) and for narration.
+	// Text already holds the default-width label (ToolUse.String); a frontend
+	// with more room than Telegram re-renders this via ToolUse.Preview at a
+	// wider limit instead of consuming the clipped Text.
+	Tool *ToolUse
 }
 
 // ProgressFunc is called with human-readable progress updates.
@@ -755,7 +774,8 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 				// narration and what comes after. Flush pending BEFORE
 				// emitting the tool so the log order matches the stream.
 				buf.demote()
-				buf.emitTool(ProgressEvent{Kind: ProgressKindTool, Text: ev.Tool.String()})
+				tool := ev.Tool
+				buf.emitTool(ProgressEvent{Kind: ProgressKindTool, Text: tool.String(), Tool: &tool})
 				if ev.Usage.ContextUsed > 0 {
 					usage.ContextUsed = ev.Usage.ContextUsed
 				}

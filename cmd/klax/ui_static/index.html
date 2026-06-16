@@ -245,6 +245,11 @@ let offset = {};            // created -> pagination cursor
 let readMark = {};          // created -> logs index read up to; drives the unread badge AND the read-line
 let pending = {};           // created -> [{text,time}] in-flight user echoes, persisted across reload
 let es = null, opened = false, stick = true, seedBusy = true, settingsFor = 0;
+let lastEventAt = 0;        // last SSE message arrival (liveness watchdog)
+let busyPollTimer = null;   // GET /api/sessions poll, runs only while a tab is busy
+let watchdogTimer = null;   // forces SSE reconnect when the stream goes silent
+let loadingHist = {};       // created -> transcript fetch in flight (guards double-load)
+let pendingReload = {};     // created -> a full reload was requested while one was in flight
 
 function esc(s){ return (s||"").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function stripTags(s){ return (s||"").replace(/<[^>]+>/g, ""); }
@@ -534,6 +539,15 @@ function selectTab(created){
 }
 
 function loadHistory(created, before){
+  if(loadingHist[created]){
+    // Another load is in flight. A full reload (before=0) — e.g. busy->idle
+    // recovery of a lost "final" — must NOT be dropped, or the recovered answer
+    // is missed; queue it to run when the in-flight load finishes. Pagination
+    // (before>0) is user-driven and simply retried by scrolling.
+    if(!before) pendingReload[created] = true;
+    return;
+  }
+  loadingHist[created] = true;
   const q = "session="+created + (before? "&before="+before : "");
   api("/api/transcript?"+q).then(r=>r.json()).then(data => {
     const prepend = [];
@@ -564,38 +578,66 @@ function loadHistory(created, before){
     offset[created] = data.more ? data.offset : 0;
     loaded[created] = true;
     if(created===active) renderLog();
-  }).catch(()=>{ loaded[created]=true; });
+  }).catch(()=>{ loaded[created]=true; }).finally(()=>{
+    delete loadingHist[created];
+    if(pendingReload[created]){ delete pendingReload[created]; loaded[created]=false; logs[created]=[]; loadHistory(created, 0); }
+  });
+}
+
+// reconcileSessions applies an authoritative session snapshot (from the SSE
+// "sessions" event OR the /api/sessions busy-poll) to local state. It is the
+// guarantee that a "typing" dot eventually clears: a snapshot's busy=false is
+// always honoured, no matter how the clearing "final" was lost (restart,
+// dropped SSE, proxy-held connection). `seed` is true only for the first
+// snapshot right after (re)connect — only then may a snapshot turn a dot ON, so
+// a turn already running survives a reload; later snapshots/polls only clear.
+function reconcileSessions(list, seed){
+  const before = new Set(busy);            // local busy snapshot, to spot busy->idle
+  const wasActiveBusy = busy.has(active);
+  sessions = list || [];
+  const present = new Set();
+  sessions.forEach(s => {
+    present.add(s.created);
+    if(s.busy){ if(seed) busy.add(s.created); }
+    else busy.delete(s.created);
+  });
+  // A session the server no longer lists is likewise no longer busy.
+  before.forEach(c => { if(!present.has(c)) busy.delete(c); });
+  if(seed) seedBusy = false;
+  // Any tab that was busy and is now idle WITHOUT a final/error having reached us
+  // (lost across a restart / dropped SSE) — reload its transcript so the answer
+  // the dropped "final" carried is restored from the JSONL. On the normal path
+  // "final" already cleared busy before this runs, so `before` won't list it and
+  // nothing reloads. Untouched tabs reload lazily when first opened.
+  before.forEach(c => {
+    if(!busy.has(c) && (c === active || loaded[c])){
+      loaded[c] = false; logs[c] = [];
+      if(c === active) stick = true;
+      loadHistory(c, 0);
+    }
+  });
+  ensureBusyPoll(); // start the guarantee poll before any early return below
+  if(!sessions.find(s=>s.created===active)){
+    const want = parseInt(location.hash.slice(1));
+    const a = sessions.find(s=>s.created===want) || sessions.find(s=>s.active) || sessions[0];
+    if(a){ selectTab(a.created); return; }
+  }
+  renderTabs();
+  // Re-render the log if the active tab's busy state CHANGED — to drop a stale
+  // typing indicator, or, when still busy, to refresh the queue count.
+  if(wasActiveBusy || busy.has(active)) renderLog();
 }
 
 function onEvent(ev){
+  lastEventAt = Date.now();
   const d = JSON.parse(ev.data);
   switch(d.type){
-    case "sessions": {
-      const wasActiveBusy = busy.has(active);
-      sessions = d.sessions || [];
-      // Clear stale spinners; and on the FIRST snapshot after a (re)connect,
-      // SEED busy from it so a turn already running survives a page reload
-      // (its turn_start was missed). Later snapshots only clear — turn_start/final
-      // own turning the dot on, so a stale post-turn snapshot can't re-stick it.
-      sessions.forEach(s => {
-        if(s.busy){ if(seedBusy) busy.add(s.created); }
-        else busy.delete(s.created);
-      });
-      seedBusy = false;
-      if(!sessions.find(s=>s.created===active)){
-        const want = parseInt(location.hash.slice(1));
-        const a = sessions.find(s=>s.created===want) || sessions.find(s=>s.active) || sessions[0];
-        if(a){ selectTab(a.created); return; }
-      }
-      renderTabs();
-      // Re-render the log if the active tab's busy state CHANGED — to drop a stale
-      // typing indicator when a turn ended/was interrupted (e.g. by a restart) with no
-      // final/error reaching us — or, when still busy, to refresh the queue count.
-      if(wasActiveBusy || busy.has(active)) renderLog();
+    case "ping": break; // liveness heartbeat only; lastEventAt updated above
+    case "sessions":
+      reconcileSessions(d.sessions, seedBusy);
       break;
-    }
     case "turn_start":
-      busy.add(d.session); renderTabs();
+      busy.add(d.session); ensureBusyPoll(); renderTabs();
       if(d.session === active) renderLog();
       maybeRefreshSettings(d.session);
       break;
@@ -632,8 +674,10 @@ function onEvent(ev){
 function connect(){
   if(es) es.close();
   es = new EventSource(BASE + "api/events?token="+encodeURIComponent(token));
+  lastEventAt = Date.now();
   es.onmessage = onEvent;
   es.onopen = () => {
+    lastEventAt = Date.now();
     seedBusy = true; // recover in-flight busy state from the next sessions snapshot
     // On a reconnect (not the first open), re-sync the active tab from the
     // transcript: any progress/final lost while disconnected is in the JSONL.
@@ -641,6 +685,42 @@ function connect(){
     opened = true;
   };
   es.onerror = () => { /* EventSource auto-reconnects */ };
+}
+
+// pollBusy is the hard guarantee that a "typing" dot clears. While any tab is
+// busy locally, GET /api/sessions on an interval and reconcile authoritatively —
+// this is an idempotent state read over plain fetch, so it works even when the
+// SSE stream is dead-but-held-open by the reverse proxy or its terminal "final"
+// was dropped by the daemon exiting. The fetch fails harmlessly during the
+// restart gap and recovers once the fresh daemon serves /api/sessions.
+function pollBusy(){
+  if(busy.size === 0){ if(busyPollTimer){ clearInterval(busyPollTimer); busyPollTimer = null; } return; }
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), 8000); // bound a proxy-stalled fetch so 5s polls can't pile up
+  api("/api/sessions", { signal: ac.signal }).then(r => r.ok ? r.json() : null).then(list => {
+    if(list) reconcileSessions(list, false);
+  }).catch(()=>{}).finally(() => clearTimeout(t)); // daemon down mid-restart — next tick retries
+}
+function ensureBusyPoll(){
+  if(busyPollTimer || busy.size === 0) return;
+  busyPollTimer = setInterval(pollBusy, 5000);
+}
+
+// startWatchdog forces a fresh EventSource when the stream goes silent past two
+// missed heartbeats. EventSource normally auto-reconnects on a clean drop, but
+// behind a reverse proxy an abruptly-exited daemon can leave the connection
+// "open" with no data; the server heartbeat ({"type":"ping"} every 20s) lets us
+// detect that and reconnect so live streaming resumes. Idempotent; gated on tab
+// visibility so background timer-throttling doesn't trigger false reconnects.
+function startWatchdog(){
+  if(watchdogTimer) return;
+  watchdogTimer = setInterval(() => {
+    if(!opened || document.visibilityState === "hidden") return;
+    if(Date.now() - lastEventAt > 45000){
+      lastEventAt = Date.now(); // grace, so we reconnect once per silent window
+      connect();
+    }
+  }, 10000);
 }
 
 function autoGrow(){
@@ -827,8 +907,19 @@ function closeSession(created, name){
 function start(){
   document.getElementById("gate").classList.add("hidden");
   document.getElementById("app").classList.add("active");
+  startWatchdog();
   connect();
 }
+
+// Returning to a backgrounded tab: timers were throttled, so reset the watchdog
+// grace and immediately reconcile if anything looked busy, clearing a dot that
+// got stuck while the tab slept.
+document.addEventListener("visibilitychange", () => {
+  if(document.visibilityState === "visible"){
+    lastEventAt = Date.now();
+    if(busy.size > 0) pollBusy();
+  }
+});
 
 document.getElementById("input").addEventListener("keydown", e => {
   if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); send(); }
