@@ -370,6 +370,7 @@ func (s *uiServer) routes() http.Handler {
 	mux.HandleFunc("/api/sessions", s.handleSessions)
 	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/api/transcript", s.handleTranscript)
+	mux.HandleFunc("/emoji/", s.handleEmoji)
 	mux.HandleFunc("/", s.handleSPA)
 	return mux
 }
@@ -714,6 +715,25 @@ func (s *uiServer) handleTranscript(w http.ResponseWriter, r *http.Request) {
 		More   bool           `json:"more"`
 		Offset int            `json:"offset"`
 	}{Turns: turns, More: start > 0, Offset: start})
+}
+
+// handleEmoji serves a bundled color-emoji web-font subset (woff2). No auth —
+// it is a static asset like the SPA shell; the filename is constrained to a
+// single .woff2 component so it cannot traverse out of the embedded dir.
+func (s *uiServer) handleEmoji(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/emoji/")
+	if name == "" || strings.Contains(name, "/") || !strings.HasSuffix(name, ".woff2") {
+		http.NotFound(w, r)
+		return
+	}
+	data, err := emojiFS.ReadFile("ui_static/emoji/" + name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "font/woff2")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	_, _ = w.Write(data)
 }
 
 // handleSPA serves the single-page app. The real embedded UI replaces this stub.
