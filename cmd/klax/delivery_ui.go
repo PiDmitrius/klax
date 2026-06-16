@@ -24,11 +24,18 @@ func (d *daemon) newUIDelivery(_ context.Context, msg queuedMsg) *uiDelivery {
 }
 
 func (u *uiDelivery) Progress(ev runner.ProgressEvent) {
+	// The runner pre-formats ev.Text at the narrow Telegram width. The UI has
+	// the room, so for real tool calls re-render the structured tool at the
+	// wider UI limit; other events (narration, rate-limit, errors) pass through.
+	text := ev.Text
+	if ev.Tool != nil {
+		text = ev.Tool.Preview(runner.UIToolPreviewLimit)
+	}
 	u.d.uiEmit(u.user, uiEvent{
 		Type:    "progress",
 		Session: u.session,
 		Kind:    string(ev.Kind),
-		Text:    ev.Text,
+		Text:    text,
 	})
 }
 

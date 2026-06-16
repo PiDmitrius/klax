@@ -18,14 +18,15 @@ import (
 )
 
 // ToolCall is a tool invocation surfaced inside an assistant turn. Label is the
-// same rich short label the live stream and Telegram show (via ToolUse.String).
+// same rich label the live UI stream shows, rendered at the wider web-UI width
+// (ToolUse.Preview(UIToolPreviewLimit)) rather than the narrow Telegram one.
 type ToolCall struct {
 	Name  string `json:"name"`
 	Label string `json:"label,omitempty"`
 }
 
 func toolCall(name, input string) ToolCall {
-	return ToolCall{Name: name, Label: runner.ToolUse{Name: name, Input: input}.String()}
+	return ToolCall{Name: name, Label: runner.ToolUse{Name: name, Input: input}.Preview(runner.UIToolPreviewLimit)}
 }
 
 // Item is one entry in a rendered transcript.
