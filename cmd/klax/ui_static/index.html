@@ -218,6 +218,8 @@
   .sctx-fill { height: 100%; background: var(--accent); border-radius: 4px; transition: width .25s; }
   .sctx-fill.hot { background: var(--warn); }
   .sctx-fill.crit { background: var(--error-fg); }
+  .smodal-actions { display: flex; justify-content: flex-end; margin-top: 14px; }
+  .smodal-ok { min-width: 76px; background: var(--accent); color: #fff; border-color: var(--accent); }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -265,6 +267,7 @@
       <button class="smodal-x" onclick="closeSettings()" title="Закрыть">✕</button>
     </div>
     <div id="sbody"></div>
+    <div class="smodal-actions"><button class="smodal-ok" onclick="closeSettings()">OK</button></div>
   </div>
 </div>
 
@@ -297,11 +300,17 @@ let busyPollTimer = null;   // GET /api/sessions poll, runs only while a tab is 
 let watchdogTimer = null;   // forces SSE reconnect when the stream goes silent
 let loadingHist = {};       // created -> transcript fetch in flight (guards double-load)
 let pendingReload = {};     // created -> a full reload was requested while one was in flight
+let tabStick = {};           // created -> whether the tab was at bottom when it was last left
+let jumpUnreadOnRender = 0;  // active session to scroll to the unread divider after renderLog
 const BASE_TITLE = document.title || "klax"; // configured page title; unread count is prefixed onto it
 let pendingRender = false;  // a renderLog deferred because the user is selecting text in the log
 let breakMerge = {};        // created -> next pushed block starts a fresh bubble (turn boundary)
 
 function viewing(created){ return created === active && document.visibilityState === "visible"; }
+function hasUnread(created){
+  const mark = readMark[created], items = logs[created] || [];
+  return mark !== undefined && mark >= 0 && mark < items.length;
+}
 function esc(s){ return (s||"").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function stripTags(s){ return (s||"").replace(/<[^>]+>/g, ""); }
 
@@ -577,8 +586,9 @@ function renderTabs(){
     t.querySelector(".tx").onclick = (e) => { e.stopPropagation(); closeSession(s.created, s.name); };
     el.appendChild(t);
   });
-  // Reflect the total unread (sum across background tabs) in the browser tab title.
-  document.title = totalUnread > 0 ? "(" + totalUnread + ") " + BASE_TITLE : BASE_TITLE;
+  const busyCount = sessions.reduce((n, s) => n + (busy.has(s.created) ? 1 : 0), 0);
+  const mark = (totalUnread > 0 ? String(totalUnread) : "") + "*".repeat(busyCount);
+  document.title = mark ? "(" + mark + ") " + BASE_TITLE : BASE_TITLE;
 }
 
 function entry(cls, html, unix){ return { cls, html, unix: unix||0 }; }
@@ -650,7 +660,8 @@ function renderLog(){
   }
   const items = logs[active] || [];
   const mark = readMark[active];
-  const showLine = (mark !== undefined && mark > 0 && mark < items.length); // a "read up to here" divider
+  const showLine = (mark !== undefined && mark >= 0 && mark < items.length); // a "read up to here" divider
+  let unreadLine = null;
   let prev = 0;
   items.forEach((it, idx) => {
     if(showLine && idx === mark){
@@ -658,6 +669,7 @@ function renderLog(){
       ln.className = "readline";
       ln.innerHTML = "<span>новые сообщения</span>";
       el.appendChild(ln);
+      unreadLine = ln;
     }
     const d = document.createElement("div");
     d.className = "msg " + it.cls;
@@ -677,7 +689,13 @@ function renderLog(){
                 + '<button class="stop" onclick="abortActive()" title="Прервать">✕</button>';
     el.appendChild(t);
   }
-  if(stick) scrollBottom(); else toggleToBottom();
+  if(jumpUnreadOnRender === active && unreadLine){
+    jumpUnreadOnRender = 0;
+    unreadLine.scrollIntoView({ block: "start" });
+    stick = false; toggleToBottom();
+  } else {
+    if(stick) scrollBottom(); else toggleToBottom();
+  }
 }
 
 function push(created, e){
@@ -715,9 +733,14 @@ function itemToEntries(it){
 function selectTab(created){
   // Mark the tab we're leaving as read up to its current end — that index becomes
   // the read-line / unread baseline for when we return to it.
-  if(active && active !== created) readMark[active] = (logs[active]||[]).length;
+  if(active && active !== created){
+    tabStick[active] = stick || nearBottom();
+    readMark[active] = (logs[active]||[]).length;
+  }
   active = created;
-  stick = true;
+  const jumpUnread = !!tabStick[created] && hasUnread(created);
+  stick = !jumpUnread;
+  if(jumpUnread) jumpUnreadOnRender = created;
   if(location.hash !== "#"+created) location.hash = created;
   renderTabs();
   if(!loaded[created]){ logs[created]=[]; loadHistory(created, 0); }
@@ -988,7 +1011,9 @@ function abortActive(){
 }
 
 function newSession(){
-  api("/api/new", { method:"POST" }).then(r => r.json()).then(d => { if(d.created) selectTab(d.created); })
+  api("/api/new", { method:"POST" }).then(r => r.json()).then(d => {
+    if(d.created){ selectTab(d.created); openSettings(d.created, "Новая сессия"); }
+  })
     .catch(() => showNotice("не удалось создать сессию"));
 }
 
@@ -999,8 +1024,9 @@ function fetchSettings(created){
   return api("/api/settings?session="+created).then(r => r.ok ? r.json() : Promise.reject(r));
 }
 
-function openSettings(created){
+function openSettings(created, title){
   settingsFor = created;
+  document.querySelector(".smodal-title").textContent = title || "Настройки сессии";
   document.getElementById("smodal").classList.remove("hidden");
   document.getElementById("sbody").innerHTML = '<div class="shint">Загрузка…</div>';
   fetchSettings(created).then(d => { if(settingsFor === created) renderSettings(d); })
@@ -1114,8 +1140,10 @@ document.addEventListener("visibilitychange", () => {
     lastEventAt = Date.now();
     if(busy.size > 0) pollBusy();
     renderTabs();
+    if(active && tabStick[active] && hasUnread(active)) jumpUnreadOnRender = active;
     if(active) renderLog();
   } else if(active){
+    tabStick[active] = stick || nearBottom();
     readMark[active] = (logs[active] || []).length;
     renderTabs();
   }
