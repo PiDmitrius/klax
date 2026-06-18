@@ -204,22 +204,25 @@ func readCodex(path string) ([]Item, error) {
 			continue
 		}
 		var entry struct {
-			Type      string          `json:"type"`
-			Timestamp string          `json:"timestamp"`
-			Payload   json.RawMessage `json:"payload"`
+			Type      string            `json:"type"`
+			Timestamp string            `json:"timestamp"`
+			Payload   json.RawMessage   `json:"payload"`
+			Item      *codexHistoryItem `json:"item"`
 		}
 		if json.Unmarshal(raw, &entry) != nil {
 			continue
 		}
-		if entry.Type != "event_msg" && entry.Type != "response_item" {
+		if entry.Type != "event_msg" && entry.Type != "response_item" && !strings.HasPrefix(entry.Type, "item.") {
 			continue
 		}
 		var p struct {
-			Type      string `json:"type"`
-			Message   string `json:"message"`
-			Name      string `json:"name"`
-			Arguments string `json:"arguments"`
-			Input     string `json:"input"`
+			Type      string          `json:"type"`
+			Message   string          `json:"message"`
+			Name      string          `json:"name"`
+			Namespace string          `json:"namespace"`
+			Arguments json.RawMessage `json:"arguments"`
+			Input     json.RawMessage `json:"input"`
+			Action    json.RawMessage `json:"action"`
 		}
 		_ = json.Unmarshal(entry.Payload, &p)
 		ts := normalizeTime(entry.Timestamp)
@@ -232,17 +235,301 @@ func readCodex(path string) ([]Item, error) {
 			if t := strings.TrimSpace(p.Message); t != "" {
 				items = append(items, Item{Role: "assistant", Text: t, Time: ts})
 			}
+		case entry.Type == "item.started":
+			if tool, ok := codexHistoryItemTool(entry.Item); ok {
+				items = append(items, Item{Role: "assistant", Tools: []ToolCall{tool}, Time: ts})
+			}
+		case entry.Type == "item.completed" && entry.Item != nil && entry.Item.Type == "web_search" && entry.Item.Query != "":
+			items = append(items, Item{Role: "assistant", Tools: []ToolCall{toolCall("WebSearch", jsonObject("query", entry.Item.Query))}, Time: ts})
 		case entry.Type == "response_item" && (p.Type == "function_call" || p.Type == "custom_tool_call"):
 			if p.Name != "" {
-				args := p.Arguments
+				args := rawJSONArgument(p.Arguments)
 				if args == "" {
-					args = p.Input // custom_tool_call carries "input" instead of "arguments"
+					args = rawJSONArgument(p.Input) // custom_tool_call carries "input" instead of "arguments"
 				}
-				items = append(items, Item{Role: "assistant", Tools: []ToolCall{toolCall(p.Name, args)}, Time: ts})
+				items = append(items, Item{Role: "assistant", Tools: []ToolCall{codexResponseToolCall(p.Namespace, p.Name, args)}, Time: ts})
+			}
+		case entry.Type == "response_item" && p.Type == "web_search_call":
+			if tool, ok := codexWebSearchTool(p.Action); ok {
+				items = append(items, Item{Role: "assistant", Tools: []ToolCall{tool}, Time: ts})
+			}
+		case entry.Type == "response_item" && p.Type == "tool_search_call":
+			if query := jsonStringField(rawJSONArgument(p.Arguments), "query"); query != "" {
+				items = append(items, Item{Role: "assistant", Tools: []ToolCall{{Name: "ToolSearch", Label: "🔎 Tool search: " + query}}, Time: ts})
 			}
 		}
 	}
 	return items, nil
+}
+
+type codexHistoryItem struct {
+	Type     string                 `json:"type"`
+	Command  string                 `json:"command,omitempty"`
+	Query    string                 `json:"query,omitempty"`
+	FilePath string                 `json:"file_path,omitempty"`
+	Changes  []codexHistoryChange   `json:"changes,omitempty"`
+	Server   string                 `json:"server,omitempty"`
+	Tool     string                 `json:"tool,omitempty"`
+	Items    []codexHistoryPlanItem `json:"items,omitempty"`
+}
+
+type codexHistoryChange struct {
+	Path string `json:"path"`
+	Kind string `json:"kind"`
+}
+
+type codexHistoryPlanItem struct {
+	Text      string `json:"text"`
+	Completed bool   `json:"completed"`
+}
+
+func codexHistoryItemTool(item *codexHistoryItem) (ToolCall, bool) {
+	if item == nil {
+		return ToolCall{}, false
+	}
+	switch item.Type {
+	case "command_execution":
+		return toolCall("Bash", jsonObject("command", item.Command)), true
+	case "web_search":
+		if item.Query != "" {
+			return toolCall("WebSearch", jsonObject("query", item.Query)), true
+		}
+		return toolCall("WebSearch", ""), true
+	case "file_read":
+		return toolCall("Read", jsonObject("file_path", item.FilePath)), true
+	case "file_edit":
+		return toolCall("Edit", jsonObject("file_path", item.FilePath)), true
+	case "file_change":
+		name := "Edit"
+		if len(item.Changes) == 1 && item.Changes[0].Kind == "add" {
+			name = "Write"
+		}
+		return toolCall(name, jsonObject("file_path", codexHistoryChangePaths(item.Changes))), true
+	case "todo_list":
+		return toolCall("Plan", codexHistoryPlanInput(item.Items)), true
+	case "mcp_tool_call":
+		return toolCall("MCP", mcpInput(item.Server, item.Tool)), true
+	}
+	return ToolCall{}, false
+}
+
+func codexResponseToolCall(namespace, name, input string) ToolCall {
+	switch name {
+	case "exec_command":
+		if cmd := jsonStringField(input, "cmd", "command"); cmd != "" {
+			return toolCall("Bash", jsonObject("command", cmd))
+		}
+	case "write_stdin":
+		var inp struct {
+			SessionID int    `json:"session_id"`
+			Chars     string `json:"chars"`
+		}
+		if json.Unmarshal([]byte(input), &inp) == nil && inp.SessionID != 0 {
+			action := "wait for command session"
+			if inp.Chars != "" {
+				action = "write to command session"
+			}
+			return toolCall("Bash", jsonObject("command", action+" "+itoa(inp.SessionID)))
+		}
+	case "view_image":
+		if path := jsonStringField(input, "path"); path != "" {
+			return ToolCall{Name: "ViewImage", Label: "🖼️ Image: " + path}
+		}
+	case "apply_patch":
+		if paths := patchPaths(input); len(paths) > 0 {
+			name := "Edit"
+			if len(paths) == 1 && strings.HasPrefix(input, "*** Begin Patch\n*** Add File: ") {
+				name = "Write"
+			}
+			return toolCall(name, jsonObject("file_path", strings.Join(paths, ", ")))
+		}
+	case "update_plan":
+		if plan := codexPlanFromFunctionArgs(input); plan != "" {
+			return toolCall("Plan", plan)
+		}
+	}
+	if namespace != "" {
+		if server, ok := codexMCPNamespace(namespace); ok {
+			return toolCall("MCP", mcpInput(server, name))
+		}
+	}
+	if server, tool, ok := codexMCPFunctionName(name); ok {
+		return toolCall("MCP", mcpInput(server, tool))
+	}
+	return toolCall(name, input)
+}
+
+func rawJSONArgument(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	return string(raw)
+}
+
+func jsonStringField(raw string, keys ...string) string {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal([]byte(raw), &obj) != nil {
+		return ""
+	}
+	for _, key := range keys {
+		var s string
+		if json.Unmarshal(obj[key], &s) == nil && s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func jsonObject(key, value string) string {
+	b, _ := json.Marshal(map[string]string{key: value})
+	return string(b)
+}
+
+func itoa(n int) string {
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if i == len(buf) {
+		i--
+		buf[i] = '0'
+	}
+	return string(buf[i:])
+}
+
+func mcpInput(server, tool string) string {
+	b, _ := json.Marshal(map[string]string{"server": server, "tool": tool})
+	return string(b)
+}
+
+func codexMCPNamespace(namespace string) (string, bool) {
+	if !strings.HasPrefix(namespace, "mcp__") {
+		return "", false
+	}
+	server := strings.TrimPrefix(namespace, "mcp__")
+	server = strings.ReplaceAll(server, "__", ".")
+	return server, server != ""
+}
+
+func codexMCPFunctionName(name string) (server, tool string, ok bool) {
+	if !strings.HasPrefix(name, "mcp__") {
+		return "", "", false
+	}
+	parts := strings.Split(strings.TrimPrefix(name, "mcp__"), "__")
+	if len(parts) < 2 {
+		return "", "", false
+	}
+	return strings.Join(parts[:len(parts)-1], "."), parts[len(parts)-1], true
+}
+
+func patchPaths(patch string) []string {
+	var paths []string
+	for _, line := range strings.Split(patch, "\n") {
+		for _, prefix := range []string{"*** Add File: ", "*** Update File: ", "*** Delete File: "} {
+			if path, ok := strings.CutPrefix(line, prefix); ok {
+				paths = append(paths, strings.TrimSpace(path))
+			}
+		}
+	}
+	return paths
+}
+
+func codexPlanFromFunctionArgs(input string) string {
+	var inp struct {
+		Plan []struct {
+			Step   string `json:"step"`
+			Status string `json:"status"`
+		} `json:"plan"`
+	}
+	if json.Unmarshal([]byte(input), &inp) != nil || len(inp.Plan) == 0 {
+		return ""
+	}
+	done := 0
+	current := ""
+	for _, item := range inp.Plan {
+		if item.Status == "completed" {
+			done++
+		} else if current == "" && item.Step != "" {
+			current = item.Step
+		}
+	}
+	return runner.MarshalPlanProgress(done, len(inp.Plan), current)
+}
+
+func codexHistoryPlanInput(items []codexHistoryPlanItem) string {
+	if len(items) == 0 {
+		return ""
+	}
+	done := 0
+	current := ""
+	for _, item := range items {
+		if item.Completed {
+			done++
+		} else if current == "" {
+			current = item.Text
+		}
+	}
+	return runner.MarshalPlanProgress(done, len(items), current)
+}
+
+func codexHistoryChangePaths(changes []codexHistoryChange) string {
+	if len(changes) == 1 {
+		return changes[0].Path
+	}
+	var paths []string
+	for _, change := range changes {
+		paths = append(paths, change.Path)
+	}
+	return strings.Join(paths, ", ")
+}
+
+func codexWebSearchTool(raw json.RawMessage) (ToolCall, bool) {
+	var action struct {
+		Type    string   `json:"type"`
+		Query   string   `json:"query"`
+		Queries []string `json:"queries"`
+		URL     string   `json:"url"`
+		Pattern string   `json:"pattern"`
+	}
+	if json.Unmarshal(raw, &action) != nil {
+		return ToolCall{}, false
+	}
+	switch action.Type {
+	case "search":
+		if action.Query == "" && len(action.Queries) > 0 {
+			action.Query = action.Queries[0]
+		}
+		if action.Query != "" {
+			return toolCall("WebSearch", jsonObject("query", action.Query)), true
+		}
+		return toolCall("WebSearch", ""), true
+	case "open_page":
+		if action.URL != "" {
+			return toolCall("WebFetch", jsonObject("url", action.URL)), true
+		}
+		return ToolCall{Name: "WebFetch", Label: "🌐 Fetch"}, true
+	case "find_in_page":
+		label := strings.TrimSpace(action.Pattern)
+		if action.URL != "" {
+			if label != "" {
+				label += " in " + action.URL
+			} else {
+				label = action.URL
+			}
+		}
+		if label == "" {
+			return ToolCall{Name: "WebFind", Label: "🌐 Find in page"}, true
+		}
+		return ToolCall{Name: "WebFind", Label: "🌐 Find: " + label}, true
+	}
+	return ToolCall{}, false
 }
 
 func timeOrEmpty(t time.Time) string {

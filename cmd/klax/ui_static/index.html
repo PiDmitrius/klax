@@ -294,7 +294,7 @@ let loaded = {};            // created -> history fetched?
 let offset = {};            // created -> pagination cursor
 let readMark = {};          // created -> logs index read up to; drives the unread badge AND the read-line
 let pending = {};           // created -> [{text,time}] in-flight user echoes, persisted across reload
-let es = null, opened = false, stick = true, seedBusy = true, settingsFor = 0;
+let es = null, opened = false, stick = true, settingsFor = 0;
 let lastEventAt = 0;        // last SSE message arrival (liveness watchdog)
 let busyPollTimer = null;   // GET /api/sessions poll, runs only while a tab is busy
 let watchdogTimer = null;   // forces SSE reconnect when the stream goes silent
@@ -795,24 +795,21 @@ function loadHistory(created, before){
 
 // reconcileSessions applies an authoritative session snapshot (from the SSE
 // "sessions" event OR the /api/sessions busy-poll) to local state. It is the
-// guarantee that a "typing" dot eventually clears: a snapshot's busy=false is
-// always honoured, no matter how the clearing "final" was lost (restart,
-// dropped SSE, proxy-held connection). `seed` is true only for the first
-// snapshot right after (re)connect — only then may a snapshot turn a dot ON, so
-// a turn already running survives a reload; later snapshots/polls only clear.
-function reconcileSessions(list, seed){
+// guarantee that a "typing" dot eventually matches the daemon: busy=true starts
+// local monitoring even if turn_start was lost, and busy=false clears even if
+// the terminal final/error was lost (restart, dropped SSE, proxy-held connection).
+function reconcileSessions(list){
   const before = new Set(busy);            // local busy snapshot, to spot busy->idle
   const wasActiveBusy = busy.has(active);
   sessions = list || [];
   const present = new Set();
   sessions.forEach(s => {
     present.add(s.created);
-    if(s.busy){ if(seed) busy.add(s.created); }
+    if(s.busy) busy.add(s.created);
     else busy.delete(s.created);
   });
   // A session the server no longer lists is likewise no longer busy.
   before.forEach(c => { if(!present.has(c)) busy.delete(c); });
-  if(seed) seedBusy = false;
   // Any tab that was busy and is now idle WITHOUT a final/error having reached us
   // (lost across a restart / dropped SSE) — reload its transcript so the answer
   // the dropped "final" carried is restored from the JSONL. On the normal path
@@ -847,7 +844,7 @@ function onEvent(ev){
   switch(d.type){
     case "ping": break; // liveness heartbeat only; lastEventAt updated above
     case "sessions":
-      reconcileSessions(d.sessions, seedBusy);
+      reconcileSessions(d.sessions);
       break;
     case "turn_start":
       busy.add(d.session); ensureBusyPoll();
@@ -893,7 +890,6 @@ function connect(){
   es.onmessage = onEvent;
   es.onopen = () => {
     lastEventAt = Date.now();
-    seedBusy = true; // recover in-flight busy state from the next sessions snapshot
     // On a reconnect (not the first open), re-sync the active tab from the
     // transcript: any progress/final lost while disconnected is in the JSONL.
     if(opened && active){ loaded[active]=false; logs[active]=[]; stick=true; loadHistory(active, 0); }
@@ -913,7 +909,7 @@ function pollBusy(){
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), 8000); // bound a proxy-stalled fetch so 5s polls can't pile up
   api("/api/sessions", { signal: ac.signal }).then(r => r.ok ? r.json() : null).then(list => {
-    if(list) reconcileSessions(list, false);
+    if(list) reconcileSessions(list);
   }).catch(()=>{}).finally(() => clearTimeout(t)); // daemon down mid-restart — next tick retries
 }
 function ensureBusyPoll(){

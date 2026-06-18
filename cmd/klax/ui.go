@@ -175,6 +175,10 @@ func (d *daemon) broadcastSessions(sk string) {
 	d.uiEmit(userFromKey(sk), uiEvent{Type: "sessions", Sessions: d.sessionsSnapshot(sk)})
 }
 
+func (d *daemon) uiUserForChat(chatID string) string {
+	return userFromKey(d.sessionKey(chatID))
+}
+
 // queuedCount is the number of messages waiting in a session's queue (excludes
 // the one currently running).
 func (d *daemon) queuedCount(sk string, created int64) int {
@@ -299,17 +303,17 @@ type uiTransport struct {
 }
 
 func (t *uiTransport) SendMessage(chatID, text, replyTo, format string) error {
-	t.d.uiEmit(userFromKey(chatID), uiEvent{Type: "notice", Text: text})
+	t.d.uiEmit(t.d.uiUserForChat(chatID), uiEvent{Type: "notice", Text: text})
 	return nil
 }
 
 func (t *uiTransport) SendMessageReturnID(chatID, text, replyTo, format string) (string, error) {
-	t.d.uiEmit(userFromKey(chatID), uiEvent{Type: "notice", Text: text})
+	t.d.uiEmit(t.d.uiUserForChat(chatID), uiEvent{Type: "notice", Text: text})
 	return "ui-notice", nil
 }
 
 func (t *uiTransport) EditMessage(chatID, messageID, text, format string) error {
-	t.d.uiEmit(userFromKey(chatID), uiEvent{Type: "notice", Text: text})
+	t.d.uiEmit(t.d.uiUserForChat(chatID), uiEvent{Type: "notice", Text: text})
 	return nil
 }
 
