@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -113,6 +114,67 @@ func TestDeliveryForRoutesUIChat(t *testing.T) {
 		t.Fatalf("ui chat must get *uiDelivery, got %T", del)
 	}
 	del.Close()
+}
+
+func TestUIDeliveryUsesCanonicalSessionUser(t *testing.T) {
+	h := newUIHub()
+	d := &daemon{uiHub: h}
+	canonical := h.subscribe("claw")
+	raw := h.subscribe("42")
+
+	del := d.newUIDelivery(context.Background(), queuedMsg{
+		chatID:      "tg:42",
+		sessKey:     "user:claw",
+		sessCreated: 7,
+	})
+	del.Close()
+
+	select {
+	case payload := <-canonical.ch:
+		var ev uiEvent
+		if err := json.Unmarshal(payload, &ev); err != nil {
+			t.Fatalf("decode event: %v", err)
+		}
+		if ev.Type != "turn_start" || ev.Session != 7 {
+			t.Fatalf("event = %+v, want turn_start for session 7", ev)
+		}
+	default:
+		t.Fatal("canonical UI subscriber did not receive messenger turn_start")
+	}
+	select {
+	case <-raw.ch:
+		t.Fatal("raw messenger id subscriber received canonical UI event")
+	default:
+	}
+}
+
+func TestUITransportUsesCanonicalSessionUser(t *testing.T) {
+	h := newUIHub()
+	d := &daemon{uiHub: h, identities: map[int64]string{42: "claw"}}
+	canonical := h.subscribe("claw")
+	raw := h.subscribe("42")
+
+	if err := (&uiTransport{d: d}).SendMessage("tg:42", "status", "", ""); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+
+	select {
+	case payload := <-canonical.ch:
+		var ev uiEvent
+		if err := json.Unmarshal(payload, &ev); err != nil {
+			t.Fatalf("decode event: %v", err)
+		}
+		if ev.Type != "notice" || ev.Text != "status" {
+			t.Fatalf("event = %+v, want status notice", ev)
+		}
+	default:
+		t.Fatal("canonical UI subscriber did not receive messenger notice")
+	}
+	select {
+	case <-raw.ch:
+		t.Fatal("raw messenger id subscriber received canonical UI notice")
+	default:
+	}
 }
 
 // End-to-end through the real mux: the SPA is served, the API rejects requests

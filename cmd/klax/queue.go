@@ -172,13 +172,21 @@ func (d *daemon) processSessionQueue(sr *sessionRunner) {
 	sr.processing = true
 	sr.mu.Unlock()
 
+	var lastSK string
 	d.drainWg.Add(1)
 	defer d.drainWg.Done()
 
 	defer func() {
 		sr.mu.Lock()
 		sr.processing = false
+		restart := len(sr.queue) > 0
 		sr.mu.Unlock()
+		if lastSK != "" {
+			d.broadcastSessions(lastSK)
+		}
+		if restart && !d.isDraining() {
+			go d.processSessionQueue(sr)
+		}
 	}()
 
 	for {
@@ -189,6 +197,7 @@ func (d *daemon) processSessionQueue(sr *sessionRunner) {
 		}
 		msg := sr.queue[0]
 		sr.queue = sr.queue[1:]
+		lastSK = msg.sessKey
 		// Update queue position in remaining messages' progress notifications.
 		for i, qm := range sr.queue {
 			if qm.progressID != "" {
@@ -376,9 +385,6 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	d.saveStore()
 
 	del.Final(result)
-	// Refresh any UI tab strip watching this session (new id, message count,
-	// model/ctx). The live busy dot is driven client-side by turn_start/final.
-	d.broadcastSessions(sk)
 }
 
 // buildTurnPrompt writes the message's attachments to a temp directory and
