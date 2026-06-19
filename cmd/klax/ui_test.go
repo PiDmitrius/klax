@@ -190,6 +190,34 @@ func TestDeliveryForRoutesUIChat(t *testing.T) {
 	del.Close()
 }
 
+// A messenger turn on a canonical "user:" session is mirrored to the web UI (tee),
+// so its answer/progress stream there live — not only on reload. A raw (unmapped)
+// messenger session is not mirrored, and never leaks to a UI hub.
+func TestDeliveryForMirrorsMessengerToUI(t *testing.T) {
+	d := newTestDeliveryDaemon(&fakeTransport{})
+	d.uiHub = newUIHub()
+
+	del := d.deliveryFor(context.Background(), queuedMsg{chatID: "tg:1", sessKey: "user:claw", sessCreated: 7}, true)
+	if _, ok := del.(teeDelivery); !ok {
+		t.Fatalf("canonical messenger session must mirror to UI (teeDelivery), got %T", del)
+	}
+	del.Close()
+	if ev, _, _ := d.uiHub.collect("claw", d.uiHub.epoch, 0); len(ev) == 0 {
+		t.Fatal("messenger turn not mirrored to the canonical UI hub")
+	} else if e := decodeEvent(t, ev[0]); e.Type != "turn_start" || e.Session != 7 {
+		t.Fatalf("mirror event = %+v, want turn_start session 7", e)
+	}
+
+	del2 := d.deliveryFor(context.Background(), queuedMsg{chatID: "tg:2", sessKey: "tg:2", sessCreated: 9}, true)
+	if _, ok := del2.(teeDelivery); ok {
+		t.Fatal("a raw (unmapped) messenger session must NOT mirror to UI")
+	}
+	del2.Close()
+	if ev, _, _ := d.uiHub.collect("2", d.uiHub.epoch, 0); len(ev) != 0 {
+		t.Fatalf("raw messenger session leaked %d events to a UI hub", len(ev))
+	}
+}
+
 func TestUIDeliveryUsesCanonicalSessionUser(t *testing.T) {
 	h := newUIHub()
 	d := &daemon{uiHub: h}
