@@ -303,7 +303,8 @@ let polling = false;        // poll loop running guard
 let pollBackoff = 0;        // backoff (ms) after a failed poll; reset on success
 const SENDTAB = Math.random().toString(36).slice(2); // per-tab id, so send nonces never collide across tabs
 let nonceCtr = 0;           // per-tab monotonic send counter
-const myNonces = new Set(); // my outstanding send nonces — skip the server's echo of my own message
+const myNonces = new Map(); // nonce -> created-at(ms): my outstanding sends, to skip the server's echo of my own message
+const NONCE_TTL = 30000;    // a send's echo round-trips in ~1 RTT; anything older is stale, never in flight
 let loadingHist = {};       // created -> transcript fetch in flight (guards double-load)
 let pendingReload = {};     // created -> a full reload was requested while one was in flight
 let tabStick = {};           // created -> whether the tab was at bottom when it was last left
@@ -862,10 +863,13 @@ function loadHistory(created, before){
 function reloadAll(){
   if(active){ loaded[active] = false; logs[active] = []; stick = true; loadHistory(active, 0); }
   for(const k in loaded){ if(+k !== active) loaded[k] = false; }
-  // Outstanding send nonces are moot after a reload (their user events predate the
-  // new cursor and won't be re-delivered; content comes from the transcript) —
-  // clear them so the set can't accumulate across reconnects/restarts.
-  myNonces.clear();
+  // Prune only STALE send nonces (older than a round-trip), not a send still in
+  // flight: an unconditional clear here would drop the nonce of a POST that the
+  // server accepts after the reload, and the sender would then render its own
+  // post-reload echo as a duplicate. Recent nonces are kept; the rest can't have a
+  // pending echo (their events predate the new cursor / a restart's reset).
+  const cut = Date.now() - NONCE_TTL;
+  for(const [n, t] of myNonces){ if(t < cut) myNonces.delete(n); }
   syncSessionsNow(); // re-sync authoritative state (busy/dot) alongside content
 }
 
@@ -1054,7 +1058,7 @@ function send(){
   savePending();
   // Nonce so we skip the server's echo of THIS message (other tabs render it).
   const nonce = SENDTAB + "-" + (++nonceCtr);
-  myNonces.add(nonce);
+  myNonces.set(nonce, now);
   api("/api/send", { method:"POST", headers:{"Content-Type":"application/json"},
     body: JSON.stringify({ session: target, text, nonce }) })
     .then(r => {
