@@ -74,8 +74,6 @@ type daemon struct {
 	groupVerb     map[string]bool   // chatID -> verbose progress output for group mode chats
 	tgRich        atomic.Bool       // global: render Telegram replies as Rich Messages (/rich)
 	uiHub         *uiHub            // web UI event hub; nil when the UI is not configured
-	startedAt     time.Time         // daemon start (for the post-restart UI notice window)
-	startupNotice string            // restart/update banner handed to reconnecting UI clients
 }
 
 func startupBackoff(attempt int) time.Duration {
@@ -534,7 +532,6 @@ func runDaemon() {
 	log.Printf("klax %s started (pid %d)", version, os.Getpid())
 
 	// Startup notification: if restart marker exists, notify users we're back.
-	d.startedAt = time.Now()
 	if m := readMarker(); m != nil {
 		var text string
 		switch m.Reason {
@@ -543,9 +540,8 @@ func runDaemon() {
 		default:
 			text = fmt.Sprintf("✅ klax перезапущен (v%s)", version)
 		}
-		// UI clients are still reconnecting at this point, so the broadcast below
-		// reaches none of them — hand it to each on (re)connect instead.
-		d.startupNotice = text
+		// Messengers get the restart banner here; UI clients show their own notice
+		// on the epoch change their next poll observes (handlePoll/pollLoop).
 		d.notifyAllUsers(text)
 		removeMarker()
 	}
@@ -1200,10 +1196,15 @@ func (d *daemon) handleMessageWithAttachments(chatID, msgID, text string, attach
 // trigger prefix is required; otherwise the message is queued. TargetCreated is
 // threaded to the enqueue so a UI tab can address a specific session (0 = the
 // active one, which every messenger uses).
-func (d *daemon) handleInbound(in Inbound) {
+// handleInbound routes one inbound message; it returns whether an actual message
+// was accepted onto a session queue (true) so a caller like the web UI's
+// handleSend can answer 204 vs roll the optimistic echo back. Commands count as
+// handled (true); an empty body, a no-trigger group line, or a drop (draining /
+// missing session) is false.
+func (d *daemon) handleInbound(in Inbound) bool {
 	text := strings.TrimSpace(in.Text)
 	if text == "" && len(in.Attachments) == 0 {
-		return
+		return false
 	}
 
 	// Ensure chat has at least one session.
@@ -1217,20 +1218,20 @@ func (d *daemon) handleInbound(in Inbound) {
 		// A command may have changed the session list/state (/new, /switch,
 		// /model, ...) — refresh any UI tab strip watching this user.
 		d.broadcastSessions(sk)
-		return
+		return true
 	}
 
 	// In group mode, require trigger prefix for all users
 	if d.isGroupChat(in.ChatID) {
 		if prompt, ok := stripGroupTrigger(text); ok {
-			d.enqueueToSession(in.ChatID, in.MsgID, prompt, in.Attachments, in.TargetCreated, in.Nonce)
+			return d.enqueueToSession(in.ChatID, in.MsgID, prompt, in.Attachments, in.TargetCreated, in.Nonce)
 		}
 		// No prefix — ignore silently
-		return
+		return false
 	}
 
 	// Queue for Claude
-	d.enqueueToSession(in.ChatID, in.MsgID, text, in.Attachments, in.TargetCreated, in.Nonce)
+	return d.enqueueToSession(in.ChatID, in.MsgID, text, in.Attachments, in.TargetCreated, in.Nonce)
 }
 
 func (d *daemon) ensureSession(sessionKey string) {

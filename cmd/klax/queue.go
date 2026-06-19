@@ -87,14 +87,18 @@ func (d *daemon) enqueueWithAttachments(chatID, msgID, text string, attachments 
 // while a positive value binds to exactly that session (a web-UI tab), validated
 // up front so a stale tab gets a clear error instead of silently hitting the
 // active session.
-func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []attachment, targetCreated int64, nonce string) {
+// enqueueToSession returns true if the message was bound to a session and queued,
+// false if it was dropped (empty, draining, or no such session) — the web UI's
+// handleSend uses this to answer 204 vs roll back its optimistic echo, closing a
+// drain-flip window where a dropped send would otherwise look accepted.
+func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []attachment, targetCreated int64, nonce string) bool {
 	if text == "" && len(attachments) == 0 {
 		d.sendMessage(chatID, msgID, "∅")
-		return
+		return false
 	}
 	if d.isDraining() {
 		d.sendMessage(chatID, msgID, "🔄 klax перезапускается, новые задачи не принимаются.")
-		return
+		return false
 	}
 
 	sk := d.sessionKey(chatID)
@@ -104,7 +108,7 @@ func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []atta
 		sess = d.store.Get(sk, targetCreated)
 		if sess == nil {
 			d.sendMessage(chatID, msgID, "❌ Сессия не найдена.")
-			return
+			return false
 		}
 	} else {
 		// Bind the message to whichever session is active right now. /switch and
@@ -113,7 +117,7 @@ func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []atta
 		sess = d.store.Active(sk)
 		if sess == nil {
 			d.sendMessage(chatID, msgID, "❌ Нет активной сессии. Напиши /new")
-			return
+			return false
 		}
 	}
 	sr := d.getRunner(sk, sess.Created)
@@ -173,10 +177,11 @@ func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []atta
 	d.broadcastSessions(sk)
 
 	if busy {
-		return
+		return true
 	}
 
 	go d.processSessionQueue(sr)
+	return true
 }
 
 func (d *daemon) processSessionQueue(sr *sessionRunner) {

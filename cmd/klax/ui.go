@@ -249,16 +249,6 @@ func (d *daemon) uiNotifyAll(text string) {
 	d.uiHub.broadcastAll(uiEvent{Type: "notice", Text: text})
 }
 
-// recentStartupNotice returns the post-restart banner for a UI client connecting
-// shortly after startup — the original broadcast had no UI clients yet — or ""
-// once the short window has passed (so a later fresh open sees nothing stale).
-func (d *daemon) recentStartupNotice() string {
-	if d.startupNotice == "" || time.Since(d.startedAt) > 90*time.Second {
-		return ""
-	}
-	return d.startupNotice
-}
-
 // uiEmit marshals and broadcasts one event to a user. No-op when the UI is off.
 func (d *daemon) uiEmit(user string, ev uiEvent) {
 	if d.uiHub == nil || user == "" {
@@ -668,14 +658,19 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	// point (enqueueToSession), so a Telegram/MAX/VK DM shows up live too — not just
 	// UI sends. The nonce rides along so THIS tab skips its own copy (it already
 	// rendered it optimistically) while other tabs render it.
-	s.d.handleInbound(Inbound{
+	if !s.d.handleInbound(Inbound{
 		ChatID:        s.chatID(user),
 		Text:          text,
 		Attachments:   attachments,
 		TargetCreated: targetCreated,
 		Nonce:         nonce,
 		RawMessage:    true, // the UI has no chat commands — "/"-text is a message
-	})
+	}) {
+		// Dropped after our entry checks (drain flipped in the window) — tell the
+		// client so it rolls back the optimistic echo instead of leaving a ghost.
+		http.Error(w, "klax перезапускается — попробуйте через минуту", http.StatusServiceUnavailable)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

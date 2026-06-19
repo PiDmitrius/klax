@@ -378,7 +378,13 @@ function inline(s){
     if(h.indexOf("**") !== -1) h = h.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
     if(h.indexOf("~~") !== -1) h = h.replace(/~~([^~]+)~~/g, '<s>$1</s>');
     if(h.indexOf("*")  !== -1) h = h.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<i>$2</i>'); // *italic*, never part of **bold**
-    if(h.indexOf("](") !== -1) h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    // Bound the link regex: a segment with many "[" and no early "]" backtracks
+    // O(n^2) (each "[" scans to end-of-segment looking for "]"). The indexOf("](")
+    // gate alone passes if a single "]( " exists anywhere, so also skip when the
+    // segment is bracket-heavy/huge (links just render literally there — a
+    // pathological self-DoS line, not real prose).
+    if(h.indexOf("](") !== -1 && h.length < 50000 && (h.match(/\[/g) || []).length < 200)
+      h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
     return linkifyBare(h);
   }).join("");
 }
@@ -805,12 +811,13 @@ function loadHistory(created, before){
     const prepend = [];
     (data.turns||[]).forEach(it => itemToEntries(it).forEach(e => mergeOrPush(prepend, e)));
     // Pagination (before>0) prepends older history. A full reload (before=0) is an
-    // authoritative re-sync: when the session is idle the JSONL is complete, so
-    // REPLACE the log instead of concatenating the live tail — otherwise a reload
-    // racing a lagging live event renders the answer twice (stickily). While a turn
-    // is in flight, keep the live tail (narration not yet written to the JSONL).
-    logs[created] = before ? prepend.concat(logs[created] || [])
-                  : (busy.has(created) ? prepend.concat(logs[created] || []) : prepend);
+    // authoritative re-sync: REPLACE the log with the transcript. The poll cursor
+    // already advanced to the reload head, so any in-flight events pushed into
+    // logs[created] during this async fetch are ALSO in the freshly-read JSONL (the
+    // CLI flushes content before its event is emitted) — concatenating them would
+    // render that content twice (stickily). The freshest narration not yet in the
+    // JSONL is re-sent by the turn's next progress/final, so nothing is lost.
+    logs[created] = before ? prepend.concat(logs[created] || []) : prepend;
     // Older history was prepended — shift the read-line so it stays on the same item.
     if(before && readMark[created] !== undefined) readMark[created] += prepend.length;
     if(!before){
@@ -824,8 +831,15 @@ function loadHistory(created, before){
       // Match on NORMALIZED text (strip CR, trim) so an invisible whitespace/CRLF
       // difference can't cause a false re-show.
       const norm = s => (s||"").replace(/\r/g, "").trim();
+      // Scope the multiset to RECENT transcript user-turns: an unrelated OLD turn
+      // with identical text ("ok", "yes") must not satisfy — and so silently drop —
+      // a just-sent, not-yet-recorded echo. A turn is recorded at/after its send
+      // (later if it queued), so anything older than the oldest pending send (minus
+      // a clock-skew margin) cannot be one of these pending messages.
+      const oldest = (pending[created] || []).reduce((m, p) => Math.min(m, p.time), Infinity) - 300000;
       const counts = {};
-      (data.turns||[]).filter(it => it.role === "user").forEach(it => { const k = norm(it.text); counts[k] = (counts[k]||0) + 1; });
+      (data.turns||[]).filter(it => it.role === "user" && (!it.time || Date.parse(it.time) >= oldest))
+        .forEach(it => { const k = norm(it.text); counts[k] = (counts[k]||0) + 1; });
       // A leftover echo is only worth showing while the session genuinely has work
       // in flight (busy or queued). On an IDLE session the JSONL is complete and
       // authoritative, so an unmatched pending is stale — delivered under a skewed
@@ -928,7 +942,7 @@ function reconcileSessions(list){
 // so the poll never redelivers, but a retried request could. A render failure on
 // one event must never break the batch (the loop's finally re-syncs the dot).
 function applyEvent(d){
-  if(d.seq !== undefined){ if(d.seq <= lastSeq) return; lastSeq = d.seq; }
+  if(d.seq !== undefined && d.seq <= lastSeq) return; // already applied
   try {
     switch(d.type){
       case "user":
@@ -975,6 +989,9 @@ function applyEvent(d){
         break;
       }
     }
+    // Commit the dedupe cursor only AFTER a successful apply (inside the try, so a
+    // throwing handler leaves it uncommitted and a retried batch can re-apply).
+    if(d.seq !== undefined && d.seq > lastSeq) lastSeq = d.seq;
   } catch(e){
     console.error("klax applyEvent", d && d.type, e);
   }
