@@ -27,13 +27,29 @@ type Delivery interface {
 	Close()
 }
 
+// teeDelivery forwards one turn's stream to two deliveries (a messenger chat AND
+// the web-UI mirror). Both Progress/Final/Close run in order; each is itself
+// non-blocking (messenger hands to a worker, UI emits to the per-user ring).
+type teeDelivery struct{ a, b Delivery }
+
+func (t teeDelivery) Progress(ev runner.ProgressEvent) { t.a.Progress(ev); t.b.Progress(ev) }
+func (t teeDelivery) Final(res runner.RunResult)       { t.a.Final(res); t.b.Final(res) }
+func (t teeDelivery) Close()                           { t.a.Close(); t.b.Close() }
+
 // deliveryFor builds the Delivery for a turn, picked by the chat's transport
-// prefix. Messenger chats (tg/mx/vk and anything else) get the edit-streaming
-// messengerDelivery; the "ui" prefix is routed to the web-UI delivery (added
-// alongside the UI server).
+// prefix. The "ui" prefix routes to the web-UI delivery. A messenger chat
+// (tg/mx/vk) gets the edit-streaming messengerDelivery — and, when its session
+// belongs to a canonical "user:" identity (so a web-UI client can be watching the
+// same session), is ALSO mirrored to the UI so the answer streams there live, not
+// only on reload. uiUserForKey gates the mirror to canonical sessions (raw
+// tg:/group keys → no mirror); the UI ring buffers if no client is polling.
 func (d *daemon) deliveryFor(ctx context.Context, msg queuedMsg, verbose bool) Delivery {
 	if transportPrefix(msg.chatID) == uiPrefix {
 		return d.newUIDelivery(ctx, msg)
 	}
-	return d.newMessengerDelivery(ctx, msg, verbose)
+	md := d.newMessengerDelivery(ctx, msg, verbose)
+	if d.uiHub != nil && uiUserForKey(msg.sessKey) != "" {
+		return teeDelivery{a: md, b: d.newUIDelivery(ctx, msg)}
+	}
+	return md
 }
