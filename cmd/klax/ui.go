@@ -27,7 +27,26 @@ import (
 // shares sessions with the messengers (cross-channel continuity).
 const uiPrefix = "ui"
 
-const uiClientBuffer = 64
+// Per-user event ring. Every broadcast event gets a monotonic seq and is retained
+// here so a long-poll can return exactly what a client missed since its cursor
+// ("<epoch>-<seq>"). Bounded by count and bytes; a cursor that predates the ring
+// (overflow) gets `reload` and re-syncs from the transcript. The ring is the only
+// delivery buffer — there is no per-connection state.
+const (
+	uiRingMaxItems = 512
+	uiRingMaxBytes = 8 << 20
+)
+
+// uiPollHold is how long /api/poll holds a request open when there is nothing new
+// before returning an empty batch (the client then re-polls). Well under typical
+// proxy/browser request limits; a cut request is just re-issued from the same
+// cursor (idempotent), so the exact value is not load-bearing.
+const uiPollHold = 25 * time.Second
+
+// uiMaxInflightPerUser bounds concurrently-held polls per user — cheap hygiene
+// against a buggy client loop or an abusive token (replaces the SSE per-client
+// cap/eviction). Excess polls get 429 + client backoff.
+const uiMaxInflightPerUser = 32
 
 // uiSessionInfo is one tab in the strip.
 type uiSessionInfo struct {
@@ -47,7 +66,9 @@ type uiSessionInfo struct {
 // uiEvent is one server-sent event. The client multiplexes all tabs over a
 // single stream and routes by Session (a session's Created).
 type uiEvent struct {
-	Type      string          `json:"type"` // sessions|turn_start|progress|final|error|notice|compact
+	Type      string          `json:"type"` // sessions|turn_start|progress|final|error|notice|compact|user
+	Seq       uint64          `json:"seq,omitempty"`   // monotonic id for client dedupe; set by emitLocked
+	Nonce     string          `json:"nonce,omitempty"` // user-event: the sender's send nonce, so it skips its own echo
 	Session   int64           `json:"session,omitempty"`
 	Kind      string          `json:"kind,omitempty"` // progress: tool|narration
 	Text      string          `json:"text,omitempty"`
@@ -58,76 +79,165 @@ type uiEvent struct {
 	CtxWindow int             `json:"ctx_window,omitempty"`
 }
 
-// userFromKey pulls the canonical user out of a session key ("user:claw") or a
-// UI chatID/raw ("ui:claw" or "claw"). Messenger keys like "tg:123" return
-// "123", which never matches a UI client, so they are harmless no-ops.
-func userFromKey(s string) string {
-	if i := strings.Index(s, ":"); i != -1 {
-		return s[i+1:]
+// uiUserForKey returns the canonical UI user for a session key, but ONLY for the
+// canonical "user:<id>" form that UI clients (and mapped messenger DMs) resolve
+// to. Raw messenger/group keys ("tg:123", "mx:...", group ids) return "" — a UI
+// event must never reach a UI identity whose id merely collides with a raw chat
+// suffix. uiEmit no-ops on the empty string.
+func uiUserForKey(sk string) string {
+	const p = "user:"
+	if strings.HasPrefix(sk, p) {
+		return sk[len(p):]
 	}
-	return s
+	return ""
 }
 
-// uiHub fans server events out to connected SSE clients, keyed by canonical user.
+// ringItem is one retained event: its seq and the marshaled uiEvent JSON (which
+// already carries `seq`). Stored as json.RawMessage so the poll handler can copy
+// it into a response without unmarshal/remarshal.
+type ringItem struct {
+	seq  uint64
+	data json.RawMessage
+}
+
+// uiHub retains events per canonical user for long-poll delivery. Every event gets
+// a monotonic seq (under mu) and is kept in a bounded per-user ring; a poll reads
+// events with seq>cursor. epoch is the process lifetime: a restart changes it, so a
+// client with a stale-epoch cursor is told to reload. notify wakes held polls;
+// inflight bounds concurrent held polls per user. There is no per-connection state.
 type uiHub struct {
-	mu      sync.Mutex
-	clients map[*uiClient]struct{}
+	mu       sync.Mutex
+	epoch    int64
+	seq      uint64
+	ring     map[string][]ringItem    // per-user retained events
+	ringSz   map[string]int           // per-user ring byte size
+	notify   map[string]chan struct{} // per-user wake channel (closed-channel broadcast)
+	inflight map[string]int           // per-user concurrently-held polls
 }
 
-type uiClient struct {
-	user string
-	ch   chan []byte
-}
-
-func newUIHub() *uiHub { return &uiHub{clients: make(map[*uiClient]struct{})} }
-
-func (h *uiHub) subscribe(user string) *uiClient {
-	c := &uiClient{user: user, ch: make(chan []byte, uiClientBuffer)}
-	h.mu.Lock()
-	h.clients[c] = struct{}{}
-	h.mu.Unlock()
-	return c
-}
-
-func (h *uiHub) unsubscribe(c *uiClient) {
-	h.mu.Lock()
-	delete(h.clients, c)
-	h.mu.Unlock()
-}
-
-// broadcast delivers payload to every client of user. A client whose buffer is
-// full is dropped (its channel closed, its SSE writer then exits) rather than
-// blocking the caller — progress events come from the runner's stdout goroutine,
-// which must never block. The dropped client reconnects and re-syncs via
-// /api/sessions + /api/transcript, so liveness is best-effort by design.
-func (h *uiHub) broadcast(user string, payload []byte) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for c := range h.clients {
-		if c.user != user {
-			continue
-		}
-		select {
-		case c.ch <- payload:
-		default:
-			close(c.ch)
-			delete(h.clients, c)
-		}
+func newUIHub() *uiHub {
+	return &uiHub{
+		epoch:    time.Now().UnixNano(), // unique per process so a restart is always detectable
+		ring:     make(map[string][]ringItem),
+		ringSz:   make(map[string]int),
+		notify:   make(map[string]chan struct{}),
+		inflight: make(map[string]int),
 	}
 }
 
-// broadcastAll delivers payload to every connected client (any user). Used for
-// daemon-wide banners (restart/update). Same slow-client drop as broadcast.
-func (h *uiHub) broadcastAll(payload []byte) {
+// waitChan returns the per-user wake channel, creating it if absent. A poll grabs
+// this BEFORE reading the ring so an emit between the read and the select closes
+// the very channel it holds (lost-wakeup-safe).
+func (h *uiHub) waitChan(user string) chan struct{} {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for c := range h.clients {
-		select {
-		case c.ch <- payload:
-		default:
-			close(c.ch)
-			delete(h.clients, c)
+	ch := h.notify[user]
+	if ch == nil {
+		ch = make(chan struct{})
+		h.notify[user] = ch
+	}
+	return ch
+}
+
+// head returns the current global seq (the newest cursor position).
+func (h *uiHub) head() uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.seq
+}
+
+// enterPoll/leavePoll bound concurrently-held polls per user.
+func (h *uiHub) enterPoll(user string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.inflight[user] >= uiMaxInflightPerUser {
+		return false
+	}
+	h.inflight[user]++
+	return true
+}
+
+func (h *uiHub) leavePoll(user string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.inflight[user] > 0 {
+		h.inflight[user]--
+	}
+	if h.inflight[user] == 0 {
+		delete(h.inflight, user)
+	}
+}
+
+// emitLocked assigns the next seq, stamps it into the payload (so the client can
+// dedupe), appends the marshaled event to the user's ring (trimming to the caps),
+// and wakes any held polls for that user. Caller holds h.mu.
+func (h *uiHub) emitLocked(user string, ev uiEvent) {
+	h.seq++
+	ev.Seq = h.seq
+	data, err := json.Marshal(ev)
+	if err != nil {
+		log.Printf("ui: marshal event: %v", err)
+		return // seq is burned, but a single skipped seq is invisible to the cursor
+	}
+	items := append(h.ring[user], ringItem{seq: h.seq, data: data})
+	sz := h.ringSz[user] + len(data)
+	for len(items) > 1 && (len(items) > uiRingMaxItems || sz > uiRingMaxBytes) {
+		sz -= len(items[0].data)
+		items[0] = ringItem{} // drop the ref so it can be GC'd despite the backing array
+		items = items[1:]
+	}
+	h.ring[user] = items
+	h.ringSz[user] = sz
+	if ch := h.notify[user]; ch != nil { // wake held polls; the next waiter makes a fresh channel
+		close(ch)
+		delete(h.notify, user)
+	}
+}
+
+// collect gathers a user's events with seq > cursorSeq, the current head seq, and
+// whether the cursor is uncoverable: epoch mismatch (daemon restarted) or it
+// predates the retained ring (overflow). In both cases the client must reload from
+// the transcript.
+func (h *uiHub) collect(user string, cursorEpoch int64, cursorSeq uint64) (events []json.RawMessage, head uint64, reload bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	head = h.seq
+	if cursorEpoch != h.epoch {
+		return nil, head, true
+	}
+	items := h.ring[user]
+	if len(items) > 0 && cursorSeq+1 < items[0].seq {
+		return nil, head, true
+	}
+	for _, it := range items {
+		if it.seq > cursorSeq {
+			events = append(events, it.data)
 		}
+	}
+	return events, head, false
+}
+
+// broadcast queues one event for a user and retains it for the next poll.
+func (h *uiHub) broadcast(user string, ev uiEvent) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.emitLocked(user, ev)
+}
+
+// broadcastAll queues one event for every user the hub knows about (has retained
+// events for, or is currently polling) — daemon-wide banners (restart/update).
+func (h *uiHub) broadcastAll(ev uiEvent) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	seen := make(map[string]struct{})
+	for user := range h.ring {
+		seen[user] = struct{}{}
+	}
+	for user := range h.inflight {
+		seen[user] = struct{}{}
+	}
+	for user := range seen {
+		h.emitLocked(user, ev)
 	}
 }
 
@@ -136,21 +246,7 @@ func (d *daemon) uiNotifyAll(text string) {
 	if d.uiHub == nil {
 		return
 	}
-	payload, err := json.Marshal(uiEvent{Type: "notice", Text: text})
-	if err != nil {
-		return
-	}
-	d.uiHub.broadcastAll(payload)
-}
-
-// recentStartupNotice returns the post-restart banner for a UI client connecting
-// shortly after startup — the original broadcast had no UI clients yet — or ""
-// once the short window has passed (so a later fresh open sees nothing stale).
-func (d *daemon) recentStartupNotice() string {
-	if d.startupNotice == "" || time.Since(d.startedAt) > 90*time.Second {
-		return ""
-	}
-	return d.startupNotice
+	d.uiHub.broadcastAll(uiEvent{Type: "notice", Text: text})
 }
 
 // uiEmit marshals and broadcasts one event to a user. No-op when the UI is off.
@@ -158,12 +254,7 @@ func (d *daemon) uiEmit(user string, ev uiEvent) {
 	if d.uiHub == nil || user == "" {
 		return
 	}
-	payload, err := json.Marshal(ev)
-	if err != nil {
-		log.Printf("ui: marshal event: %v", err)
-		return
-	}
-	d.uiHub.broadcast(user, payload)
+	d.uiHub.broadcast(user, ev)
 }
 
 // broadcastSessions pushes the current tab-strip snapshot to the UI client(s)
@@ -172,11 +263,11 @@ func (d *daemon) broadcastSessions(sk string) {
 	if d.uiHub == nil {
 		return
 	}
-	d.uiEmit(userFromKey(sk), uiEvent{Type: "sessions", Sessions: d.sessionsSnapshot(sk)})
+	d.uiEmit(uiUserForKey(sk), uiEvent{Type: "sessions", Sessions: d.sessionsSnapshot(sk)})
 }
 
 func (d *daemon) uiUserForChat(chatID string) string {
-	return userFromKey(d.sessionKey(chatID))
+	return uiUserForKey(d.sessionKey(chatID))
 }
 
 // queuedCount is the number of messages waiting in a session's queue (excludes
@@ -336,7 +427,7 @@ func (s *uiServer) Run(ctx context.Context) {
 		_ = srv.Shutdown(shCtx)
 	}()
 	if !isLoopbackAddr(s.addr) {
-		log.Printf("ui: WARNING %q is not loopback — the bearer token travels in cleartext (it is also in the SSE URL); keep ui_listen on 127.0.0.1 or front it with a TLS proxy", s.addr)
+		log.Printf("ui: WARNING %q is not loopback — the bearer token travels in cleartext; keep ui_listen on 127.0.0.1 or front it with a TLS proxy", s.addr)
 	}
 	log.Printf("ui: listening on %s", s.addr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -365,7 +456,7 @@ func isLoopbackAddr(addr string) bool {
 
 func (s *uiServer) routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/events", s.handleEvents)
+	mux.HandleFunc("/api/poll", s.handlePoll)
 	mux.HandleFunc("/api/send", s.handleSend)
 	mux.HandleFunc("/api/abort", s.handleAbort)
 	mux.HandleFunc("/api/new", s.handleNew)
@@ -379,10 +470,9 @@ func (s *uiServer) routes() http.Handler {
 	return mux
 }
 
-// auth resolves the bearer token (Authorization header) to a canonical user.
-// Query-string tokens are deliberately NOT accepted here: only the SSE stream
-// needs one (EventSource cannot set headers — see authSSE). Accepting ?token= on
-// POST/data routes would needlessly widen the token-in-URL leakage surface.
+// auth resolves the bearer token (Authorization header) to a canonical user. Every
+// UI request — including the long-poll — sets the header (fetch can), so there is
+// no ?token= query path to widen token-in-URL leakage.
 func (s *uiServer) auth(r *http.Request) (string, bool) {
 	h := r.Header.Get("Authorization")
 	if !strings.HasPrefix(h, "Bearer ") {
@@ -392,81 +482,101 @@ func (s *uiServer) auth(r *http.Request) (string, bool) {
 	return u, ok
 }
 
-// authSSE additionally accepts ?token= because EventSource cannot set an
-// Authorization header. Used ONLY by the SSE endpoint.
-func (s *uiServer) authSSE(r *http.Request) (string, bool) {
-	if u, ok := s.auth(r); ok {
-		return u, true
-	}
-	if tok := r.URL.Query().Get("token"); tok != "" {
-		if u, ok := s.tokens[tok]; ok {
-			return u, true
-		}
-	}
-	return "", false
-}
-
 func (s *uiServer) chatID(user string) string { return uiPrefix + ":" + user }
 
-func (s *uiServer) handleEvents(w http.ResponseWriter, r *http.Request) {
-	user, ok := s.authSSE(r)
+// pollResponse is the /api/poll body: events since the cursor, the new cursor to
+// send next, and a reload flag when the cursor is uncoverable.
+type pollResponse struct {
+	Epoch  int64             `json:"epoch"`
+	Cursor string            `json:"cursor"`
+	Events []json.RawMessage `json:"events,omitempty"`
+	Reload bool              `json:"reload,omitempty"`
+}
+
+// parseCursor splits a "<epoch>-<seq>" poll cursor. ok=false on an absent/blank
+// cursor (a fresh client).
+func parseCursor(v string) (epoch int64, seq uint64, ok bool) {
+	i := strings.IndexByte(v, '-')
+	if i <= 0 {
+		return 0, 0, false
+	}
+	e, err1 := strconv.ParseInt(v[:i], 10, 64)
+	q, err2 := strconv.ParseUint(v[i+1:], 10, 64)
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	return e, q, true
+}
+
+func (s *uiServer) cursorString(seq uint64) string {
+	return strconv.FormatInt(s.d.uiHub.epoch, 10) + "-" + strconv.FormatUint(seq, 10)
+}
+
+// handlePoll is the long-poll delivery endpoint. The client sends its cursor
+// ("<epoch>-<seq>"); the server returns the user's events with seq>cursor, holding
+// the request up to uiPollHold when there is nothing new (returning an empty batch
+// on timeout, so the client re-polls). Ordinary request/response — no streaming,
+// no heartbeat, no per-connection state — so any proxy handles it, and a cut
+// request is just re-issued from the same cursor (idempotent, no loss).
+func (s *uiServer) handlePoll(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.auth(r)
 	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-
-	c := s.d.uiHub.subscribe(user)
-	defer s.d.uiHub.unsubscribe(c)
-
-	fmt.Fprint(w, ": connected\n\n")
-	flusher.Flush()
-
-	// Initial tab strip (ensures at least one session exists first).
+	// Ensure the user has at least one session so the client's /api/sessions load
+	// (cold start) has something to render.
 	sk := s.d.sessionKey(s.chatID(user))
 	s.d.ensureSessionWithCWD(sk, s.d.sessionCWD(s.chatID(user)))
-	s.d.broadcastSessions(sk)
 
-	// If the daemon just restarted/updated, hand this (re)connecting client the
-	// startup banner — it was broadcast before any UI client could reconnect.
-	if note := s.d.recentStartupNotice(); note != "" {
-		if payload, err := json.Marshal(uiEvent{Type: "notice", Text: note}); err == nil {
-			select {
-			case c.ch <- payload:
-			default:
-			}
-		}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+
+	cursorEpoch, cursorSeq, hasCursor := parseCursor(r.URL.Query().Get("cursor"))
+
+	// Fresh client (no cursor): just establish the cursor at the current head and
+	// return immediately. Content comes from the client's /api/sessions + transcript
+	// load; subsequent polls deliver everything after this head.
+	if !hasCursor {
+		s.writePoll(w, pollResponse{Epoch: s.d.uiHub.epoch, Cursor: s.cursorString(s.d.uiHub.head())})
+		return
 	}
 
-	heartbeat := time.NewTicker(20 * time.Second)
-	defer heartbeat.Stop()
+	if !s.d.uiHub.enterPoll(user) {
+		http.Error(w, "too many concurrent polls", http.StatusTooManyRequests)
+		return
+	}
+	defer s.d.uiHub.leavePoll(user)
+
+	deadline := time.NewTimer(uiPollHold)
+	defer deadline.Stop()
 	for {
+		ch := s.d.uiHub.waitChan(user) // grab BEFORE collect (lost-wakeup-safe)
+		events, head, reload := s.d.uiHub.collect(user, cursorEpoch, cursorSeq)
+		if reload {
+			s.writePoll(w, pollResponse{Epoch: s.d.uiHub.epoch, Cursor: s.cursorString(head), Reload: true})
+			return
+		}
+		if len(events) > 0 {
+			s.writePoll(w, pollResponse{Epoch: s.d.uiHub.epoch, Cursor: s.cursorString(head), Events: events})
+			return
+		}
 		select {
+		case <-ch:
+			// woken by an emit for this user — re-collect
+		case <-deadline.C:
+			// nothing new within the hold — empty batch; head has no events for this
+			// user in (cursor, head], so advancing the cursor to head loses nothing.
+			s.writePoll(w, pollResponse{Epoch: s.d.uiHub.epoch, Cursor: s.cursorString(head)})
+			return
 		case <-r.Context().Done():
 			return
-		case payload, ok := <-c.ch:
-			if !ok {
-				return // dropped as a slow client
-			}
-			fmt.Fprintf(w, "data: %s\n\n", payload)
-			flusher.Flush()
-		case <-heartbeat.C:
-			// A real data event, not an SSE ": ping" comment: EventSource.onmessage
-			// never fires for comment lines, so the client's liveness watchdog can
-			// only observe a data frame. Lets it detect a dead-but-held-open stream
-			// (e.g. behind a reverse proxy after an abrupt daemon exit) and reconnect.
-			fmt.Fprint(w, "data: {\"type\":\"ping\"}\n\n")
-			flusher.Flush()
 		}
 	}
+}
+
+func (s *uiServer) writePoll(w http.ResponseWriter, resp pollResponse) {
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
@@ -492,6 +602,7 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<20)
 	var (
 		text          string
+		nonce         string
 		targetCreated int64
 		attachments   []attachment
 	)
@@ -501,6 +612,7 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		text = r.FormValue("text")
+		nonce = r.FormValue("nonce")
 		targetCreated, _ = strconv.ParseInt(r.FormValue("session"), 10, 64)
 		for _, fh := range r.MultipartForm.File["files"] {
 			f, err := fh.Open()
@@ -518,12 +630,14 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Session int64  `json:"session"`
 			Text    string `json:"text"`
+			Nonce   string `json:"nonce"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		text = body.Text
+		nonce = body.Nonce
 		targetCreated = body.Session
 	}
 	// The UI always targets a specific tab; never silently fall back to the
@@ -540,13 +654,23 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
-	s.d.handleInbound(Inbound{
+	// The accepted user message is echoed to every UI tab from the common accept
+	// point (enqueueToSession), so a Telegram/MAX/VK DM shows up live too — not just
+	// UI sends. The nonce rides along so THIS tab skips its own copy (it already
+	// rendered it optimistically) while other tabs render it.
+	if !s.d.handleInbound(Inbound{
 		ChatID:        s.chatID(user),
 		Text:          text,
 		Attachments:   attachments,
 		TargetCreated: targetCreated,
+		Nonce:         nonce,
 		RawMessage:    true, // the UI has no chat commands — "/"-text is a message
-	})
+	}) {
+		// Dropped after our entry checks (drain flipped in the window) — tell the
+		// client so it rolls back the optimistic echo instead of leaving a ghost.
+		http.Error(w, "klax перезапускается — попробуйте через минуту", http.StatusServiceUnavailable)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

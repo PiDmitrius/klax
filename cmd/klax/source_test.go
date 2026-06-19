@@ -27,7 +27,7 @@ func TestEnqueueToSessionRejectsMissingTarget(t *testing.T) {
 	d.store = newStoreWithChat("tg:1", "one")
 	d.runners = make(map[runnerKey]*sessionRunner)
 
-	d.enqueueToSession("tg:1", "100", "hi", nil, 99999)
+	d.enqueueToSession("tg:1", "100", "hi", nil, 99999, "")
 
 	if len(d.runners) != 0 {
 		t.Fatalf("missing target must not create a runner, got %d", len(d.runners))
@@ -66,7 +66,7 @@ func TestEnqueueToSessionBindsExplicitTarget(t *testing.T) {
 	sr := &sessionRunner{runner: runner.New(), processing: true}
 	d.runners[runnerKey{sk: "tg:1", created: targetCreated}] = sr
 
-	d.enqueueToSession("tg:1", "100", "hi", nil, targetCreated)
+	d.enqueueToSession("tg:1", "100", "hi", nil, targetCreated, "")
 
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
@@ -75,5 +75,34 @@ func TestEnqueueToSessionBindsExplicitTarget(t *testing.T) {
 	}
 	if sr.queue[0].sessCreated != targetCreated {
 		t.Fatalf("message bound to %d, want explicit target %d (not active %d)", sr.queue[0].sessCreated, targetCreated, activeCreated)
+	}
+}
+
+// A messenger DM (no nonce) is echoed to the UI hub as a "user" event the instant
+// it is accepted, so it shows up live in the web UI — not only on a reload.
+func TestEnqueueToSessionEchoesUserToUI(t *testing.T) {
+	tp := &fakeTransport{}
+	d := newTestDeliveryDaemon(tp)
+	d.identities = map[int64]string{1: "claw"} // tg:1 -> user:claw (a mapped DM)
+	d.store = newStoreWithChat("user:claw", "one")
+	d.runners = make(map[runnerKey]*sessionRunner)
+	d.uiHub = newUIHub()
+
+	created := d.store.SessionsFor("user:claw")[0].Created
+	// Pre-seed the runner as processing so the spawned queue pump returns at its
+	// guard and no real backend runs.
+	d.runners[runnerKey{sk: "user:claw", created: created}] = &sessionRunner{runner: runner.New(), processing: true}
+
+	d.enqueueToSession("tg:1", "100", "hi there", nil, created, "") // mapped messenger DM: no nonce
+
+	ev, _, _ := d.uiHub.collect("claw", d.uiHub.epoch, 0)
+	found := false
+	for _, raw := range ev {
+		if e := decodeEvent(t, raw); e.Type == "user" && e.Text == "hi there" && e.Session == created {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("messenger DM not echoed to the UI hub as a user event; got %d events", len(ev))
 	}
 }

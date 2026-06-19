@@ -8,7 +8,7 @@ import (
 	"os"
 )
 
-const version = "0.6.29"
+const version = "0.6.39"
 
 func main() {
 	log.SetPrefix("klax: ")
