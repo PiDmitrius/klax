@@ -301,6 +301,9 @@ let lastSeq = -1;           // highest applied seq this epoch (belt-and-suspende
 let seenMessages = {};      // created -> server message count we've materialized (staleness backstop)
 let polling = false;        // poll loop running guard
 let pollBackoff = 0;        // backoff (ms) after a failed poll; reset on success
+const SENDTAB = Math.random().toString(36).slice(2); // per-tab id, so send nonces never collide across tabs
+let nonceCtr = 0;           // per-tab monotonic send counter
+const myNonces = new Set(); // my outstanding send nonces — skip the server's echo of my own message
 let loadingHist = {};       // created -> transcript fetch in flight (guards double-load)
 let pendingReload = {};     // created -> a full reload was requested while one was in flight
 let tabStick = {};           // created -> whether the tab was at bottom when it was last left
@@ -920,6 +923,12 @@ function applyEvent(d){
   if(d.seq !== undefined){ if(d.seq <= lastSeq) return; lastSeq = d.seq; }
   try {
     switch(d.type){
+      case "user":
+        // The user's own message, echoed by the server to every tab. Skip my own
+        // (this tab already showed it optimistically); render it in any other tab.
+        if(d.nonce && myNonces.has(d.nonce)){ myNonces.delete(d.nonce); break; }
+        push(d.session, entry("user", mdSafe(d.text), Date.now()));
+        break;
       case "sessions":
         reconcileSessions(d.sessions);
         break;
@@ -1039,8 +1048,11 @@ function send(){
   push(target, entry("user", mdSafe(text), now));
   (pending[target] = pending[target] || []).push({ text, time: now });
   savePending();
+  // Nonce so we skip the server's echo of THIS message (other tabs render it).
+  const nonce = SENDTAB + "-" + (++nonceCtr);
+  myNonces.add(nonce);
   api("/api/send", { method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({ session: target, text }) })
+    body: JSON.stringify({ session: target, text, nonce }) })
     .then(r => {
       // A definitive refusal (e.g. 503 while klax drains for a restart) means the
       // turn was NOT accepted — roll it back AND restore the text to the composer so

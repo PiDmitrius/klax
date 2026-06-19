@@ -59,6 +59,20 @@ func TestUIHubCollectGapOnOverflow(t *testing.T) {
 	}
 }
 
+// The user-echo event carries the sender's nonce (so the sending tab skips its
+// own optimistic echo) and round-trips through the ring intact.
+func TestUIUserEventCarriesNonce(t *testing.T) {
+	h := newUIHub()
+	h.broadcast("claw", uiEvent{Type: "user", Session: 5, Text: "hi", Nonce: "n1"})
+	ev, _, _ := h.collect("claw", h.epoch, 0)
+	if len(ev) != 1 {
+		t.Fatalf("got %d events, want 1", len(ev))
+	}
+	if e := decodeEvent(t, ev[0]); e.Type != "user" || e.Text != "hi" || e.Nonce != "n1" || e.Session != 5 {
+		t.Fatalf("user event = %+v, want user/hi/n1/session5", e)
+	}
+}
+
 // Events are retained per user; one user's events never leak into another's.
 func TestUIHubIsolatesUsers(t *testing.T) {
 	h := newUIHub()

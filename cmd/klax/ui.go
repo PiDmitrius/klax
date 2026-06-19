@@ -66,8 +66,9 @@ type uiSessionInfo struct {
 // uiEvent is one server-sent event. The client multiplexes all tabs over a
 // single stream and routes by Session (a session's Created).
 type uiEvent struct {
-	Type      string          `json:"type"` // sessions|turn_start|progress|final|error|notice|compact
-	Seq       uint64          `json:"seq,omitempty"` // monotonic id for client dedupe; set by emitLocked
+	Type      string          `json:"type"` // sessions|turn_start|progress|final|error|notice|compact|user
+	Seq       uint64          `json:"seq,omitempty"`   // monotonic id for client dedupe; set by emitLocked
+	Nonce     string          `json:"nonce,omitempty"` // user-event: the sender's send nonce, so it skips its own echo
 	Session   int64           `json:"session,omitempty"`
 	Kind      string          `json:"kind,omitempty"` // progress: tool|narration
 	Text      string          `json:"text,omitempty"`
@@ -608,6 +609,7 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<20)
 	var (
 		text          string
+		nonce         string
 		targetCreated int64
 		attachments   []attachment
 	)
@@ -617,6 +619,7 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		text = r.FormValue("text")
+		nonce = r.FormValue("nonce")
 		targetCreated, _ = strconv.ParseInt(r.FormValue("session"), 10, 64)
 		for _, fh := range r.MultipartForm.File["files"] {
 			f, err := fh.Open()
@@ -634,12 +637,14 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Session int64  `json:"session"`
 			Text    string `json:"text"`
+			Nonce   string `json:"nonce"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		text = body.Text
+		nonce = body.Nonce
 		targetCreated = body.Session
 	}
 	// The UI always targets a specific tab; never silently fall back to the
@@ -655,6 +660,13 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	if s.d.store.Get(s.d.sessionKey(s.chatID(user)), targetCreated) == nil {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
+	}
+	// Echo the accepted user message to ALL of this user's UI tabs (emitted before
+	// the turn's events so it renders first) — an observer tab must see the prompt,
+	// not just the answer. The sending tab already showed it optimistically and
+	// skips this event by its own nonce.
+	if strings.TrimSpace(text) != "" {
+		s.d.uiEmit(user, uiEvent{Type: "user", Session: targetCreated, Text: text, Nonce: nonce})
 	}
 	s.d.handleInbound(Inbound{
 		ChatID:        s.chatID(user),
