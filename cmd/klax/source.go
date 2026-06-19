@@ -21,11 +21,15 @@ type Inbound struct {
 	// chat commands (every action is a native control), so a message that starts
 	// with "/" is just text for the agent.
 	RawMessage bool
+	// Nonce is the web UI's per-send id, echoed back in the "user" event so the
+	// sending tab skips its own optimistic echo while other tabs render it. Empty
+	// for messenger sources (every UI tab then renders their message live).
+	Nonce string
 }
 
 // Source is an inbound channel into the daemon: a loop (poll or server) that
 // feeds messages in via handleInbound. tg/mx/vk are poll-loop sources; the web
-// UI is an HTTP/SSE source. Run blocks until ctx is cancelled.
+// UI is an HTTP (long-poll) source. Run blocks until ctx is cancelled.
 type Source interface {
 	Name() string
 	Run(ctx context.Context)

@@ -862,6 +862,10 @@ function loadHistory(created, before){
 function reloadAll(){
   if(active){ loaded[active] = false; logs[active] = []; stick = true; loadHistory(active, 0); }
   for(const k in loaded){ if(+k !== active) loaded[k] = false; }
+  // Outstanding send nonces are moot after a reload (their user events predate the
+  // new cursor and won't be re-delivered; content comes from the transcript) —
+  // clear them so the set can't accumulate across reconnects/restarts.
+  myNonces.clear();
   syncSessionsNow(); // re-sync authoritative state (busy/dot) alongside content
 }
 

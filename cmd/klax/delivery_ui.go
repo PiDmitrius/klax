@@ -18,7 +18,7 @@ type uiDelivery struct {
 }
 
 func (d *daemon) newUIDelivery(_ context.Context, msg queuedMsg) *uiDelivery {
-	u := &uiDelivery{d: d, user: userFromKey(msg.sessKey), session: msg.sessCreated}
+	u := &uiDelivery{d: d, user: uiUserForKey(msg.sessKey), session: msg.sessCreated}
 	d.uiEmit(u.user, uiEvent{Type: "turn_start", Session: u.session})
 	return u
 }

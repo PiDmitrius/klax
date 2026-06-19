@@ -79,14 +79,17 @@ type uiEvent struct {
 	CtxWindow int             `json:"ctx_window,omitempty"`
 }
 
-// userFromKey pulls the canonical user out of a session key ("user:claw") or a
-// UI chatID/raw ("ui:claw" or "claw"). Messenger keys like "tg:123" return
-// "123", which never matches a UI client, so they are harmless no-ops.
-func userFromKey(s string) string {
-	if i := strings.Index(s, ":"); i != -1 {
-		return s[i+1:]
+// uiUserForKey returns the canonical UI user for a session key, but ONLY for the
+// canonical "user:<id>" form that UI clients (and mapped messenger DMs) resolve
+// to. Raw messenger/group keys ("tg:123", "mx:...", group ids) return "" — a UI
+// event must never reach a UI identity whose id merely collides with a raw chat
+// suffix. uiEmit no-ops on the empty string.
+func uiUserForKey(sk string) string {
+	const p = "user:"
+	if strings.HasPrefix(sk, p) {
+		return sk[len(p):]
 	}
-	return s
+	return ""
 }
 
 // ringItem is one retained event: its seq and the marshaled uiEvent JSON (which
@@ -270,11 +273,11 @@ func (d *daemon) broadcastSessions(sk string) {
 	if d.uiHub == nil {
 		return
 	}
-	d.uiEmit(userFromKey(sk), uiEvent{Type: "sessions", Sessions: d.sessionsSnapshot(sk)})
+	d.uiEmit(uiUserForKey(sk), uiEvent{Type: "sessions", Sessions: d.sessionsSnapshot(sk)})
 }
 
 func (d *daemon) uiUserForChat(chatID string) string {
-	return userFromKey(d.sessionKey(chatID))
+	return uiUserForKey(d.sessionKey(chatID))
 }
 
 // queuedCount is the number of messages waiting in a session's queue (excludes
@@ -661,18 +664,16 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
-	// Echo the accepted user message to ALL of this user's UI tabs (emitted before
-	// the turn's events so it renders first) — an observer tab must see the prompt,
-	// not just the answer. The sending tab already showed it optimistically and
-	// skips this event by its own nonce.
-	if strings.TrimSpace(text) != "" {
-		s.d.uiEmit(user, uiEvent{Type: "user", Session: targetCreated, Text: text, Nonce: nonce})
-	}
+	// The accepted user message is echoed to every UI tab from the common accept
+	// point (enqueueToSession), so a Telegram/MAX/VK DM shows up live too — not just
+	// UI sends. The nonce rides along so THIS tab skips its own copy (it already
+	// rendered it optimistically) while other tabs render it.
 	s.d.handleInbound(Inbound{
 		ChatID:        s.chatID(user),
 		Text:          text,
 		Attachments:   attachments,
 		TargetCreated: targetCreated,
+		Nonce:         nonce,
 		RawMessage:    true, // the UI has no chat commands — "/"-text is a message
 	})
 	w.WriteHeader(http.StatusNoContent)

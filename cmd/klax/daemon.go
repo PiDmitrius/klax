@@ -1223,14 +1223,14 @@ func (d *daemon) handleInbound(in Inbound) {
 	// In group mode, require trigger prefix for all users
 	if d.isGroupChat(in.ChatID) {
 		if prompt, ok := stripGroupTrigger(text); ok {
-			d.enqueueToSession(in.ChatID, in.MsgID, prompt, in.Attachments, in.TargetCreated)
+			d.enqueueToSession(in.ChatID, in.MsgID, prompt, in.Attachments, in.TargetCreated, in.Nonce)
 		}
 		// No prefix — ignore silently
 		return
 	}
 
 	// Queue for Claude
-	d.enqueueToSession(in.ChatID, in.MsgID, text, in.Attachments, in.TargetCreated)
+	d.enqueueToSession(in.ChatID, in.MsgID, text, in.Attachments, in.TargetCreated, in.Nonce)
 }
 
 func (d *daemon) ensureSession(sessionKey string) {
