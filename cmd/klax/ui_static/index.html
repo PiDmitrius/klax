@@ -294,10 +294,13 @@ let loaded = {};            // created -> history fetched?
 let offset = {};            // created -> pagination cursor
 let readMark = {};          // created -> logs index read up to; drives the unread badge AND the read-line
 let pending = {};           // created -> [{text,time}] in-flight user echoes, persisted across reload
-let es = null, opened = false, stick = true, settingsFor = 0;
-let lastEventAt = 0;        // last SSE message arrival (liveness watchdog)
-let busyPollTimer = null;   // GET /api/sessions poll, runs only while a tab is busy
-let watchdogTimer = null;   // forces SSE reconnect when the stream goes silent
+let stick = true, settingsFor = 0, settingsIsNew = false;
+let cursor = "";            // long-poll cursor "epoch-seq"; advanced from each poll response
+let pollEpoch = "";         // server process id (cursor prefix); a change = daemon restart -> reload
+let lastSeq = -1;           // highest applied seq this epoch (belt-and-suspenders dedupe)
+let seenMessages = {};      // created -> server message count we've materialized (staleness backstop)
+let polling = false;        // poll loop running guard
+let pollBackoff = 0;        // backoff (ms) after a failed poll; reset on success
 let loadingHist = {};       // created -> transcript fetch in flight (guards double-load)
 let pendingReload = {};     // created -> a full reload was requested while one was in flight
 let tabStick = {};           // created -> whether the tab was at bottom when it was last left
@@ -364,10 +367,14 @@ function inline(s){
   return (s||"").split(/(`[^`]+`)/g).map(seg => {
     if(seg.length >= 2 && seg[0] === "`" && seg[seg.length-1] === "`") return '<code>'+esc(seg.slice(1, -1))+'</code>';
     let h = esc(seg);
-    h = h.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
-    h = h.replace(/~~([^~]+)~~/g, '<s>$1</s>');
-    h = h.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<i>$2</i>'); // *italic*, never part of **bold**
-    h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    // Cheap indexOf gate before each regex: when the trigger substring is absent
+    // the pattern can't match, so skipping avoids the engine scanning (and, for
+    // the link regex on bracket-heavy text with no "](", backtracking O(n^2) per
+    // unmatched "[" — enough to freeze the tab on a big array/log dump).
+    if(h.indexOf("**") !== -1) h = h.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+    if(h.indexOf("~~") !== -1) h = h.replace(/~~([^~]+)~~/g, '<s>$1</s>');
+    if(h.indexOf("*")  !== -1) h = h.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<i>$2</i>'); // *italic*, never part of **bold**
+    if(h.indexOf("](") !== -1) h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
     return linkifyBare(h);
   }).join("");
 }
@@ -512,6 +519,16 @@ function md(src, depth){
   return html;
 }
 
+// mdSafe wraps md() so a malformed/pathological block can never throw out of an
+// event handler (which would strand the typing indicator and lose the answer —
+// see applyEvent). On failure it degrades to escaped plain text with line breaks
+// rather than dropping the content. ALL live/history render paths use this, not
+// md() directly.
+function mdSafe(src){
+  try { return md(src); }
+  catch(e){ console.error("klax md()", e); return esc(src).replace(/\n/g, "<br>"); }
+}
+
 function api(path, opts){
   opts = opts || {};
   opts.headers = Object.assign({ "Authorization": "Bearer "+token }, opts.headers||{});
@@ -645,6 +662,37 @@ function fallbackCopy(text){
   } catch(e){ return false; }
 }
 
+// syncTyping toggles ONE dedicated trailing node from the authoritative busy set,
+// independent of the log rebuild. This is the hard guarantee that the three-dot
+// indicator matches the daemon: renderLog may defer (text selection) or a content
+// render may fail, but this still adds/removes the dot to match busy.has(active).
+// It touches only its own node at the end of the column, so it never collapses a
+// selection elsewhere in the log.
+function syncTyping(){
+  const col = document.getElementById("logcol");
+  if(!col) return;
+  let t = document.getElementById("typing");
+  if(!(busy.has(active) && document.visibilityState === "visible")){
+    if(t) t.remove();
+    return;
+  }
+  const s = sessions.find(x => x.created === active);
+  const q = (s && s.queued) || 0;
+  const html = '<span class="dots"><span></span><span></span><span></span></span>'
+             + (q>0 ? '<span class="qnote">+'+q+' в очереди</span>' : "")
+             + '<button class="stop" onclick="abortActive()" title="Прервать">✕</button>';
+  if(!t){
+    t = document.createElement("div");
+    t.id = "typing"; t.className = "msg assistant typing";
+    t.innerHTML = html;
+    col.appendChild(t);
+    if(stick) scrollBottom();
+  } else {
+    if(t.innerHTML !== html) t.innerHTML = html; // refresh the queue note in place
+    if(col.lastChild !== t) col.appendChild(t);  // keep it last after content was appended
+  }
+}
+
 function renderLog(){
   // Don't rebuild the log out from under an active text selection — that would
   // collapse/extend it (the "selection jumps to the top" + flicker bug). Defer
@@ -679,16 +727,7 @@ function renderLog(){
     d.innerHTML = '<div class="body">'+it.html+'</div>' + (meta ? '<span class="meta">'+esc(meta)+'</span>' : "");
     el.appendChild(d);
   });
-  if(busy.has(active)){
-    const s = sessions.find(x => x.created === active);
-    const q = (s && s.queued) || 0;
-    const t = document.createElement("div");
-    t.className = "msg assistant typing";
-    t.innerHTML = '<span class="dots"><span></span><span></span><span></span></span>'
-                + (q>0 ? '<span class="qnote">+'+q+' в очереди</span>' : "")
-                + '<button class="stop" onclick="abortActive()" title="Прервать">✕</button>';
-    el.appendChild(t);
-  }
+  syncTyping(); // append the typing indicator (if busy) as the column's last child
   if(jumpUnreadOnRender === active && unreadLine){
     jumpUnreadOnRender = 0;
     unreadLine.scrollIntoView({ block: "start" });
@@ -718,12 +757,12 @@ function push(created, e){
 // prose is never hidden by a co-located tool_use; tools show their rich label.
 function itemToEntries(it){
   const u = it.time ? Date.parse(it.time) : 0;
-  if(it.role === "user") return [entry("user", md(it.text), u)];
+  if(it.role === "user") return [entry("user", mdSafe(it.text), u)];
   if(it.role === "system" && it.kind === "compact") return [entry("system", "🗜 контекст свёрнут", u)];
   if(it.role === "system" && it.kind === "error") return [entry("error", esc(it.text||"ошибка"), u)];
   if(it.role === "assistant"){
     const out = [];
-    if(it.text) out.push(entry("assistant", md(it.text), u));
+    if(it.text) out.push(entry("assistant", mdSafe(it.text), u));
     (it.tools||[]).forEach(t => out.push(entry("tool", esc(t.label||t.name), u)));
     return out;
   }
@@ -761,7 +800,13 @@ function loadHistory(created, before){
   api("/api/transcript?"+q).then(r=>r.json()).then(data => {
     const prepend = [];
     (data.turns||[]).forEach(it => itemToEntries(it).forEach(e => mergeOrPush(prepend, e)));
-    logs[created] = prepend.concat(logs[created] || []);
+    // Pagination (before>0) prepends older history. A full reload (before=0) is an
+    // authoritative re-sync: when the session is idle the JSONL is complete, so
+    // REPLACE the log instead of concatenating the live tail — otherwise a reload
+    // racing a lagging live event renders the answer twice (stickily). While a turn
+    // is in flight, keep the live tail (narration not yet written to the JSONL).
+    logs[created] = before ? prepend.concat(logs[created] || [])
+                  : (busy.has(created) ? prepend.concat(logs[created] || []) : prepend);
     // Older history was prepended — shift the read-line so it stays on the same item.
     if(before && readMark[created] !== undefined) readMark[created] += prepend.length;
     if(!before){
@@ -772,11 +817,24 @@ function loadHistory(created, before){
       // never reaches here. Match as a MULTISET — consume one transcript user-turn
       // per pending entry — so N identical pending sends clear against N turns, not
       // all off the first (a plain Set would over-clear duplicate "ok"-style sends).
+      // Match on NORMALIZED text (strip CR, trim) so an invisible whitespace/CRLF
+      // difference can't cause a false re-show.
+      const norm = s => (s||"").replace(/\r/g, "").trim();
       const counts = {};
-      (data.turns||[]).filter(it => it.role === "user").forEach(it => { counts[it.text] = (counts[it.text]||0) + 1; });
+      (data.turns||[]).filter(it => it.role === "user").forEach(it => { const k = norm(it.text); counts[k] = (counts[k]||0) + 1; });
+      // A leftover echo is only worth showing while the session genuinely has work
+      // in flight (busy or queued). On an IDLE session the JSONL is complete and
+      // authoritative, so an unmatched pending is stale — delivered under a skewed
+      // send-time (it queued behind another turn, so its 15:54 send-time differs
+      // from the transcript's record-time) or lost — and must NOT be re-rendered,
+      // or it dangles at the bottom as a duplicate with the old time.
+      const sess = sessions.find(s => s.created === created);
+      const inFlight = busy.has(created) || (sess && sess.queued > 0);
       pending[created] = (pending[created] || []).filter(p => {
-        if(counts[p.text] > 0){ counts[p.text]--; return false; }
-        logs[created].push(entry("user", md(p.text), p.time));
+        const k = norm(p.text);
+        if(counts[k] > 0){ counts[k]--; return false; }     // already in the transcript
+        if(!inFlight) return false;                          // idle: transcript is complete — don't ghost a stale echo
+        logs[created].push(entry("user", mdSafe(p.text), p.time));
         return true;
       });
       savePending();
@@ -793,6 +851,17 @@ function loadHistory(created, before){
   });
 }
 
+// reloadAll re-syncs content from the authoritative transcript: the active tab
+// reloads now (it is on screen); other loaded tabs are invalidated so they reload
+// lazily on next view. Used on a daemon restart (epoch change) or when the server
+// can't replay our gap. Reloads REPLACE the log when idle (see loadHistory), so
+// this is idempotent and never duplicates content.
+function reloadAll(){
+  if(active){ loaded[active] = false; logs[active] = []; stick = true; loadHistory(active, 0); }
+  for(const k in loaded){ if(+k !== active) loaded[k] = false; }
+  syncSessionsNow(); // re-sync authoritative state (busy/dot) alongside content
+}
+
 // reconcileSessions applies an authoritative session snapshot (from the SSE
 // "sessions" event OR the /api/sessions busy-poll) to local state. It is the
 // guarantee that a "typing" dot eventually matches the daemon: busy=true starts
@@ -807,22 +876,23 @@ function reconcileSessions(list){
     present.add(s.created);
     if(s.busy) busy.add(s.created);
     else busy.delete(s.created);
+    // Authoritative content backstop: if a LOADED non-active tab's server message
+    // count grew beyond what we've materialized (a turn ran while we weren't
+    // watching it — cross-channel, queued, or during a ring-overflow gap),
+    // invalidate it so it reloads fresh on next view. The active tab is covered
+    // live + by replay; don't reload it here (that would flicker the normal path).
+    if(seenMessages[s.created] !== undefined && s.messages > seenMessages[s.created]
+       && loaded[s.created] && s.created !== active){
+      loaded[s.created] = false;
+    }
+    seenMessages[s.created] = s.messages;
   });
   // A session the server no longer lists is likewise no longer busy.
   before.forEach(c => { if(!present.has(c)) busy.delete(c); });
-  // Any tab that was busy and is now idle WITHOUT a final/error having reached us
-  // (lost across a restart / dropped SSE) — reload its transcript so the answer
-  // the dropped "final" carried is restored from the JSONL. On the normal path
-  // "final" already cleared busy before this runs, so `before` won't list it and
-  // nothing reloads. Untouched tabs reload lazily when first opened.
-  before.forEach(c => {
-    if(!busy.has(c) && (c === active || loaded[c])){
-      loaded[c] = false; logs[c] = [];
-      if(c === active) stick = true;
-      loadHistory(c, 0);
-    }
-  });
-  ensureBusyPoll(); // start the guarantee poll before any early return below
+  // NB: a lost "final" no longer needs a busy->idle transcript reload here — the
+  // long-poll delivers everything after the cursor, and an uncoverable gap or a
+  // restart triggers reloadAll(). Reloading on the busy->idle edge raced a lagging
+  // live "final" and rendered the answer twice; that path is gone.
   if(!sessions.find(s=>s.created===active)){
     const want = parseInt(location.hash.slice(1));
     const a = sessions.find(s=>s.created===want) || sessions.find(s=>s.active) || sessions[0];
@@ -836,102 +906,115 @@ function reconcileSessions(list){
   if(wasActiveBusy !== busy.has(active)){
     if(viewing(active)) renderLog(); else renderTabs();
   }
+  // Authoritative backstop: whatever the snapshot/poll said about the active tab,
+  // make the typing dot match it now — this is what clears a dot the daemon
+  // reports idle even when no busy transition was detected here.
+  syncTyping();
 }
 
-function onEvent(ev){
-  lastEventAt = Date.now();
-  const d = JSON.parse(ev.data);
-  switch(d.type){
-    case "ping": break; // liveness heartbeat only; lastEventAt updated above
-    case "sessions":
-      reconcileSessions(d.sessions);
-      break;
-    case "turn_start":
-      busy.add(d.session); ensureBusyPoll();
-      breakMerge[d.session] = true; // new turn: its answer must not glue onto the previous one
-      renderTabs();
-      if(viewing(d.session)) renderLog();
-      maybeRefreshSettings(d.session);
-      break;
-    case "progress":
-      // Narration is the assistant's own text (intermediate blocks between tools)
-      // — render it like the final answer (formatted bubble), not gray plain text.
-      if(d.kind === "tool") push(d.session, entry("tool", esc(d.text), Date.now()));
-      else push(d.session, entry("assistant", md(d.text), Date.now()));
-      break;
-    case "final":
-      busy.delete(d.session);
-      renderTabs();
-      maybeRefreshSettings(d.session);
-      push(d.session, entry("assistant", md(d.markdown), Date.now()));
-      break;
-    case "error":
-      busy.delete(d.session);
-      renderTabs();
-      maybeRefreshSettings(d.session);
-      push(d.session, entry("error", esc(d.text||"ошибка"), Date.now()));
-      break;
-    case "compact":
-      push(d.session, entry("system", "🗜 контекст свёрнут", Date.now()));
-      break;
-    case "notice": {
-      const t = noticeText(d.text);
-      push(active, entry("notice", esc(t).replace(/\n/g, "<br>"), Date.now()));
-      showNotice(t);
-      break;
+// applyEvent renders ONE already-parsed event from a poll batch. Dedupe by the
+// server's monotonic seq is belt-and-suspenders — the cursor advances monotonically
+// so the poll never redelivers, but a retried request could. A render failure on
+// one event must never break the batch (the loop's finally re-syncs the dot).
+function applyEvent(d){
+  if(d.seq !== undefined){ if(d.seq <= lastSeq) return; lastSeq = d.seq; }
+  try {
+    switch(d.type){
+      case "sessions":
+        reconcileSessions(d.sessions);
+        break;
+      case "turn_start":
+        busy.add(d.session);
+        breakMerge[d.session] = true; // new turn: its answer must not glue onto the previous one
+        renderTabs();
+        if(viewing(d.session)) renderLog();
+        maybeRefreshSettings(d.session);
+        break;
+      case "progress":
+        // Narration is the assistant's own text (intermediate blocks between tools)
+        // — render it like the final answer (formatted bubble), not gray plain text.
+        if(d.kind === "tool") push(d.session, entry("tool", esc(d.text), Date.now()));
+        else push(d.session, entry("assistant", mdSafe(d.text), Date.now()));
+        break;
+      case "final":
+        busy.delete(d.session);
+        renderTabs();
+        maybeRefreshSettings(d.session);
+        push(d.session, entry("assistant", mdSafe(d.markdown), Date.now()));
+        break;
+      case "error":
+        busy.delete(d.session);
+        renderTabs();
+        maybeRefreshSettings(d.session);
+        push(d.session, entry("error", esc(d.text||"ошибка"), Date.now()));
+        break;
+      case "compact":
+        push(d.session, entry("system", "🗜 контекст свёрнут", Date.now()));
+        break;
+      case "notice": {
+        const t = noticeText(d.text);
+        push(active, entry("notice", esc(t).replace(/\n/g, "<br>"), Date.now()));
+        showNotice(t);
+        break;
+      }
     }
+  } catch(e){
+    console.error("klax applyEvent", d && d.type, e);
   }
 }
 
-function connect(){
-  if(es) es.close();
-  es = new EventSource(BASE + "api/events?token="+encodeURIComponent(token));
-  lastEventAt = Date.now();
-  es.onmessage = onEvent;
-  es.onopen = () => {
-    lastEventAt = Date.now();
-    // On a reconnect (not the first open), re-sync the active tab from the
-    // transcript: any progress/final lost while disconnected is in the JSONL.
-    if(opened && active){ loaded[active]=false; logs[active]=[]; stick=true; loadHistory(active, 0); }
-    opened = true;
-  };
-  es.onerror = () => { /* EventSource auto-reconnects */ };
-}
-
-// pollBusy is the hard guarantee that a "typing" dot clears. While any tab is
-// busy locally, GET /api/sessions on an interval and reconcile authoritatively —
-// this is an idempotent state read over plain fetch, so it works even when the
-// SSE stream is dead-but-held-open by the reverse proxy or its terminal "final"
-// was dropped by the daemon exiting. The fetch fails harmlessly during the
-// restart gap and recovers once the fresh daemon serves /api/sessions.
-function pollBusy(){
-  if(busy.size === 0){ if(busyPollTimer){ clearInterval(busyPollTimer); busyPollTimer = null; } return; }
+// One authoritative /api/sessions fetch + reconcile (cold start, on focus, on
+// reload). Bounded so a proxy-stalled request can't pile up.
+function syncSessionsNow(){
   const ac = new AbortController();
-  const t = setTimeout(() => ac.abort(), 8000); // bound a proxy-stalled fetch so 5s polls can't pile up
+  const t = setTimeout(() => ac.abort(), 8000);
   api("/api/sessions", { signal: ac.signal }).then(r => r.ok ? r.json() : null).then(list => {
     if(list) reconcileSessions(list);
-  }).catch(()=>{}).finally(() => clearTimeout(t)); // daemon down mid-restart — next tick retries
-}
-function ensureBusyPoll(){
-  if(busyPollTimer || busy.size === 0) return;
-  busyPollTimer = setInterval(pollBusy, 5000);
+  }).catch(()=>{}).finally(() => clearTimeout(t));
 }
 
-// startWatchdog forces a fresh EventSource when the stream goes silent past two
-// missed heartbeats. EventSource normally auto-reconnects on a clean drop, but
-// behind a reverse proxy an abruptly-exited daemon can leave the connection
-// "open" with no data; the server heartbeat ({"type":"ping"} every 20s) lets us
-// detect that and reconnect so live streaming resumes. Idempotent; gated on tab
-// visibility so background timer-throttling doesn't trigger false reconnects.
-function startWatchdog(){
-  if(watchdogTimer) return;
-  watchdogTimer = setInterval(() => {
-    if(!opened || document.visibilityState === "hidden") return;
-    if(Date.now() - lastEventAt > 45000){
-      lastEventAt = Date.now(); // grace, so we reconnect once per silent window
-      connect();
-    }
-  }, 10000);
+const POLL_ABORT_MS = 30000; // > server hold (~25s); bounds a wedged request
+function pollSleep(ms){ return new Promise(res => setTimeout(res, ms)); }
+function pollDelay(){ pollBackoff = pollBackoff ? Math.min(pollBackoff * 2, 5000) : 500; return pollBackoff + Math.random()*250; }
+
+// pollLoop is the entire live channel: ask /api/poll for everything after `cursor`,
+// apply the batch, advance the cursor, repeat. The server holds the request ~25s
+// when idle (≈1 request / 25s — no spam, zero event latency). A failed poll just
+// retries the SAME cursor (idempotent — the ring still holds everything after it,
+// or returns reload). Epoch change (restart) / reload re-syncs from the transcript.
+// No EventSource, heartbeat, watchdog or busy-poll timer — this is all of it.
+async function pollLoop(){
+  if(polling) return;
+  polling = true;
+  while(polling){
+    let d;
+    try {
+      const ac = new AbortController();
+      const t = setTimeout(() => ac.abort(), POLL_ABORT_MS);
+      let r;
+      try {
+        r = await api("/api/poll" + (cursor ? "?cursor="+encodeURIComponent(cursor) : ""),
+                      { signal: ac.signal, cache: "no-store" });
+      } finally { clearTimeout(t); }
+      if(r.status === 401){ polling = false; document.getElementById("app").classList.remove("active"); document.getElementById("gate").classList.remove("hidden"); return; }
+      if(!r.ok){ await pollSleep(pollDelay()); continue; }   // 429 / 5xx → backoff, same cursor
+      d = await r.json();
+    } catch(e){ await pollSleep(pollDelay()); continue; }     // network / abort → backoff, same cursor
+    pollBackoff = 0; // success
+    try {
+      const ep = (d.cursor || "").split("-")[0]; // epoch from the cursor STRING (int64 in JSON would lose precision)
+      if(pollEpoch && ep && ep !== pollEpoch){    // daemon restarted (seq counter reset)
+        pollEpoch = ep; cursor = d.cursor; lastSeq = -1;
+        showNotice("klax обновился"); reloadAll();
+        continue;
+      }
+      if(ep) pollEpoch = ep;
+      if(d.reload){ cursor = d.cursor; reloadAll(); continue; } // uncoverable gap → re-sync from transcript
+      (d.events || []).forEach(applyEvent);
+      cursor = d.cursor; // commit the cursor only AFTER applying the whole batch
+    } catch(e){ console.error("klax poll batch", e); }
+    finally { syncTyping(); } // dot always reflects the authoritative busy set
+  }
 }
 
 function autoGrow(){
@@ -953,7 +1036,7 @@ function send(){
   // Sending is a definitive "caught up" signal for the active tab — drop the
   // stale "new messages" divider so the user's own message never lands beneath it.
   delete readMark[target];
-  push(target, entry("user", md(text), now));
+  push(target, entry("user", mdSafe(text), now));
   (pending[target] = pending[target] || []).push({ text, time: now });
   savePending();
   api("/api/send", { method:"POST", headers:{"Content-Type":"application/json"},
@@ -1008,7 +1091,7 @@ function abortActive(){
 
 function newSession(){
   api("/api/new", { method:"POST" }).then(r => r.json()).then(d => {
-    if(d.created){ selectTab(d.created); openSettings(d.created, "Новая сессия"); }
+    if(d.created){ selectTab(d.created); openSettings(d.created, "Новая сессия", true); }
   })
     .catch(() => showNotice("не удалось создать сессию"));
 }
@@ -1020,8 +1103,9 @@ function fetchSettings(created){
   return api("/api/settings?session="+created).then(r => r.ok ? r.json() : Promise.reject(r));
 }
 
-function openSettings(created, title){
+function openSettings(created, title, isNew){
   settingsFor = created;
+  settingsIsNew = !!isNew;
   document.querySelector(".smodal-title").textContent = title || "Настройки сессии";
   document.getElementById("smodal").classList.remove("hidden");
   document.getElementById("sbody").innerHTML = '<div class="shint">Загрузка…</div>';
@@ -1029,7 +1113,7 @@ function openSettings(created, title){
     .catch(() => { if(settingsFor === created) document.getElementById("sbody").innerHTML = '<div class="shint">Не удалось загрузить настройки</div>'; });
 }
 
-function closeSettings(){ settingsFor = 0; document.getElementById("smodal").classList.add("hidden"); }
+function closeSettings(){ settingsFor = 0; settingsIsNew = false; document.getElementById("smodal").classList.add("hidden"); }
 
 function renderSettings(d){
   if(settingsFor !== d.created) return;
@@ -1065,8 +1149,19 @@ function renderSettings(d){
 
   const nameInput = b.querySelector(".sname");
   const applyName = () => { const v = nameInput.value.trim(); if(v && v !== d.name) patchSettings(d.created, { name: v }); };
-  nameInput.addEventListener("keydown", e => { if(e.key === "Enter"){ e.preventDefault(); nameInput.blur(); } });
+  nameInput.addEventListener("keydown", e => {
+    if(e.key !== "Enter") return;
+    e.preventDefault();
+    nameInput.blur(); // commit the name via the blur handler
+    // A freshly-created session: the dialog is "name it and go", so Enter closes
+    // it. An existing session keeps the old behaviour (commit, stay open) so
+    // several fields can be edited in one pass.
+    if(settingsIsNew) closeSettings();
+  });
   nameInput.addEventListener("blur", applyName);
+  // On creation, drop the cursor straight into the name field (and preselect the
+  // placeholder) so the user can type a name and press Enter without the mouse.
+  if(settingsIsNew && settingsFor === d.created){ nameInput.focus(); nameInput.select(); }
   const wire = (sel, fn) => { const el = b.querySelector(sel); if(el) el.onchange = fn; };
   wire("#s-backend", e => patchSettings(d.created, { backend: e.target.value }));
   wire("#s-model",   e => patchSettings(d.created, { model: e.target.value }));
@@ -1124,17 +1219,15 @@ function closeSession(created, name){
 function start(){
   document.getElementById("gate").classList.add("hidden");
   document.getElementById("app").classList.add("active");
-  startWatchdog();
-  connect();
+  syncSessionsNow(); // initial state: picks the active tab (reconcile) + loads its transcript
+  pollLoop();        // begin long-polling; the first poll establishes the cursor
 }
 
-// Returning to a backgrounded tab: timers were throttled, so reset the watchdog
-// grace and immediately reconcile if anything looked busy, clearing a dot that
-// got stuck while the tab slept.
+// Returning to a backgrounded tab: timers were throttled, so reconcile state now
+// (a turn may have started/finished while hidden) and refresh the view.
 document.addEventListener("visibilitychange", () => {
   if(document.visibilityState === "visible"){
-    lastEventAt = Date.now();
-    if(busy.size > 0) pollBusy();
+    syncSessionsNow();
     renderTabs();
     if(active && tabStick[active] && hasUnread(active)) jumpUnreadOnRender = active;
     if(active) renderLog();
