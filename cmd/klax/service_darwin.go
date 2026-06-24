@@ -33,8 +33,10 @@ func runServiceCtl(action string) {
 		// bootout unloads so KeepAlive does not relaunch — matches `systemctl stop`.
 		cmd = exec.Command("launchctl", "bootout", launchdTarget())
 	case "restart":
-		// kickstart -k kills the running instance and starts a fresh one.
-		cmd = exec.Command("launchctl", "kickstart", "-k", launchdTarget())
+		// SIGTERM lets the daemon drain in-flight work (its signal handler
+		// turns it into a graceful drain); KeepAlive then relaunches it. This
+		// matches `systemctl --user restart`, which also sends SIGTERM.
+		cmd = exec.Command("launchctl", "kill", "SIGTERM", launchdTarget())
 	default:
 		cmd = exec.Command("launchctl", action, launchdTarget())
 	}

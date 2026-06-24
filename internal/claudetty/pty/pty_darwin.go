@@ -12,20 +12,16 @@ import (
 )
 
 // openPair allocates a pty pair on macOS/Darwin. There is no TIOCGPTN-style
-// "slave number" ioctl; instead the slave path is fetched with TIOCPTYGNAME
-// and the slave is enabled with grantpt (TIOCPTYGRANT) + unlockpt
-// (TIOCPTYUNLK).
+// "slave number" ioctl; instead the slave is enabled with grantpt
+// (TIOCPTYGRANT) + unlockpt (TIOCPTYUNLK) and its path is fetched with
+// TIOCPTYGNAME.
 func openPair() (master, slave *os.File, err error) {
 	master, err = os.OpenFile("/dev/ptmx", os.O_RDWR|unix.O_NOCTTY, 0)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open /dev/ptmx: %w", err)
 	}
 
-	sname, err := ptsname(master.Fd())
-	if err != nil {
-		master.Close()
-		return nil, nil, fmt.Errorf("TIOCPTYGNAME: %w", err)
-	}
+	// Canonical macOS order: grantpt, unlockpt, then resolve the slave name.
 	if err := unix.IoctlSetInt(int(master.Fd()), unix.TIOCPTYGRANT, 0); err != nil {
 		master.Close()
 		return nil, nil, fmt.Errorf("TIOCPTYGRANT: %w", err)
@@ -33,6 +29,11 @@ func openPair() (master, slave *os.File, err error) {
 	if err := unix.IoctlSetInt(int(master.Fd()), unix.TIOCPTYUNLK, 0); err != nil {
 		master.Close()
 		return nil, nil, fmt.Errorf("TIOCPTYUNLK: %w", err)
+	}
+	sname, err := ptsname(master.Fd())
+	if err != nil {
+		master.Close()
+		return nil, nil, fmt.Errorf("TIOCPTYGNAME: %w", err)
 	}
 
 	slave, err = os.OpenFile(sname, os.O_RDWR|unix.O_NOCTTY, 0)
