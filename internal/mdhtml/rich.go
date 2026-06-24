@@ -84,7 +84,7 @@ func ConvertRich(md string) string {
 		// (h4–h6) render close to body text and don't read as headings otherwise.
 		if m := reHeading.FindStringSubmatch(line); m != nil {
 			tag := "h" + strconv.Itoa(len(m[1]))
-			out = append(out, "<"+tag+"><b>"+convertInline(escapeHTML(m[2]), true)+"</b></"+tag+">")
+			out = append(out, "<"+tag+"><b>"+convertInline(escapeHTML(m[2]))+"</b></"+tag+">")
 			i++
 			continue
 		}
@@ -95,7 +95,7 @@ func ConvertRich(md string) string {
 			for i < len(lines) && strings.HasPrefix(lines[i], ">") {
 				q := strings.TrimPrefix(lines[i], ">")
 				q = strings.TrimPrefix(q, " ")
-				block = append(block, convertInline(escapeHTML(q), true))
+				block = append(block, convertInline(escapeHTML(q)))
 				i++
 			}
 			out = append(out, "<blockquote>"+strings.Join(block, "<br>")+"</blockquote>")
@@ -112,7 +112,7 @@ func ConvertRich(md string) string {
 				items = append(items, listItem{
 					indent:  len(strings.ReplaceAll(m[1], "\t", "  ")),
 					ordered: strings.HasSuffix(m[2], "."),
-					content: convertInline(escapeHTML(m[3]), true),
+					content: convertInline(escapeHTML(m[3])),
 				})
 				i++
 			}
@@ -121,7 +121,7 @@ func ConvertRich(md string) string {
 		}
 
 		// Plain paragraph line.
-		out = append(out, "<p>"+convertInline(escapeHTML(line), true)+"</p>")
+		out = append(out, "<p>"+convertInline(escapeHTML(line))+"</p>")
 		i++
 	}
 
@@ -208,7 +208,7 @@ func renderTable(headers, aligns []string, rows [][]string) string {
 	}
 	cell := func(vals []string, c int) string {
 		if c < len(vals) {
-			return convertInline(escapeHTML(vals[c]), true)
+			return convertInline(escapeHTML(vals[c]))
 		}
 		return ""
 	}
