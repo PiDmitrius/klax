@@ -76,14 +76,19 @@ func TestConvertRichLinkValidation(t *testing.T) {
 	}
 	// An unsupported target must NOT become a link — else Telegram rejects the
 	// whole rich message with RICH_MESSAGE_URL_INVALID and it drops to plain.
+	// Keep the would-be link text underlined so it doesn't disappear into prose.
 	// Includes a valid-scheme URL with a space, which prefix-only checks miss.
 	// Includes valid-scheme-but-empty targets that a prefix-only check would miss.
 	for _, in := range []string{
 		"[link](url)", "[x](foo/bar)", "[y](./rel)", "[w](https://has space)",
 		"[a](https://)", "[b](mailto:)", "[c](tel:)", "[d](https://?q=1)",
 	} {
-		if got := ConvertRich(in); strings.Contains(got, "<a ") {
+		got := ConvertRich(in)
+		if strings.Contains(got, "<a ") {
 			t.Errorf("invalid url should not linkify: %s -> %q", in, got)
+		}
+		if !strings.Contains(got, "<u>") {
+			t.Errorf("invalid url should underline fallback text: %s -> %q", in, got)
 		}
 	}
 	// The actual incident: a double-backtick code span mis-pairs the single
@@ -134,11 +139,24 @@ func TestConvertRichFenceLangSanitized(t *testing.T) {
 	}
 }
 
-func TestConvertLegacyLinkUnchanged(t *testing.T) {
-	// Legacy Convert keeps its previous unconditional link behavior — no URL
-	// validation — so non-rich output stays byte-identical.
-	if got := Convert("[x](foo/bar)", false); !strings.Contains(got, `<a href="foo/bar">x</a>`) {
-		t.Errorf("legacy link behavior changed: %s", got)
+func TestConvertLegacyLinkValidation(t *testing.T) {
+	// Legacy Convert validates link targets the same as ConvertRich: a real URL
+	// still linkifies, but an unsupported target — a relative path, a bare word,
+	// or a markdown link to a local file like /home/u/notes.md — underlines the
+	// link text without emitting <a>. Emitting a broken <a href> made Telegram
+	// reject the HTML parse and fall back to plain text, stripping all other
+	// formatting in the chunk; dropping the link keeps the rest intact.
+	if got := Convert("[t](https://x.io)", false); got != `<a href="https://x.io">t</a>` {
+		t.Errorf("valid legacy link mangled: %q", got)
+	}
+	for _, in := range []string{"[x](foo/bar)", "[link](url)", "[notes](/home/u/notes.md)"} {
+		got := Convert(in, false)
+		if strings.Contains(got, "<a ") {
+			t.Errorf("invalid url should not linkify in legacy: %s -> %q", in, got)
+		}
+		if !strings.Contains(got, "<u>") {
+			t.Errorf("invalid url should underline fallback text in legacy: %s -> %q", in, got)
+		}
 	}
 }
 

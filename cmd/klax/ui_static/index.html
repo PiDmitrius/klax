@@ -12,7 +12,11 @@
     --bg:#ffffff; --panel:#f5f6f8; --chat:#e6e8ec; --fg:#1f2328; --muted:#6b7280; --border:#e3e5ea;
     --bubble-user:#dcf3dc; --bubble-assistant:#ffffff; --tool-bg:#eef0f3; --tool-fg:#4b5563;
     --code-bg:#eceef1; --error-bg:#fdecea; --error-fg:#b3261e; --accent:#008e00;
-    --dot:#9fb6a6; --dot-work:#eaa800; --dot-new:#1ec21e; --unread-bg:#e2f6e2; --warn:#d9a441;
+    --dot:#9fb6a6; --dot-work:#eaa800; --dot-new:#1ec21e; --unread-bg:#e2f6e2; --unread-work-bg:#fff3cf; --warn:#d9a441;
+    --badge-new-top:#1ec21e; --badge-new-mid:#00b500; --badge-new-bottom:#008e00;
+    --badge-new-stroke:#006400;
+    --badge-work-top:#ffc928; --badge-work-mid:#eaa800; --badge-work-bottom:#d19a00;
+    --badge-work-stroke:#a87700;
     --link:#006400;
     --tab-active-bg:#ffffff; --tab-active-border:#006400;
   }
@@ -20,7 +24,11 @@
     --bg:#15171c; --panel:#1a1d23; --chat:#15171c; --fg:#d8dee9; --muted:#8b92a0; --border:#2a2e37;
     --bubble-user:#24382a; --bubble-assistant:#232730; --tool-bg:#1c1f26; --tool-fg:#9aa4b6;
     --code-bg:#14161b; --error-bg:#3a2326; --error-fg:#f0b3b3; --accent:#33c558;
-    --dot:#49584d; --dot-work:#f4c948; --dot-new:#2bd02b; --unread-bg:#1f3324; --warn:#d9a441;
+    --dot:#49584d; --dot-work:#f4c948; --dot-new:#2bd02b; --unread-bg:#1f3324; --unread-work-bg:#302819; --warn:#d9a441;
+    --badge-new-top:#2bd02b; --badge-new-mid:#13b813; --badge-new-bottom:#0c8f0c;
+    --badge-new-stroke:#197b19;
+    --badge-work-top:#ffe070; --badge-work-mid:#f4c948; --badge-work-bottom:#d9ad22;
+    --badge-work-stroke:#a77b00;
     --link:#9ccc65;
     --tab-active-bg:#232730; --tab-active-border:#33c558;
   }
@@ -58,14 +66,19 @@
   }
   .tab.active .dot { background: var(--accent); }
   .tab .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dot); }
+  .tab:not(.active):not(.busy):not(.unread) .dot { opacity: .8; }
   .tab.busy .dot { background: var(--dot-work); animation: pulse 1s infinite; } /* working: pulsing amber (clearly != the green idle/done dots) */
   @keyframes pulse { 50% { opacity: .35; } }
   .tab.unread { font-weight: 600; background: var(--unread-bg); }              /* finished w/ new msgs */
+  .tab.busy.unread { background: var(--unread-work-bg); }
   .tab.unread:not(.busy) .dot { background: var(--dot-new); }                  /* solid bright green */
-  /* Unread count — a mini of the favicon: rounded-square green chip, count instead of "k". */
-  .tab .badge { background: linear-gradient(#1ec21e, #00b500 50%, #008e00); color: #fff; font-size: 11px;
+  /* Unread count — favicon-like when done, same amber as the work dot while busy. */
+  .tab .badge { background: linear-gradient(var(--badge-new-top), var(--badge-new-mid) 50%, var(--badge-new-bottom)); color: #fff; font-size: 11px;
                 font-weight: 700; line-height: 1; min-width: 17px; height: 17px; padding: 0 4px;
-                border-radius: 5px; display: inline-flex; align-items: center; justify-content: center; }
+                border-radius: 5px; display: inline-flex; align-items: center; justify-content: center;
+                box-shadow: inset 0 0 0 1px var(--badge-new-stroke); }
+  .tab.busy .badge { background: linear-gradient(var(--badge-work-top), var(--badge-work-mid) 50%, var(--badge-work-bottom)); color: #fff;
+                     box-shadow: inset 0 0 0 1px var(--badge-work-stroke); }
   .tab .queued { font-size: 11px; color: var(--muted); }
   .qnote { margin-left: 10px; font-size: 12px; color: var(--muted); }
   .tab .tname { overflow: hidden; text-overflow: ellipsis; max-width: 22ch; }
@@ -384,7 +397,10 @@ function inline(s){
     // segment is bracket-heavy/huge (links just render literally there — a
     // pathological self-DoS line, not real prose).
     if(h.indexOf("](") !== -1 && h.length < 50000 && (h.match(/\[/g) || []).length < 200)
-      h = h.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+      h = h.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(m, text, href){
+        if(/^https?:\/\/[^\s]+$/.test(href)) return '<a href="'+href+'" target="_blank" rel="noopener">'+text+'</a>';
+        return '<u>'+text+'</u>';
+      });
     return linkifyBare(h);
   }).join("");
 }
@@ -394,7 +410,7 @@ function inline(s){
 // out of the href attribute or inject markup); only https?:// matches, so javascript:
 // URLs are excluded.
 function linkifyBare(h){
-  return h.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<code>[\s\S]*?<\/code>)|(https?:\/\/[^\s<]+)/g, function(m, span, url){
+  return h.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<code>[\s\S]*?<\/code>|<u>[\s\S]*?<\/u>)|(https?:\/\/[^\s<]+)/g, function(m, span, url){
     if(span) return span;
     var u = url, tail = "";
     var p = u.match(/[.,;:!?]+$/);             // don't swallow trailing sentence punctuation
