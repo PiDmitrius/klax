@@ -10,6 +10,12 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.26'
 
       - run: go build ./cmd/klax
+      - name: Cross-compile darwin
+        run: |
+          GOOS=darwin GOARCH=arm64 go build ./cmd/klax
+          GOOS=darwin GOARCH=amd64 go build ./cmd/klax
+      - run: go vet ./...
+      - run: go test ./...

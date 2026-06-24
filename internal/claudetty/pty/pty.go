@@ -1,12 +1,12 @@
 // Package pty opens a Unix98 pseudo-terminal pair via golang.org/x/sys —
-// the only external dependency in this module. Linux-only by design (klax
-// and claudetty run on the same Linux hosts).
+// the only external dependency in this module. The platform-specific
+// allocation lives in pty_linux.go / pty_darwin.go; everything else here is
+// shared across Unix targets.
 package pty
 
 import (
 	"fmt"
 	"os"
-	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -20,26 +20,9 @@ type Pair struct {
 
 // Open allocates a pty pair and sets the slave's window size.
 func Open(rows, cols uint16) (*Pair, error) {
-	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR|unix.O_NOCTTY, 0)
+	master, slave, err := openPair()
 	if err != nil {
-		return nil, fmt.Errorf("open /dev/ptmx: %w", err)
-	}
-
-	// Unlock the slave and find its number.
-	if err := ioctlInt(master.Fd(), unix.TIOCSPTLCK, 0); err != nil {
-		master.Close()
-		return nil, fmt.Errorf("TIOCSPTLCK: %w", err)
-	}
-	n, err := unix.IoctlGetInt(int(master.Fd()), unix.TIOCGPTN)
-	if err != nil {
-		master.Close()
-		return nil, fmt.Errorf("TIOCGPTN: %w", err)
-	}
-
-	slave, err := os.OpenFile(fmt.Sprintf("/dev/pts/%d", n), os.O_RDWR|unix.O_NOCTTY, 0)
-	if err != nil {
-		master.Close()
-		return nil, fmt.Errorf("open slave: %w", err)
+		return nil, err
 	}
 
 	ws := unix.Winsize{Row: rows, Col: cols}
@@ -69,13 +52,4 @@ func (p *Pair) CloseSlave() {
 		p.Slave.Close()
 		p.Slave = nil
 	}
-}
-
-func ioctlInt(fd uintptr, req uint, val int) error {
-	v := int32(val)
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL, fd, uintptr(req), uintptr(unsafe.Pointer(&v)))
-	if errno != 0 {
-		return errno
-	}
-	return nil
 }

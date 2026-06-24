@@ -4,39 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/session"
 )
 
-// --- Service control ---
-
-func runServiceStart() {
-	cmd := exec.Command("systemctl", "--user", "start", "klax")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "failed: %v\nTry 'klax install' first, or 'klax start --foreground'\n", err)
-		os.Exit(1)
-	}
-	fmt.Println("klax started")
-}
-
-func runServiceCtl(action string) {
-	cmd := exec.Command("systemctl", "--user", action, "klax")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Run()
-}
-
-func runStatus() {
-	cmd := exec.Command("systemctl", "--user", "status", "klax", "--no-pager", "-l")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Run()
-}
+// Service control (start/stop/restart/status) is platform-specific and lives
+// in service_linux.go (systemd) and service_darwin.go (launchd).
 
 // --- Restart marker ---
 
