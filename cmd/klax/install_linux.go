@@ -89,8 +89,6 @@ WantedBy=default.target
 `, binPath)
 }
 
-func unitDrifted_unused() {}
-
 func verifyServiceUnit(unit string) error {
 	if _, err := exec.LookPath("systemd-analyze"); err != nil {
 		return fmt.Errorf("systemd-analyze not found")
