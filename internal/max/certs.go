@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func newHTTPClient() *http.Client {
+func newMaxHTTPClient() *http.Client {
 	roots, err := x509.SystemCertPool()
 	if err != nil {
 		roots = x509.NewCertPool()

@@ -36,7 +36,7 @@ func TestRussianTrustedCABundle(t *testing.T) {
 			t.Fatalf("certificate %d common name = %q, want %q", i+1, names[i], want[i])
 		}
 	}
-	tr, ok := newHTTPClient().Transport.(*http.Transport)
+	tr, ok := newMaxHTTPClient().Transport.(*http.Transport)
 	if !ok || tr.TLSClientConfig == nil || tr.TLSClientConfig.RootCAs == nil {
 		t.Fatal("MAX HTTP client has no custom RootCAs")
 	}

@@ -23,7 +23,7 @@ type Bot struct {
 func New(token string) *Bot {
 	return &Bot{
 		token:  token,
-		client: newHTTPClient(),
+		client: newMaxHTTPClient(),
 	}
 }
 
