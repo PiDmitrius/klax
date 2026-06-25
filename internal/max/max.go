@@ -8,12 +8,11 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/PiDmitrius/klax/internal/transport"
 )
 
-const apiBase = "https://platform-api.max.ru"
+const apiBase = "https://platform-api2.max.ru"
 
 type Bot struct {
 	token  string
@@ -24,7 +23,7 @@ type Bot struct {
 func New(token string) *Bot {
 	return &Bot{
 		token:  token,
-		client: &http.Client{Timeout: 90 * time.Second},
+		client: newHTTPClient(),
 	}
 }
 
