@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/PiDmitrius/klax/internal/config"
+	"github.com/PiDmitrius/klax/internal/runner"
 )
 
 func decodeEvent(t *testing.T, raw json.RawMessage) uiEvent {
@@ -17,6 +18,19 @@ func decodeEvent(t *testing.T, raw json.RawMessage) uiEvent {
 		t.Fatalf("decode event: %v", err)
 	}
 	return ev
+}
+
+func TestQueuedCountExcludesFirstIdleQueuedMessage(t *testing.T) {
+	d := &daemon{runners: map[runnerKey]*sessionRunner{}}
+	sr := &sessionRunner{runner: runner.New(), queue: []queuedMsg{{turnSeq: 1}}}
+	d.runners[runnerKey{sk: "user:x", created: 1}] = sr
+	if got := d.queuedCount("user:x", 1); got != 0 {
+		t.Fatalf("idle first queued count = %d, want 0", got)
+	}
+	sr.processing = true
+	if got := d.queuedCount("user:x", 1); got != 1 {
+		t.Fatalf("processing queued count = %d, want 1", got)
+	}
 }
 
 // Every broadcast event gets a monotonic seq and is retained per user; collect
@@ -59,8 +73,8 @@ func TestUIHubCollectGapOnOverflow(t *testing.T) {
 	}
 }
 
-// The user-echo event carries the sender's nonce (so the sending tab skips its
-// own optimistic echo) and round-trips through the ring intact.
+// The user-echo event carries the sender's nonce for server-side idempotency/debugging
+// and round-trips through the ring intact.
 func TestUIUserEventCarriesNonce(t *testing.T) {
 	h := newUIHub()
 	h.broadcast("claw", uiEvent{Type: "user", Session: 5, Text: "hi", Nonce: "n1"})
@@ -70,6 +84,21 @@ func TestUIUserEventCarriesNonce(t *testing.T) {
 	}
 	if e := decodeEvent(t, ev[0]); e.Type != "user" || e.Text != "hi" || e.Nonce != "n1" || e.Session != 5 {
 		t.Fatalf("user event = %+v, want user/hi/n1/session5", e)
+	}
+}
+
+func TestUIDeliveryContextCanceledRendersAborted(t *testing.T) {
+	d := &daemon{uiHub: newUIHub()}
+	u := d.newUIDelivery(context.Background(), queuedMsg{sessKey: "user:claw", sessCreated: 7, turnSeq: 11})
+	u.Final(runner.RunResult{Error: context.Canceled})
+
+	ev, _, _ := d.uiHub.collect("claw", d.uiHub.epoch, 0)
+	if len(ev) != 2 {
+		t.Fatalf("events = %d, want turn_start + error", len(ev))
+	}
+	e := decodeEvent(t, ev[1])
+	if e.Type != "error" || e.Text != "прервано" || e.Block == nil || e.Block.Text != "прервано" {
+		t.Fatalf("cancel error event = %+v", e)
 	}
 }
 
