@@ -50,9 +50,10 @@ function timeMeta(time){
   return u ? '<span class="meta">'+esc(fmtTime(u))+'</span>' : "";
 }
 function bubble(cls, html, time){
+  const meta = timeMeta(time);
   const d = document.createElement("div");
-  d.className = "msg " + cls;
-  d.innerHTML = '<div class="body">'+html+'</div>' + timeMeta(time);
+  d.className = "msg " + cls + (meta ? " hasmeta" : "");
+  d.innerHTML = '<div class="body">'+html+'</div>' + meta;
   return d;
 }
 // indicator is the per-turn tail dots: null for a settled turn (done/err — err shows its

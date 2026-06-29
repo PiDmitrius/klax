@@ -150,12 +150,11 @@
     font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   }
 
-  /* cmon-style timestamp: subtle, top-right, revealed on hover */
-  /* Timestamp OUTSIDE the bubble, bottom-right (hover-revealed). For a merged answer
-     bubble this is its LAST block's time. */
-  .meta { position: absolute; top: 100%; right: 6px; margin-top: 2px; font-size: 11px; color: var(--muted);
+  /* Timestamp OUTSIDE the bubble, to the right, bottom-aligned with the bubble edge.
+     For a merged answer bubble this is its LAST block's time. */
+  .meta { position: absolute; left: calc(100% + 6px); bottom: 0; font-size: 11px; line-height: 1.2; color: var(--muted);
           opacity: 0; transition: opacity .15s; pointer-events: none; white-space: nowrap; z-index: 2;
-          background: var(--panel); padding: 0 4px; border-radius: 4px; }
+          background: color-mix(in srgb, var(--chat) 88%, transparent); padding: 0 3px; border-radius: 3px; }
   .msg:hover .meta { opacity: 1; }
   #more { align-self: center; font-size: 12px; }
 
