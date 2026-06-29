@@ -14,13 +14,16 @@ import { injectEmojiFont } from "./emoji.js";
 
 const model = new TurnModel();
 const loaded = {};        // created -> transcript loaded?
-const lastRead = {};      // created -> last-read event seq (unread baseline)
+const readThrough = {};   // created -> highest event seq the user has actually read
 const unreadJump = {};    // created -> one-shot scroll to the unread divider
+const readGraceUntil = {}, readGraceTimer = {};
+const READ_GRACE_MS = 1600;
 let active = 0;
 let cursor = null, lastSeq = 0;
 let stick = true, pendingRender = false, readOnScroll = true;
 let sessionList = []; // last /api/sessions list — for hash-change validity + lookups
 const offsetFor = {}, moreFor = {}; // created -> first-loaded turn index + has-older-history flag (pagination)
+const scrollTopFor = {}; // created -> last scrollTop, so tab switches do not snap by a pixel
 const watchedImages = new WeakSet();
 
 function logcol(){ return document.getElementById("logcol"); }
@@ -28,16 +31,49 @@ function getActive(){ return active; }
 function seqOf(c){ const i = String(c || "").indexOf("-"); return i >= 0 ? (parseInt(String(c).slice(i + 1), 10) || 0) : 0; }
 function sameSession(a, b){ return String(a) === String(b); }
 function documentVisible(){ return typeof document === "undefined" || document.visibilityState !== "hidden"; }
-function markRead(created){
+function clearReadGrace(created){
   if(!created) return;
-  delete lastRead[created];
+  delete readGraceUntil[created];
+  if(readGraceTimer[created]){
+    clearTimeout(readGraceTimer[created]);
+    delete readGraceTimer[created];
+  }
+}
+function inReadGrace(created){ return !!created && (readGraceUntil[created] || 0) > Date.now(); }
+function startReadGrace(created){
+  if(!created) return;
+  readGraceUntil[created] = Date.now() + READ_GRACE_MS;
+  if(readGraceTimer[created]) clearTimeout(readGraceTimer[created]);
+  readGraceTimer[created] = setTimeout(() => {
+    delete readGraceTimer[created];
+    if(inReadGrace(created)) return;
+    clearReadGrace(created);
+    if(active === created && documentVisible() && stick && rawUnreadCount(created) > 0){
+      markRead(created, true);
+      renderTabs(active);
+      rerender(created);
+    }
+  }, READ_GRACE_MS + 40);
+}
+function markRead(created, force){
+  if(!created) return false;
+  if(!force && inReadGrace(created)) return false;
+  const visualChange = rawUnreadCount(created) > 0 || unreadJump[created] !== undefined || readGraceUntil[created] !== undefined;
+  readThrough[created] = Math.max(readThrough[created] || 0, lastSeq);
   delete unreadJump[created];
+  clearReadGrace(created);
+  readOnScroll = true;
+  return visualChange;
+}
+function markLoadedRead(created, watermark){
+  if(!created) return;
+  const seq = watermark !== undefined ? watermark : lastSeq;
+  readThrough[created] = Math.max(readThrough[created] || 0, seq);
+  delete unreadJump[created];
+  clearReadGrace(created);
   readOnScroll = true;
 }
-function freezeRead(created){
-  if(created && lastRead[created] === undefined) lastRead[created] = lastSeq;
-}
-function jumpToUnread(created){ if(created) unreadJump[created] = true; }
+function jumpToUnread(created){ if(created){ unreadJump[created] = true; startReadGrace(created); } }
 function focusComposer(){
   const input = document.getElementById("input");
   if(input && documentVisible()) input.focus({ preventScroll: true });
@@ -45,6 +81,17 @@ function focusComposer(){
 function stickToBottom(){
   const sc = document.getElementById("log");
   if(sc) toBottom(sc);
+  toggleToBottom();
+}
+function rememberScroll(created){
+  const log = document.getElementById("log");
+  if(created && log) scrollTopFor[created] = log.scrollTop;
+}
+function restoreScroll(created){
+  const log = document.getElementById("log");
+  if(!created || !log || scrollTopFor[created] === undefined) return;
+  log.scrollTop = Math.min(scrollTopFor[created], Math.max(0, log.scrollHeight - log.clientHeight));
+  stick = (log.scrollHeight - log.scrollTop - log.clientHeight < 80);
   toggleToBottom();
 }
 function watchInlineImages(col){
@@ -70,7 +117,7 @@ function rerender(created){
   const col = logcol();
   if(!col) return;
   if(selectionInLog(col)){ pendingRender = true; return; } // don't collapse a live selection
-  renderSession(col, model.turns(active), lastRead[active], abortActive);
+  renderSession(col, model.turns(active), readThrough[active], abortActive);
   watchInlineImages(col);
   if(moreFor[active]){ // older history exists → a "load earlier" button at the top
     const m = document.createElement("button");
@@ -108,7 +155,7 @@ async function loadTranscript(created){
     // lazy tab-load must NOT move the global cursor, or it would skip events for other
     // already-loaded sessions. Re-applied events for this session dedup by seq + block id.
     if(cursor === null && data.watermark){ cursor = data.watermark; lastSeq = seqOf(data.watermark); }
-    markRead(created); // a freshly (re)loaded tab is read — no divider until you leave it
+    markLoadedRead(created, data.watermark ? seqOf(data.watermark) : undefined); // a freshly (re)loaded tab is read
     rerender(created);
   } catch(e){}
 }
@@ -136,7 +183,7 @@ async function loadOlder(created){
 // rawUnreadCount is the true unread model, used for the in-log divider/jump. unreadCount
 // is the tab/title display variant, suppressing the active visible tab's badge.
 function rawUnreadCount(created){
-  const base = lastRead[created];
+  const base = readThrough[created];
   if(base === undefined) return 0;
   let n = 0;
   for(const t of model.turns(created)){
@@ -152,10 +199,24 @@ function unreadCount(created){
   if(sameSession(created, active) && documentVisible()) return 0;
   return rawUnreadCount(created);
 }
+function advanceReadThroughPastViewport(log){
+  if(!active || readThrough[active] === undefined || !log || inReadGrace(active)) return false;
+  const top = log.getBoundingClientRect().top;
+  let next = readThrough[active];
+  log.querySelectorAll("[data-max-event-seq]").forEach(el => {
+    const seq = parseInt(el.dataset.maxEventSeq || "0", 10) || 0;
+    if(seq > next && el.getBoundingClientRect().bottom < top + 1) next = seq;
+  });
+  if(next <= readThrough[active]) return false;
+  readThrough[active] = next;
+  if(rawUnreadCount(active) === 0) delete unreadJump[active];
+  return true;
+}
 
 async function selectSession(created){
-  if(active && active !== created){
-    freezeRead(active); // messages arriving after this point are unread
+  if(active && active !== created) rememberScroll(active);
+  if(active && active !== created && documentVisible() && stick){
+    markRead(active);
   }
   const hadUnread = loaded[created] && rawUnreadCount(created) > 0;
   active = created;
@@ -167,7 +228,10 @@ async function selectSession(created){
   stick = !hadUnread;
   renderTabs(active);
   if(!loaded[created]) await loadTranscript(created);
-  else rerender(created);
+  else {
+    rerender(created);
+    if(!hadUnread) restoreScroll(created);
+  }
   focusComposer();
 }
 
@@ -238,10 +302,12 @@ const host = {
   onAffected: set => {
     for(const c of set){
       if(c === active){
-        const hasUnread = rawUnreadCount(c) > 0;
-        if(documentVisible() && lastRead[c] !== undefined && hasUnread){
+        if(documentVisible() && stick){
+          markRead(c);
+        } else if(rawUnreadCount(c) > 0){
           stick = false;
-        } else if(documentVisible() && stick) markRead(c);
+          startReadGrace(c);
+        }
         rerender(c);
       }
     }
@@ -255,8 +321,9 @@ const host = {
     // cursor is null). Inactive loaded sessions are dropped so they reload fresh on
     // their next selection rather than keeping a model stale past the gap.
     Object.keys(loaded).forEach(k => { model.drop(Number(k)); delete loaded[k]; });
-    Object.keys(lastRead).forEach(k => delete lastRead[k]);
+    Object.keys(readThrough).forEach(k => delete readThrough[k]);
     Object.keys(unreadJump).forEach(k => delete unreadJump[k]);
+    Object.keys(readGraceUntil).forEach(k => clearReadGrace(Number(k)));
     cursor = null; lastSeq = 0;
     await syncSessions();
     if(active && !loaded[active]) await loadTranscript(active);
@@ -275,7 +342,7 @@ function start(){
   const app = document.getElementById("app"); if(app) app.classList.add("active");
   initCompose({
     getActive, notice: showNotice,
-    onAfterSend: () => { stick = true; markRead(active); renderTabs(active); stickToBottom(); },
+    onAfterSend: () => { stick = true; markRead(active, true); renderTabs(active); stickToBottom(); },
   });
   initTabs({ select: selectSession, onNew: onNewSession, afterClose, notice: showNotice, unread: unreadCount });
   // Delegated copy button for code fences (markdown emits <button class="copy">).
@@ -299,26 +366,38 @@ function start(){
   }
   if(log) log.addEventListener("scroll", () => {
     stick = (log.scrollHeight - log.scrollTop - log.clientHeight < 80);
-    if(readOnScroll && stick && active && documentVisible() && lastRead[active] !== undefined){
-      markRead(active);
-      renderTabs(active);
-      rerender(active);
+    if(active) scrollTopFor[active] = log.scrollTop;
+    if(readOnScroll && active && documentVisible()){
+      const oldTop = log.scrollTop;
+      const oldHeight = log.scrollHeight;
+      const advanced = advanceReadThroughPastViewport(log);
+      if(stick){
+        if(markRead(active) || advanced){
+          renderTabs(active);
+          rerender(active);
+        }
+      } else if(advanced){
+        renderTabs(active);
+        rerender(active);
+        log.scrollTop = oldTop + (log.scrollHeight - oldHeight);
+        scrollTopFor[active] = log.scrollTop;
+      }
     }
     toggleToBottom();
   });
   const th = document.getElementById("theme");
   if(th) th.addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
   const tb = document.getElementById("tobottom");
-  if(tb) tb.addEventListener("click", () => { stick = true; markRead(active); renderTabs(active); rerender(active); const l = document.getElementById("log"); if(l) toBottom(l); toggleToBottom(); });
+  if(tb) tb.addEventListener("click", () => { stick = true; markRead(active, true); renderTabs(active); rerender(active); });
   window.addEventListener("hashchange", () => { const w = parseInt(location.hash.slice(1), 10); if(w && w !== active && sessionList.some(s => s.created === w)) selectSession(w); });
   document.addEventListener("keydown", e => {
     if(["ArrowDown","PageDown","End"," "].includes(e.key)) allowReadOnScroll();
   });
-  // Browser tab hidden → freeze the read baseline so messages arriving while away count as
-  // unread; foregrounded → reconcile sessions (authoritative) and re-render (the divider).
+  // Read-through advances only while the user can actually see the bottom. Hidden tabs
+  // stop advancing; foregrounding an unread active tab performs one jump to the divider.
   document.addEventListener("visibilitychange", () => {
     if(document.visibilityState === "hidden"){
-      freezeRead(active);
+      if(active && stick) markRead(active);
     } else {
       syncSessions();
       if(active){

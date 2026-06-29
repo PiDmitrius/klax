@@ -84,7 +84,7 @@
   /* Centred conversation column — on wide desktop the chat does not span the
      whole screen, so left (klax) and right (user) messages stay close. */
   #logwrap { flex: 1; min-height: 0; position: relative; display: flex; }
-  #log { flex: 1; overflow-y: auto; scrollbar-gutter: stable both-edges;
+  #log { flex: 1; overflow-y: auto; overscroll-behavior-y: contain; overflow-anchor: none; scrollbar-gutter: stable both-edges;
          display: flex; flex-direction: column; align-items: center; background: var(--chat); }
   #logcol { width: 100%; max-width: 820px; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
   /* One container per user turn: a flex column so .msg.user right-aligns and the answer

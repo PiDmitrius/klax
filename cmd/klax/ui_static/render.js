@@ -22,9 +22,9 @@ export function renderModel(turns, unreadAfter){
   for(const t of (turns || [])){
     if(t.role !== "user"){
       if(isUnread(t.eventSeq)) placeDivider();
-      if(t.kind === "compact") items.push({ kind: "bubble", cls: "system", text: "🗜 контекст свёрнут", md: false, time: t.time });
-      else if(t.role === "notice") items.push({ kind: "bubble", cls: "notice", text: t.text || "", md: false, time: t.time });
-      else items.push({ kind: "bubble", cls: (t.kind === "error" || t.role === "error") ? "error" : t.role === "system" ? "system" : "assistant", text: t.text || "", md: true, time: t.time });
+      if(t.kind === "compact") items.push({ kind: "bubble", cls: "system", text: "🗜 контекст свёрнут", md: false, time: t.time, maxEventSeq: t.eventSeq });
+      else if(t.role === "notice") items.push({ kind: "bubble", cls: "notice", text: t.text || "", md: false, time: t.time, maxEventSeq: t.eventSeq });
+      else items.push({ kind: "bubble", cls: (t.kind === "error" || t.role === "error") ? "error" : t.role === "system" ? "system" : "assistant", text: t.text || "", md: true, time: t.time, maxEventSeq: t.eventSeq });
       continue;
     }
     const groups = [];
@@ -40,7 +40,8 @@ export function renderModel(turns, unreadAfter){
         if(isUnread(t.blocks[i].eventSeq) && !divided && unreadAfter !== undefined && blocks.length > 0) break;
         blocks.push(t.blocks[i]); i++;
       }
-      groups.push({ cls: blockCls(role), blocks, tool: role === "tool", time: blocks.length ? blocks[blocks.length - 1].time : undefined });
+      const seqs = blocks.map(b => b.eventSeq || 0);
+      groups.push({ cls: blockCls(role), blocks, tool: role === "tool", time: blocks.length ? blocks[blocks.length - 1].time : undefined, maxEventSeq: Math.max(0, ...seqs) || undefined });
     }
     if(t.state === "enq") queuePos++;
     items.push({ kind: "turn", seq: t.seq, text: t.text || "", time: t.time, groups, state: t.state, note: t.state === "enq" ? "в очереди · " + queuePos : undefined });
@@ -53,7 +54,7 @@ const DOTS = '<span class="dots"><span></span><span></span><span></span></span>'
 
 function divider(){
   const d = document.createElement("div");
-  d.className = "readline"; d.innerHTML = "<span>новые сообщения</span>";
+  d.className = "readline"; d.innerHTML = "<span>непрочитанные сообщения</span>";
   return d;
 }
 
@@ -62,10 +63,11 @@ function timeMeta(time){
   const u = typeof time === "number" ? time : Date.parse(time);
   return u ? '<span class="meta">'+esc(fmtTime(u))+'</span>' : "";
 }
-function bubble(cls, html, time){
+function bubble(cls, html, time, maxEventSeq){
   const meta = timeMeta(time);
   const d = document.createElement("div");
   d.className = "msg " + cls + (meta ? " hasmeta" : "");
+  if(maxEventSeq) d.dataset.maxEventSeq = String(maxEventSeq);
   d.innerHTML = '<div class="body">'+html+'</div>' + meta;
   return d;
 }
@@ -115,12 +117,12 @@ function renderSig(it){
       text: it.text, time: it.time, state: it.state, note: it.note,
       groups: it.groups.map(g => ({
         divider: g.divider,
-        cls: g.cls, tool: g.tool, time: g.time,
+        cls: g.cls, tool: g.tool, time: g.time, maxEventSeq: g.maxEventSeq,
         blocks: (g.blocks || []).map(b => ({ id: b.id, role: b.role, text: b.text, time: b.time })),
       })),
     });
   }
-  if(it.kind === "bubble") return JSON.stringify({ cls: it.cls, text: it.text, md: it.md, time: it.time });
+  if(it.kind === "bubble") return JSON.stringify({ cls: it.cls, text: it.text, md: it.md, time: it.time, maxEventSeq: it.maxEventSeq });
   return "";
 }
 
@@ -140,14 +142,14 @@ function stamp(node, key, sig){
 
 function buildItem(it, onAbort){
   if(it.kind === "divider") return divider();
-  if(it.kind === "bubble") return bubble(it.cls, it.md ? mdSafe(it.text) : esc(it.text), it.time);
+  if(it.kind === "bubble") return bubble(it.cls, it.md ? mdSafe(it.text) : esc(it.text), it.time, it.maxEventSeq);
   const turn = document.createElement("div");
   turn.className = "turn"; turn.dataset.seq = it.seq;
   turn.appendChild(bubble("user", mdSafe(it.text), it.time));
   for(const g of it.groups){
     if(g.divider){ turn.appendChild(divider()); continue; }
     const html = g.blocks.map(b => g.tool ? esc(b.text || "") : mdSafe(b.text || "")).join(g.tool ? "<br>" : "");
-    turn.appendChild(bubble(g.cls, html, g.time));
+    turn.appendChild(bubble(g.cls, html, g.time, g.maxEventSeq));
   }
   const ind = indicator(it.state, it.note, onAbort);
   if(ind) turn.appendChild(ind);
