@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 
 	"github.com/PiDmitrius/klax/internal/runner"
+	"github.com/PiDmitrius/klax/internal/sealref"
 	"github.com/PiDmitrius/klax/internal/session"
 )
 
@@ -104,5 +106,78 @@ func TestEnqueueToSessionEchoesUserToUI(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("messenger DM not echoed to the UI hub as a user event; got %d events", len(ev))
+	}
+}
+
+func TestEnqueueToSessionEchoesInboundImageMarkdownToUI(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	tp := &fakeTransport{}
+	d := newTestDeliveryDaemon(tp)
+	d.identities = map[int64]string{1: "claw"} // tg:1 -> user:claw (a mapped DM)
+	d.store = newStoreWithChat("user:claw", "one")
+	d.runners = make(map[runnerKey]*sessionRunner)
+	d.uiHub = newUIHub()
+	var err error
+	d.sealer, err = sealref.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created := d.store.SessionsFor("user:claw")[0].Created
+	d.runners[runnerKey{sk: "user:claw", created: created}] = &sessionRunner{runner: runner.New(), processing: true}
+
+	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAIAAAB7QOjdAAAAD0lEQVR4nGP8z8DAwMAAAAYIAQHLR3Z1AAAAAElFTkSuQmCC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.enqueueToSession("tg:1", "100", "", []attachment{{filename: "image.png", data: png}}, created, "")
+
+	ev, _, _ := d.uiHub.collect("claw", d.uiHub.epoch, 0)
+	for _, raw := range ev {
+		e := decodeEvent(t, raw)
+		if e.Type != "user" {
+			continue
+		}
+		if e.Time == "" {
+			t.Fatal("user echo event missing time")
+		}
+		if strings.Contains(e.Text, "📎") {
+			t.Fatalf("image attachment echoed as file fallback: %q", e.Text)
+		}
+		if strings.Contains(e.Text, "![image.png](/api/file?ref=") && strings.Contains(e.Text, "&w=2&h=1)") {
+			return
+		}
+	}
+	t.Fatalf("image attachment was not echoed as markdown image; events=%d", len(ev))
+}
+
+func TestAbortSessionEchoesQueuedErrorsToUI(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	tp := &fakeTransport{}
+	d := newTestDeliveryDaemon(tp)
+	d.identities = map[int64]string{1: "claw"} // tg:1 -> user:claw (a mapped DM)
+	d.store = newStoreWithChat("user:claw", "one")
+	d.runners = make(map[runnerKey]*sessionRunner)
+	d.uiHub = newUIHub()
+
+	created := d.store.SessionsFor("user:claw")[0].Created
+	d.runners[runnerKey{sk: "user:claw", created: created}] = &sessionRunner{runner: runner.New(), processing: true}
+	d.enqueueToSession("tg:1", "100", "one", nil, created, "")
+	d.enqueueToSession("tg:1", "101", "two", nil, created, "")
+	_, head, _ := d.uiHub.collect("claw", d.uiHub.epoch, 0)
+
+	if !d.abortSession("user:claw", created, false) {
+		t.Fatal("abortSession returned false for queued turns")
+	}
+	ev, _, _ := d.uiHub.collect("claw", d.uiHub.epoch, head)
+	errs := 0
+	for _, raw := range ev {
+		e := decodeEvent(t, raw)
+		if e.Type == "error" && e.State == "err" && e.Session == created && e.Block != nil && e.Block.Role == "error" {
+			errs++
+		}
+	}
+	if errs != 2 {
+		t.Fatalf("queued abort error events = %d, want 2 (events=%d)", errs, len(ev))
 	}
 }

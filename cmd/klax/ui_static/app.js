@@ -15,22 +15,47 @@ import { injectEmojiFont } from "./emoji.js";
 const model = new TurnModel();
 const loaded = {};        // created -> transcript loaded?
 const lastRead = {};      // created -> last-read event seq (unread baseline)
-const myNonces = new Map();
+const unreadJump = {};    // created -> one-shot scroll to the unread divider
 let active = 0;
 let cursor = null, lastSeq = 0;
-let stick = true, pendingRender = false, jumpUnread = false;
+let stick = true, pendingRender = false;
 let sessionList = []; // last /api/sessions list — for hash-change validity + lookups
 const offsetFor = {}, moreFor = {}; // created -> first-loaded turn index + has-older-history flag (pagination)
+const watchedImages = new WeakSet();
 
 function logcol(){ return document.getElementById("logcol"); }
 function getActive(){ return active; }
 function seqOf(c){ const i = String(c || "").indexOf("-"); return i >= 0 ? (parseInt(String(c).slice(i + 1), 10) || 0) : 0; }
 function sameSession(a, b){ return String(a) === String(b); }
 function documentVisible(){ return typeof document === "undefined" || document.visibilityState !== "hidden"; }
-function markRead(created){ if(created) delete lastRead[created]; }
+function markRead(created){
+  if(!created) return;
+  delete lastRead[created];
+  delete unreadJump[created];
+}
+function freezeRead(created){
+  if(created && lastRead[created] === undefined) lastRead[created] = lastSeq;
+}
+function jumpToUnread(created){ if(created) unreadJump[created] = true; }
 function focusComposer(){
   const input = document.getElementById("input");
   if(input && documentVisible()) input.focus({ preventScroll: true });
+}
+function stickToBottom(){
+  const sc = document.getElementById("log");
+  if(sc) toBottom(sc);
+  toggleToBottom();
+}
+function watchInlineImages(col){
+  col.querySelectorAll("img.att").forEach(img => {
+    if(watchedImages.has(img)) return;
+    watchedImages.add(img);
+    const settle = () => { if(stick) stickToBottom(); };
+    if(!img.complete){
+      img.addEventListener("load", settle, { once: true });
+      img.addEventListener("error", settle, { once: true });
+    }
+  });
 }
 
 function applyTheme(t){
@@ -45,17 +70,21 @@ function rerender(created){
   if(!col) return;
   if(selectionInLog(col)){ pendingRender = true; return; } // don't collapse a live selection
   renderSession(col, model.turns(active), lastRead[active], abortActive);
+  watchInlineImages(col);
   if(moreFor[active]){ // older history exists → a "load earlier" button at the top
     const m = document.createElement("button");
     m.id = "more"; m.textContent = "↑ Загрузить раньше";
     m.addEventListener("click", () => loadOlder(active));
     col.insertBefore(m, col.firstChild);
   }
-  if(jumpUnread){
+  if(unreadJump[active] && rawUnreadCount(active) > 0){
     const dv = col.querySelector(".readline");
-    if(dv){ dv.scrollIntoView({ block: "start" }); stick = false; }
-    jumpUnread = false;
-  } else if(stick){ const sc = document.getElementById("log"); if(sc) toBottom(sc); } // #log is the scroller
+    if(dv){
+      dv.scrollIntoView({ block: "start" });
+      stick = false;
+      delete unreadJump[active];
+    }
+  } else if(stick) stickToBottom();
   toggleToBottom();
 }
 
@@ -77,7 +106,7 @@ async function loadTranscript(created){
     // lazy tab-load must NOT move the global cursor, or it would skip events for other
     // already-loaded sessions. Re-applied events for this session dedup by seq + block id.
     if(cursor === null && data.watermark){ cursor = data.watermark; lastSeq = seqOf(data.watermark); }
-    delete lastRead[created]; // a freshly (re)loaded tab is read — no divider until you leave it
+    markRead(created); // a freshly (re)loaded tab is read — no divider until you leave it
     rerender(created);
   } catch(e){}
 }
@@ -119,14 +148,17 @@ function unreadCount(created){
 }
 
 async function selectSession(created){
-  if(active && active !== created) lastRead[active] = lastSeq; // mark the tab we leave as read
+  if(active && active !== created){
+    freezeRead(active); // messages arriving after this point are unread
+  }
   const hadUnread = loaded[created] && rawUnreadCount(created) > 0;
   active = created;
   if(location.hash !== "#" + created) location.hash = String(created);
   // Returning to an already-loaded tab with unread → jump to the "новые сообщения" divider
   // instead of the bottom; otherwise stick to the bottom.
-  jumpUnread = hadUnread;
-  stick = !jumpUnread;
+  if(hadUnread) jumpToUnread(created);
+  else markRead(created);
+  stick = !hadUnread;
   renderTabs(active);
   if(!loaded[created]) await loadTranscript(created);
   else rerender(created);
@@ -141,7 +173,7 @@ async function onSessionsList(list){
   list = list || [];
   sessionList = list;
   if(active && !list.some(s => s.created === active)){
-    model.drop(active); delete loaded[active]; delete lastRead[active];
+    model.drop(active); delete loaded[active]; markRead(active);
     active = 0;
   }
   reconcileSessions(list, active);
@@ -194,13 +226,16 @@ function fallbackCopy(text, ok){
 // the poll host events.js drives
 const host = {
   model,
-  ctx: { myNonces, onSessions: list => { onSessionsList(list); }, onNotice: onNoticeEvent },
+  ctx: { onSessions: list => { onSessionsList(list); }, onNotice: onNoticeEvent },
   cursor: () => cursor, setCursor: c => { cursor = c; },
   lastSeq: () => lastSeq, setLastSeq: n => { lastSeq = n; },
   onAffected: set => {
     for(const c of set){
       if(c === active){
-        if(documentVisible() && stick) markRead(c);
+        const hasUnread = rawUnreadCount(c) > 0;
+        if(documentVisible() && lastRead[c] !== undefined && hasUnread){
+          stick = false;
+        } else if(documentVisible() && stick) markRead(c);
         rerender(c);
       }
     }
@@ -215,6 +250,7 @@ const host = {
     // their next selection rather than keeping a model stale past the gap.
     Object.keys(loaded).forEach(k => { model.drop(Number(k)); delete loaded[k]; });
     Object.keys(lastRead).forEach(k => delete lastRead[k]);
+    Object.keys(unreadJump).forEach(k => delete unreadJump[k]);
     cursor = null; lastSeq = 0;
     await syncSessions();
     if(active && !loaded[active]) await loadTranscript(active);
@@ -223,7 +259,7 @@ const host = {
 
 async function onNewSession(created){ await syncSessions(); await selectSession(created); }
 async function afterClose(created){
-  model.drop(created); delete loaded[created]; delete lastRead[created];
+  model.drop(created); delete loaded[created]; markRead(created);
   if(created === active) active = 0;
   await syncSessions();
 }
@@ -232,8 +268,8 @@ function start(){
   document.getElementById("gate").classList.add("hidden");
   const app = document.getElementById("app"); if(app) app.classList.add("active");
   initCompose({
-    model, getActive, rerender, myNonces, notice: showNotice,
-    onAfterSend: () => { stick = true; markRead(active); renderTabs(active); },
+    getActive, notice: showNotice,
+    onAfterSend: () => { stick = true; markRead(active); renderTabs(active); stickToBottom(); },
   });
   initTabs({ select: selectSession, onNew: onNewSession, afterClose, notice: showNotice, unread: unreadCount });
   // Delegated copy button for code fences (markdown emits <button class="copy">).
@@ -250,17 +286,37 @@ function start(){
   });
   document.addEventListener("selectionchange", () => { if(pendingRender && !selectionInLog(logcol())){ pendingRender = false; rerender(active); } });
   const log = document.getElementById("log");
-  if(log) log.addEventListener("scroll", () => { stick = (log.scrollHeight - log.scrollTop - log.clientHeight < 80); toggleToBottom(); });
+  if(log) log.addEventListener("scroll", () => {
+    stick = (log.scrollHeight - log.scrollTop - log.clientHeight < 80);
+    if(stick && active && documentVisible() && lastRead[active] !== undefined){
+      markRead(active);
+      renderTabs(active);
+      rerender(active);
+    }
+    toggleToBottom();
+  });
   const th = document.getElementById("theme");
   if(th) th.addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
   const tb = document.getElementById("tobottom");
-  if(tb) tb.addEventListener("click", () => { stick = true; const l = document.getElementById("log"); if(l) toBottom(l); toggleToBottom(); });
+  if(tb) tb.addEventListener("click", () => { stick = true; markRead(active); renderTabs(active); rerender(active); const l = document.getElementById("log"); if(l) toBottom(l); toggleToBottom(); });
   window.addEventListener("hashchange", () => { const w = parseInt(location.hash.slice(1), 10); if(w && w !== active && sessionList.some(s => s.created === w)) selectSession(w); });
   // Browser tab hidden → freeze the read baseline so messages arriving while away count as
   // unread; foregrounded → reconcile sessions (authoritative) and re-render (the divider).
   document.addEventListener("visibilitychange", () => {
-    if(document.visibilityState === "hidden"){ if(active) lastRead[active] = lastSeq; }
-    else { syncSessions(); if(active) rerender(active); }
+    if(document.visibilityState === "hidden"){
+      freezeRead(active);
+    } else {
+      syncSessions();
+      if(active){
+        if(rawUnreadCount(active) > 0){
+          stick = false;
+          jumpToUnread(active);
+        } else {
+          markRead(active);
+        }
+        rerender(active);
+      }
+    }
   });
   syncSessions().then(() => pollLoop(host));
 }

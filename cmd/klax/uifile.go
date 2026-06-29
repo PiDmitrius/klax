@@ -1,6 +1,10 @@
 package main
 
 import (
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"mime"
 	"net/http"
 	"net/url"
@@ -31,12 +35,28 @@ func (d *daemon) inboundText(store *sessfiles.Store, t sessfiles.Turn, sk string
 		u := "/api/file?ref=" + url.QueryEscape(ref)
 		label := safeMarkdownLabel(sessfiles.DisplayName(name))
 		if strings.HasPrefix(ct, "image/") {
+			if w, h := imageDimensions(store.Path(name)); w > 0 && h > 0 {
+				u += "&w=" + strconv.Itoa(w) + "&h=" + strconv.Itoa(h)
+			}
 			parts = append(parts, "!["+label+"]("+u+")")
 		} else {
 			parts = append(parts, "["+label+"]("+u+")")
 		}
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+func imageDimensions(path string) (int, int) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, 0
+	}
+	defer f.Close()
+	cfg, _, err := image.DecodeConfig(f)
+	if err != nil {
+		return 0, 0
+	}
+	return cfg.Width, cfg.Height
 }
 
 // safeMarkdownLabel strips markdown-structural characters from a filename so it can't

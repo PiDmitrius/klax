@@ -65,39 +65,106 @@ function bubble(cls, html, time){
   return d;
 }
 // indicator is the per-turn tail dots: null for a settled turn (done/err — err shows its
-// error block); animated + ✕ for run; animated for the just-sent 'sending'; dim 'в
-// очереди · N' for enq.
+// error block); animated + ✕ for run; dim 'в очереди · N' for enq.
 function indicator(state, note, onAbort){
   if(state === "done" || state === "err" || state === undefined) return null;
   const d = document.createElement("div");
-  const animated = state === "run" || state === "sending";
+  const animated = state === "run";
+  const abortable = state === "run" || state === "enq";
   d.className = "msg assistant typing" + (animated ? "" : " queued");
-  d.innerHTML = DOTS + (note ? '<span class="qnote">'+esc(note)+'</span>' : "") + (state === "run" ? '<button class="stop" title="Прервать">✕</button>' : "");
-  if(state === "run" && onAbort){ const b = d.querySelector(".stop"); if(b) b.addEventListener("click", onAbort); }
+  d.innerHTML = DOTS + (note ? '<span class="qnote">'+esc(note)+'</span>' : "") + (abortable ? '<button class="stop" title="Прервать">✕</button>' : "");
+  if(abortable && onAbort){ const b = d.querySelector(".stop"); if(b) b.addEventListener("click", onAbort); }
   return d;
 }
 
-export function paint(col, items, onAbort){
-  col.innerHTML = "";
-  for(const it of items){
-    if(it.kind === "divider"){
-      col.appendChild(divider());
-    } else if(it.kind === "bubble"){
-      col.appendChild(bubble(it.cls, it.md ? mdSafe(it.text) : esc(it.text), it.time));
-    } else { // per-turn container
-      const turn = document.createElement("div");
-      turn.className = "turn"; turn.dataset.seq = it.seq;
-      turn.appendChild(bubble("user", mdSafe(it.text), it.time));
-      if(it.dividerBeforeGroups) turn.appendChild(divider());
-      for(const g of it.groups){
-        const html = g.blocks.map(b => g.tool ? esc(b.text || "") : mdSafe(b.text || "")).join(g.tool ? "<br>" : "");
-        turn.appendChild(bubble(g.cls, html, g.time));
-      }
-      const ind = indicator(it.state, it.note, onAbort);
-      if(ind) turn.appendChild(ind);
-      col.appendChild(turn);
-    }
+function reusableImages(col){
+  const bySrc = new Map();
+  col.querySelectorAll("img.att[src]").forEach(img => {
+    const src = img.getAttribute("src");
+    if(!src) return;
+    const list = bySrc.get(src) || [];
+    list.push(img);
+    bySrc.set(src, list);
+  });
+  return bySrc;
+}
+
+function reuseImages(root, bySrc){
+  root.querySelectorAll("img.att[src]").forEach(img => {
+    const src = img.getAttribute("src");
+    const list = src && bySrc.get(src);
+    const old = list && list.shift();
+    if(old) img.replaceWith(old);
+  });
+}
+
+function renderKey(it, index){
+  if(it.kind === "turn") return "turn:" + it.seq;
+  if(it.kind === "bubble") return "bubble:" + index + ":" + it.cls;
+  return "";
+}
+
+function renderSig(it){
+  if(it.kind === "turn"){
+    return JSON.stringify({
+      text: it.text, time: it.time, state: it.state, note: it.note,
+      dividerBeforeGroups: it.dividerBeforeGroups,
+      groups: it.groups.map(g => ({
+        cls: g.cls, tool: g.tool, time: g.time,
+        blocks: g.blocks.map(b => ({ id: b.id, role: b.role, text: b.text, time: b.time })),
+      })),
+    });
   }
+  if(it.kind === "bubble") return JSON.stringify({ cls: it.cls, text: it.text, md: it.md, time: it.time });
+  return "";
+}
+
+function reusableNodes(col){
+  const byKey = new Map();
+  Array.from(col.children).forEach(node => { if(node.dataset && node.dataset.renderKey) byKey.set(node.dataset.renderKey, node); });
+  return byKey;
+}
+
+function stamp(node, key, sig){
+  if(key){
+    node.dataset.renderKey = key;
+    node.dataset.renderSig = sig;
+  }
+  return node;
+}
+
+function buildItem(it, onAbort){
+  if(it.kind === "divider") return divider();
+  if(it.kind === "bubble") return bubble(it.cls, it.md ? mdSafe(it.text) : esc(it.text), it.time);
+  const turn = document.createElement("div");
+  turn.className = "turn"; turn.dataset.seq = it.seq;
+  turn.appendChild(bubble("user", mdSafe(it.text), it.time));
+  if(it.dividerBeforeGroups) turn.appendChild(divider());
+  for(const g of it.groups){
+    const html = g.blocks.map(b => g.tool ? esc(b.text || "") : mdSafe(b.text || "")).join(g.tool ? "<br>" : "");
+    turn.appendChild(bubble(g.cls, html, g.time));
+  }
+  const ind = indicator(it.state, it.note, onAbort);
+  if(ind) turn.appendChild(ind);
+  return turn;
+}
+
+export function paint(col, items, onAbort){
+  const nodes = reusableNodes(col);
+  const frag = document.createDocumentFragment();
+  items.forEach((it, index) => {
+    const key = renderKey(it, index);
+    const sig = renderSig(it);
+    const old = key && nodes.get(key);
+    if(old && old.dataset.renderSig === sig){
+      frag.appendChild(old);
+      return;
+    }
+    frag.appendChild(stamp(buildItem(it, onAbort), key, sig));
+  });
+  const images = reusableImages(col);
+  reuseImages(frag, images);
+  col.replaceChildren(frag);
 }
 
 export function renderSession(col, turns, unreadAfter, onAbort){

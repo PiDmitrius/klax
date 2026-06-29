@@ -1,18 +1,15 @@
 // compose.js — the message composer: textarea (auto-grow, Enter-to-send), staged
-// attachments (paperclip / paste / drop, with chips), and send(). On send it adds an
-// optimistic turn keyed by a NONCE (no negative tmp ids), POSTs /api/send, and binds the
-// durable {seq,state} from the response (the broadcast `user` event is the idempotent
-// backstop). Optimistic image thumbnails use blob: URLs, revoked if the send is refused.
+// attachments (paperclip / paste / drop, with chips), and send(). The composer never
+// mutates the read model: the server is authoritative, and the sent message appears only
+// when the live event / transcript reports it back.
 
 import { api } from "./base.js";
 
 const SENDTAB = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID().slice(0, 8) : "tab";
 let nonceCtr = 0;
 let files = [];                 // staged { file, name } for the next send
-const blobsByNonce = new Map(); // nonce -> [blobURL] for rendered local previews
 
-// initCompose wires the composer DOM. deps: { model, getActive():created, rerender(created),
-// myNonces:Map, onAfterSend?() }.
+// initCompose wires the composer DOM. deps: { getActive():created, notice?(), onAfterSend?() }.
 export function initCompose(deps){
   const ta = document.getElementById("input");
   const fileInput = document.getElementById("file");
@@ -74,18 +71,9 @@ async function send(deps){
   if(!created) return;
   const nonce = SENDTAB + "-" + (++nonceCtr);
 
-  // optimistic turn keyed by nonce: text + blob thumbnails for staged images
-  const blobs = [];
-  const thumbs = staged.filter(f => /^image\//.test(f.file.type)).map(f => { const u = URL.createObjectURL(f.file); blobs.push(u); return "![](" + u + ")"; });
-  if(blobs.length) blobsByNonce.set(nonce, blobs);
-  const echo = text || ("📎 " + staged.map(f => f.name).join(", "));
-  deps.model.optimistic(created, nonce, { text: [echo, ...thumbs].join("\n\n"), time: Date.now() });
-  deps.myNonces.set(nonce, Date.now());
-
   // clear the composer immediately
   if(ta){ ta.value = ""; autoGrow(ta); }
   files = []; renderChips();
-  deps.rerender(created);
   if(deps.onAfterSend) deps.onAfterSend();
 
   try {
@@ -98,24 +86,16 @@ async function send(deps){
     } else {
       r = await api("/api/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: created, text, nonce }) });
     }
-    if(!r.ok){ rollback(deps, created, nonce, text, staged, (await r.text()).trim() || "сообщение не принято"); return; }
-    const data = await r.json();
-    deps.model.bindNonce(created, nonce, data.seq, data.state || "enq");
-    deps.rerender(created);
+    if(!r.ok){ rollback(deps, text, staged, (await r.text()).trim() || "сообщение не принято"); return; }
   } catch(e){
-    rollback(deps, created, nonce, text, staged, "сеть недоступна — сообщение не отправлено");
+    rollback(deps, text, staged, "сеть недоступна — сообщение не отправлено");
   }
 }
 
-function rollback(deps, created, nonce, text, staged, msg){
-  (blobsByNonce.get(nonce) || []).forEach(u => URL.revokeObjectURL(u));
-  blobsByNonce.delete(nonce);
-  deps.model.rollback(created, nonce);
-  deps.myNonces.delete(nonce);
+function rollback(deps, text, staged, msg){
   // Restore the composed text/files so a failed send doesn't silently vanish — but only if
   // the composer hasn't already been reused for a newer draft.
   const ta = document.getElementById("input");
   if(ta && !ta.value.trim() && !files.length){ ta.value = text || ""; autoGrow(ta); files = (staged || []).slice(); renderChips(); }
   if(msg && deps.notice) deps.notice(msg);
-  deps.rerender(created);
 }

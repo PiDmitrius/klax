@@ -142,6 +142,49 @@ func TestReadModelAbortedSurfaced(t *testing.T) {
 	if len(turns[0].Blocks) != 1 || turns[0].Blocks[0].Role != "error" {
 		t.Fatalf("aborted turn missing its error block: %+v", turns[0].Blocks)
 	}
+	if turns[0].Blocks[0].Text != "прервано" {
+		t.Fatalf("aborted turn text = %q, want localized text", turns[0].Blocks[0].Text)
+	}
+}
+
+func TestReadModelAbortedKeepsTurnOrder(t *testing.T) {
+	d, created := newReadModelDaemon(t)
+	sr := d.getRunner("user:claw", created)
+	seq1, marker1, _, err := sr.store.Enqueue("ui:claw", "", "n1", "first", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seq2, _, _, err := sr.store.Enqueue("ui:claw", "", "n2", "aborted", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seq3, marker3, _, err := sr.store.Enqueue("ui:claw", "", "n3", "third", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seq := range []int64{seq1, seq3} {
+		if err := sr.store.MarkDone(seq); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sr.store.MarkErr(seq2, "aborted"); err != nil {
+		t.Fatal(err)
+	}
+	turns := testRM(d, created, []history.Item{
+		{Role: "user", Text: "first", Marker: marker1},
+		{Role: "assistant", Text: "one"},
+		{Role: "user", Text: "third", Marker: marker3},
+		{Role: "assistant", Text: "three"},
+	}, false, true)
+	if len(turns) != 3 {
+		t.Fatalf("turn count = %d, want 3: %+v", len(turns), turns)
+	}
+	if turns[0].Seq != seq1 || turns[1].Seq != seq2 || turns[2].Seq != seq3 {
+		t.Fatalf("turn order = [%d %d %d], want [%d %d %d]: %+v", turns[0].Seq, turns[1].Seq, turns[2].Seq, seq1, seq2, seq3, turns)
+	}
+	if turns[1].State != "err" {
+		t.Fatalf("middle turn state = %q, want err: %+v", turns[1].State, turns[1])
+	}
 }
 
 // blockID is canonical: a trailing-whitespace difference (live res.Text vs the trimmed

@@ -28,8 +28,8 @@ type uiBlock struct {
 // (the per-turn indicator: enq|run|done|err) and its answer blocks; a standalone row
 // (system/compact/error notice between turns) has role != "user" and no seq/state.
 type uiTurn struct {
-	Seq    int64     `json:"seq,omitempty"`   // durable turn_seq (user turns); negative synthetic for legacy markerless; 0 for standalone rows
-	Role   string    `json:"role"`            // user|system|compact|assistant|tool
+	Seq    int64     `json:"seq,omitempty"` // durable turn_seq (user turns); negative synthetic for legacy markerless; 0 for standalone rows
+	Role   string    `json:"role"`          // user|system|compact|assistant|tool
 	Text   string    `json:"text,omitempty"`
 	Time   string    `json:"time,omitempty"`
 	State  string    `json:"state,omitempty"` // user turns: enq|run|done|err
@@ -53,7 +53,7 @@ func blockID(seq int64, role, text string, tools []history.ToolCall) string {
 // errBlock is the terminal block of an aborted/errored turn, so a reload shows why it
 // stopped (mirrors the messenger "❌ Прервано") instead of a silently-frozen turn.
 func errBlock(seq int64, reason string) uiBlock {
-	if reason == "" {
+	if reason == "" || reason == "aborted" {
 		reason = "прервано"
 	}
 	return uiBlock{ID: blockID(seq, "error", reason, nil), Role: "error", Text: reason}
@@ -185,22 +185,43 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 	}
 
 	if latest {
+		var missing []uiTurn
 		for _, t := range queueTurns {
 			if t.Marker == "" || seen[t.Marker] {
 				continue
 			}
+			ut := uiTurn{
+				Seq: t.Seq, Role: "user", Text: d.inboundText(store, t, sk, created),
+				Time: time.Unix(0, t.TS).Format(time.RFC3339), State: resolveTurnState(t.Last, busy, t.Seq == newestRun),
+			}
 			switch t.Last {
 			case "enq", "run":
-				turns = append(turns, uiTurn{
-					Seq: t.Seq, Role: "user", Text: d.inboundText(store, t, sk, created),
-					Time: time.Unix(0, t.TS).Format(time.RFC3339), State: resolveTurnState(t.Last, busy, t.Seq == newestRun),
-				})
+				missing = append(missing, ut)
 			case "err": // a queued turn aborted before it ran — show it with why it stopped
-				ut := uiTurn{Seq: t.Seq, Role: "user", Text: d.inboundText(store, t, sk, created), Time: time.Unix(0, t.TS).Format(time.RFC3339), State: "err"}
+				ut.State = "err"
 				ut.Blocks = append(ut.Blocks, errBlock(t.Seq, t.Reason))
-				turns = append(turns, ut)
+				missing = append(missing, ut)
 			}
 		}
+		turns = mergeQueueOnlyTurns(turns, missing)
 	}
 	return turns
+}
+
+func mergeQueueOnlyTurns(base, missing []uiTurn) []uiTurn {
+	if len(missing) == 0 {
+		return base
+	}
+	out := make([]uiTurn, 0, len(base)+len(missing))
+	mi := 0
+	for _, row := range base {
+		if row.Role == "user" && row.Seq > 0 {
+			for mi < len(missing) && missing[mi].Seq < row.Seq {
+				out = append(out, missing[mi])
+				mi++
+			}
+		}
+		out = append(out, row)
+	}
+	return append(out, missing[mi:]...)
 }

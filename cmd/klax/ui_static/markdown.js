@@ -37,11 +37,10 @@ export function inline(s){
   if(h.indexOf("**") !== -1) h = h.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
   if(h.indexOf("~~") !== -1) h = h.replace(/~~([^~]+)~~/g, '<s>$1</s>');
   if(h.indexOf("*")  !== -1) h = h.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<i>$2</i>'); // *italic*, never part of **bold**
-  // Images: ![alt](url) -> <img> for our /api/file capability refs, remote http(s), or a
-  // page-own blob: URL (the optimistic just-sent thumbnail).
+  // Images: ![alt](url) -> <img> for our /api/file capability refs or remote http(s).
   if(h.indexOf("![") !== -1)
-    h = h.replace(/!\[([^\]]*)\]\((\/api\/file\?[^)\s]+|https?:\/\/[^)\s]+|blob:[^)\s]+)\)/g,
-      (m, alt, href) => '<img class="att" src="'+apiHref(href)+'" alt="'+alt+'" loading="lazy">');
+    h = h.replace(/!\[([^\]]*)\]\((\/api\/file\?[^)\s]+|https?:\/\/[^)\s]+)\)/g,
+      (m, alt, href) => '<img class="att" src="'+apiHref(href)+'" alt="'+alt+'" loading="lazy"'+imageSizeAttrs(href)+'>');
   // Bound the link regex (it backtracks O(n^2) on bracket-heavy text with no early "]").
   if(h.indexOf("](") !== -1 && h.length < 50000 && (h.match(/\[/g) || []).length < 200)
     h = h.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(m, text, href){
@@ -54,10 +53,21 @@ export function inline(s){
   return linkifyBare(h);
 }
 
-// Turn bare http(s) URLs into links, leaving existing <a>/<code>/<u> spans untouched.
+function imageSizeAttrs(href){
+  const wm = href.match(/(?:[?&]|&amp;)w=(\d{1,5})/);
+  const hm = href.match(/(?:[?&]|&amp;)h=(\d{1,5})/);
+  if(!wm || !hm) return "";
+  const w = parseInt(wm[1], 10), h = parseInt(hm[1], 10);
+  if(w <= 0 || h <= 0) return "";
+  return ' width="'+w+'" height="'+h+'"';
+}
+
+// Turn bare http(s) URLs into links, leaving existing HTML tags and protected spans
+// untouched. This must not linkify URLs inside attributes of HTML we just generated,
+// such as <img src="https://...">.
 // Safe: h is already escaped, so a URL match holds no raw <, >, or "; only https?:// matches.
 export function linkifyBare(h){
-  return h.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<code>[\s\S]*?<\/code>|<u>[\s\S]*?<\/u>)|(https?:\/\/[^\s<]+)/g, function(m, span, url){
+  return h.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<code>[\s\S]*?<\/code>|<u>[\s\S]*?<\/u>|<[^>]+>)|(https?:\/\/[^\s<]+)/g, function(m, span, url){
     if(span) return span;
     var u = url, tail = "";
     var p = u.match(/[.,;:!?]+$/);

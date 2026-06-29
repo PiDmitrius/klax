@@ -66,15 +66,16 @@ type uiSessionInfo struct {
 // uiEvent is one server-sent event. The client multiplexes all tabs over a
 // single stream and routes by Session (a session's Created).
 type uiEvent struct {
-	Type      string          `json:"type"` // sessions|turn_start|progress|final|error|notice|compact|user
-	Seq       uint64          `json:"seq,omitempty"`      // monotonic id for client dedupe + unread; set by emitLocked
-	Nonce     string          `json:"nonce,omitempty"`    // user-event: the sender's send nonce, so it skips its own echo
+	Type      string          `json:"type"`            // sessions|turn_start|progress|final|error|notice|compact|user
+	Seq       uint64          `json:"seq,omitempty"`   // monotonic id for client dedupe + unread; set by emitLocked
+	Nonce     string          `json:"nonce,omitempty"` // user-event: the sender's send nonce, so it skips its own echo
 	Session   int64           `json:"session,omitempty"`
 	TurnSeq   int64           `json:"turn_seq,omitempty"` // per-turn id: routes turn-scoped events to a turn's slot
 	State     string          `json:"state,omitempty"`    // turn state this event sets: enq|run|done|err (read-model)
 	Block     *uiBlock        `json:"block,omitempty"`    // progress/final/error: the answer block (with its stable id)
-	Kind      string          `json:"kind,omitempty"` // progress: tool|narration
+	Kind      string          `json:"kind,omitempty"`     // progress: tool|narration
 	Text      string          `json:"text,omitempty"`
+	Time      string          `json:"time,omitempty"`
 	Markdown  string          `json:"markdown,omitempty"`
 	Sessions  []uiSessionInfo `json:"sessions,omitempty"`
 	Model     string          `json:"model,omitempty"`
@@ -650,24 +651,24 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "a positive session is required", http.StatusBadRequest)
 		return
 	}
-	// A UI send always carries a per-tab nonce; it's what lets the response bind the real
-	// {seq,state} back to the optimistic echo, so a missing one is a malformed request.
+	// A UI send always carries a per-tab nonce for idempotency and traceability, so a
+	// missing one is a malformed request.
 	if nonce == "" {
 		http.Error(w, "a send nonce is required", http.StatusBadRequest)
 		return
 	}
 	// Refuse a send to a tab whose session no longer exists (e.g. closed from
-	// another client): enqueue would drop it with only an SSE notice while we'd
-	// still answer 204, stranding the client's optimistic echo as a ghost. A 404
-	// lets the client roll it back. (Mirrors handleAbort's existence check.)
+	// another client): enqueue would drop it with only an SSE notice while we'd still
+	// answer success. A 404 lets the client restore the composer. (Mirrors handleAbort's
+	// existence check.)
 	if s.d.store.Get(s.d.sessionKey(s.chatID(user)), targetCreated) == nil {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
 	// The accepted user message is echoed to every UI tab from the common accept
 	// point (enqueueToSession), so a Telegram/MAX/VK DM shows up live too — not just
-	// UI sends. The nonce rides along so THIS tab skips its own copy (it already
-	// rendered it optimistically) while other tabs render it.
+	// UI sends. The web client does not render a local echo; the server event is the
+	// first visible copy.
 	if !s.d.handleInbound(Inbound{
 		ChatID:        s.chatID(user),
 		Text:          text,
@@ -677,13 +678,12 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		RawMessage:    true, // the UI has no chat commands — "/"-text is a message
 	}) {
 		// Dropped after our entry checks (drain flipped in the window) — tell the
-		// client so it rolls back the optimistic echo instead of leaving a ghost.
+		// client so it restores the composer instead of silently losing the draft.
 		http.Error(w, "klax перезапускается — попробуйте через минуту", http.StatusServiceUnavailable)
 		return
 	}
-	// Return the durable {seq,state} so the sender binds its optimistic echo immediately;
-	// the broadcast `user` event is the cross-tab/idempotent backstop. Looked up by the
-	// send nonce from the just-written durable queue (a UI send always carries a nonce).
+	// Return the durable {seq,state} for compatibility/diagnostics. The visible UI update
+	// comes from the broadcast `user` event.
 	sk := s.d.sessionKey(s.chatID(user))
 	seq, state := int64(0), "enq"
 	if log, _ := s.d.sessionStore(sk, targetCreated).InboundLog(); len(log) > 0 && nonce != "" {

@@ -195,7 +195,8 @@
   /* Drop highlight while dragging files anywhere over the window */
   #cbar.drag { outline: 2px dashed var(--accent); outline-offset: 3px; }
   /* Inline images the agent produced (served via /api/file capability refs) */
-  .body img.att { max-width: 100%; max-height: 420px; border: 2px solid #006400; border-radius: 8px; margin: 6px 0; display: block; box-sizing: border-box; } /* #006400 = the favicon's stroke (dark green) */
+  .body img.att { width: auto; height: auto; max-width: 100%; max-height: 420px; object-fit: contain;
+                  border: 2px solid #006400; border-radius: 8px; margin: 6px 0; display: block; box-sizing: border-box; } /* #006400 = the favicon's stroke (dark green) */
   .body .att-file { display: inline-block; margin: 4px 0; padding: 2px 8px; background: var(--tool-bg);
                     border: 1px solid var(--border); border-radius: 8px; font-size: 13px; }
   #notice { position: fixed; bottom: 84px; right: 16px; max-width: 40ch;

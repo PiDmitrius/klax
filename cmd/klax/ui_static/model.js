@@ -2,17 +2,17 @@
 // single client-side source of truth. Pure data + idempotent/monotonic patch ops; no
 // DOM, no fetch. The server (transcript ⋈ queue.jsonl) is authoritative: reconcile()
 // replaces a session from a reload, and the live events patch it (upsertUser / setState /
-// appendBlock / bindNonce). This replaces the old runningTurn/doneTurns/queuedTurns/
+// appendBlock). This replaces the old runningTurn/doneTurns/queuedTurns/
 // tmpTurn machine — a turn's state is just `turn.state`.
 
 // Monotonic order: enq → run → done|err. A terminal state (rank 3) never regresses, so a
 // late progress/turn_start after a final can't un-finish a turn.
 const RANK = { enq: 1, run: 2, done: 3, err: 3 };
 
-export function isPending(state){ return state === "enq" || state === "run" || state === "sending"; }
+export function isPending(state){ return state === "enq" || state === "run"; }
 
 function advance(cur, next){
-  if(cur === undefined || cur === "sending") return next || cur; // optimistic placeholder yields to any real state
+  if(cur === undefined) return next || cur;
   if(!next) return cur;
   if((RANK[cur] || 0) >= 3) return cur;                          // terminal wins
   return (RANK[next] || 0) >= (RANK[cur] || 0) ? next : cur;
@@ -37,16 +37,6 @@ export class TurnModel {
   }
 
   _seq(arr, seq){ for(const t of arr){ if(t.role === "user" && t.seq === seq) return t; } }
-  _nonce(arr, nonce){ for(const t of arr){ if(t.role === "user" && t.nonce === nonce) return t; } }
-
-  // optimistic adds a just-sent bubble keyed by nonce (no durable seq yet). It binds to a
-  // real seq via bindNonce when the server acknowledges the send.
-  optimistic(created, nonce, fields){
-    const arr = this.byCreated[created] = this.byCreated[created] || [];
-    const t = { role: "user", nonce, state: "sending", blocks: [], ...fields };
-    arr.push(t);
-    return t;
-  }
 
   // upsertUser inserts or updates a user turn from a `user` event / send response.
   upsertUser(created, fields, state){
@@ -56,7 +46,6 @@ export class TurnModel {
     if(fields.text !== undefined) t.text = fields.text;
     if(fields.time !== undefined) t.time = fields.time;
     if(fields.eventSeq) t.eventSeq = fields.eventSeq;
-    if(fields.nonce) t.nonce = fields.nonce;
     t.state = advance(t.state, state);
     return t;
   }
@@ -78,38 +67,12 @@ export class TurnModel {
     t.blocks.push({ ...block });
   }
 
-  // bindNonce promotes an optimistic (nonce-keyed) turn to its durable seq — the three
-  // cases of REFACTOR_PLAN §B1: an optimistic nonce row exists → promote it; else the seq
-  // row already exists → drop the nonce (no duplicate); else → upsert a fresh user row.
-  bindNonce(created, nonce, seq, state){
-    const arr = this.turns(created);
-    const opt = this._nonce(arr, nonce);
-    const durable = this._seq(arr, seq);
-    if(opt && durable && opt !== durable){
-      // both exist (a reload loaded the durable row while the optimistic one lingered) —
-      // drop the optimistic duplicate, keep the durable row, advance its state.
-      const i = arr.indexOf(opt); if(i >= 0) arr.splice(i, 1);
-      durable.state = advance(durable.state, state);
-      return durable;
-    }
-    if(opt){ opt.seq = seq; delete opt.nonce; opt.state = advance(opt.state, state); return opt; }
-    if(durable) return durable; // seq already present, no optimistic row — drop the nonce, no duplicate
-    return this.upsertUser(created, { seq, nonce }, state);
-  }
-
   // appendStandalone adds a non-turn row (a compact/system notice between turns).
   appendStandalone(created, row){
     const arr = this.byCreated[created] = this.byCreated[created] || [];
     arr.push({ role: row.role || "system", kind: row.kind, text: row.text, eventSeq: row.eventSeq });
   }
 
-  // rollback removes an optimistic turn whose send was refused (no durable seq bound).
-  rollback(created, nonce){
-    const arr = this.byCreated[created];
-    if(!arr) return;
-    const i = arr.findIndex(t => t.nonce === nonce && t.seq === undefined);
-    if(i >= 0) arr.splice(i, 1);
-  }
 }
 
 function normTurn(r){

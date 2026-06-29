@@ -7,20 +7,13 @@
 import { api } from "./base.js";
 
 // applyEvent applies one event to the model; returns the affected session id (to
-// re-render) or null. ctx: { myNonces:Set, onSessions(list), onNotice(text) }.
+// re-render) or null. ctx: { onSessions(list), onNotice(text) }.
 export function applyEvent(model, ev, ctx){
   ctx = ctx || {};
   const s = ev.session;
   switch(ev.type){
     case "user":
-      // The sender already showed this optimistically and bound it on the send response;
-      // its own echo just clears the nonce. Other tabs / messenger DMs upsert the turn.
-      if(ev.nonce && ctx.myNonces && ctx.myNonces.has(ev.nonce)){
-        model.bindNonce(s, ev.nonce, ev.turn_seq, ev.state || "enq");
-        ctx.myNonces.delete(ev.nonce);
-      } else {
-        model.upsertUser(s, { seq: ev.turn_seq, nonce: ev.nonce, text: ev.text, time: ev.time, eventSeq: ev.seq }, ev.state || "enq");
-      }
+      model.upsertUser(s, { seq: ev.turn_seq, text: ev.text, time: ev.time, eventSeq: ev.seq }, ev.state || "enq");
       return s;
     case "turn_start":
       model.setState(s, ev.turn_seq, "run");

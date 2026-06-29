@@ -92,7 +92,7 @@ func (d *daemon) enqueueWithAttachments(chatID, msgID, text string, attachments 
 // enqueueToSession returns true if the message was durably accepted (queued, or
 // persisted-for-replay while draining), false if it was dropped (empty text and no
 // files, no such session, or a durable-write failure) — the web UI's handleSend
-// uses this to answer 204 vs roll back its optimistic echo.
+// uses this to answer success vs restore the composer.
 func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []attachment, targetCreated int64, nonce string) bool {
 	if text == "" && len(attachments) == 0 {
 		d.sendMessage(chatID, msgID, "∅")
@@ -136,17 +136,25 @@ func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []atta
 		return false
 	}
 
-	echoText := text
-	if echoText == "" && len(attachments) > 0 {
-		names := make([]string, 0, len(attachments))
-		for _, a := range attachments {
-			names = append(names, sanitizeAttachmentFilename(a.filename))
-		}
-		echoText = "📎 " + strings.Join(names, ", ")
-	}
 	emitEcho := func() {
-		if echoText != "" {
-			d.uiEmit(uiUserForKey(sk), uiEvent{Type: "user", Session: sess.Created, TurnSeq: turnSeq, State: "enq", Text: echoText, Nonce: nonce})
+		if d.uiHub != nil {
+			echoText := text
+			if d.sealer != nil {
+				echoText = d.inboundText(sr.store, sessfiles.Turn{Text: text, Files: files}, sk, sess.Created)
+			}
+			if echoText == "" && len(files) > 0 {
+				names := make([]string, 0, len(files))
+				for _, name := range files {
+					names = append(names, sessfiles.DisplayName(name))
+				}
+				echoText = "📎 " + strings.Join(names, ", ")
+			}
+			if echoText != "" {
+				d.uiEmit(uiUserForKey(sk), uiEvent{
+					Type: "user", Session: sess.Created, TurnSeq: turnSeq, State: "enq",
+					Text: echoText, Nonce: nonce, Time: time.Now().Format(time.RFC3339),
+				})
+			}
 		}
 		d.broadcastSessions(sk)
 	}
@@ -333,6 +341,9 @@ func (d *daemon) abortSession(sk string, created int64, closing bool) bool {
 		for _, qm := range queued {
 			if err := sr.store.MarkErr(qm.turnSeq, "aborted"); err != nil && !errors.Is(err, sessfiles.ErrRemoved) {
 				log.Printf("durable MarkErr aborted (%s/%d): %v", sk, created, err)
+			} else if err == nil {
+				b := errBlock(qm.turnSeq, "aborted")
+				d.uiEmit(uiUserForKey(sk), uiEvent{Type: "error", Session: created, TurnSeq: qm.turnSeq, State: "err", Block: &b, Text: b.Text})
 			}
 		}
 	}
@@ -341,6 +352,7 @@ func (d *daemon) abortSession(sk string, created int64, closing bool) bool {
 		cancelFn()
 	}
 	d.abortQueuedMessages(queued)
+	d.broadcastSessions(sk)
 	return hasWork
 }
 

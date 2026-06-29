@@ -73,8 +73,8 @@ func TestUIHubCollectGapOnOverflow(t *testing.T) {
 	}
 }
 
-// The user-echo event carries the sender's nonce (so the sending tab skips its
-// own optimistic echo) and round-trips through the ring intact.
+// The user-echo event carries the sender's nonce for server-side idempotency/debugging
+// and round-trips through the ring intact.
 func TestUIUserEventCarriesNonce(t *testing.T) {
 	h := newUIHub()
 	h.broadcast("claw", uiEvent{Type: "user", Session: 5, Text: "hi", Nonce: "n1"})
