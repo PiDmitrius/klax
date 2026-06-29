@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -31,11 +32,33 @@ func toolCall(name, input string) ToolCall {
 
 // Item is one entry in a rendered transcript.
 type Item struct {
-	Role  string     `json:"role"`           // "user" | "assistant" | "system"
-	Text  string     `json:"text,omitempty"` // message text (Markdown)
-	Tools []ToolCall `json:"tools,omitempty"`
-	Kind  string     `json:"kind,omitempty"` // "" | "compact" | "error"
-	Time  string     `json:"time,omitempty"` // RFC3339, empty when unknown
+	Role   string     `json:"role"`             // "user" | "assistant" | "system"
+	Text   string     `json:"text,omitempty"`   // message text (Markdown)
+	Marker string     `json:"marker,omitempty"` // user turns: the klax-turn correlation token
+	Tools  []ToolCall `json:"tools,omitempty"`
+	Kind   string     `json:"kind,omitempty"` // "" | "compact" | "error"
+	Time   string     `json:"time,omitempty"` // RFC3339, empty when unknown
+	Seq    int64      `json:"seq,omitempty"`  // durable turn_seq, set on pending turns surfaced from the queue
+	// Pending drives the client's per-turn dots on reload: "" normal/done | "enq" still
+	// queued | "run" started-but-not-yet-flushed-to-transcript. Lets a full reload show a
+	// queued message exactly as it was instead of dropping it until it runs.
+	Pending string `json:"pending,omitempty"`
+}
+
+// turnMarkerRe matches ONLY klax's injected marker shape: the exact 16-hex token
+// newMarker produces, at the end of the message (where buildTurnPrompt appends it),
+// so a user message that merely contains a klax-turn-looking comment is left intact.
+var turnMarkerRe = regexp.MustCompile(`\s*<!--\s*klax-turn:([0-9a-fA-F]{16})\s*-->\s*$`)
+
+// StripTurnMarker removes the per-turn correlation marker that buildTurnPrompt
+// injects into the prompt (so it never shows in rendered user text) and returns the
+// cleaned, trimmed text plus the marker token (empty if absent). The token is the
+// key that correlates a transcript user turn to its durable-queue turn.
+func StripTurnMarker(text string) (clean, marker string) {
+	if m := turnMarkerRe.FindStringSubmatch(text); m != nil {
+		marker = m[1]
+	}
+	return strings.TrimSpace(turnMarkerRe.ReplaceAllString(text, "")), marker
 }
 
 // Load locates and reads the transcript for a session. A missing file or empty
@@ -107,8 +130,8 @@ func readClaude(path string) ([]Item, error) {
 		}
 		switch line.Type {
 		case "user":
-			if text := claudeUserText(line.Raw); text != "" {
-				items = append(items, Item{Role: "user", Text: text, Time: ts})
+			if text, marker := claudeUserText(line.Raw); text != "" {
+				items = append(items, Item{Role: "user", Text: text, Marker: marker, Time: ts})
 			}
 		case "assistant":
 			text, tools := claudeAssistant(line.Raw)
@@ -124,18 +147,18 @@ func readClaude(path string) ([]Item, error) {
 // a plain string (a typed message) or an array of blocks; a user line whose
 // array holds only tool_result blocks (tool output fed back to the model) has no
 // user text and is skipped.
-func claudeUserText(raw json.RawMessage) string {
+func claudeUserText(raw json.RawMessage) (clean, marker string) {
 	var w struct {
 		Message struct {
 			Content json.RawMessage `json:"content"`
 		} `json:"message"`
 	}
 	if json.Unmarshal(raw, &w) != nil {
-		return ""
+		return "", ""
 	}
 	var s string
 	if json.Unmarshal(w.Message.Content, &s) == nil {
-		return strings.TrimSpace(s)
+		return StripTurnMarker(s)
 	}
 	var blocks []struct {
 		Type string `json:"type"`
@@ -148,7 +171,7 @@ func claudeUserText(raw json.RawMessage) string {
 			sb.WriteString(b.Text)
 		}
 	}
-	return strings.TrimSpace(sb.String())
+	return StripTurnMarker(sb.String())
 }
 
 func claudeAssistant(raw json.RawMessage) (string, []ToolCall) {
@@ -228,8 +251,8 @@ func readCodex(path string) ([]Item, error) {
 		ts := normalizeTime(entry.Timestamp)
 		switch {
 		case entry.Type == "event_msg" && p.Type == "user_message":
-			if t := strings.TrimSpace(p.Message); t != "" {
-				items = append(items, Item{Role: "user", Text: t, Time: ts})
+			if t, marker := StripTurnMarker(p.Message); t != "" {
+				items = append(items, Item{Role: "user", Text: t, Marker: marker, Time: ts})
 			}
 		case entry.Type == "event_msg" && p.Type == "agent_message":
 			if t := strings.TrimSpace(p.Message); t != "" {

@@ -1,0 +1,253 @@
+// app.js — bootstrap + wiring. Owns the model, the active-session render flow, and the
+// poll host (cursor/lastSeq/onReload/onAffected); ties compose + tabs together. The whole
+// old state machine (runningTurn/doneTurns/queuedTurns/tmpTurn/renderedPending/readMark/
+// insertAnswer/breakMerge) is gone — a turn's truth is model turn.state.
+
+import { TurnModel } from "./model.js";
+import { renderSession } from "./render.js";
+import { pollLoop } from "./events.js";
+import { api, getToken, setToken } from "./base.js";
+import { selectionInLog, toBottom } from "./scroll.js";
+import { initCompose } from "./compose.js";
+import { initTabs, reconcileSessions, renderTabs } from "./tabs.js";
+import { injectEmojiFont } from "./emoji.js";
+
+const model = new TurnModel();
+const loaded = {};        // created -> transcript loaded?
+const lastRead = {};      // created -> last-read event seq (unread baseline)
+const myNonces = new Map();
+let active = 0;
+let cursor = null, lastSeq = 0;
+let stick = true, pendingRender = false, jumpUnread = false;
+let sessionList = []; // last /api/sessions list — for hash-change validity + lookups
+const offsetFor = {}, moreFor = {}; // created -> first-loaded turn index + has-older-history flag (pagination)
+
+function logcol(){ return document.getElementById("logcol"); }
+function getActive(){ return active; }
+function seqOf(c){ const i = String(c || "").indexOf("-"); return i >= 0 ? (parseInt(String(c).slice(i + 1), 10) || 0) : 0; }
+
+function applyTheme(t){
+  document.documentElement.dataset.theme = t;
+  try { localStorage.setItem("klax_theme2", t); } catch(e){}
+  const b = document.getElementById("theme"); if(b) b.textContent = t === "dark" ? "☀️" : "🌙";
+}
+
+function rerender(created){
+  if(created !== active) return;
+  const col = logcol();
+  if(!col) return;
+  if(selectionInLog(col)){ pendingRender = true; return; } // don't collapse a live selection
+  renderSession(col, model.turns(active), lastRead[active], abortActive);
+  if(moreFor[active]){ // older history exists → a "load earlier" button at the top
+    const m = document.createElement("button");
+    m.id = "more"; m.textContent = "↑ Загрузить раньше";
+    m.addEventListener("click", () => loadOlder(active));
+    col.insertBefore(m, col.firstChild);
+  }
+  if(jumpUnread){
+    const dv = col.querySelector(".readline");
+    if(dv){ dv.scrollIntoView({ block: "start" }); stick = false; }
+    jumpUnread = false;
+  } else if(stick){ const sc = document.getElementById("log"); if(sc) toBottom(sc); } // #log is the scroller
+  toggleToBottom();
+}
+
+function abortActive(){
+  if(active) api("/api/abort", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: active }) }).catch(()=>{});
+}
+
+async function loadTranscript(created){
+  try {
+    const r = await api("/api/transcript?session=" + created);
+    if(!r.ok) return;
+    const data = await r.json();
+    model.reconcile(created, data.turns || []);
+    loaded[created] = true;
+    offsetFor[created] = data.offset || 0;
+    moreFor[created] = !!data.more;
+    // The poll cursor is GLOBAL (one stream for all the user's sessions). Only the FIRST
+    // load (cursor still null) establishes the baseline from the watermark (§A3); a later
+    // lazy tab-load must NOT move the global cursor, or it would skip events for other
+    // already-loaded sessions. Re-applied events for this session dedup by seq + block id.
+    if(cursor === null && data.watermark){ cursor = data.watermark; lastSeq = seqOf(data.watermark); }
+    delete lastRead[created]; // a freshly (re)loaded tab is read — no divider until you leave it
+    rerender(created);
+  } catch(e){}
+}
+
+// loadOlder pages in the previous turn-page and PREPENDS it, keeping the viewport stable
+// (the scroll position is nudged by the height the prepended content added).
+async function loadOlder(created){
+  if(!offsetFor[created]) return; // nothing older
+  const log = document.getElementById("log");
+  const oldH = log ? log.scrollHeight : 0;
+  try {
+    const r = await api("/api/transcript?session=" + created + "&before=" + offsetFor[created]);
+    if(!r.ok) return;
+    const data = await r.json();
+    model.prepend(created, data.turns || []);
+    offsetFor[created] = data.offset || 0;
+    moreFor[created] = !!data.more;
+    const prev = stick; stick = false; // never snap to the bottom after loading old history
+    rerender(created);
+    stick = prev;
+    if(log) log.scrollTop += log.scrollHeight - oldH;
+  } catch(e){}
+}
+
+// unreadCount: blocks/turns in a session's model produced after its leave baseline. 0 for
+// the active tab / a freshly-loaded tab (no baseline).
+function unreadCount(created){
+  const base = lastRead[created];
+  if(base === undefined) return 0;
+  let n = 0;
+  for(const t of model.turns(created)){
+    if(t.eventSeq !== undefined && t.eventSeq > base) n++;
+    for(const b of (t.blocks || [])) if(b.eventSeq !== undefined && b.eventSeq > base) n++;
+  }
+  return n;
+}
+
+async function selectSession(created){
+  if(active && active !== created) lastRead[active] = lastSeq; // mark the tab we leave as read
+  active = created;
+  if(location.hash !== "#" + created) location.hash = String(created);
+  // Returning to an already-loaded tab with unread → jump to the "новые сообщения" divider
+  // instead of the bottom; otherwise stick to the bottom.
+  jumpUnread = loaded[created] && unreadCount(created) > 0;
+  stick = !jumpUnread;
+  renderTabs(active);
+  if(!loaded[created]) await loadTranscript(created);
+  else rerender(created);
+}
+
+// onSessionsList is the SINGLE reconcile path for both /api/sessions and the live
+// `sessions` event: it redraws the strip and, if the active session vanished (closed here
+// or from another client), drops it and selects a replacement so the tab is never stuck
+// on a dead session.
+async function onSessionsList(list){
+  list = list || [];
+  sessionList = list;
+  if(active && !list.some(s => s.created === active)){
+    model.drop(active); delete loaded[active]; delete lastRead[active];
+    active = 0;
+  }
+  reconcileSessions(list, active);
+  if(!active && list.length){
+    const want = parseInt(location.hash.slice(1), 10);
+    const a = list.find(s => s.created === want) || list.find(s => s.active) || list[0];
+    if(a) await selectSession(a.created);
+  }
+}
+
+async function syncSessions(){
+  try {
+    const r = await api("/api/sessions");
+    if(r.ok) await onSessionsList(await r.json());
+  } catch(e){}
+}
+
+function showNotice(text){
+  const n = document.getElementById("notice");
+  if(!n) return;
+  n.textContent = text; n.classList.add("show");
+  clearTimeout(showNotice._t); showNotice._t = setTimeout(() => n.classList.remove("show"), 5000);
+}
+
+// noticeText turns a command-output notice (Telegram HTML) into plain text with line breaks.
+function noticeText(s){ return (s || "").replace(/<br\s*\/?>/gi, "\n").replace(/<[^>]+>/g, "").trim(); }
+
+// onNoticeEvent shows the toast AND keeps the notice visible in the active conversation
+// (a command/status line stays in the log, not just a 5s toast).
+function onNoticeEvent(text){
+  const t = noticeText(text);
+  showNotice(t);
+  if(active){ model.appendStandalone(active, { role: "notice", text: t }); rerender(active); }
+}
+
+// toggleToBottom shows the down-arrow affordance only when the user has scrolled up.
+function toggleToBottom(){ const b = document.getElementById("tobottom"); if(b) b.classList.toggle("hidden", stick); }
+
+// fallbackCopy uses the legacy execCommand path for insecure/plain-HTTP origins where
+// navigator.clipboard is unavailable.
+function fallbackCopy(text, ok){
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select(); document.execCommand("copy"); document.body.removeChild(ta);
+    if(ok) ok();
+  } catch(e){}
+}
+
+// the poll host events.js drives
+const host = {
+  model,
+  ctx: { myNonces, onSessions: list => { onSessionsList(list); }, onNotice: onNoticeEvent },
+  cursor: () => cursor, setCursor: c => { cursor = c; },
+  lastSeq: () => lastSeq, setLastSeq: n => { lastSeq = n; },
+  onAffected: set => { for(const c of set){ if(c === active) rerender(c); } renderTabs(active); },
+  onAuthFail: () => { const a = document.getElementById("app"); if(a) a.classList.remove("active"); const g = document.getElementById("gate"); if(g) g.classList.remove("hidden"); },
+  onRestart: () => showNotice("klax обновился"),
+  onReload: async () => {
+    // Uncoverable cursor: invalidate EVERYTHING and reset the global cursor, then
+    // re-establish from the server (the active load re-commits the watermark since
+    // cursor is null). Inactive loaded sessions are dropped so they reload fresh on
+    // their next selection rather than keeping a model stale past the gap.
+    Object.keys(loaded).forEach(k => { model.drop(Number(k)); delete loaded[k]; });
+    Object.keys(lastRead).forEach(k => delete lastRead[k]);
+    cursor = null; lastSeq = 0;
+    await syncSessions();
+    if(active && !loaded[active]) await loadTranscript(active);
+  },
+};
+
+async function onNewSession(created){ await syncSessions(); await selectSession(created); }
+async function afterClose(created){
+  model.drop(created); delete loaded[created]; delete lastRead[created];
+  if(created === active) active = 0;
+  await syncSessions();
+}
+
+function start(){
+  document.getElementById("gate").classList.add("hidden");
+  const app = document.getElementById("app"); if(app) app.classList.add("active");
+  initCompose({ model, getActive, rerender, myNonces, notice: showNotice, onAfterSend: () => { stick = true; rerender(active); } });
+  initTabs({ select: selectSession, onNew: onNewSession, afterClose, notice: showNotice, unread: unreadCount });
+  // Delegated copy button for code fences (markdown emits <button class="copy">).
+  const lw = document.getElementById("log");
+  if(lw) lw.addEventListener("click", e => {
+    const btn = e.target.closest && e.target.closest(".copy");
+    if(!btn) return;
+    const code = btn.closest("pre") && btn.closest("pre").querySelector("code");
+    if(!code) return;
+    const text = code.textContent || "";
+    const done = () => { btn.classList.add("done"); btn.textContent = "✓"; setTimeout(() => { btn.classList.remove("done"); btn.textContent = "⧉"; }, 1200); };
+    if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+    else fallbackCopy(text, done);
+  });
+  document.addEventListener("selectionchange", () => { if(pendingRender && !selectionInLog(logcol())){ pendingRender = false; rerender(active); } });
+  const log = document.getElementById("log");
+  if(log) log.addEventListener("scroll", () => { stick = (log.scrollHeight - log.scrollTop - log.clientHeight < 80); toggleToBottom(); });
+  const th = document.getElementById("theme");
+  if(th) th.addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
+  const tb = document.getElementById("tobottom");
+  if(tb) tb.addEventListener("click", () => { stick = true; const l = document.getElementById("log"); if(l) toBottom(l); toggleToBottom(); });
+  window.addEventListener("hashchange", () => { const w = parseInt(location.hash.slice(1), 10); if(w && w !== active && sessionList.some(s => s.created === w)) selectSession(w); });
+  // Browser tab hidden → freeze the read baseline so messages arriving while away count as
+  // unread; foregrounded → reconcile sessions (authoritative) and re-render (the divider).
+  document.addEventListener("visibilitychange", () => {
+    if(document.visibilityState === "hidden"){ if(active) lastRead[active] = lastSeq; }
+    else { syncSessions(); if(active) rerender(active); }
+  });
+  syncSessions().then(() => pollLoop(host));
+}
+
+function gateSubmit(){ const el = document.getElementById("token"); const t = el ? el.value.trim() : ""; if(t){ setToken(t); start(); } }
+
+applyTheme((() => { try { return localStorage.getItem("klax_theme2"); } catch(e){ return null; } })() || "light");
+injectEmojiFont();
+if(getToken()) start();
+else {
+  const btn = document.getElementById("tokenbtn"); if(btn) btn.addEventListener("click", gateSubmit);
+  const tk = document.getElementById("token"); if(tk) tk.addEventListener("keydown", e => { if(e.key === "Enter") gateSubmit(); });
+}

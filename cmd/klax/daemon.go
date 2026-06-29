@@ -21,6 +21,8 @@ import (
 	"github.com/PiDmitrius/klax/internal/config"
 	"github.com/PiDmitrius/klax/internal/max"
 	"github.com/PiDmitrius/klax/internal/runner"
+	"github.com/PiDmitrius/klax/internal/sealref"
+	"github.com/PiDmitrius/klax/internal/sessfiles"
 	"github.com/PiDmitrius/klax/internal/session"
 	"github.com/PiDmitrius/klax/internal/tg"
 	"github.com/PiDmitrius/klax/internal/transport"
@@ -30,7 +32,11 @@ import (
 // sessionRunner holds a per-session runner and message queue.
 // Different sessions run Claude in parallel; within a session, messages are serialized.
 type sessionRunner struct {
-	runner     *runner.Runner
+	runner *runner.Runner
+	// store is the per-session durable store (files + queue.jsonl). One instance
+	// per (sessionKey, created), owned here so its lock is a true per-session
+	// singleton — distinct from sr.mu and never held across a runner wait.
+	store      *sessfiles.Store
 	mu         sync.Mutex
 	queue      []queuedMsg
 	processing bool
@@ -74,6 +80,7 @@ type daemon struct {
 	groupVerb     map[string]bool   // chatID -> verbose progress output for group mode chats
 	tgRich        atomic.Bool       // global: render Telegram replies as Rich Messages (/rich)
 	uiHub         *uiHub            // web UI event hub; nil when the UI is not configured
+	sealer        *sealref.Sealer   // mints/opens file capability refs; nil when UI is off
 }
 
 func startupBackoff(attempt int) time.Duration {
@@ -159,8 +166,12 @@ func (d *daemon) getRunner(sk string, created int64) *sessionRunner {
 	defer d.runnersMu.Unlock()
 	sr, ok := d.runners[key]
 	if !ok {
-		sr = &sessionRunner{runner: runner.New()}
+		sr = &sessionRunner{runner: runner.New(), store: sessfiles.Open(sk, created)}
 		d.runners[key] = sr
+	} else if sr.store == nil {
+		// A runner injected without a store (only happens in tests that pre-populate
+		// d.runners directly) gets one lazily, so the durable-queue path never nils.
+		sr.store = sessfiles.Open(sk, created)
 	}
 	return sr
 }
@@ -180,6 +191,25 @@ func (d *daemon) dropRunner(sk string, created int64) {
 	d.runnersMu.Lock()
 	delete(d.runners, runnerKey{sk: sk, created: created})
 	d.runnersMu.Unlock()
+}
+
+// removeSessionStore deletes a session's durable files + queue log. It removes via
+// the runner-owned store when one exists, so the "removed" latch lands on the SAME
+// *Store instance an in-flight run holds — a fresh Open() would latch a different
+// object and the run's late Mark* could recreate (resurrect) the directory. Call it
+// BEFORE dropRunner, while the runner still exists.
+// sessionStore returns the durable store for a session, preferring the runner-owned
+// instance when one exists so the removed-latch is shared with any in-flight run — a
+// fresh Open has its own latch and could resurrect a just-deleted dir (the F3 class).
+func (d *daemon) sessionStore(sk string, created int64) *sessfiles.Store {
+	if sr := d.lookupRunner(sk, created); sr != nil && sr.store != nil {
+		return sr.store
+	}
+	return sessfiles.Open(sk, created)
+}
+
+func (d *daemon) removeSessionStore(sk string, created int64) {
+	_ = d.sessionStore(sk, created).Remove()
 }
 
 // isSessionBusy reports whether the session has work in flight or queued.
@@ -289,7 +319,12 @@ type queuedMsg struct {
 	text        string
 	progressID  string // ID of "В очереди" message to reuse as progress
 	progressSeq uint64 // chat activity right after the queue message was created
-	attachments []attachment
+	// Durable-queue references (the bytes live in the session's durable store, not
+	// here): turnSeq is the queue/turn id, files are stored names under files/, and
+	// marker is the opaque token injected into the prompt for transcript correlation.
+	turnSeq int64
+	files   []string
+	marker  string
 	// sessKey + sessCreated identify the session this message is bound to.
 	// Captured at enqueue time so subsequent /switch or /new cannot redirect
 	// it to a different session.
@@ -522,6 +557,9 @@ func runDaemon() {
 		}
 		if len(uiTokens) > 0 {
 			d.uiHub = newUIHub()
+			if d.sealer, err = sealref.New(); err != nil {
+				log.Fatalf("ui: sealer init: %v", err)
+			}
 			d.transports["ui"] = &uiTransport{d: d}
 			d.formats["ui"] = ""
 			d.sources["ui"] = &uiServer{d: d, addr: cfg.UIListen, tokens: uiTokens}
@@ -557,6 +595,10 @@ func runDaemon() {
 
 	// Watch for restart marker (runs after startup marker is cleared).
 	go d.watchMarker()
+
+	// Re-enqueue durably-accepted messages left by a previous run (a crash or an
+	// accept-during-drain restart) before any transport starts taking new traffic.
+	d.replayDurableQueues()
 
 	// Start polling loops for enabled transports.
 	if tgBot != nil && !disabled["tg"] {

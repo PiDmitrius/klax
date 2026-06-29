@@ -67,9 +67,12 @@ type uiSessionInfo struct {
 // single stream and routes by Session (a session's Created).
 type uiEvent struct {
 	Type      string          `json:"type"` // sessions|turn_start|progress|final|error|notice|compact|user
-	Seq       uint64          `json:"seq,omitempty"`   // monotonic id for client dedupe; set by emitLocked
-	Nonce     string          `json:"nonce,omitempty"` // user-event: the sender's send nonce, so it skips its own echo
+	Seq       uint64          `json:"seq,omitempty"`      // monotonic id for client dedupe + unread; set by emitLocked
+	Nonce     string          `json:"nonce,omitempty"`    // user-event: the sender's send nonce, so it skips its own echo
 	Session   int64           `json:"session,omitempty"`
+	TurnSeq   int64           `json:"turn_seq,omitempty"` // per-turn id: routes turn-scoped events to a turn's slot
+	State     string          `json:"state,omitempty"`    // turn state this event sets: enq|run|done|err (read-model)
+	Block     *uiBlock        `json:"block,omitempty"`    // progress/final/error: the answer block (with its stable id)
 	Kind      string          `json:"kind,omitempty"` // progress: tool|narration
 	Text      string          `json:"text,omitempty"`
 	Markdown  string          `json:"markdown,omitempty"`
@@ -326,6 +329,7 @@ func (d *daemon) closeSession(sk string, created int64) error {
 	}
 	d.abortSession(sk, created, true)
 	d.store.Delete(sk, idx)
+	d.removeSessionStore(sk, created) // latch + delete the runner-owned store before dropping it
 	d.dropRunner(sk, created)
 	if wasActive {
 		d.store.Switch(sk, 0) // promote the first remaining session
@@ -465,6 +469,7 @@ func (s *uiServer) routes() http.Handler {
 	mux.HandleFunc("/api/sessions", s.handleSessions)
 	mux.HandleFunc("/api/settings", s.handleSettings)
 	mux.HandleFunc("/api/transcript", s.handleTranscript)
+	mux.HandleFunc("/api/file", s.handleFile)
 	mux.HandleFunc("/emoji/", s.handleEmoji)
 	mux.HandleFunc("/", s.handleSPA)
 	return mux
@@ -589,14 +594,9 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// While draining for a restart the daemon refuses new turns (enqueue drops them
-	// with only an SSE notice). Tell the client explicitly so it rolls back the
-	// optimistic echo instead of leaving a ghost message that never reaches a turn
-	// and lingers in localStorage until the reconcile TTL.
-	if s.d.isDraining() {
-		http.Error(w, "klax перезапускается — попробуйте через минуту", http.StatusServiceUnavailable)
-		return
-	}
+	// Accept-during-drain: do NOT refuse here. enqueueToSession durably persists the
+	// message and lets startup replay run it after the restart — the single
+	// acceptance decision lives there, so a UI send during drain is not lost.
 	// Cap the whole request body (attachments included) so a buggy or hostile
 	// client cannot exhaust memory/disk while parsing.
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<20)
@@ -646,6 +646,12 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "a positive session is required", http.StatusBadRequest)
 		return
 	}
+	// A UI send always carries a per-tab nonce; it's what lets the response bind the real
+	// {seq,state} back to the optimistic echo, so a missing one is a malformed request.
+	if nonce == "" {
+		http.Error(w, "a send nonce is required", http.StatusBadRequest)
+		return
+	}
 	// Refuse a send to a tab whose session no longer exists (e.g. closed from
 	// another client): enqueue would drop it with only an SSE notice while we'd
 	// still answer 204, stranding the client's optimistic echo as a ghost. A 404
@@ -671,7 +677,31 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "klax перезапускается — попробуйте через минуту", http.StatusServiceUnavailable)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	// Return the durable {seq,state} so the sender binds its optimistic echo immediately;
+	// the broadcast `user` event is the cross-tab/idempotent backstop. Looked up by the
+	// send nonce from the just-written durable queue (a UI send always carries a nonce).
+	sk := s.d.sessionKey(s.chatID(user))
+	seq, state := int64(0), "enq"
+	if log, _ := s.d.sessionStore(sk, targetCreated).InboundLog(); len(log) > 0 && nonce != "" {
+		busy, newest := s.d.isSessionBusy(sk, targetCreated), newestRunSeq(log)
+		for _, t := range log {
+			if t.Nonce == nonce {
+				seq, state = t.Seq, resolveTurnState(t.Last, busy, t.Seq == newest)
+			}
+		}
+	}
+	if seq == 0 {
+		// nonce is required above, so an accepted send is always in the durable log — a 0
+		// here means the log read failed; surface it rather than hand back a binding the
+		// client can't use (the broadcast `user` event still re-shows the message).
+		http.Error(w, "could not resolve accepted send", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(struct {
+		Seq   int64  `json:"seq"`
+		State string `json:"state"`
+	}{Seq: seq, State: state})
 }
 
 func (s *uiServer) handleAbort(w http.ResponseWriter, r *http.Request) {
@@ -820,12 +850,21 @@ func (s *uiServer) handleTranscript(w http.ResponseWriter, r *http.Request) {
 	if backend == "" {
 		backend = "claude"
 	}
+	// Watermark = hub head BEFORE reading the transcript: every event with seq ≤ watermark
+	// has flushed its content into the transcript (klax flushes before it emits), so the
+	// client resumes its poll cursor here and applies only seq > watermark; any reload-
+	// read/poll overlap is deduped by Block.id (REFACTOR_PLAN §A3).
+	watermark := s.cursorString(s.d.uiHub.head())
+
 	items, err := history.Load(backend, sess.ID, sess.CWD)
 	if err != nil {
 		log.Printf("ui: transcript load: %v", err)
 		items = nil
 	}
-	end := len(items)
+	// Pagination is BY TURN (top-level units), not flat items — a turn with hundreds of
+	// tool blocks is one page unit, so its user message never scrolls off a page top.
+	grouped := groupTurns(items)
+	end := len(grouped)
 	if before > 0 && int(before) < end {
 		end = int(before)
 	}
@@ -833,16 +872,16 @@ func (s *uiServer) handleTranscript(w http.ResponseWriter, r *http.Request) {
 	if start < 0 {
 		start = 0
 	}
-	turns := items[start:end]
-	if turns == nil {
-		turns = []history.Item{}
-	}
+	queueTurns, _ := s.d.sessionStore(sk, created).InboundLog()
+	turns := s.d.buildReadModel(sk, created, grouped[start:end], queueTurns, s.d.isSessionBusy(sk, created), start, before == 0)
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
-		Turns  []history.Item `json:"turns"`
-		More   bool           `json:"more"`
-		Offset int            `json:"offset"`
-	}{Turns: turns, More: start > 0, Offset: start})
+		Turns     []uiTurn `json:"turns"`
+		More      bool     `json:"more"`
+		Offset    int      `json:"offset"`
+		Watermark string   `json:"watermark"`
+	}{Turns: turns, More: start > 0, Offset: start, Watermark: watermark})
 }
 
 // handleEmoji serves a bundled color-emoji web-font subset (woff2). No auth —
@@ -864,8 +903,14 @@ func (s *uiServer) handleEmoji(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
-// handleSPA serves the single-page app. The real embedded UI replaces this stub.
+// handleSPA serves the single-page app shell at "/" and the SPA's ES modules / stylesheet
+// at "/<name>.js" / "/<name>.css". /api/* and /emoji/ are more-specific routes and never
+// reach here. Any other path 404s (no SPA-deep-link routing — the UI is one page).
 func (s *uiServer) handleSPA(w http.ResponseWriter, r *http.Request) {
+	if p := r.URL.Path; strings.HasSuffix(p, ".js") || strings.HasSuffix(p, ".css") {
+		s.serveModule(w, r, p)
+		return
+	}
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
@@ -874,4 +919,28 @@ func (s *uiServer) handleSPA(w http.ResponseWriter, r *http.Request) {
 	page := bytes.ReplaceAll(spaHTML, []byte("__KLAX_UI_TITLE__"), []byte(html.EscapeString(s.d.cfg.GetUITitle())))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(page)
+}
+
+// serveModule serves one SPA ES module / stylesheet from the embedded ui_static dir. The
+// name is constrained to a single path component (no traversal); like the shell and emoji
+// font it needs no auth (the token gate is client-side). no-cache so a deploy's new
+// modules are always picked up on the next reload.
+func (s *uiServer) serveModule(w http.ResponseWriter, r *http.Request, p string) {
+	name := strings.TrimPrefix(p, "/")
+	if name == "" || strings.Contains(name, "/") {
+		http.NotFound(w, r)
+		return
+	}
+	data, err := moduleFS.ReadFile("ui_static/" + name)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	ct := "text/javascript; charset=utf-8"
+	if strings.HasSuffix(name, ".css") {
+		ct = "text/css; charset=utf-8"
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(data)
 }

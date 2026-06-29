@@ -370,6 +370,7 @@ func (d *daemon) handleSessionDelete(chatID, msgID, sk, n string) {
 		return
 	}
 	d.store.Delete(sk, pos)
+	d.removeSessionStore(sk, target.Created) // before dropRunner: latch the runner-owned store
 	d.dropRunner(sk, target.Created)
 	d.saveStore()
 	d.sendMessage(chatID, msgID, d.cleanupText(sk))
@@ -418,6 +419,7 @@ func (d *daemon) deleteInactiveSessions(sk string) (deleted, aborted int) {
 			aborted++
 		}
 		if d.store.Delete(sk, i) {
+			d.removeSessionStore(sk, s.Created) // before dropRunner: latch the runner-owned store
 			d.dropRunner(sk, s.Created)
 			deleted++
 		}

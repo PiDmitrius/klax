@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/runner"
+	"github.com/PiDmitrius/klax/internal/sessfiles"
 	"github.com/PiDmitrius/klax/internal/session"
 )
 
@@ -87,19 +89,16 @@ func (d *daemon) enqueueWithAttachments(chatID, msgID, text string, attachments 
 // while a positive value binds to exactly that session (a web-UI tab), validated
 // up front so a stale tab gets a clear error instead of silently hitting the
 // active session.
-// enqueueToSession returns true if the message was bound to a session and queued,
-// false if it was dropped (empty, draining, or no such session) — the web UI's
-// handleSend uses this to answer 204 vs roll back its optimistic echo, closing a
-// drain-flip window where a dropped send would otherwise look accepted.
+// enqueueToSession returns true if the message was durably accepted (queued, or
+// persisted-for-replay while draining), false if it was dropped (empty text and no
+// files, no such session, or a durable-write failure) — the web UI's handleSend
+// uses this to answer 204 vs roll back its optimistic echo.
 func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []attachment, targetCreated int64, nonce string) bool {
 	if text == "" && len(attachments) == 0 {
 		d.sendMessage(chatID, msgID, "∅")
 		return false
 	}
-	if d.isDraining() {
-		d.sendMessage(chatID, msgID, "🔄 klax перезапускается, новые задачи не принимаются.")
-		return false
-	}
+	draining := d.isDraining()
 
 	sk := d.sessionKey(chatID)
 	var sess *session.Session
@@ -122,23 +121,50 @@ func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []atta
 	}
 	sr := d.getRunner(sk, sess.Created)
 
-	sr.mu.Lock()
-	qm := queuedMsg{
-		chatID:      chatID,
-		msgID:       msgID,
-		text:        text,
-		attachments: attachments,
-		sessKey:     sk,
-		sessCreated: sess.Created,
+	// Durably accept the message BEFORE acking: write its files and append a fsynced
+	// enq record, holding only the durable-store lock — never sr.mu (the two-lock
+	// rule: no disk I/O under sr.mu). The bytes go to disk; the in-memory queue then
+	// holds only a reference (turnSeq + stored names + marker).
+	readers := make([]sessfiles.NamedReader, 0, len(attachments))
+	for _, a := range attachments {
+		readers = append(readers, sessfiles.NamedReader{Name: a.filename, R: bytes.NewReader(a.data)})
 	}
+	turnSeq, marker, files, err := sr.store.Enqueue(chatID, msgID, nonce, text, readers)
+	if err != nil {
+		log.Printf("durable enqueue (%s/%d): %v", sk, sess.Created, err)
+		d.sendMessage(chatID, msgID, "❌ Не удалось сохранить сообщение, попробуйте снова.")
+		return false
+	}
+
+	echoText := text
+	if echoText == "" && len(attachments) > 0 {
+		names := make([]string, 0, len(attachments))
+		for _, a := range attachments {
+			names = append(names, sanitizeAttachmentFilename(a.filename))
+		}
+		echoText = "📎 " + strings.Join(names, ", ")
+	}
+	emitEcho := func() {
+		if echoText != "" {
+			d.uiEmit(uiUserForKey(sk), uiEvent{Type: "user", Session: sess.Created, TurnSeq: turnSeq, State: "enq", Text: echoText, Nonce: nonce})
+		}
+		d.broadcastSessions(sk)
+	}
+
+	// Accept-during-drain: the message is persisted but NOT started here — startup
+	// replay re-enqueues it after the restart. No runner is launched, so there is no
+	// drainWg Add-after-Wait race. The user still sees it land in the UI.
+	if draining {
+		emitEcho()
+		return true
+	}
+
+	sr.mu.Lock()
+	qm := queuedMsg{chatID: chatID, msgID: msgID, text: text, turnSeq: turnSeq, files: files, marker: marker, sessKey: sk, sessCreated: sess.Created}
 	busy := sr.runner.IsBusy()
-	// The "В очереди" notice is a messenger placeholder later reused as the
-	// progress message and edited in place. The UI streams independently (the
-	// busy dot, typing indicator and unread badge already show the queued/working
-	// state), and uiDelivery never touches this placeholder — so on the UI it
-	// would just linger as a stale notice that never updates. Skip it there.
+	// The "В очереди" notice is a messenger placeholder later reused as the progress
+	// message; the UI streams independently, so skip it there.
 	if busy && transportPrefix(chatID) != uiPrefix {
-		// Send queue notification and capture its ID for later reuse as progress message.
 		qlen := len(sr.queue) + 1 // +1 for this message being added
 		ctx, cancel := withDeliveryTimeout(context.Background())
 		res, err := d.performTransportOp(ctx, transportOp{
@@ -157,24 +183,7 @@ func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []atta
 	sr.queue = append(sr.queue, qm)
 	sr.mu.Unlock()
 
-	// Echo the accepted user message to the UI tabs that share this session — live
-	// cross-channel: a Telegram/MAX/VK DM (or another UI tab's send) appears in the
-	// web UI immediately, not only on reload. The UI sender skips its own copy via
-	// the nonce; messenger sends carry none, so every UI tab renders them.
-	// uiUserForKey gates to the canonical "user:" identity (no leak to a raw chat).
-	echoText := text
-	if echoText == "" && len(attachments) > 0 {
-		names := make([]string, 0, len(attachments))
-		for _, a := range attachments {
-			names = append(names, sanitizeAttachmentFilename(a.filename))
-		}
-		echoText = "📎 " + strings.Join(names, ", ")
-	}
-	if echoText != "" {
-		d.uiEmit(uiUserForKey(sk), uiEvent{Type: "user", Session: sess.Created, Text: echoText, Nonce: nonce})
-	}
-	// Surface the new queue depth (the UI shows how many are waiting).
-	d.broadcastSessions(sk)
+	emitEcho()
 
 	if busy {
 		return true
@@ -182,6 +191,45 @@ func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []atta
 
 	go d.processSessionQueue(sr)
 	return true
+}
+
+// replayDurableQueues runs once at startup, before transports begin polling (so the
+// session store and runner map are accessed single-threaded here). For every
+// session it re-enqueues messages that were durably accepted but never started
+// (enq without run — safe to run) and marks interrupted any run that crashed
+// mid-flight (run without terminal — never auto-rerun, the backend may have had
+// side effects; transcript-based recovery to "done" is a later refinement).
+func (d *daemon) replayDurableQueues() {
+	for sk, cs := range d.store.Chats {
+		for _, sess := range cs.Sessions {
+			sr := d.getRunner(sk, sess.Created)
+			reenq, recovered, err := sr.store.Replay()
+			if err != nil {
+				log.Printf("durable replay (%s/%d): %v", sk, sess.Created, err)
+				d.dropRunner(sk, sess.Created)
+				continue
+			}
+			for _, t := range recovered {
+				_ = sr.store.MarkErr(t.Seq, "interrupted")
+			}
+			if len(reenq) == 0 {
+				d.dropRunner(sk, sess.Created) // no pending work — don't keep the runner
+				continue
+			}
+			sr.mu.Lock()
+			for _, t := range reenq {
+				sr.queue = append(sr.queue, queuedMsg{
+					chatID: t.ChatID, msgID: t.MsgID, text: t.Text,
+					turnSeq: t.Seq, files: t.Files, marker: t.Marker,
+					sessKey: sk, sessCreated: sess.Created,
+				})
+			}
+			n := len(sr.queue)
+			sr.mu.Unlock()
+			log.Printf("durable replay: re-enqueued %d message(s) for %s/%d", n, sk, sess.Created)
+			go d.processSessionQueue(sr)
+		}
+	}
 }
 
 func (d *daemon) processSessionQueue(sr *sessionRunner) {
@@ -279,6 +327,15 @@ func (d *daemon) abortSession(sk string, created int64, closing bool) bool {
 		sr.mu.Unlock()
 	}
 	queued := d.clearSessionQueue(sk, created)
+	// Durably mark the dropped queued turns aborted, so a restart's replay does not
+	// resurrect work the user just aborted (they were enq-without-run on disk).
+	if sr != nil {
+		for _, qm := range queued {
+			if err := sr.store.MarkErr(qm.turnSeq, "aborted"); err != nil && !errors.Is(err, sessfiles.ErrRemoved) {
+				log.Printf("durable MarkErr aborted (%s/%d): %v", sk, created, err)
+			}
+		}
+	}
 	hasWork := active || cancelFn != nil || len(queued) > 0
 	if cancelFn != nil {
 		cancelFn()
@@ -361,11 +418,26 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	del := d.deliveryFor(ctx, msg, verbose)
 	defer del.Close()
 
-	prompt, tmpDir := d.buildTurnPrompt(msg)
+	prompt, tmpDir, err := d.buildTurnPrompt(sr, msg)
 	if tmpDir != "" {
 		defer os.RemoveAll(tmpDir)
 	}
+	if err != nil {
+		log.Printf("buildTurnPrompt (%s/%d): %v", sk, sess.Created, err)
+		if mErr := sr.store.MarkErr(msg.turnSeq, "attachments-missing"); mErr != nil && !errors.Is(mErr, sessfiles.ErrRemoved) {
+			log.Printf("durable MarkErr (%s/%d): %v", sk, sess.Created, mErr)
+		}
+		del.Final(runner.RunResult{Error: errors.New("вложения недоступны, сообщение не обработано")})
+		return
+	}
 
+	// MarkRun is a hard pre-run fence: if the durable append fails we must NOT run
+	// the backend, or a crash would replay the (still enq) turn and duplicate work.
+	if err := sr.store.MarkRun(msg.turnSeq); err != nil {
+		log.Printf("durable MarkRun (%s/%d): %v", sk, sess.Created, err)
+		del.Final(runner.RunResult{Error: errors.New("не удалось зафиксировать запуск, сообщение не обработано")})
+		return
+	}
 	backend := d.backendFor(sess)
 	result := sr.runner.Run(ctx, backend, runner.RunOptions{
 		Prompt:                    prompt,
@@ -378,6 +450,19 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		ClaudeTTY:                 sess.ClaudeTTY,
 		SuppressNarrationProgress: !verbose,
 	}, del.Progress)
+
+	// Record the turn's terminal state in the durable queue so a future replay skips
+	// it. A failed append is logged, not fatal: ErrRemoved means a concurrent close
+	// deleted the session (record is moot); any other error means replay re-classifies.
+	var termErr error
+	if result.Error != nil {
+		termErr = sr.store.MarkErr(msg.turnSeq, result.Error.Error())
+	} else {
+		termErr = sr.store.MarkDone(msg.turnSeq)
+	}
+	if termErr != nil && !errors.Is(termErr, sessfiles.ErrRemoved) {
+		log.Printf("durable terminal mark (%s/%d): %v", sk, sess.Created, termErr)
+	}
 
 	// Persist changes onto the same session record that started the run.
 	d.store.UpdateSession(sk, sess.Created, func(current *session.Session) {
@@ -408,37 +493,37 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	del.Final(result)
 }
 
-// buildTurnPrompt writes the message's attachments to a temp directory and
-// folds their paths into the prompt. It returns the prompt and the temp dir
-// (empty when there are no attachments or the dir could not be created); the
-// caller owns removing a non-empty tmpDir.
-func (d *daemon) buildTurnPrompt(msg queuedMsg) (prompt, tmpDir string) {
+// buildTurnPrompt materializes the message's durable files into a clean per-turn
+// run-view (a /tmp dir holding the ORIGINAL names, never the internal store paths),
+// folds those paths into the prompt, and appends the opaque turn marker so the
+// backend transcript records it for correlation. Returns the prompt and the
+// run-view dir (empty when there are no files); the caller owns removing tmpDir.
+func (d *daemon) buildTurnPrompt(sr *sessionRunner, msg queuedMsg) (prompt, tmpDir string, err error) {
 	prompt = msg.text
-	if len(msg.attachments) == 0 {
-		return prompt, ""
-	}
-	var err error
-	tmpDir, err = os.MkdirTemp("", "klax-attach-*")
-	if err != nil {
-		log.Printf("failed to create temp dir for attachments: %v", err)
-		return prompt, ""
-	}
-	var filePaths []string
-	for _, att := range msg.attachments {
-		fp := filepath.Join(tmpDir, sanitizeAttachmentFilename(att.filename))
-		if err := os.WriteFile(fp, att.data, 0644); err != nil {
-			log.Printf("failed to write attachment %s: %v", att.filename, err)
-			continue
+	if len(msg.files) > 0 {
+		tmpDir, err = os.MkdirTemp("", "klax-attach-*")
+		if err != nil {
+			return prompt, "", fmt.Errorf("create run-view dir: %w", err)
 		}
-		filePaths = append(filePaths, fp)
-	}
-	if len(filePaths) > 0 {
-		fileList := strings.Join(filePaths, "\n")
+		paths, mErr := sr.store.Materialize(msg.files, tmpDir)
+		if mErr != nil {
+			return prompt, tmpDir, fmt.Errorf("materialize attachments: %w", mErr)
+		}
+		// Never run a turn missing files the user sent (contract §3): a short
+		// materialization is a corrupt-message error, not a silent text-only run.
+		if len(paths) != len(msg.files) {
+			return prompt, tmpDir, fmt.Errorf("materialized %d of %d attachment(s)", len(paths), len(msg.files))
+		}
+		fileList := strings.Join(paths, "\n")
 		if prompt == "" {
 			prompt = fmt.Sprintf("Пользователь отправил файлы. Прочитай и проанализируй их:\n%s", fileList)
 		} else {
 			prompt = fmt.Sprintf("%s\n\nПрикреплённые файлы:\n%s", prompt, fileList)
 		}
 	}
-	return prompt, tmpDir
+	if msg.marker != "" {
+		// Unobtrusive correlation marker the agent ignores; history.Load strips it.
+		prompt = fmt.Sprintf("%s\n\n<!-- klax-turn:%s -->", prompt, msg.marker)
+	}
+	return prompt, tmpDir, nil
 }
