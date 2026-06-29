@@ -18,7 +18,7 @@ const lastRead = {};      // created -> last-read event seq (unread baseline)
 const unreadJump = {};    // created -> one-shot scroll to the unread divider
 let active = 0;
 let cursor = null, lastSeq = 0;
-let stick = true, pendingRender = false;
+let stick = true, pendingRender = false, readOnScroll = true;
 let sessionList = []; // last /api/sessions list — for hash-change validity + lookups
 const offsetFor = {}, moreFor = {}; // created -> first-loaded turn index + has-older-history flag (pagination)
 const watchedImages = new WeakSet();
@@ -32,6 +32,7 @@ function markRead(created){
   if(!created) return;
   delete lastRead[created];
   delete unreadJump[created];
+  readOnScroll = true;
 }
 function freezeRead(created){
   if(created && lastRead[created] === undefined) lastRead[created] = lastSeq;
@@ -80,6 +81,7 @@ function rerender(created){
   if(unreadJump[active] && rawUnreadCount(active) > 0){
     const dv = col.querySelector(".readline");
     if(dv){
+      readOnScroll = false;
       dv.scrollIntoView({ block: "start" });
       stick = false;
       delete unreadJump[active];
@@ -290,9 +292,14 @@ function start(){
   });
   document.addEventListener("selectionchange", () => { if(pendingRender && !selectionInLog(logcol())){ pendingRender = false; rerender(active); } });
   const log = document.getElementById("log");
+  const allowReadOnScroll = () => { readOnScroll = true; };
+  if(log){
+    log.addEventListener("wheel", allowReadOnScroll, { passive: true });
+    log.addEventListener("touchstart", allowReadOnScroll, { passive: true });
+  }
   if(log) log.addEventListener("scroll", () => {
     stick = (log.scrollHeight - log.scrollTop - log.clientHeight < 80);
-    if(stick && active && documentVisible() && lastRead[active] !== undefined){
+    if(readOnScroll && stick && active && documentVisible() && lastRead[active] !== undefined){
       markRead(active);
       renderTabs(active);
       rerender(active);
@@ -304,6 +311,9 @@ function start(){
   const tb = document.getElementById("tobottom");
   if(tb) tb.addEventListener("click", () => { stick = true; markRead(active); renderTabs(active); rerender(active); const l = document.getElementById("log"); if(l) toBottom(l); toggleToBottom(); });
   window.addEventListener("hashchange", () => { const w = parseInt(location.hash.slice(1), 10); if(w && w !== active && sessionList.some(s => s.created === w)) selectSession(w); });
+  document.addEventListener("keydown", e => {
+    if(["ArrowDown","PageDown","End"," "].includes(e.key)) allowReadOnScroll();
+  });
   // Browser tab hidden → freeze the read baseline so messages arriving while away count as
   // unread; foregrounded → reconcile sessions (authoritative) and re-render (the divider).
   document.addEventListener("visibilitychange", () => {
