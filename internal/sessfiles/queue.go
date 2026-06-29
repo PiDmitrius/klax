@@ -62,10 +62,11 @@ func (s *Store) queuePath() string { return filepath.Join(s.dir, "queue.jsonl") 
 
 // Enqueue durably accepts one inbound message: it reserves the next turn_seq,
 // streams the files to disk (each fsynced), then appends a fsynced enq record.
-// Returns the turn_seq, the opaque turn_marker to inject into the prompt, and the
-// stored file names. Holds the durable-store lock across the whole acceptance, so
-// turn_seq allocation, file writes and the enq append are one atomic unit.
-func (s *Store) Enqueue(chatID, msgID, nonce, text string, files []NamedReader) (seq int64, marker string, stored []string, err error) {
+// Returns the turn_seq, the opaque turn_marker to inject into the prompt, the stored
+// file names, and whether this was a duplicate nonce that had already been accepted.
+// Holds the durable-store lock across the whole acceptance, so turn_seq allocation,
+// file writes and the enq append are one atomic unit.
+func (s *Store) Enqueue(chatID, msgID, nonce, text string, files []NamedReader) (seq int64, marker string, stored []string, duplicate bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.removed {
@@ -74,6 +75,17 @@ func (s *Store) Enqueue(chatID, msgID, nonce, text string, files []NamedReader) 
 	}
 	if err = s.ensureLoaded(); err != nil {
 		return
+	}
+	if nonce != "" {
+		var turns []Turn
+		if turns, err = s.turns(); err != nil {
+			return
+		}
+		for _, t := range turns {
+			if t.Nonce == nonce {
+				return t.Seq, t.Marker, append([]string(nil), t.Files...), true, nil
+			}
+		}
 	}
 	s.seq++ // reserve first: a failure below just burns the seq (gaps are fine)
 	seq = s.seq
@@ -92,9 +104,11 @@ func (s *Store) Enqueue(chatID, msgID, nonce, text string, files []NamedReader) 
 }
 
 // MarkRun/MarkDone/MarkErr append progress/terminal records for a turn.
-func (s *Store) MarkRun(seq int64) error           { return s.mark(record{Ev: "run", Seq: seq}) }
-func (s *Store) MarkDone(seq int64) error          { return s.mark(record{Ev: "done", Seq: seq}) }
-func (s *Store) MarkErr(seq int64, reason string) error { return s.mark(record{Ev: "err", Seq: seq, Reason: reason}) }
+func (s *Store) MarkRun(seq int64) error  { return s.mark(record{Ev: "run", Seq: seq}) }
+func (s *Store) MarkDone(seq int64) error { return s.mark(record{Ev: "done", Seq: seq}) }
+func (s *Store) MarkErr(seq int64, reason string) error {
+	return s.mark(record{Ev: "err", Seq: seq, Reason: reason})
+}
 
 func (s *Store) mark(rec record) error {
 	rec.TS = time.Now().UnixNano()

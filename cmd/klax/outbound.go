@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"mime"
 	"net/url"
 	"path/filepath"
@@ -56,12 +57,19 @@ func (d *daemon) rewriteOutboundForUI(sk string, created int64, md string) strin
 		if err != nil {
 			return label
 		}
-		ref, err := d.mintFileRef(sk, created, store.Path(stored), mime.TypeByExtension(filepath.Ext(stored)))
+		storedPath := store.Path(stored)
+		ref, err := d.mintFileRef(sk, created, storedPath, mime.TypeByExtension(filepath.Ext(stored)))
 		if err != nil {
 			return label
 		}
 		n++
-		return bang + "[" + label + "](/api/file?ref=" + url.QueryEscape(ref) + ")"
+		outHref := "/api/file?ref=" + url.QueryEscape(ref)
+		if bang == "!" {
+			if w, h := imageDimensions(storedPath); w > 0 && h > 0 {
+				outHref += fmt.Sprintf("&w=%d&h=%d", w, h)
+			}
+		}
+		return bang + "[" + label + "](" + outHref + ")"
 	})
 }
 

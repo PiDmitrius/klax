@@ -129,7 +129,7 @@ func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []atta
 	for _, a := range attachments {
 		readers = append(readers, sessfiles.NamedReader{Name: a.filename, R: bytes.NewReader(a.data)})
 	}
-	turnSeq, marker, files, err := sr.store.Enqueue(chatID, msgID, nonce, text, readers)
+	turnSeq, marker, files, duplicate, err := sr.store.Enqueue(chatID, msgID, nonce, text, readers)
 	if err != nil {
 		log.Printf("durable enqueue (%s/%d): %v", sk, sess.Created, err)
 		d.sendMessage(chatID, msgID, "❌ Не удалось сохранить сообщение, попробуйте снова.")
@@ -163,6 +163,10 @@ func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []atta
 	// replay re-enqueues it after the restart. No runner is launched, so there is no
 	// drainWg Add-after-Wait race. The user still sees it land in the UI.
 	if draining {
+		emitEcho()
+		return true
+	}
+	if duplicate {
 		emitEcho()
 		return true
 	}
@@ -204,9 +208,9 @@ func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []atta
 // replayDurableQueues runs once at startup, before transports begin polling (so the
 // session store and runner map are accessed single-threaded here). For every
 // session it re-enqueues messages that were durably accepted but never started
-// (enq without run — safe to run) and marks interrupted any run that crashed
-// mid-flight (run without terminal — never auto-rerun, the backend may have had
-// side effects; transcript-based recovery to "done" is a later refinement).
+// (enq without run — safe to run). A run without terminal is never auto-rerun
+// because the backend may already have written a transcript answer; the read model
+// resolves idle run records to done instead of showing a permanent spinner.
 func (d *daemon) replayDurableQueues() {
 	for sk, cs := range d.store.Chats {
 		for _, sess := range cs.Sessions {
@@ -217,8 +221,10 @@ func (d *daemon) replayDurableQueues() {
 				d.dropRunner(sk, sess.Created)
 				continue
 			}
-			for _, t := range recovered {
-				_ = sr.store.MarkErr(t.Seq, "interrupted")
+			if len(recovered) > 0 {
+				for _, t := range recovered {
+					log.Printf("durable replay: recovered run without terminal for %s/%d turn %d", sk, sess.Created, t.Seq)
+				}
 			}
 			if len(reenq) == 0 {
 				d.dropRunner(sk, sess.Created) // no pending work — don't keep the runner

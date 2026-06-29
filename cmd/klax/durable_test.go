@@ -18,7 +18,7 @@ func TestRemoveSessionStoreLatchesRunnerStore(t *testing.T) {
 	d.runners = make(map[runnerKey]*sessionRunner)
 	created := d.store.SessionsFor("tg:1")[0].Created
 	sr := d.getRunner("tg:1", created)
-	seq, _, _, err := sr.store.Enqueue("tg:1", "", "n", "hi", nil)
+	seq, _, _, _, err := sr.store.Enqueue("tg:1", "", "n", "hi", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,5 +86,65 @@ func TestEnqueueToSessionPersistsDurably(t *testing.T) {
 	}
 	if len(reenq) != 1 || len(recovered) != 0 {
 		t.Fatalf("replay: reenq=%d recovered=%d, want 1/0", len(reenq), len(recovered))
+	}
+}
+
+func TestReplayDurableQueuesLeavesRecoveredRunUnchanged(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	d := newTestDeliveryDaemon(&fakeTransport{})
+	d.store = newStoreWithChat("tg:1", "one")
+	d.runners = make(map[runnerKey]*sessionRunner)
+
+	created := d.store.SessionsFor("tg:1")[0].Created
+	sr := d.getRunner("tg:1", created)
+	seq, _, _, _, err := sr.store.Enqueue("tg:1", "", "n", "already ran", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sr.store.MarkRun(seq); err != nil {
+		t.Fatal(err)
+	}
+
+	d.replayDurableQueues()
+
+	log, err := sessfiles.Open("tg:1", created).InboundLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(log) != 1 || log[0].Last != "run" || log[0].Reason != "" {
+		t.Fatalf("recovered run must stay run for transcript/readmodel reconciliation: %+v", log)
+	}
+}
+
+func TestEnqueueToSessionDuplicateNonceDoesNotRequeue(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	tp := &fakeTransport{}
+	d := newTestDeliveryDaemon(tp)
+	d.store = newStoreWithChat("tg:1", "one")
+	d.runners = make(map[runnerKey]*sessionRunner)
+
+	created := d.store.SessionsFor("tg:1")[0].Created
+	sr := d.getRunner("tg:1", created)
+	sr.processing = true
+
+	if ok := d.enqueueToSession("tg:1", "100", "one", nil, created, "nonce-1"); !ok {
+		t.Fatal("first enqueueToSession returned false")
+	}
+	if ok := d.enqueueToSession("tg:1", "101", "retry", nil, created, "nonce-1"); !ok {
+		t.Fatal("duplicate enqueueToSession returned false")
+	}
+
+	sr.mu.Lock()
+	n := len(sr.queue)
+	sr.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("queue len after duplicate nonce = %d, want 1", n)
+	}
+	log, err := sr.store.InboundLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(log) != 1 || log[0].Text != "one" {
+		t.Fatalf("inbound log after duplicate nonce = %+v, want one original turn", log)
 	}
 }

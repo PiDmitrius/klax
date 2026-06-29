@@ -138,6 +138,10 @@ function rawUnreadCount(created){
   if(base === undefined) return 0;
   let n = 0;
   for(const t of model.turns(created)){
+    if(t.role !== "user"){
+      if(t.eventSeq !== undefined && t.eventSeq > base) n++;
+      continue;
+    }
     for(const b of (t.blocks || [])) if(b.eventSeq !== undefined && b.eventSeq > base) n++;
   }
   return n;

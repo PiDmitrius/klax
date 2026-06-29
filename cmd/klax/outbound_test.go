@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,7 +18,11 @@ import (
 func TestRewriteOutboundForUI(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	cwd := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cwd, "chart.png"), []byte("PNG"), 0600); err != nil {
+	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAIAAAB7QOjdAAAAD0lEQVR4nGP8z8DAwMAAAAYIAQHLR3Z1AAAAAElFTkSuQmCC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "chart.png"), png, 0600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -37,6 +42,9 @@ func TestRewriteOutboundForUI(t *testing.T) {
 
 	if !strings.Contains(out, "![c](/api/file?ref=") {
 		t.Fatalf("in-root image must be rewritten to a capability URL: %q", out)
+	}
+	if !strings.Contains(out, "&w=2&h=1)") {
+		t.Fatalf("rewritten local image must carry dimensions: %q", out)
 	}
 	if strings.Contains(out, "passwd") {
 		t.Fatalf("out-of-root link must degrade to its label: %q", out)

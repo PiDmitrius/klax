@@ -43,7 +43,7 @@ export function renderTabs(active){
   for(const s of sessions){
     const rawUnread = deps.unread ? deps.unread(s.created) : 0;
     const isActive = sameSession(s.created, active);
-    const tabUnread = isActive ? 0 : rawUnread;
+    const tabUnread = (isActive && activeReads) ? 0 : rawUnread;
     const titleUnread = (isActive && activeReads) ? 0 : rawUnread;
     totalUnread += titleUnread;
     if(s.busy) busyCount++;

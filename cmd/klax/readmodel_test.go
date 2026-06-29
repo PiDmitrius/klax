@@ -34,7 +34,7 @@ func testRM(d *daemon, created int64, items []history.Item, busy, latest bool) [
 func TestReadModelQueuedSurfaced(t *testing.T) {
 	d, created := newReadModelDaemon(t)
 	sr := d.getRunner("user:claw", created)
-	if _, _, _, err := sr.store.Enqueue("ui:claw", "", "n", "hello", nil); err != nil {
+	if _, _, _, _, err := sr.store.Enqueue("ui:claw", "", "n", "hello", nil); err != nil {
 		t.Fatal(err)
 	}
 	turns := testRM(d, created, nil, false, true)
@@ -54,7 +54,7 @@ func TestReadModelQueuedSurfaced(t *testing.T) {
 func TestReadModelRunningVsStale(t *testing.T) {
 	d, created := newReadModelDaemon(t)
 	sr := d.getRunner("user:claw", created)
-	seq, marker, _, err := sr.store.Enqueue("ui:claw", "", "n", "go", nil)
+	seq, marker, _, _, err := sr.store.Enqueue("ui:claw", "", "n", "go", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestGroupTurns(t *testing.T) {
 func TestReadModelAbortedSurfaced(t *testing.T) {
 	d, created := newReadModelDaemon(t)
 	sr := d.getRunner("user:claw", created)
-	seq, _, _, err := sr.store.Enqueue("ui:claw", "", "n", "doomed", nil)
+	seq, _, _, _, err := sr.store.Enqueue("ui:claw", "", "n", "doomed", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,15 +150,15 @@ func TestReadModelAbortedSurfaced(t *testing.T) {
 func TestReadModelAbortedKeepsTurnOrder(t *testing.T) {
 	d, created := newReadModelDaemon(t)
 	sr := d.getRunner("user:claw", created)
-	seq1, marker1, _, err := sr.store.Enqueue("ui:claw", "", "n1", "first", nil)
+	seq1, marker1, _, _, err := sr.store.Enqueue("ui:claw", "", "n1", "first", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	seq2, _, _, err := sr.store.Enqueue("ui:claw", "", "n2", "aborted", nil)
+	seq2, _, _, _, err := sr.store.Enqueue("ui:claw", "", "n2", "aborted", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	seq3, marker3, _, err := sr.store.Enqueue("ui:claw", "", "n3", "third", nil)
+	seq3, marker3, _, _, err := sr.store.Enqueue("ui:claw", "", "n3", "third", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

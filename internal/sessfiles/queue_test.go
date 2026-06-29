@@ -11,8 +11,8 @@ import (
 func TestAbortedTurnDoesNotReplay(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	s := Open("user:claw", 9)
-	a, _, _, _ := s.Enqueue("tg:1", "", "a", "A", nil)
-	b, _, _, _ := s.Enqueue("tg:1", "", "b", "B", nil)
+	a, _, _, _, _ := s.Enqueue("tg:1", "", "a", "A", nil)
+	b, _, _, _, _ := s.Enqueue("tg:1", "", "b", "B", nil)
 	if err := s.MarkErr(a, "aborted"); err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func TestAbortedTurnDoesNotReplay(t *testing.T) {
 func TestRemovedStoreNotResurrected(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	s := Open("user:claw", 11)
-	seq, _, _, _ := s.Enqueue("tg:1", "", "n", "hi", nil)
+	seq, _, _, _, _ := s.Enqueue("tg:1", "", "n", "hi", nil)
 	if err := s.Remove(); err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestRemovedStoreNotResurrected(t *testing.T) {
 	if err := s.MarkDone(seq); !errors.Is(err, ErrRemoved) {
 		t.Fatalf("MarkDone after Remove = %v, want ErrRemoved", err)
 	}
-	if _, _, _, err := s.Enqueue("tg:1", "", "n2", "again", nil); !errors.Is(err, ErrRemoved) {
+	if _, _, _, _, err := s.Enqueue("tg:1", "", "n2", "again", nil); !errors.Is(err, ErrRemoved) {
 		t.Fatalf("Enqueue after Remove = %v, want ErrRemoved", err)
 	}
 	if _, err := os.Stat(s.dir); !os.IsNotExist(err) {
@@ -58,11 +58,11 @@ func nr(name, data string) NamedReader { return NamedReader{Name: name, R: strin
 func TestEnqueueAllocatesAndSurvivesRestart(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	s := Open("user:claw", 100)
-	seq1, m1, f1, err := s.Enqueue("ui:claw", "", "n1", "hi", []NamedReader{nr("a.png", "AA")})
+	seq1, m1, f1, _, err := s.Enqueue("ui:claw", "", "n1", "hi", []NamedReader{nr("a.png", "AA")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	seq2, m2, _, _ := s.Enqueue("ui:claw", "", "n2", "yo", nil) // text-only turn is fine
+	seq2, m2, _, _, _ := s.Enqueue("ui:claw", "", "n2", "yo", nil) // text-only turn is fine
 	if seq1 != 1 || seq2 != 2 {
 		t.Fatalf("seqs = %d,%d want 1,2", seq1, seq2)
 	}
@@ -84,9 +84,38 @@ func TestEnqueueAllocatesAndSurvivesRestart(t *testing.T) {
 	if log[0].Text != "hi" || log[0].Marker != m1 || len(log[0].Files) != 1 || log[0].ChatID != "ui:claw" {
 		t.Fatalf("turn1 reload mismatch: %+v", log[0])
 	}
-	seq3, _, _, _ := s2.Enqueue("ui:claw", "", "n3", "again", nil)
+	seq3, _, _, _, _ := s2.Enqueue("ui:claw", "", "n3", "again", nil)
 	if seq3 != 3 {
 		t.Fatalf("seq after restart = %d want 3", seq3)
+	}
+}
+
+func TestEnqueueDedupeByNonce(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	s := Open("user:claw", 101)
+	seq1, marker1, files1, dup1, err := s.Enqueue("ui:claw", "", "nonce-1", "first", []NamedReader{nr("a.png", "AA")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seq2, marker2, files2, dup2, err := s.Enqueue("ui:claw", "", "nonce-1", "retry", []NamedReader{nr("b.png", "BB")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dup1 || !dup2 {
+		t.Fatalf("duplicate flags = first %v second %v, want false/true", dup1, dup2)
+	}
+	if seq2 != seq1 || marker2 != marker1 || len(files2) != len(files1) || files2[0] != files1[0] {
+		t.Fatalf("duplicate nonce returned seq/marker/files = %d/%q/%v, want %d/%q/%v", seq2, marker2, files2, seq1, marker1, files1)
+	}
+	log, err := s.InboundLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(log) != 1 || log[0].Text != "first" {
+		t.Fatalf("duplicate nonce must not append a second turn: %+v", log)
+	}
+	if _, err := os.Stat(s.Path("000002-01-b.png")); !os.IsNotExist(err) {
+		t.Fatalf("duplicate nonce must not write retry attachment, stat err=%v", err)
 	}
 }
 
@@ -95,11 +124,11 @@ func TestEnqueueAllocatesAndSurvivesRestart(t *testing.T) {
 func TestReplayClassifies(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	s := Open("user:claw", 7)
-	sA, _, _, _ := s.Enqueue("tg:1", "", "a", "A", nil)
+	sA, _, _, _, _ := s.Enqueue("tg:1", "", "a", "A", nil)
 	s.MarkRun(sA)
 	s.MarkDone(sA)                       // A: complete → skipped
 	s.Enqueue("tg:1", "", "b", "B", nil) // B: enq only → reenqueue
-	sC, _, _, _ := s.Enqueue("tg:1", "", "c", "C", nil)
+	sC, _, _, _, _ := s.Enqueue("tg:1", "", "c", "C", nil)
 	s.MarkRun(sC) // C: run, no terminal → recover
 
 	reenq, recover, err := Open("user:claw", 7).Replay()
