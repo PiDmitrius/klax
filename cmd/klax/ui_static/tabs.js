@@ -57,9 +57,6 @@ export function renderTabs(active){
     const badge = t.querySelector(".badge");
     badge.textContent = tabUnread || "";
     badge.classList.toggle("hidden", !tabUnread);
-    const queued = t.querySelector(".queued");
-    queued.textContent = s.queued ? "⏳" + s.queued : "";
-    queued.classList.toggle("hidden", !s.queued);
     if(t.parentNode !== strip || strip.children[sessions.indexOf(s)] !== t) strip.appendChild(t);
   }
   for(const [key, t] of existing) if(!keep.has(key)) t.remove();
@@ -70,7 +67,7 @@ export function renderTabs(active){
 function createTab(){
   const t = document.createElement("div");
   t.className = "tab";
-  t.innerHTML = '<span class="dot"></span><span class="tname"></span><span class="badge hidden"></span><span class="queued hidden"></span><span class="tx" title="Закрыть">✕</span>';
+  t.innerHTML = '<span class="dot"></span><span class="tname"></span><span class="badge hidden"></span><span class="tx" title="Закрыть">✕</span>';
   t.addEventListener("click", e => {
     if(e.target.classList.contains("tx")) return;
     const created = parseInt(t.dataset.created, 10);

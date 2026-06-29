@@ -102,10 +102,9 @@ async function loadOlder(created){
   } catch(e){}
 }
 
-// unreadCount: blocks/turns in a session's model produced after its leave baseline. 0 for
-// the active tab / a freshly-loaded tab (no baseline).
-function unreadCount(created){
-  if(sameSession(created, active) && documentVisible()) return 0;
+// rawUnreadCount is the true unread model, used for the in-log divider/jump. unreadCount
+// is the tab/title display variant, suppressing the active visible tab's badge.
+function rawUnreadCount(created){
   const base = lastRead[created];
   if(base === undefined) return 0;
   let n = 0;
@@ -114,14 +113,19 @@ function unreadCount(created){
   }
   return n;
 }
+function unreadCount(created){
+  if(sameSession(created, active) && documentVisible()) return 0;
+  return rawUnreadCount(created);
+}
 
 async function selectSession(created){
   if(active && active !== created) lastRead[active] = lastSeq; // mark the tab we leave as read
+  const hadUnread = loaded[created] && rawUnreadCount(created) > 0;
   active = created;
   if(location.hash !== "#" + created) location.hash = String(created);
   // Returning to an already-loaded tab with unread → jump to the "новые сообщения" divider
   // instead of the bottom; otherwise stick to the bottom.
-  jumpUnread = loaded[created] && unreadCount(created) > 0;
+  jumpUnread = hadUnread;
   stick = !jumpUnread;
   renderTabs(active);
   if(!loaded[created]) await loadTranscript(created);
@@ -229,7 +233,6 @@ function start(){
   const app = document.getElementById("app"); if(app) app.classList.add("active");
   initCompose({
     model, getActive, rerender, myNonces, notice: showNotice,
-    onBeforeSend: created => { markRead(created); renderTabs(active); },
     onAfterSend: () => { stick = true; markRead(active); renderTabs(active); },
   });
   initTabs({ select: selectSession, onNew: onNewSession, afterClose, notice: showNotice, unread: unreadCount });

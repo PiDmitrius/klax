@@ -73,7 +73,6 @@
                 box-shadow: inset 0 0 0 1px var(--badge-new-stroke); }
   .tab.busy .badge { background: linear-gradient(var(--badge-work-top), var(--badge-work-mid) 50%, var(--badge-work-bottom)); color: #fff;
                      box-shadow: inset 0 0 0 1px var(--badge-work-stroke); }
-  .tab .queued { font-size: 11px; color: var(--muted); }
   .qnote { margin-left: 10px; font-size: 12px; color: var(--muted); }
   .tab .tname { overflow: hidden; text-overflow: ellipsis; max-width: 22ch; }
   .tab .tx { margin-left: 2px; color: var(--muted); opacity: 0; font-size: 12px; cursor: pointer; }
