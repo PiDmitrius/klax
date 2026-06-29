@@ -43,9 +43,10 @@ func (u *uiDelivery) Progress(ev runner.ProgressEvent) {
 
 func (u *uiDelivery) Final(res runner.RunResult) {
 	if res.Error != nil {
-		msg := res.Error.Error()
-		b := uiBlock{ID: blockID(u.turnSeq, "error", msg, nil), Role: "error", Text: msg, Time: time.Now().Format(time.RFC3339)}
-		u.d.uiEmit(u.user, uiEvent{Type: "error", Session: u.session, TurnSeq: u.turnSeq, State: "err", Block: &b, Text: msg})
+		msg := turnErrorReason(res.Error)
+		b := errBlock(u.turnSeq, msg)
+		b.Time = time.Now().Format(time.RFC3339)
+		u.d.uiEmit(u.user, uiEvent{Type: "error", Session: u.session, TurnSeq: u.turnSeq, State: "err", Block: &b, Text: b.Text})
 		return
 	}
 	// Block id is hashed from the CANONICAL answer (res.Text) BEFORE the outbound file-ref

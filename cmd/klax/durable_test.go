@@ -120,18 +120,30 @@ func TestEnqueueToSessionDuplicateNonceDoesNotRequeue(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	tp := &fakeTransport{}
 	d := newTestDeliveryDaemon(tp)
-	d.store = newStoreWithChat("tg:1", "one")
+	d.store = newStoreWithChat("user:claw", "one")
 	d.runners = make(map[runnerKey]*sessionRunner)
+	d.uiHub = newUIHub()
 
-	created := d.store.SessionsFor("tg:1")[0].Created
-	sr := d.getRunner("tg:1", created)
+	created := d.store.SessionsFor("user:claw")[0].Created
+	sr := d.getRunner("user:claw", created)
 	sr.processing = true
 
-	if ok := d.enqueueToSession("tg:1", "100", "one", nil, created, "nonce-1"); !ok {
+	if ok := d.enqueueToSession("user:claw", "100", "one", nil, created, "nonce-1"); !ok {
 		t.Fatal("first enqueueToSession returned false")
 	}
-	if ok := d.enqueueToSession("tg:1", "101", "retry", nil, created, "nonce-1"); !ok {
+	if ok := d.enqueueToSession("user:claw", "101", "retry", nil, created, "nonce-1"); !ok {
 		t.Fatal("duplicate enqueueToSession returned false")
+	}
+
+	ev, _, _ := d.uiHub.collect("claw", d.uiHub.epoch, 0)
+	userEvents := 0
+	for _, raw := range ev {
+		if e := decodeEvent(t, raw); e.Type == "user" {
+			userEvents++
+		}
+	}
+	if userEvents != 1 {
+		t.Fatalf("duplicate nonce emitted %d user events, want 1", userEvents)
 	}
 
 	sr.mu.Lock()

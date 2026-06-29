@@ -162,11 +162,11 @@ func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []atta
 	// Accept-during-drain: the message is persisted but NOT started here — startup
 	// replay re-enqueues it after the restart. No runner is launched, so there is no
 	// drainWg Add-after-Wait race. The user still sees it land in the UI.
-	if draining {
-		emitEcho()
+	if duplicate {
+		d.broadcastSessions(sk)
 		return true
 	}
-	if duplicate {
+	if draining {
 		emitEcho()
 		return true
 	}
@@ -345,10 +345,10 @@ func (d *daemon) abortSession(sk string, created int64, closing bool) bool {
 	// resurrect work the user just aborted (they were enq-without-run on disk).
 	if sr != nil {
 		for _, qm := range queued {
-			if err := sr.store.MarkErr(qm.turnSeq, "aborted"); err != nil && !errors.Is(err, sessfiles.ErrRemoved) {
+			if err := sr.store.MarkErr(qm.turnSeq, turnErrAborted); err != nil && !errors.Is(err, sessfiles.ErrRemoved) {
 				log.Printf("durable MarkErr aborted (%s/%d): %v", sk, created, err)
 			} else if err == nil {
-				b := errBlock(qm.turnSeq, "aborted")
+				b := errBlock(qm.turnSeq, turnErrAborted)
 				d.uiEmit(uiUserForKey(sk), uiEvent{Type: "error", Session: created, TurnSeq: qm.turnSeq, State: "err", Block: &b, Text: b.Text})
 			}
 		}
@@ -442,10 +442,10 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	}
 	if err != nil {
 		log.Printf("buildTurnPrompt (%s/%d): %v", sk, sess.Created, err)
-		if mErr := sr.store.MarkErr(msg.turnSeq, "attachments-missing"); mErr != nil && !errors.Is(mErr, sessfiles.ErrRemoved) {
+		if mErr := sr.store.MarkErr(msg.turnSeq, turnErrAttachmentsMissing); mErr != nil && !errors.Is(mErr, sessfiles.ErrRemoved) {
 			log.Printf("durable MarkErr (%s/%d): %v", sk, sess.Created, mErr)
 		}
-		del.Final(runner.RunResult{Error: errors.New("вложения недоступны, сообщение не обработано")})
+		del.Final(runner.RunResult{Error: errors.New(turnErrAttachmentsMissing)})
 		return
 	}
 
@@ -453,7 +453,10 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	// the backend, or a crash would replay the (still enq) turn and duplicate work.
 	if err := sr.store.MarkRun(msg.turnSeq); err != nil {
 		log.Printf("durable MarkRun (%s/%d): %v", sk, sess.Created, err)
-		del.Final(runner.RunResult{Error: errors.New("не удалось зафиксировать запуск, сообщение не обработано")})
+		if mErr := sr.store.MarkErr(msg.turnSeq, turnErrRunStartFailed); mErr != nil && !errors.Is(mErr, sessfiles.ErrRemoved) {
+			log.Printf("durable MarkErr (%s/%d): %v", sk, sess.Created, mErr)
+		}
+		del.Final(runner.RunResult{Error: errors.New(turnErrRunStartFailed)})
 		return
 	}
 	backend := d.backendFor(sess)
@@ -474,7 +477,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	// deleted the session (record is moot); any other error means replay re-classifies.
 	var termErr error
 	if result.Error != nil {
-		termErr = sr.store.MarkErr(msg.turnSeq, result.Error.Error())
+		termErr = sr.store.MarkErr(msg.turnSeq, turnErrorReason(result.Error))
 	} else {
 		termErr = sr.store.MarkDone(msg.turnSeq)
 	}

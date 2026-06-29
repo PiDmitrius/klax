@@ -682,30 +682,7 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "klax перезапускается — попробуйте через минуту", http.StatusServiceUnavailable)
 		return
 	}
-	// Return the durable {seq,state} for compatibility/diagnostics. The visible UI update
-	// comes from the broadcast `user` event.
-	sk := s.d.sessionKey(s.chatID(user))
-	seq, state := int64(0), "enq"
-	if log, _ := s.d.sessionStore(sk, targetCreated).InboundLog(); len(log) > 0 && nonce != "" {
-		busy, newest := s.d.isSessionBusy(sk, targetCreated), newestRunSeq(log)
-		for _, t := range log {
-			if t.Nonce == nonce {
-				seq, state = t.Seq, resolveTurnState(t.Last, busy, t.Seq == newest)
-			}
-		}
-	}
-	if seq == 0 {
-		// nonce is required above, so an accepted send is always in the durable log — a 0
-		// here means the log read failed; surface it rather than hand back a binding the
-		// client can't use (the broadcast `user` event still re-shows the message).
-		http.Error(w, "could not resolve accepted send", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(struct {
-		Seq   int64  `json:"seq"`
-		State string `json:"state"`
-	}{Seq: seq, State: state})
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *uiServer) handleAbort(w http.ResponseWriter, r *http.Request) {

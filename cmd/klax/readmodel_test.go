@@ -147,6 +147,27 @@ func TestReadModelAbortedSurfaced(t *testing.T) {
 	}
 }
 
+func TestErrBlockCanonicalReasons(t *testing.T) {
+	tests := []struct {
+		reason string
+		want   string
+	}{
+		{turnErrAborted, "прервано"},
+		{turnErrAttachmentsMissing, "вложения недоступны, сообщение не обработано"},
+		{turnErrRunStartFailed, "не удалось зафиксировать запуск, сообщение не обработано"},
+		{"backend failed", "backend failed"},
+	}
+	for _, tt := range tests {
+		got := errBlock(11, tt.reason)
+		if got.Text != tt.want {
+			t.Fatalf("errBlock(%q).Text = %q, want %q", tt.reason, got.Text, tt.want)
+		}
+		if wantID := blockID(11, "error", tt.want, nil); got.ID != wantID {
+			t.Fatalf("errBlock(%q).ID = %q, want %q", tt.reason, got.ID, wantID)
+		}
+	}
+}
+
 func TestReadModelAbortedKeepsTurnOrder(t *testing.T) {
 	d, created := newReadModelDaemon(t)
 	sr := d.getRunner("user:claw", created)

@@ -16,6 +16,8 @@ import (
 
 	"github.com/PiDmitrius/klax/internal/sealref"
 	"github.com/PiDmitrius/klax/internal/sessfiles"
+	_ "golang.org/x/image/bmp"
+	_ "golang.org/x/image/webp"
 )
 
 // inboundText rebuilds a turn's display text from its durable inbound record: the text

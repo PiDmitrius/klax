@@ -87,6 +87,21 @@ func TestUIUserEventCarriesNonce(t *testing.T) {
 	}
 }
 
+func TestUIDeliveryContextCanceledRendersAborted(t *testing.T) {
+	d := &daemon{uiHub: newUIHub()}
+	u := d.newUIDelivery(context.Background(), queuedMsg{sessKey: "user:claw", sessCreated: 7, turnSeq: 11})
+	u.Final(runner.RunResult{Error: context.Canceled})
+
+	ev, _, _ := d.uiHub.collect("claw", d.uiHub.epoch, 0)
+	if len(ev) != 2 {
+		t.Fatalf("events = %d, want turn_start + error", len(ev))
+	}
+	e := decodeEvent(t, ev[1])
+	if e.Type != "error" || e.Text != "прервано" || e.Block == nil || e.Block.Text != "прервано" {
+		t.Fatalf("cancel error event = %+v", e)
+	}
+}
+
 // Events are retained per user; one user's events never leak into another's.
 func TestUIHubIsolatesUsers(t *testing.T) {
 	h := newUIHub()

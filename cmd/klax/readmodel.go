@@ -53,8 +53,13 @@ func blockID(seq int64, role, text string, tools []history.ToolCall) string {
 // errBlock is the terminal block of an aborted/errored turn, so a reload shows why it
 // stopped (mirrors the messenger "❌ Прервано") instead of a silently-frozen turn.
 func errBlock(seq int64, reason string) uiBlock {
-	if reason == "" || reason == "aborted" {
+	switch reason {
+	case "", turnErrAborted:
 		reason = "прервано"
+	case turnErrAttachmentsMissing:
+		reason = "вложения недоступны, сообщение не обработано"
+	case turnErrRunStartFailed:
+		reason = "не удалось зафиксировать запуск, сообщение не обработано"
 	}
 	return uiBlock{ID: blockID(seq, "error", reason, nil), Role: "error", Text: reason}
 }
