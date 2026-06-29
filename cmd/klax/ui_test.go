@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/PiDmitrius/klax/internal/config"
+	"github.com/PiDmitrius/klax/internal/runner"
 )
 
 func decodeEvent(t *testing.T, raw json.RawMessage) uiEvent {
@@ -17,6 +18,19 @@ func decodeEvent(t *testing.T, raw json.RawMessage) uiEvent {
 		t.Fatalf("decode event: %v", err)
 	}
 	return ev
+}
+
+func TestQueuedCountExcludesFirstIdleQueuedMessage(t *testing.T) {
+	d := &daemon{runners: map[runnerKey]*sessionRunner{}}
+	sr := &sessionRunner{runner: runner.New(), queue: []queuedMsg{{turnSeq: 1}}}
+	d.runners[runnerKey{sk: "user:x", created: 1}] = sr
+	if got := d.queuedCount("user:x", 1); got != 0 {
+		t.Fatalf("idle first queued count = %d, want 0", got)
+	}
+	sr.processing = true
+	if got := d.queuedCount("user:x", 1); got != 1 {
+		t.Fatalf("processing queued count = %d, want 1", got)
+	}
 }
 
 // Every broadcast event gets a monotonic seq and is retained per user; collect

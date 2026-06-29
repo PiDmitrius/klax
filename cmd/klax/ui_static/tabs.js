@@ -45,7 +45,6 @@ export function renderTabs(active){
     const isActive = sameSession(s.created, active);
     const tabUnread = isActive ? 0 : rawUnread;
     const titleUnread = (isActive && activeReads) ? 0 : rawUnread;
-    const tabQueued = isActive ? 0 : s.queued;
     totalUnread += titleUnread;
     if(s.busy) busyCount++;
     const key = String(s.created);
@@ -59,8 +58,8 @@ export function renderTabs(active){
     badge.textContent = tabUnread || "";
     badge.classList.toggle("hidden", !tabUnread);
     const queued = t.querySelector(".queued");
-    queued.textContent = tabQueued ? "⏳" + tabQueued : "";
-    queued.classList.toggle("hidden", !tabQueued);
+    queued.textContent = s.queued ? "⏳" + s.queued : "";
+    queued.classList.toggle("hidden", !s.queued);
     if(t.parentNode !== strip || strip.children[sessions.indexOf(s)] !== t) strip.appendChild(t);
   }
   for(const [key, t] of existing) if(!keep.has(key)) t.remove();

@@ -282,7 +282,11 @@ func (d *daemon) queuedCount(sk string, created int64) int {
 	}
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
-	return len(sr.queue)
+	n := len(sr.queue)
+	if n > 0 && !sr.processing && !sr.runner.IsBusy() {
+		n--
+	}
+	return n
 }
 
 // newUISession creates a fresh active session for a UI chat and returns it so
