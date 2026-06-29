@@ -210,6 +210,7 @@ function advanceReadThroughPastViewport(log){
   if(next <= readThrough[active]) return false;
   readThrough[active] = next;
   if(rawUnreadCount(active) === 0) delete unreadJump[active];
+  else startReadGrace(active);
   return true;
 }
 
