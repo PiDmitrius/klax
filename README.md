@@ -29,13 +29,12 @@ At a high level:
 - Persistent sessions with resume support
 - Per-session backend, model, thinking level, and sandbox mode
 - Group mode with a dedicated working directory per group chat
-- systemd user service management
+- User service management: `systemd --user` on Linux, `launchd` LaunchAgent on macOS
 - Release update flow, plus local-source rebuilds via `source_dir`
 
 ## Requirements
 
-- Linux (`amd64` or `arm64`)
-- `systemd --user`
+- Linux (`amd64` or `arm64`) with `systemd --user`, **or** macOS (`arm64` or `amd64`) with `launchd`
 - At least one configured backend:
 
 ### Claude backend
@@ -62,7 +61,7 @@ Codex must be authenticated before use (e.g. via `OPENAI_API_KEY` or `codex auth
 curl -fsSL https://raw.githubusercontent.com/PiDmitrius/klax/main/install.sh | bash
 ```
 
-The installer places the binary in `~/.local/bin/klax`, checks PATH wiring, and prepares the user environment for `systemd --user`.
+The installer detects the OS, places the binary in `~/.local/bin/klax`, checks PATH wiring, and prepares the user environment (`systemd --user` on Linux, `launchd` on macOS).
 
 ## Quick Start
 
@@ -140,8 +139,8 @@ Anything that is not recognized as a control command is forwarded to the active 
 
 ```text
 klax setup       interactive first-time setup
-klax install     install systemd user service
-klax uninstall   remove systemd user service
+klax install     install the user service (systemd on Linux, launchd on macOS)
+klax uninstall   remove the user service
 klax start       start the service (--foreground to run directly)
 klax stop        stop the service
 klax restart     restart the service
@@ -179,9 +178,13 @@ Direct-message sessions are keyed by user identity. With `users` mapping configu
 - If `source_dir` is empty, it downloads the latest GitHub release and installs it.
 - If `source_dir` is set, it rebuilds from local source and installs that binary instead.
 
-The daemon watches for the restart marker, finishes the current task, notifies chats, exits, and relies on `systemd --user` to come back up.
+The daemon watches for the restart marker, finishes the current task, notifies chats, exits, and relies on the supervisor (`systemd --user` on Linux, `launchd` `KeepAlive` on macOS) to come back up.
 
-## systemd Service
+## Service Management
+
+`klax install`, `start`, `stop`, `restart`, `status`, and `uninstall` wrap the platform service manager. The same CLI works on both platforms; only the supervisor underneath differs.
+
+### Linux (systemd)
 
 `klax install` writes a user service based on [klax.service](./klax.service):
 
@@ -191,8 +194,6 @@ The daemon watches for the restart marker, finishes the current task, notifies c
 - `StartLimitBurst=3`
 - `StartLimitIntervalSec=60`
 
-### Troubleshooting
-
 If klax crashes 3 times within 60 seconds, systemd stops restarting it. To investigate and recover:
 
 ```bash
@@ -200,6 +201,23 @@ klax status                            # see the error
 journalctl --user -u klax --no-pager   # full logs
 systemctl --user reset-failed klax     # clear the failure counter
 klax start                             # try again
+```
+
+### macOS (launchd)
+
+`klax install` writes a LaunchAgent to `~/Library/LaunchAgents/klax.plist`:
+
+- `ProgramArguments`: `~/.local/bin/klax start --foreground`
+- `KeepAlive` (mirrors `Restart=always`) and `ThrottleInterval=5` (mirrors `RestartSec=5`)
+- `RunAtLoad` so it starts on login
+- `EnvironmentVariables.PATH` seeded with Homebrew prefixes and `~/.local/bin` so the backend CLIs resolve under launchd's minimal environment
+
+Logs go to `~/Library/Logs/klax.log`. To investigate:
+
+```bash
+klax status                            # launchctl print for the service
+tail -f ~/Library/Logs/klax.log        # full logs
+klax restart                           # kill and relaunch
 ```
 
 Common causes: invalid bot token, network unreachable at startup, broken config. Check `~/.config/klax/config.json` and re-run `klax setup` if needed.
