@@ -10,6 +10,7 @@ import { uiConfirm } from "./modal.js";
 let sessions = [], deps = {}, settingsFor = 0, settingsIsNew = false;
 // The shell's <title> (product name, server-injected) — the base for the unread prefix.
 const BASE_TITLE = (typeof document !== "undefined" && document.title) || "klax";
+function sameSession(a, b){ return String(a) === String(b); }
 
 export function initTabs(d){
   deps = d;
@@ -34,26 +35,60 @@ export function reconcileSessions(list, active){ sessions = list || []; renderTa
 export function renderTabs(active){
   const strip = document.getElementById("tabs");
   if(!strip) return;
-  strip.innerHTML = "";
   let totalUnread = 0, busyCount = 0;
+  const activeReads = typeof document === "undefined" || document.visibilityState !== "hidden";
+  const existing = new Map();
+  strip.querySelectorAll(".tab[data-created]").forEach(t => existing.set(t.dataset.created, t));
+  const keep = new Set();
   for(const s of sessions){
-    const unread = (s.created !== active && deps.unread) ? deps.unread(s.created) : 0;
-    totalUnread += unread;
+    const rawUnread = deps.unread ? deps.unread(s.created) : 0;
+    const isActive = sameSession(s.created, active);
+    const tabUnread = isActive ? 0 : rawUnread;
+    const titleUnread = (isActive && activeReads) ? 0 : rawUnread;
+    const tabQueued = isActive ? 0 : s.queued;
+    totalUnread += titleUnread;
     if(s.busy) busyCount++;
-    const t = document.createElement("div");
-    t.className = "tab" + (s.created === active ? " active" : "") + (s.busy ? " busy" : "") + (unread ? " unread" : "");
-    t.innerHTML = '<span class="dot"></span><span class="tname"></span>'
-      + (unread ? '<span class="badge">'+unread+'</span>' : "")
-      + (s.queued ? '<span class="queued">⏳'+s.queued+'</span>' : "")
-      + '<span class="tx" title="Закрыть">✕</span>';
+    const key = String(s.created);
+    const t = existing.get(key) || createTab();
+    keep.add(key);
+    t.dataset.created = key;
+    t._sessionName = s.name || "";
+    t.className = "tab" + (isActive ? " active" : "") + (s.busy ? " busy" : "") + (tabUnread ? " unread" : "");
     t.querySelector(".tname").textContent = s.name || ("сессия " + s.created);
-    t.addEventListener("click", e => { if(e.target.classList.contains("tx")) return; deps.select && deps.select(s.created); });
-    t.addEventListener("dblclick", e => { if(e.target.classList.contains("tx")) return; e.preventDefault(); openSettings(s.created, "Настройки сессии", false); }); // settings via double-click (no per-tab gear)
-    t.querySelector(".tx").addEventListener("click", e => { e.stopPropagation(); closeSession(s.created, s.name); });
-    strip.appendChild(t);
+    const badge = t.querySelector(".badge");
+    badge.textContent = tabUnread || "";
+    badge.classList.toggle("hidden", !tabUnread);
+    const queued = t.querySelector(".queued");
+    queued.textContent = tabQueued ? "⏳" + tabQueued : "";
+    queued.classList.toggle("hidden", !tabQueued);
+    if(t.parentNode !== strip || strip.children[sessions.indexOf(s)] !== t) strip.appendChild(t);
   }
+  for(const [key, t] of existing) if(!keep.has(key)) t.remove();
   const mark = (totalUnread || "") + "*".repeat(busyCount); // unread count + one * per busy session
   document.title = mark ? "(" + mark + ") " + BASE_TITLE : BASE_TITLE;
+}
+
+function createTab(){
+  const t = document.createElement("div");
+  t.className = "tab";
+  t.innerHTML = '<span class="dot"></span><span class="tname"></span><span class="badge hidden"></span><span class="queued hidden"></span><span class="tx" title="Закрыть">✕</span>';
+  t.addEventListener("click", e => {
+    if(e.target.classList.contains("tx")) return;
+    const created = parseInt(t.dataset.created, 10);
+    if(created && deps.select) deps.select(created);
+  });
+  t.addEventListener("dblclick", e => {
+    if(e.target.classList.contains("tx")) return;
+    e.preventDefault();
+    const created = parseInt(t.dataset.created, 10);
+    if(created) openSettings(created, "Настройки сессии", false);
+  }); // settings via double-click (no per-tab gear)
+  t.querySelector(".tx").addEventListener("click", e => {
+    e.stopPropagation();
+    const created = parseInt(t.dataset.created, 10);
+    if(created) closeSession(created, t._sessionName);
+  });
+  return t;
 }
 
 function notice(t){ if(deps.notice) deps.notice(t); }

@@ -64,6 +64,9 @@
   .tab.unread { font-weight: 600; background: var(--unread-bg); }              /* finished w/ new msgs */
   .tab.busy.unread { background: var(--unread-work-bg); }
   .tab.unread:not(.busy) .dot { background: var(--dot-new); }                  /* solid bright green */
+  .tab.active.unread { font-weight: inherit; background: var(--tab-active-bg); }
+  .tab.active .badge { display: none !important; }
+  .tab.active .queued { display: none !important; }
   /* Unread count — favicon-like when done, same amber as the work dot while busy. */
   .tab .badge { background: linear-gradient(var(--badge-new-top), var(--badge-new-mid) 50%, var(--badge-new-bottom)); color: #fff; font-size: 11px;
                 font-weight: 700; line-height: 1; min-width: 17px; height: 17px; padding: 0 4px;

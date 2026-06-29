@@ -11,9 +11,9 @@ import { mdSafe, esc, fmtTime } from "./markdown.js";
 function blockCls(role){ return role === "tool" ? "tool" : role === "error" ? "error" : role === "system" ? "system" : "assistant"; }
 
 // renderModel computes the ordered render items for one session. PURE and unit-testable.
-// The unread divider is TURN-local (§B3): it lands before a turn iff the turn's accept
-// event OR any of its blocks is unread (eventSeq > unreadAfter) — never between a user
-// bubble and its own answer.
+// The unread divider stays turn-aware: user bubbles are the human's own messages and do
+// not count as unread; unread answer blocks land inside the turn, between the user bubble
+// and the answer.
 export function renderModel(turns, unreadAfter){
   const items = [];
   let queuePos = 0, divided = false;
@@ -27,7 +27,9 @@ export function renderModel(turns, unreadAfter){
       else items.push({ kind: "bubble", cls: (t.kind === "error" || t.role === "error") ? "error" : t.role === "system" ? "system" : "assistant", text: t.text || "", md: true, time: t.time });
       continue;
     }
-    if(isUnread(t.eventSeq) || (t.blocks || []).some(b => isUnread(b.eventSeq))) placeDivider();
+    const blocksUnread = (t.blocks || []).some(b => isUnread(b.eventSeq));
+    let dividerBeforeGroups = false;
+    if(blocksUnread && !divided && unreadAfter !== undefined){ dividerBeforeGroups = true; divided = true; }
     const groups = [];
     let i = 0;
     while(i < (t.blocks || []).length){
@@ -36,13 +38,19 @@ export function renderModel(turns, unreadAfter){
       groups.push({ cls: blockCls(role), blocks, tool: role === "tool", time: blocks.length ? blocks[blocks.length - 1].time : undefined });
     }
     if(t.state === "enq") queuePos++;
-    items.push({ kind: "turn", seq: t.seq, text: t.text || "", time: t.time, groups, state: t.state, note: t.state === "enq" ? "в очереди · " + queuePos : undefined });
+    items.push({ kind: "turn", seq: t.seq, text: t.text || "", time: t.time, groups, dividerBeforeGroups, state: t.state, note: t.state === "enq" ? "в очереди · " + queuePos : undefined });
   }
   return items;
 }
 
 // --- DOM layer (thin) ---
 const DOTS = '<span class="dots"><span></span><span></span><span></span></span>';
+
+function divider(){
+  const d = document.createElement("div");
+  d.className = "readline"; d.innerHTML = "<span>новые сообщения</span>";
+  return d;
+}
 
 function timeMeta(time){
   if(!time) return "";
@@ -73,15 +81,14 @@ export function paint(col, items, onAbort){
   col.innerHTML = "";
   for(const it of items){
     if(it.kind === "divider"){
-      const d = document.createElement("div");
-      d.className = "readline"; d.innerHTML = "<span>новые сообщения</span>";
-      col.appendChild(d);
+      col.appendChild(divider());
     } else if(it.kind === "bubble"){
       col.appendChild(bubble(it.cls, it.md ? mdSafe(it.text) : esc(it.text), it.time));
     } else { // per-turn container
       const turn = document.createElement("div");
       turn.className = "turn"; turn.dataset.seq = it.seq;
       turn.appendChild(bubble("user", mdSafe(it.text), it.time));
+      if(it.dividerBeforeGroups) turn.appendChild(divider());
       for(const g of it.groups){
         const html = g.blocks.map(b => g.tool ? esc(b.text || "") : mdSafe(b.text || "")).join(g.tool ? "<br>" : "");
         turn.appendChild(bubble(g.cls, html, g.time));

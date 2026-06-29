@@ -1,18 +1,17 @@
 // compose.js — the message composer: textarea (auto-grow, Enter-to-send), staged
-// attachments (paperclip / paste / drop, with chips), and send(). On send it adds an
-// optimistic turn keyed by a NONCE (no negative tmp ids), POSTs /api/send, and binds the
-// durable {seq,state} from the response (the broadcast `user` event is the idempotent
-// backstop). Optimistic image thumbnails use blob: URLs, revoked if the send is refused.
+// attachments (paperclip / paste / drop, with chips), and send(). The visible echo is
+// added only after /api/send returns a durable {seq,state}; this avoids a local optimistic
+// bubble being briefly removed by a concurrent transcript/session reconcile.
 
 import { api } from "./base.js";
 
 const SENDTAB = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID().slice(0, 8) : "tab";
 let nonceCtr = 0;
 let files = [];                 // staged { file, name } for the next send
-const blobsByNonce = new Map(); // nonce -> [blobURL] for optimistic thumbnails
+const blobsByNonce = new Map(); // nonce -> [blobURL] for rendered local previews
 
 // initCompose wires the composer DOM. deps: { model, getActive():created, rerender(created),
-// myNonces:Map, onAfterSend?() }.
+// myNonces:Map, onBeforeSend?(), onAfterSend?() }.
 export function initCompose(deps){
   const ta = document.getElementById("input");
   const fileInput = document.getElementById("file");
@@ -73,14 +72,9 @@ async function send(deps){
   const created = deps.getActive();
   if(!created) return;
   const nonce = SENDTAB + "-" + (++nonceCtr);
+  if(deps.onBeforeSend) deps.onBeforeSend(created);
 
-  // optimistic turn keyed by nonce: text + blob thumbnails for staged images
-  const blobs = [];
-  const thumbs = staged.filter(f => /^image\//.test(f.file.type)).map(f => { const u = URL.createObjectURL(f.file); blobs.push(u); return "![](" + u + ")"; });
-  if(blobs.length) blobsByNonce.set(nonce, blobs);
   const echo = text || ("📎 " + staged.map(f => f.name).join(", "));
-  deps.model.optimistic(created, nonce, { text: [echo, ...thumbs].join("\n\n"), time: Date.now() });
-  deps.myNonces.set(nonce, Date.now());
 
   // clear the composer immediately
   if(ta){ ta.value = ""; autoGrow(ta); }
@@ -100,7 +94,10 @@ async function send(deps){
     }
     if(!r.ok){ rollback(deps, created, nonce, text, staged, (await r.text()).trim() || "сообщение не принято"); return; }
     const data = await r.json();
-    deps.model.bindNonce(created, nonce, data.seq, data.state || "enq");
+    const blobs = [];
+    const thumbs = staged.filter(f => /^image\//.test(f.file.type)).map(f => { const u = URL.createObjectURL(f.file); blobs.push(u); return "![](" + u + ")"; });
+    if(blobs.length) blobsByNonce.set(nonce, blobs);
+    deps.model.upsertUser(created, { seq: data.seq, nonce, text: [echo, ...thumbs].join("\n\n"), time: Date.now() }, data.state || "enq");
     deps.rerender(created);
   } catch(e){
     rollback(deps, created, nonce, text, staged, "сеть недоступна — сообщение не отправлено");

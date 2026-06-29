@@ -25,6 +25,13 @@ const offsetFor = {}, moreFor = {}; // created -> first-loaded turn index + has-
 function logcol(){ return document.getElementById("logcol"); }
 function getActive(){ return active; }
 function seqOf(c){ const i = String(c || "").indexOf("-"); return i >= 0 ? (parseInt(String(c).slice(i + 1), 10) || 0) : 0; }
+function sameSession(a, b){ return String(a) === String(b); }
+function documentVisible(){ return typeof document === "undefined" || document.visibilityState !== "hidden"; }
+function markRead(created){ if(created) delete lastRead[created]; }
+function focusComposer(){
+  const input = document.getElementById("input");
+  if(input && documentVisible()) input.focus({ preventScroll: true });
+}
 
 function applyTheme(t){
   document.documentElement.dataset.theme = t;
@@ -98,11 +105,11 @@ async function loadOlder(created){
 // unreadCount: blocks/turns in a session's model produced after its leave baseline. 0 for
 // the active tab / a freshly-loaded tab (no baseline).
 function unreadCount(created){
+  if(sameSession(created, active) && documentVisible()) return 0;
   const base = lastRead[created];
   if(base === undefined) return 0;
   let n = 0;
   for(const t of model.turns(created)){
-    if(t.eventSeq !== undefined && t.eventSeq > base) n++;
     for(const b of (t.blocks || [])) if(b.eventSeq !== undefined && b.eventSeq > base) n++;
   }
   return n;
@@ -119,6 +126,7 @@ async function selectSession(created){
   renderTabs(active);
   if(!loaded[created]) await loadTranscript(created);
   else rerender(created);
+  focusComposer();
 }
 
 // onSessionsList is the SINGLE reconcile path for both /api/sessions and the live
@@ -185,7 +193,15 @@ const host = {
   ctx: { myNonces, onSessions: list => { onSessionsList(list); }, onNotice: onNoticeEvent },
   cursor: () => cursor, setCursor: c => { cursor = c; },
   lastSeq: () => lastSeq, setLastSeq: n => { lastSeq = n; },
-  onAffected: set => { for(const c of set){ if(c === active) rerender(c); } renderTabs(active); },
+  onAffected: set => {
+    for(const c of set){
+      if(c === active){
+        if(documentVisible() && stick) markRead(c);
+        rerender(c);
+      }
+    }
+    renderTabs(active);
+  },
   onAuthFail: () => { const a = document.getElementById("app"); if(a) a.classList.remove("active"); const g = document.getElementById("gate"); if(g) g.classList.remove("hidden"); },
   onRestart: () => showNotice("klax обновился"),
   onReload: async () => {
@@ -211,7 +227,11 @@ async function afterClose(created){
 function start(){
   document.getElementById("gate").classList.add("hidden");
   const app = document.getElementById("app"); if(app) app.classList.add("active");
-  initCompose({ model, getActive, rerender, myNonces, notice: showNotice, onAfterSend: () => { stick = true; rerender(active); } });
+  initCompose({
+    model, getActive, rerender, myNonces, notice: showNotice,
+    onBeforeSend: created => { markRead(created); renderTabs(active); },
+    onAfterSend: () => { stick = true; markRead(active); renderTabs(active); },
+  });
   initTabs({ select: selectSession, onNew: onNewSession, afterClose, notice: showNotice, unread: unreadCount });
   // Delegated copy button for code fences (markdown emits <button class="copy">).
   const lw = document.getElementById("log");
