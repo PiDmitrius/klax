@@ -12,8 +12,8 @@ function blockCls(role){ return role === "tool" ? "tool" : role === "error" ? "e
 
 // renderModel computes the ordered render items for one session. PURE and unit-testable.
 // The unread divider stays turn-aware: user bubbles are the human's own messages and do
-// not count as unread; unread answer blocks land inside the turn, between the user bubble
-// and the answer.
+// not count as unread; unread answer blocks land inside the turn at the exact block
+// boundary, even when they have the same role as the preceding already-read block.
 export function renderModel(turns, unreadAfter){
   const items = [];
   let queuePos = 0, divided = false;
@@ -27,18 +27,23 @@ export function renderModel(turns, unreadAfter){
       else items.push({ kind: "bubble", cls: (t.kind === "error" || t.role === "error") ? "error" : t.role === "system" ? "system" : "assistant", text: t.text || "", md: true, time: t.time });
       continue;
     }
-    const blocksUnread = (t.blocks || []).some(b => isUnread(b.eventSeq));
-    let dividerBeforeGroups = false;
-    if(blocksUnread && !divided && unreadAfter !== undefined){ dividerBeforeGroups = true; divided = true; }
     const groups = [];
     let i = 0;
     while(i < (t.blocks || []).length){
+      if(isUnread(t.blocks[i].eventSeq) && !divided && unreadAfter !== undefined){
+        groups.push({ divider: true });
+        divided = true;
+        continue;
+      }
       const role = t.blocks[i].role, blocks = [];
-      while(i < t.blocks.length && t.blocks[i].role === role){ blocks.push(t.blocks[i]); i++; }
+      while(i < t.blocks.length && t.blocks[i].role === role){
+        if(isUnread(t.blocks[i].eventSeq) && !divided && unreadAfter !== undefined && blocks.length > 0) break;
+        blocks.push(t.blocks[i]); i++;
+      }
       groups.push({ cls: blockCls(role), blocks, tool: role === "tool", time: blocks.length ? blocks[blocks.length - 1].time : undefined });
     }
     if(t.state === "enq") queuePos++;
-    items.push({ kind: "turn", seq: t.seq, text: t.text || "", time: t.time, groups, dividerBeforeGroups, state: t.state, note: t.state === "enq" ? "в очереди · " + queuePos : undefined });
+    items.push({ kind: "turn", seq: t.seq, text: t.text || "", time: t.time, groups, state: t.state, note: t.state === "enq" ? "в очереди · " + queuePos : undefined });
   }
   return items;
 }
@@ -108,10 +113,10 @@ function renderSig(it){
   if(it.kind === "turn"){
     return JSON.stringify({
       text: it.text, time: it.time, state: it.state, note: it.note,
-      dividerBeforeGroups: it.dividerBeforeGroups,
       groups: it.groups.map(g => ({
+        divider: g.divider,
         cls: g.cls, tool: g.tool, time: g.time,
-        blocks: g.blocks.map(b => ({ id: b.id, role: b.role, text: b.text, time: b.time })),
+        blocks: (g.blocks || []).map(b => ({ id: b.id, role: b.role, text: b.text, time: b.time })),
       })),
     });
   }
@@ -139,8 +144,8 @@ function buildItem(it, onAbort){
   const turn = document.createElement("div");
   turn.className = "turn"; turn.dataset.seq = it.seq;
   turn.appendChild(bubble("user", mdSafe(it.text), it.time));
-  if(it.dividerBeforeGroups) turn.appendChild(divider());
   for(const g of it.groups){
+    if(g.divider){ turn.appendChild(divider()); continue; }
     const html = g.blocks.map(b => g.tool ? esc(b.text || "") : mdSafe(b.text || "")).join(g.tool ? "<br>" : "");
     turn.appendChild(bubble(g.cls, html, g.time));
   }
