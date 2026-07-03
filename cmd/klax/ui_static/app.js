@@ -4,11 +4,11 @@
 // insertAnswer/breakMerge) is gone — a turn's truth is model turn.state.
 
 import { TurnModel } from "./model.js";
-import { renderSession } from "./render.js";
+import { renderSession, beginShift, playShift, clearShiftGhosts } from "./render.js";
 import { pollLoop } from "./events.js";
 import { api, getToken, setToken } from "./base.js";
-import { selectionInLog, toBottom } from "./scroll.js";
-import { initCompose } from "./compose.js";
+import { selectionInLog } from "./scroll.js";
+import { initCompose, saveDraft, loadDraft, dropDraft } from "./compose.js";
 import { initTabs, reconcileSessions, renderTabs } from "./tabs.js";
 import { injectEmojiFont } from "./emoji.js";
 
@@ -21,10 +21,21 @@ const READ_GRACE_MS = 1600;
 let active = 0;
 let cursor = null, lastSeq = 0;
 let stick = true, pendingRender = false, readOnScroll = true;
+let liveRenderRAF = 0, liveRenderCreated = 0;
 let sessionList = []; // last /api/sessions list — for hash-change validity + lookups
 const offsetFor = {}, moreFor = {}; // created -> first-loaded turn index + has-older-history flag (pagination)
 const scrollTopFor = {}; // created -> last scrollTop, so tab switches do not snap by a pixel
 const watchedImages = new WeakSet();
+let composerH = 0; // observed #composer height — the bottom-anchor baseline (see start())
+
+function setComposerH(h){
+  composerH = h || 0;
+  const wrap = document.getElementById("logwrap");
+  if(wrap) wrap.style.setProperty("--composer-h", composerH + "px");
+}
+// syncComposerH re-baselines the composer observer after a deliberate height change
+// (tab switch swapping drafts), so only typing/chips growth shifts the bottom padding.
+function syncComposerH(){ const c = document.getElementById("composer"); if(c) setComposerH(c.offsetHeight); }
 
 function logcol(){ return document.getElementById("logcol"); }
 function getActive(){ return active; }
@@ -51,7 +62,7 @@ function startReadGrace(created){
     if(active === created && documentVisible() && stick && rawUnreadCount(created) > 0){
       markRead(created, true);
       renderTabs(active);
-      rerender(created);
+      rerender(created, true); // the unread line fades out, messages close the gap
     }
   }, READ_GRACE_MS + 40);
 }
@@ -78,9 +89,25 @@ function focusComposer(){
   const input = document.getElementById("input");
   if(input && documentVisible()) input.focus({ preventScroll: true });
 }
+// settledDistance measures how far the view is from the SETTLED bottom of the timeline.
+// #logcol.offsetHeight is layout geometry: unlike log.scrollHeight it is NOT inflated by
+// the transient FLIP transforms (a unit mid-slide extends the scrollable overflow), so
+// stick/pin decisions taken during a 180ms animation stay correct.
+function settledDistance(log){
+  const col = logcol();
+  // The composer's height is a transparent bottom border on #log (see app.css), so it is
+  // NOT scrollable content — the settled height is just the column, and clientHeight already
+  // excludes the border. (That is why there is no +composerH here anymore.)
+  const h = col ? col.offsetHeight : log.scrollHeight;
+  return h - log.scrollTop - log.clientHeight;
+}
 function stickToBottom(){
   const sc = document.getElementById("log");
-  if(sc) toBottom(sc);
+  const col = logcol();
+  // pin to the settled bottom, not the animation-inflated scrollHeight — pinning to the
+  // inflated max overshoots, then snaps back when the slide finishes. col.offsetHeight (no
+  // +composerH) because the composer is a bottom border on #log, not scrollable padding.
+  if(sc) sc.scrollTop = Math.max(0, (col ? col.offsetHeight : sc.scrollHeight) - sc.clientHeight);
   toggleToBottom();
 }
 function rememberScroll(created){
@@ -91,7 +118,7 @@ function restoreScroll(created){
   const log = document.getElementById("log");
   if(!created || !log || scrollTopFor[created] === undefined) return;
   log.scrollTop = Math.min(scrollTopFor[created], Math.max(0, log.scrollHeight - log.clientHeight));
-  stick = (log.scrollHeight - log.scrollTop - log.clientHeight < 80);
+  stick = settledDistance(log) < 80;
   toggleToBottom();
 }
 function watchInlineImages(col){
@@ -112,11 +139,23 @@ function applyTheme(t){
   const b = document.getElementById("theme"); if(b) b.textContent = t === "dark" ? "☀️" : "🌙";
 }
 
-function rerender(created){
+// rerender(created, live): live=true marks event-driven updates — they run through the
+// FLIP snapshot (render.js beginShift/playShift) so new messages slide in and a vanished
+// unread divider collapses smoothly instead of jerking the screen. Structural renders
+// (tab switch, transcript load, pagination, foregrounding) stay instant — their scroll
+// repositioning must not be animated over.
+function rerender(created, live){
   if(created !== active) return;
+  if(!live && liveRenderRAF){
+    cancelAnimationFrame(liveRenderRAF);
+    liveRenderRAF = 0;
+    liveRenderCreated = 0;
+  }
   const col = logcol();
   if(!col) return;
   if(selectionInLog(col)){ pendingRender = true; return; } // don't collapse a live selection
+  if(!live) clearShiftGhosts(); // a structural render must not inherit a fading divider
+  const snap = live ? beginShift(col) : null;
   renderSession(col, model.turns(active), readThrough[active], abortActive);
   watchInlineImages(col);
   if(moreFor[active]){ // older history exists → a "load earlier" button at the top
@@ -135,10 +174,29 @@ function rerender(created){
     }
   } else if(stick) stickToBottom();
   toggleToBottom();
+  if(snap) playShift(col, snap); // after the scroll settled: deltas = exact visual shifts
+}
+
+function scheduleLiveRerender(created){
+  if(created !== active) return;
+  liveRenderCreated = created;
+  if(liveRenderRAF) return;
+  liveRenderRAF = requestAnimationFrame(() => {
+    const c = liveRenderCreated;
+    liveRenderRAF = 0;
+    liveRenderCreated = 0;
+    if(c === active) rerender(c, true);
+  });
 }
 
 function abortActive(){
   if(active) api("/api/abort", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: active }) }).catch(()=>{});
+}
+
+function sessionContext(created){
+  const s = sessionList.find(x => x.created === created);
+  if(!s || !s.ctx_used || !s.ctx_window) return null;
+  return { used: s.ctx_used, window: s.ctx_window };
 }
 
 async function loadTranscript(created){
@@ -147,6 +205,8 @@ async function loadTranscript(created){
     if(!r.ok) return;
     const data = await r.json();
     model.reconcile(created, data.turns || []);
+    const h = sessionContext(created);
+    if(h) model.setSessionContextHint(created, h.used, h.window);
     loaded[created] = true;
     offsetFor[created] = data.offset || 0;
     moreFor[created] = !!data.more;
@@ -215,12 +275,16 @@ function advanceReadThroughPastViewport(log){
 }
 
 async function selectSession(created){
-  if(active && active !== created) rememberScroll(active);
-  if(active && active !== created && documentVisible() && stick){
+  const switching = active !== created;
+  if(active && switching){ rememberScroll(active); saveDraft(active); }
+  if(active && switching && documentVisible() && stick){
     markRead(active);
   }
   const hadUnread = loaded[created] && rawUnreadCount(created) > 0;
   active = created;
+  // The composer travels with the tab: swap in this session's draft before any scroll
+  // math below, then re-baseline the resize observer so the swap itself doesn't anchor.
+  if(switching){ loadDraft(created); syncComposerH(); }
   if(location.hash !== "#" + created) location.hash = String(created);
   // Returning to an already-loaded tab with unread → jump to the "новые сообщения" divider
   // instead of the bottom; otherwise stick to the bottom.
@@ -243,11 +307,16 @@ async function selectSession(created){
 async function onSessionsList(list){
   list = list || [];
   sessionList = list;
+  const affected = new Set();
+  for(const s of list){
+    if(model.setSessionContextHint(s.created, s.ctx_used, s.ctx_window)) affected.add(s.created);
+  }
   if(active && !list.some(s => s.created === active)){
-    model.drop(active); delete loaded[active]; markRead(active);
+    model.drop(active); delete loaded[active]; markRead(active); dropDraft(active);
     active = 0;
   }
   reconcileSessions(list, active);
+  if(affected.has(active) && loaded[active]) scheduleLiveRerender(active);
   if(!active && list.length){
     const want = parseInt(location.hash.slice(1), 10);
     const a = list.find(s => s.created === want) || list.find(s => s.active) || list[0];
@@ -277,7 +346,7 @@ function noticeText(s){ return (s || "").replace(/<br\s*\/?>/gi, "\n").replace(/
 function onNoticeEvent(text){
   const t = noticeText(text);
   showNotice(t);
-  if(active){ model.appendStandalone(active, { role: "notice", text: t }); rerender(active); }
+  if(active){ model.appendStandalone(active, { role: "notice", text: t }); rerender(active, true); }
 }
 
 // toggleToBottom shows the down-arrow affordance only when the user has scrolled up.
@@ -297,7 +366,11 @@ function fallbackCopy(text, ok){
 // the poll host events.js drives
 const host = {
   model,
-  ctx: { onSessions: list => { onSessionsList(list); }, onNotice: onNoticeEvent },
+  ctx: {
+    onSessions: list => { onSessionsList(list); },
+    onNotice: onNoticeEvent,
+    sessionContext,
+  },
   cursor: () => cursor, setCursor: c => { cursor = c; },
   lastSeq: () => lastSeq, setLastSeq: n => { lastSeq = n; },
   onAffected: set => {
@@ -309,7 +382,7 @@ const host = {
           stick = false;
           startReadGrace(c);
         }
-        rerender(c);
+        scheduleLiveRerender(c);
       }
     }
     renderTabs(active);
@@ -333,7 +406,7 @@ const host = {
 
 async function onNewSession(created){ await syncSessions(); await selectSession(created); }
 async function afterClose(created){
-  model.drop(created); delete loaded[created]; markRead(created);
+  model.drop(created); delete loaded[created]; markRead(created); dropDraft(created);
   if(created === active) active = 0;
   await syncSessions();
 }
@@ -343,22 +416,31 @@ function start(){
   const app = document.getElementById("app"); if(app) app.classList.add("active");
   initCompose({
     getActive, notice: showNotice,
+    isLive: c => sessionList.some(s => s.created === c),
     onAfterSend: () => { stick = true; markRead(active, true); renderTabs(active); stickToBottom(); },
   });
   initTabs({ select: selectSession, onNew: onNewSession, afterClose, notice: showNotice, unread: unreadCount });
-  // Delegated copy button for code fences (markdown emits <button class="copy">).
+  // Delegated copy buttons: a fence's .copy copies its code, a bubble's .mcopy copies the
+  // whole message's PRIMARY text (the model text render.js stashed on the node — raw
+  // markdown source, never the rendered HTML).
   const lw = document.getElementById("log");
   if(lw) lw.addEventListener("click", e => {
-    const btn = e.target.closest && e.target.closest(".copy");
+    const btn = e.target.closest && e.target.closest(".copy, .mcopy");
     if(!btn) return;
-    const code = btn.closest("pre") && btn.closest("pre").querySelector("code");
-    if(!code) return;
-    const text = code.textContent || "";
+    let text;
+    if(btn.classList.contains("mcopy")){
+      const msg = btn.closest(".msg");
+      if(msg) text = msg._raw;
+    } else {
+      const code = btn.closest("pre") && btn.closest("pre").querySelector("code");
+      if(code) text = code.textContent || "";
+    }
+    if(text === undefined) return;
     const done = () => { btn.classList.add("done"); btn.textContent = "✓"; setTimeout(() => { btn.classList.remove("done"); btn.textContent = "⧉"; }, 1200); };
     if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
     else fallbackCopy(text, done);
   });
-  document.addEventListener("selectionchange", () => { if(pendingRender && !selectionInLog(logcol())){ pendingRender = false; rerender(active); } });
+  document.addEventListener("selectionchange", () => { if(pendingRender && !selectionInLog(logcol())){ pendingRender = false; rerender(active, true); } });
   const log = document.getElementById("log");
   const allowReadOnScroll = () => { readOnScroll = true; };
   if(log){
@@ -366,7 +448,7 @@ function start(){
     log.addEventListener("touchstart", allowReadOnScroll, { passive: true });
   }
   if(log) log.addEventListener("scroll", () => {
-    stick = (log.scrollHeight - log.scrollTop - log.clientHeight < 80);
+    stick = settledDistance(log) < 80; // settled: a FLIP mid-slide must not unstick us
     if(active) scrollTopFor[active] = log.scrollTop;
     if(readOnScroll && active && documentVisible()){
       const oldTop = log.scrollTop;
@@ -375,7 +457,7 @@ function start(){
       if(stick){
         if(markRead(active) || advanced){
           renderTabs(active);
-          rerender(active);
+          rerender(active, true); // reaching the bottom: divider collapse animates
         }
       } else if(advanced){
         renderTabs(active);
@@ -386,10 +468,25 @@ function start(){
     }
     toggleToBottom();
   });
+  // Composer is an overlay, not a flex row that shrinks #log. Its height is reserved as a
+  // transparent bottom border on #log (so the scrollbar ends at the composer top): pinned
+  // re-pins here, a scrolled-up reader's top messages stay put (overflow-anchor:none). Tab
+  // switches re-baseline via syncComposerH().
+  const composer = document.getElementById("composer");
+  if(composer && log && typeof ResizeObserver !== "undefined"){
+    setComposerH(composer.offsetHeight);
+    new ResizeObserver(() => {
+      const d = composer.offsetHeight - composerH;
+      setComposerH(composer.offsetHeight);
+      if(!d) return;
+      if(stick) stickToBottom();
+      else toggleToBottom();
+    }).observe(composer);
+  }
   const th = document.getElementById("theme");
   if(th) th.addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
   const tb = document.getElementById("tobottom");
-  if(tb) tb.addEventListener("click", () => { stick = true; markRead(active, true); renderTabs(active); rerender(active); });
+  if(tb) tb.addEventListener("click", () => { stick = true; markRead(active, true); renderTabs(active); rerender(active, true); });
   window.addEventListener("hashchange", () => { const w = parseInt(location.hash.slice(1), 10); if(w && w !== active && sessionList.some(s => s.created === w)) selectSession(w); });
   document.addEventListener("keydown", e => {
     if(["ArrowDown","PageDown","End"," "].includes(e.key)) allowReadOnScroll();

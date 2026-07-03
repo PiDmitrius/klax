@@ -56,6 +56,39 @@ export class TurnModel {
     if(t) t.state = advance(t.state, state);
   }
 
+  // setContext updates the turn-level usage snapshot. It is intentionally separate from
+  // blocks: the working indicator and the final context line are per-turn UI, not per-bubble.
+  setContext(created, seq, used, window){
+    const t = this._seq(this.turns(created), seq);
+    if(!t) return;
+    if(used) t.ctx_used = used;
+    if(window) t.ctx_window = window;
+  }
+
+  setContextHint(created, seq, used, window){
+    if(!used || !window) return false;
+    const t = this._seq(this.turns(created), seq);
+    if(!t || !isPending(t.state)) return false;
+    let changed = false;
+    if(used && t.ctx_hint_used !== used){ t.ctx_hint_used = used; changed = true; }
+    if(window && t.ctx_hint_window !== window){ t.ctx_hint_window = window; changed = true; }
+    return changed;
+  }
+
+  setSessionContextHint(created, used, window){
+    if(!used || !window) return false;
+    let changed = false;
+    // Update each pending turn's hint directly — we already hold t, so skip setContextHint's
+    // per-turn _seq() re-scan of the turn list (which made this O(n²) over pending turns).
+    for(const t of this.turns(created)){
+      if(t.role === "user" && isPending(t.state)){
+        if(t.ctx_hint_used !== used){ t.ctx_hint_used = used; changed = true; }
+        if(t.ctx_hint_window !== window){ t.ctx_hint_window = window; changed = true; }
+      }
+    }
+    return changed;
+  }
+
   // appendBlock adds an answer block, deduped by block.id: a present id wins (a live
   // eventSeq is attached to the existing block so unread still sees it), else it appends.
   // Visual merging of consecutive same-role blocks is render's job, not the model's.
@@ -78,6 +111,8 @@ export class TurnModel {
 function normTurn(r){
   return {
     seq: r.seq, role: r.role, text: r.text, time: r.time, state: r.state, kind: r.kind,
-    eventSeq: r.eventSeq, blocks: (r.blocks || []).map(b => ({ ...b })),
+    eventSeq: r.eventSeq, ctx_used: r.ctx_used, ctx_window: r.ctx_window,
+    ctx_hint_used: r.ctx_hint_used, ctx_hint_window: r.ctx_hint_window,
+    blocks: (r.blocks || []).map(b => ({ ...b })),
   };
 }

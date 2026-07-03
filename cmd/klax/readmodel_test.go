@@ -26,7 +26,7 @@ func newReadModelDaemon(t *testing.T) (*daemon, int64) {
 
 func testRM(d *daemon, created int64, items []history.Item, busy, latest bool) []uiTurn {
 	q, _ := d.sessionStore("user:claw", created).InboundLog()
-	return d.buildReadModel("user:claw", created, groupTurns(items), q, busy, 0, latest)
+	return d.buildReadModel("user:claw", created, groupTurns(items), q, busy, 0, latest, 1_000_000)
 }
 
 // A turn still queued (enq, never run) is surfaced on the latest page as state "enq" with
@@ -83,6 +83,41 @@ func TestReadModelLegacyMarkerless(t *testing.T) {
 	turns := testRM(d, created, items, false, true)
 	if len(turns) != 1 || turns[0].Seq >= 0 || turns[0].State != "done" {
 		t.Fatalf("legacy markerless turn: %+v", turns)
+	}
+}
+
+func TestReadModelCarriesContextOnTurn(t *testing.T) {
+	d, created := newReadModelDaemon(t)
+	items := []history.Item{
+		{Role: "user", Text: "u"},
+		{Role: "assistant", Text: "a", CtxUsed: 144_000},
+	}
+	turns := testRM(d, created, items, false, true)
+	if len(turns) != 1 || len(turns[0].Blocks) != 1 {
+		t.Fatalf("context test model shape: %+v", turns)
+	}
+	// The per-turn "cut line" context comes from the last assistant block's usage; its window
+	// falls back to the session window when the transcript carries none (Claude).
+	if turns[0].CtxUsed != 144_000 || turns[0].CtxWindow != 1_000_000 {
+		t.Fatalf("turn context = %d/%d, want 144000/1000000", turns[0].CtxUsed, turns[0].CtxWindow)
+	}
+}
+
+// A codex turn whose final token_count lands on a trailing tool-only assistant item must
+// still carry its context to the turn on reload — guards the tool-only branch of
+// buildReadModel (the ctx capture lives outside the text-block `if`).
+func TestReadModelContextFromToolOnlyBlock(t *testing.T) {
+	d, created := newReadModelDaemon(t)
+	items := []history.Item{
+		{Role: "user", Text: "u"},
+		{Role: "assistant", Tools: []history.ToolCall{{Name: "Bash", Label: "$ echo hi"}}, CtxUsed: 142_000, CtxWindow: 258_400},
+	}
+	turns := testRM(d, created, items, false, true)
+	if len(turns) != 1 {
+		t.Fatalf("want 1 turn, got %+v", turns)
+	}
+	if turns[0].CtxUsed != 142_000 || turns[0].CtxWindow != 258_400 {
+		t.Fatalf("tool-only turn context = %d/%d, want 142000/258400", turns[0].CtxUsed, turns[0].CtxWindow)
 	}
 }
 

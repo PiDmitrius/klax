@@ -6,9 +6,13 @@
 // layer (exercised end-to-end by the Step-4 browser harness). Markdown + capability image
 // refs come from markdown.js.
 
-import { mdSafe, esc, fmtTime } from "./markdown.js";
+import { mdSafe, esc, fmtTime, fmtDate } from "./markdown.js";
 
 function blockCls(role){ return role === "tool" ? "tool" : role === "error" ? "error" : role === "system" ? "system" : "assistant"; }
+function contextText(used, window){
+  if(!used || !window) return "";
+  return "📊 Контекст: " + Math.floor(used * 100 / window) + "% (" + Math.floor(used / 1000) + "k/" + Math.floor(window / 1000) + "k)";
+}
 
 // renderModel computes the ordered render items for one session. PURE and unit-testable.
 // The unread divider stays turn-aware: user bubbles are the human's own messages and do
@@ -19,6 +23,7 @@ export function renderModel(turns, unreadAfter){
   let queuePos = 0, divided = false;
   const placeDivider = () => { if(!divided && unreadAfter !== undefined){ items.push({ kind: "divider" }); divided = true; } };
   const isUnread = es => es !== undefined && unreadAfter !== undefined && es > unreadAfter;
+  const blockUnread = b => b && isUnread(b.eventSeq);
   for(const t of (turns || [])){
     if(t.role !== "user"){
       if(isUnread(t.eventSeq)) placeDivider();
@@ -29,22 +34,41 @@ export function renderModel(turns, unreadAfter){
     }
     const groups = [];
     let i = 0;
+    let lastGroupTime = t.time;
     while(i < (t.blocks || []).length){
-      if(isUnread(t.blocks[i].eventSeq) && !divided && unreadAfter !== undefined){
+      if(blockUnread(t.blocks[i]) && !divided && unreadAfter !== undefined){
         groups.push({ divider: true });
         divided = true;
         continue;
       }
       const role = t.blocks[i].role, blocks = [];
       while(i < t.blocks.length && t.blocks[i].role === role){
-        if(isUnread(t.blocks[i].eventSeq) && !divided && unreadAfter !== undefined && blocks.length > 0) break;
+        if(blockUnread(t.blocks[i]) && !divided && unreadAfter !== undefined && blocks.length > 0) break;
         blocks.push(t.blocks[i]); i++;
       }
       const seqs = blocks.map(b => b.eventSeq || 0);
-      groups.push({ cls: blockCls(role), blocks, tool: role === "tool", time: blocks.length ? blocks[blocks.length - 1].time : undefined, maxEventSeq: Math.max(0, ...seqs) || undefined });
+      const last = blocks.length ? blocks[blocks.length - 1] : {};
+      const group = {
+        cls: blockCls(role), blocks, tool: role === "tool", time: last.time,
+        maxEventSeq: Math.max(0, ...seqs) || undefined,
+      };
+      groups.push(group);
+      if(group.time) lastGroupTime = group.time;
     }
     if(t.state === "enq") queuePos++;
-    items.push({ kind: "turn", seq: t.seq, text: t.text || "", time: t.time, groups, state: t.state, note: t.state === "enq" ? "в очереди · " + queuePos : undefined });
+    // Context is ONE left tool-line — the turn's "cut line", always the LAST element of the
+    // turn: BELOW the working dots, not above them. While the turn runs the order is
+    // [answer][dots][context] — new content is born at the dots, the context line stays at
+    // the bottom; when the turn settles the dots vanish and the context slides up to close
+    // the gap, still the bottom line. Live % (session hint as fallback) while running; the
+    // settled line uses turn-local context only, so a stale hint never becomes a fake final.
+    // It is NOT a group — buildItem renders it after the dots indicator.
+    const finalCtx = contextText(t.ctx_used, t.ctx_window);
+    const ctxLine = (t.state === "done" || t.state === "err") ? finalCtx
+      : t.state === "run" ? (finalCtx || contextText(t.ctx_hint_used, t.ctx_hint_window))
+      : "";
+    const note = t.state === "enq" ? "в очереди · " + queuePos : undefined;
+    items.push({ kind: "turn", seq: t.seq, text: t.text || "", time: t.time, groups, state: t.state, note, ctxLine, ctxTime: lastGroupTime });
   }
   return items;
 }
@@ -61,25 +85,37 @@ function divider(){
 function timeMeta(time){
   if(!time) return "";
   const u = typeof time === "number" ? time : Date.parse(time);
-  return u ? '<span class="meta">'+esc(fmtTime(u))+'</span>' : "";
+  return u ? esc(fmtDate(u))+' '+esc(fmtTime(u)) : "";
 }
-function bubble(cls, html, time, maxEventSeq){
-  const meta = timeMeta(time);
+function metaHTML(time){
+  const tm = timeMeta(time);
+  return tm ? '<span class="meta">'+tm+'</span>' : "";
+}
+// bubble carries the PRIMARY text on the node (`_raw`): the whole-message copy button
+// puts the model text on the clipboard, never the rendered HTML (app.js delegate).
+function bubble(cls, html, time, maxEventSeq, raw){
+  const meta = metaHTML(time);
   const d = document.createElement("div");
   d.className = "msg " + cls + (meta ? " hasmeta" : "");
   if(maxEventSeq) d.dataset.maxEventSeq = String(maxEventSeq);
-  d.innerHTML = '<div class="body">'+html+'</div>' + meta;
+  const copy = raw ? '<button class="mcopy" title="Копировать сообщение">⧉</button>' : "";
+  d.innerHTML = copy + '<div class="body">'+html+'</div>' + meta;
+  if(raw) d._raw = raw;
   return d;
 }
 // indicator is the per-turn tail dots: null for a settled turn (done/err — err shows its
 // error block); animated + ✕ for run; dim 'в очереди · N' for enq.
 function indicator(state, note, onAbort){
   if(state === "done" || state === "err" || state === undefined) return null;
-  const d = document.createElement("div");
   const animated = state === "run";
   const abortable = state === "run" || state === "enq";
+  const d = document.createElement("div");
   d.className = "msg assistant typing" + (animated ? "" : " queued");
-  d.innerHTML = DOTS + (note ? '<span class="qnote">'+esc(note)+'</span>' : "") + (abortable ? '<button class="stop" title="Прервать">✕</button>' : "");
+  // The only note left is the enq queue position ('в очереди · N'). The context line is a
+  // separate tool bubble rendered below the dots (see buildItem), so the running indicator
+  // is just the animated dots + the ✕ abort button.
+  const queueNote = note ? '<span class="qnote">'+esc(note)+'</span>' : "";
+  d.innerHTML = DOTS + queueNote + (abortable ? '<button class="stop" title="Прервать">✕</button>' : "");
   if(abortable && onAbort){ const b = d.querySelector(".stop"); if(b) b.addEventListener("click", onAbort); }
   return d;
 }
@@ -107,18 +143,20 @@ function reuseImages(root, bySrc){
 
 function renderKey(it, index){
   if(it.kind === "turn") return "turn:" + it.seq;
-  if(it.kind === "bubble") return "bubble:" + index + ":" + it.cls;
+  // Prefer the event seq over the list index: it keeps the key stable when items above
+  // (the unread divider) come and go, which node reuse and FLIP shifts both rely on.
+  if(it.kind === "bubble") return "bubble:" + (it.maxEventSeq !== undefined ? "e" + it.maxEventSeq : index) + ":" + it.cls;
   return "";
 }
 
 function renderSig(it){
   if(it.kind === "turn"){
     return JSON.stringify({
-      text: it.text, time: it.time, state: it.state, note: it.note,
+      text: it.text, time: it.time, state: it.state, note: it.note, ctxLine: it.ctxLine,
       groups: it.groups.map(g => ({
         divider: g.divider,
         cls: g.cls, tool: g.tool, time: g.time, maxEventSeq: g.maxEventSeq,
-        blocks: (g.blocks || []).map(b => ({ id: b.id, role: b.role, text: b.text, time: b.time })),
+        blocks: (g.blocks || []).map(b => ({ id: b.id, role: b.role, text: b.text, kind: b.kind, time: b.time })),
       })),
     });
   }
@@ -140,19 +178,34 @@ function stamp(node, key, sig){
   return node;
 }
 
+// withFlip tags a turn child as an independently animatable FLIP unit. A group bubble is
+// keyed by its FIRST block's id: when reading merges the bubbles a divider used to split,
+// the merged bubble inherits the leading part's identity and stays put — only the content
+// below slides up into the collapsed gap.
+function withFlip(el, key){ el.dataset.flip = key; return el; }
+
 function buildItem(it, onAbort){
   if(it.kind === "divider") return divider();
-  if(it.kind === "bubble") return bubble(it.cls, it.md ? mdSafe(it.text) : esc(it.text), it.time, it.maxEventSeq);
+  if(it.kind === "bubble") return bubble(it.cls, it.md ? mdSafe(it.text) : esc(it.text), it.time, it.maxEventSeq, it.text);
   const turn = document.createElement("div");
   turn.className = "turn"; turn.dataset.seq = it.seq;
-  turn.appendChild(bubble("user", mdSafe(it.text), it.time));
+  turn.appendChild(withFlip(bubble("user", mdSafe(it.text), it.time, undefined, it.text), "u"));
+  let gi = 0;
   for(const g of it.groups){
     if(g.divider){ turn.appendChild(divider()); continue; }
     const html = g.blocks.map(b => g.tool ? esc(b.text || "") : mdSafe(b.text || "")).join(g.tool ? "<br>" : "");
-    turn.appendChild(bubble(g.cls, html, g.time, g.maxEventSeq));
+    const raw = g.blocks.map(b => b.text || "").join(g.tool ? "\n" : "\n\n");
+    const fk = "g:" + ((g.blocks[0] && g.blocks[0].id) || (g.cls + ":" + gi));
+    turn.appendChild(withFlip(bubble(g.cls, html, g.time, g.maxEventSeq, raw), fk));
+    gi++;
   }
   const ind = indicator(it.state, it.note, onAbort);
-  if(ind) turn.appendChild(ind);
+  if(ind) turn.appendChild(withFlip(ind, "dots"));
+  // The context "cut line" is the turn's final element — below the dots while running, and
+  // the last line once the dots are gone (it slides up to close the gap).
+  if(it.ctxLine){
+    turn.appendChild(withFlip(bubble("tool", esc(it.ctxLine), it.ctxTime, undefined, it.ctxLine), "g:ctx:" + it.seq));
+  }
   return turn;
 }
 
@@ -164,6 +217,7 @@ export function paint(col, items, onAbort){
     const sig = renderSig(it);
     const old = key && nodes.get(key);
     if(old && old.dataset.renderSig === sig){
+      nodes.delete(key); // a duplicate key later must build fresh, not steal this node
       frag.appendChild(old);
       return;
     }
@@ -176,4 +230,115 @@ export function paint(col, items, onAbort){
 
 export function renderSession(col, turns, unreadAfter, onAbort){
   paint(col, renderModel(turns, unreadAfter), onAbort);
+}
+
+// --- smooth live updates (FLIP) ---
+// beginShift snapshots visual positions before a LIVE re-render; playShift then slides
+// every surviving unit from its old position to the new one, fades a ghost of a vanished
+// unread divider in place while the messages below close the gap, and gives genuinely new
+// nodes a short entry animation. A FLIP *unit* is what actually moves: a standalone keyed
+// bubble, or a CHILD of a .turn (user bubble / answer group / indicator, keyed
+// turnKey|data-flip) — the .turn container itself is never transformed, so parent and
+// child shifts cannot compound, and an in-turn divider collapse animates block-level.
+// Transforms only — layout and all scroll maths stay exact. Reduced motion disables it.
+const SHIFT_MS = 180, SHIFT_CAP = 800;
+
+function reducedMotion(){
+  return typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+export function beginShift(col){
+  if(reducedMotion()) return null;
+  const units = new Map(), keys = new Set();
+  Array.from(col.children).forEach(node => {
+    const key = node.dataset && node.dataset.renderKey;
+    if(!key) return;
+    keys.add(key);
+    if(node.classList.contains("turn")){
+      Array.from(node.children).forEach(ch => {
+        const fk = ch.dataset && ch.dataset.flip;
+        if(fk) units.set(key + "|" + fk, ch.getBoundingClientRect().top); // visual pos, mid-animation included
+      });
+    } else {
+      units.set(key, node.getBoundingClientRect().top);
+    }
+  });
+  col.querySelectorAll(".enter").forEach(n => n.classList.remove("enter"));
+  const dv = col.querySelector(".readline");
+  return { units, keys, divider: dv ? dv.getBoundingClientRect() : null, hadAny: col.children.length > 0 };
+}
+
+export function playShift(col, snap){
+  if(!snap) return;
+  const nodes = [], freshTurns = [];
+  Array.from(col.children).forEach(node => {
+    const key = node.dataset && node.dataset.renderKey;
+    if(!key) return;
+    if(node.classList.contains("turn")){
+      if(!snap.keys.has(key)){ freshTurns.push(node); return; } // brand-new turn enters as one
+      Array.from(node.children).forEach(ch => {
+        const fk = ch.dataset && ch.dataset.flip;
+        if(fk) nodes.push([ch, key + "|" + fk]);
+      });
+    } else if(!snap.keys.has(key)){
+      freshTurns.push(node);
+    } else {
+      nodes.push([node, key]);
+    }
+  });
+  nodes.forEach(([el]) => { el.style.transition = "none"; el.style.transform = ""; }); // neutralize leftovers
+  const vh = typeof innerHeight === "number" ? innerHeight : 800;
+  const inView = r => r.top < vh * 1.5 && r.bottom > -100;
+  const shifts = [], fresh = [];
+  nodes.forEach(([el, uk]) => { // one layout pass: everything at its final position
+    const r = el.getBoundingClientRect();
+    if(!snap.units.has(uk)){
+      if(snap.hadAny && inView(r)) fresh.push(el);
+      return;
+    }
+    const d = snap.units.get(uk) - r.top;
+    if(Math.abs(d) >= 2 && Math.abs(d) <= SHIFT_CAP && r.top > -vh && r.top < vh * 2) shifts.push([el, d]);
+  });
+  if(snap.hadAny) freshTurns.forEach(el => { if(inView(el.getBoundingClientRect())) fresh.push(el); });
+  shifts.forEach(([el, d]) => { el.style.transform = "translateY(" + d + "px)"; });
+  fresh.forEach(el => {
+    el.classList.add("enter");
+    el.addEventListener("animationend", () => el.classList.remove("enter"), { once: true });
+  });
+  if(shifts.length){
+    void col.offsetHeight; // commit the start positions before transitioning
+    shifts.forEach(([el]) => {
+      el.style.transition = "transform " + SHIFT_MS + "ms ease-out";
+      el.style.transform = "";
+      el.addEventListener("transitionend", () => { el.style.transition = ""; }, { once: true });
+    });
+  }
+  if(snap.divider && !col.querySelector(".readline")) fadeDividerGhost(snap.divider);
+}
+
+// clearShiftGhosts removes any fading divider ghost — structural renders (tab switch,
+// transcript reload, pagination) must not inherit a ghost from the previous view.
+export function clearShiftGhosts(){
+  const wrap = document.getElementById("logwrap");
+  if(wrap) wrap.querySelectorAll(".readline.ghost").forEach(n => n.remove());
+}
+
+// The removed "непрочитанные сообщения" line fades out exactly where it stood (an
+// absolutely positioned ghost in #logwrap) while the FLIP above collapses the gap.
+function fadeDividerGhost(rect){
+  const wrap = document.getElementById("logwrap");
+  if(!wrap) return;
+  const w = wrap.getBoundingClientRect();
+  if(rect.bottom < w.top - 40 || rect.top > w.bottom + 40) return; // was offscreen anyway
+  const old = wrap.querySelector(".readline.ghost");
+  if(old) old.remove();
+  const g = divider();
+  g.className = "readline ghost";
+  g.style.top = (rect.top - w.top) + "px";
+  g.style.left = (rect.left - w.left) + "px";
+  g.style.width = rect.width + "px";
+  wrap.appendChild(g);
+  const drop = () => g.remove();
+  g.addEventListener("animationend", drop, { once: true });
+  setTimeout(drop, 500);
 }

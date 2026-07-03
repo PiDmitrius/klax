@@ -62,7 +62,7 @@ func TestReadCodex(t *testing.T) {
 		`{"type":"response_item","payload":{"type":"reasoning","summary":[]}}`, // internal, ignored
 		`{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"echo hello\",\"yield_time_ms\":1000}"}}`,
 		`{"type":"event_msg","payload":{"type":"agent_message","message":"doing X"}}`,
-		`{"type":"event_msg","payload":{"type":"token_count","info":{}}}`, // meta, ignored
+		`{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":144000},"model_context_window":258400}}}`,
 	})
 	items, err := readCodex(path)
 	if err != nil {
@@ -82,6 +82,9 @@ func TestReadCodex(t *testing.T) {
 	}
 	if items[2].Role != "assistant" || items[2].Text != "doing X" {
 		t.Fatalf("item2 = %+v", items[2])
+	}
+	if items[2].CtxUsed != 144000 || items[2].CtxWindow != 258400 {
+		t.Fatalf("item2 context = %d/%d, want 144000/258400", items[2].CtxUsed, items[2].CtxWindow)
 	}
 }
 

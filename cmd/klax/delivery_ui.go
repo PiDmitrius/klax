@@ -27,6 +27,13 @@ func (d *daemon) newUIDelivery(_ context.Context, msg queuedMsg) *uiDelivery {
 }
 
 func (u *uiDelivery) Progress(ev runner.ProgressEvent) {
+	if ev.Kind == runner.ProgressKindContext {
+		u.d.uiEmit(u.user, uiEvent{
+			Type: "context", Session: u.session, TurnSeq: u.turnSeq,
+			CtxUsed: ev.Usage.ContextUsed, CtxWindow: ev.Usage.ContextWindow,
+		})
+		return
+	}
 	// The runner pre-formats ev.Text at the narrow Telegram width. The UI has the room,
 	// so a real tool call is re-rendered at the wider UI limit; narration passes through.
 	// Each block gets a stable id so the client dedups a reload-race duplicate.
@@ -38,7 +45,10 @@ func (u *uiDelivery) Progress(ev runner.ProgressEvent) {
 	} else {
 		b = uiBlock{ID: blockID(u.turnSeq, "assistant", ev.Text, nil), Role: "assistant", Text: ev.Text, Time: now}
 	}
-	u.d.uiEmit(u.user, uiEvent{Type: "progress", Session: u.session, TurnSeq: u.turnSeq, Block: &b, Kind: string(ev.Kind)})
+	u.d.uiEmit(u.user, uiEvent{
+		Type: "progress", Session: u.session, TurnSeq: u.turnSeq, Block: &b, Kind: string(ev.Kind),
+		CtxUsed: ev.Usage.ContextUsed, CtxWindow: ev.Usage.ContextWindow,
+	})
 }
 
 func (u *uiDelivery) Final(res runner.RunResult) {

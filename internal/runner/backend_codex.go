@@ -104,6 +104,12 @@ type codexUsage struct {
 	OutputTokens      int `json:"output_tokens"`
 }
 
+type codexSessionMeta struct {
+	Model         string
+	ContextWindow int
+	ContextUsed   int
+}
+
 func (b *CodexBackend) ParseEvent(line []byte) ([]Event, bool) {
 	var ev codexEvent
 	if err := json.Unmarshal(line, &ev); err != nil {
@@ -237,10 +243,6 @@ func (b *CodexBackend) ParseEvent(line []byte) ([]Event, bool) {
 			e.Usage.InputTokens = ev.Usage.InputTokens
 			e.Usage.OutputTokens = ev.Usage.OutputTokens
 			e.Usage.CacheRead = ev.Usage.CachedInputTokens
-			// Codex reports cached_input_tokens as a subset of input_tokens.
-			// For context occupancy we should use input_tokens directly to avoid
-			// double-counting cached prompt tokens.
-			e.Usage.ContextUsed = ev.Usage.InputTokens
 		}
 		return single(e)
 
@@ -307,72 +309,131 @@ func firstNonEmpty(values ...string) string {
 // ReadSessionMeta reads model, effective context window, and the last turn's
 // prompt size from the local Codex session JSONL file.
 func ReadCodexSessionMeta(threadID string) (model string, contextWindow int, contextUsed int) {
+	// One-shot: a fresh tail polled from offset 0 opens, scans, and parses the whole
+	// rollout exactly as the live tail does (findCodexSessionFile + readEventLine +
+	// parseCodexSessionMetaLine), so the two share a single code path.
+	meta, _ := newCodexSessionMetaTail(threadID).Poll()
+	return meta.Model, meta.ContextWindow, meta.ContextUsed
+}
+
+func findCodexSessionFile(threadID string) string {
 	home, _ := os.UserHomeDir()
-	if home == "" {
-		return
+	if home == "" || threadID == "" {
+		return ""
 	}
-	sessDir := filepath.Join(home, ".codex", "sessions")
-	// Find session file matching thread ID.
-	pattern := filepath.Join(sessDir, "*", "*", "*", fmt.Sprintf("*%s.jsonl", threadID))
+	pattern := filepath.Join(home, ".codex", "sessions", "*", "*", "*", fmt.Sprintf("*%s.jsonl", threadID))
 	matches, _ := filepath.Glob(pattern)
 	if len(matches) == 0 {
-		return
+		return ""
 	}
-	f, err := os.Open(matches[0])
+	return matches[0]
+}
+
+type codexSessionMetaTail struct {
+	threadID string
+	path     string
+	offset   int64
+	meta     codexSessionMeta
+}
+
+func newCodexSessionMetaTail(threadID string) *codexSessionMetaTail {
+	return &codexSessionMetaTail{threadID: threadID}
+}
+
+func (t *codexSessionMetaTail) Poll() (codexSessionMeta, bool) {
+	if t.path == "" {
+		t.path = findCodexSessionFile(t.threadID)
+		if t.path == "" {
+			return t.meta, false
+		}
+	}
+	f, err := os.Open(t.path)
 	if err != nil {
-		return
+		return t.meta, false
 	}
 	defer f.Close()
-
-	// Read with the same robust line reader as the runner's stdout loop, not a
-	// bufio.Scanner: a codex rollout line can exceed any fixed scanner buffer (a
-	// turn carrying large file contents or a big message). A scanner would hit
-	// ErrTooLong and stop early, silently skipping the later token_count /
-	// turn_context lines this function exists to pick up. readEventLine consumes
-	// the whole file regardless, so the metadata is always found.
+	if t.offset > 0 {
+		if _, err := f.Seek(t.offset, 0); err != nil {
+			return t.meta, false
+		}
+	}
+	changed := false
 	reader := bufio.NewReaderSize(f, 64*1024)
+	trailing := 0 // raw bytes of an unterminated final line (codex mid-write) — not consumed
 	for {
 		line, readErr := readEventLine(reader)
-		if len(line) > 0 {
-			var entry struct {
-				Type    string          `json:"type"`
-				Payload json.RawMessage `json:"payload"`
-			}
-			if json.Unmarshal(line, &entry) == nil {
-				switch entry.Type {
-				case "event_msg":
-					var ev struct {
-						Type               string `json:"type"`
-						ModelContextWindow int    `json:"model_context_window"`
-						Info               *struct {
-							LastTokenUsage *struct {
-								InputTokens int `json:"input_tokens"`
-							} `json:"last_token_usage"`
-						} `json:"info,omitempty"`
-					}
-					if json.Unmarshal(entry.Payload, &ev) == nil {
-						if ev.Type == "task_started" && ev.ModelContextWindow > 0 {
-							contextWindow = ev.ModelContextWindow
-						}
-						if ev.Type == "token_count" && ev.Info != nil && ev.Info.LastTokenUsage != nil && ev.Info.LastTokenUsage.InputTokens > 0 {
-							contextUsed = ev.Info.LastTokenUsage.InputTokens
-						}
-					}
-				case "turn_context":
-					var tc struct {
-						Model string `json:"model"`
-					}
-					if json.Unmarshal(entry.Payload, &tc) == nil && tc.Model != "" {
-						model = tc.Model
-					}
-				}
-			}
+		if readErr != nil && len(line) > 0 && len(line) < maxEventLine {
+			// A line returned together with the read error has no newline terminator, so
+			// len(line) is its exact raw length. Roll the offset back past it and reparse
+			// from its start next poll — a token_count split across two polls is not lost.
+			trailing = len(line)
+		}
+		if len(line) > 0 && parseCodexSessionMetaLine(line, &t.meta) {
+			changed = true
 		}
 		if readErr != nil {
 			break
 		}
 	}
-	return
+	if off, err := f.Seek(0, 1); err == nil {
+		t.offset = off - int64(trailing)
+	}
+	return t.meta, changed
+}
+
+func parseCodexSessionMetaLine(line []byte, meta *codexSessionMeta) bool {
+	var entry struct {
+		Type    string          `json:"type"`
+		Payload json.RawMessage `json:"payload"`
+	}
+	if json.Unmarshal(line, &entry) != nil {
+		return false
+	}
+	switch entry.Type {
+	case "event_msg":
+		var ev struct {
+			Type               string `json:"type"`
+			ModelContextWindow int    `json:"model_context_window"`
+			Info               *struct {
+				LastTokenUsage *struct {
+					InputTokens int `json:"input_tokens"`
+				} `json:"last_token_usage"`
+				ModelContextWindow int `json:"model_context_window"`
+			} `json:"info,omitempty"`
+		}
+		if json.Unmarshal(entry.Payload, &ev) != nil {
+			return false
+		}
+		switch ev.Type {
+		case "task_started":
+			if ev.ModelContextWindow > 0 && meta.ContextWindow != ev.ModelContextWindow {
+				meta.ContextWindow = ev.ModelContextWindow
+				return true
+			}
+		case "token_count":
+			changed := false
+			if ev.Info != nil {
+				if ev.Info.ModelContextWindow > 0 && meta.ContextWindow != ev.Info.ModelContextWindow {
+					meta.ContextWindow = ev.Info.ModelContextWindow
+					changed = true
+				}
+				if ev.Info.LastTokenUsage != nil && ev.Info.LastTokenUsage.InputTokens > 0 && meta.ContextUsed != ev.Info.LastTokenUsage.InputTokens {
+					meta.ContextUsed = ev.Info.LastTokenUsage.InputTokens
+					changed = true
+				}
+			}
+			return changed
+		}
+	case "turn_context":
+		var tc struct {
+			Model string `json:"model"`
+		}
+		if json.Unmarshal(entry.Payload, &tc) == nil && tc.Model != "" && meta.Model != tc.Model {
+			meta.Model = tc.Model
+			return true
+		}
+	}
+	return false
 }
 
 // codexPlanInput normalizes a codex todo_list event into the canonical

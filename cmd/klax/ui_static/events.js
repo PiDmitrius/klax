@@ -11,17 +11,28 @@ import { api } from "./base.js";
 export function applyEvent(model, ev, ctx){
   ctx = ctx || {};
   const s = ev.session;
+  const applyHint = () => {
+    const h = ctx.sessionContext && ctx.sessionContext(s);
+    if(h) model.setContextHint(s, ev.turn_seq, h.used, h.window);
+  };
   switch(ev.type){
     case "user":
       model.upsertUser(s, { seq: ev.turn_seq, text: ev.text, time: ev.time, eventSeq: ev.seq }, ev.state || "enq");
+      applyHint();
       return s;
     case "turn_start":
       model.setState(s, ev.turn_seq, "run");
+      applyHint();
+      return s;
+    case "context":
+      model.setContext(s, ev.turn_seq, ev.ctx_used, ev.ctx_window);
       return s;
     case "progress":
+      if(ev.ctx_used || ev.ctx_window) model.setContext(s, ev.turn_seq, ev.ctx_used, ev.ctx_window);
       if(ev.block){ ev.block.eventSeq = ev.seq; model.appendBlock(s, ev.turn_seq, ev.block); }
       return s;
     case "final":
+      if(ev.ctx_used || ev.ctx_window) model.setContext(s, ev.turn_seq, ev.ctx_used, ev.ctx_window);
       if(ev.block){ ev.block.eventSeq = ev.seq; model.appendBlock(s, ev.turn_seq, ev.block); }
       model.setState(s, ev.turn_seq, "done");
       return s;

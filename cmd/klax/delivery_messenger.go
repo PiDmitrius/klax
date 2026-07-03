@@ -150,6 +150,9 @@ func (m *messengerDelivery) startWorker() {
 // Progress is the runner.ProgressFunc. It runs in the stdout-scanner goroutine
 // and only ever appends and does a non-blocking mailbox send — never network.
 func (m *messengerDelivery) Progress(ev runner.ProgressEvent) {
+	if ev.Kind == runner.ProgressKindContext {
+		return
+	}
 	if !m.verbose {
 		return
 	}

@@ -467,6 +467,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		Sandbox:                   sess.Sandbox,
 		Model:                     sess.ModelOverride,
 		Effort:                    sess.ThinkOverride,
+		ContextWindowHint:         sess.ContextWindow,
 		AppendSystemPrompt:        sess.AppendSystemPrompt,
 		ClaudeTTY:                 sess.ClaudeTTY,
 		SuppressNarrationProgress: !verbose,

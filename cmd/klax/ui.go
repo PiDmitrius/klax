@@ -66,7 +66,7 @@ type uiSessionInfo struct {
 // uiEvent is one server-sent event. The client multiplexes all tabs over a
 // single stream and routes by Session (a session's Created).
 type uiEvent struct {
-	Type      string          `json:"type"`            // sessions|turn_start|progress|final|error|notice|compact|user
+	Type      string          `json:"type"`            // sessions|turn_start|context|progress|final|error|notice|compact|user
 	Seq       uint64          `json:"seq,omitempty"`   // monotonic id for client dedupe + unread; set by emitLocked
 	Nonce     string          `json:"nonce,omitempty"` // user-event: the sender's send nonce, so it skips its own echo
 	Session   int64           `json:"session,omitempty"`
@@ -854,7 +854,7 @@ func (s *uiServer) handleTranscript(w http.ResponseWriter, r *http.Request) {
 		start = 0
 	}
 	queueTurns, _ := s.d.sessionStore(sk, created).InboundLog()
-	turns := s.d.buildReadModel(sk, created, grouped[start:end], queueTurns, s.d.isSessionBusy(sk, created), start, before == 0)
+	turns := s.d.buildReadModel(sk, created, grouped[start:end], queueTurns, s.d.isSessionBusy(sk, created), start, before == 0, sess.ContextWindow)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
