@@ -10,8 +10,14 @@ import { mdSafe, esc, fmtTime, fmtDate } from "./markdown.js";
 
 function blockCls(role){ return role === "tool" ? "tool" : role === "error" ? "error" : role === "system" ? "system" : "assistant"; }
 function contextText(used, window){
-  if(!used || !window) return "";
-  return "📊 Контекст: " + Math.floor(used * 100 / window) + "% (" + Math.floor(used / 1000) + "k/" + Math.floor(window / 1000) + "k)";
+  if(!used) return "";
+  const uk = Math.floor(used / 1000) + "k";
+  // Draw the line as soon as `used` tokens are known. A brand-new session's FIRST turn only
+  // learns its window in the end-of-turn result, but Claude streams used tokens long before
+  // that — so show the count now and fold in the % once the window arrives. No believed
+  // window is invented: only real numbers, upgraded in place.
+  if(!window) return "📊 Контекст: " + uk;
+  return "📊 Контекст: " + Math.floor(used * 100 / window) + "% (" + uk + "/" + Math.floor(window / 1000) + "k)";
 }
 
 // renderModel computes the ordered render items for one session. PURE and unit-testable.
@@ -241,7 +247,7 @@ export function renderSession(col, turns, unreadAfter, onAbort){
 // turnKey|data-flip) — the .turn container itself is never transformed, so parent and
 // child shifts cannot compound, and an in-turn divider collapse animates block-level.
 // Transforms only — layout and all scroll maths stay exact. Reduced motion disables it.
-const SHIFT_MS = 180, SHIFT_CAP = 800;
+const SHIFT_MS = 180, SHIFT_CAP = 800, DIVIDER_FADE_MS = 300; // DIVIDER_FADE_MS matches .readline.ghost lineout in app.css
 
 function reducedMotion(){
   return typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -305,15 +311,22 @@ export function playShift(col, snap){
     el.classList.add("enter");
     el.addEventListener("animationend", () => el.classList.remove("enter"), { once: true });
   });
+  // When the "непрочитанные сообщения" line vanishes, split the motion into two phases so
+  // the sliding blocks never cross the still-visible line: the ghost fades out FIRST, and
+  // only then does the gap collapse. A transition-delay equal to the fade holds every shifted
+  // block at its old position while the line fades, then slides it up. A plain reflow (no
+  // divider gone) has zero delay and collapses immediately, exactly as before.
+  const dividerGone = snap.divider && !col.querySelector(".readline");
+  const collapseDelay = dividerGone ? DIVIDER_FADE_MS : 0;
   if(shifts.length){
     void col.offsetHeight; // commit the start positions before transitioning
     shifts.forEach(([el]) => {
-      el.style.transition = "transform " + SHIFT_MS + "ms ease-out";
+      el.style.transition = "transform " + SHIFT_MS + "ms ease-out" + (collapseDelay ? " " + collapseDelay + "ms" : "");
       el.style.transform = "";
       el.addEventListener("transitionend", () => { el.style.transition = ""; }, { once: true });
     });
   }
-  if(snap.divider && !col.querySelector(".readline")) fadeDividerGhost(snap.divider);
+  if(dividerGone) fadeDividerGhost(snap.divider);
 }
 
 // clearShiftGhosts removes any fading divider ghost — structural renders (tab switch,

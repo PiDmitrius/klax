@@ -22,6 +22,13 @@ let active = 0;
 let cursor = null, lastSeq = 0;
 let stick = true, pendingRender = false, readOnScroll = true;
 let liveRenderRAF = 0, liveRenderCreated = 0;
+// Live DOM commits are serialized so streamed blocks never animate on top of each other.
+// While an entrance/FLIP is in flight the model keeps updating, but the DOM commit is
+// deferred and COALESCED: everything that arrived during the window then appears as ONE
+// block growing out of the dots, instead of a cascade of overlapping slide-ins. Only the
+// animation is throttled (COMMIT_MS, a hair over the 180ms entrance) — the data stays live.
+const COMMIT_MS = 200;
+let liveBusy = false, liveDirty = false, liveGateTimer = 0;
 let sessionList = []; // last /api/sessions list — for hash-change validity + lookups
 const offsetFor = {}, moreFor = {}; // created -> first-loaded turn index + has-older-history flag (pagination)
 const scrollTopFor = {}; // created -> last scrollTop, so tab switches do not snap by a pixel
@@ -146,10 +153,10 @@ function applyTheme(t){
 // repositioning must not be animated over.
 function rerender(created, live){
   if(created !== active) return;
-  if(!live && liveRenderRAF){
-    cancelAnimationFrame(liveRenderRAF);
-    liveRenderRAF = 0;
-    liveRenderCreated = 0;
+  if(!live){ // a structural render (tab switch, load, foreground) supersedes any queued live animation
+    if(liveRenderRAF){ cancelAnimationFrame(liveRenderRAF); liveRenderRAF = 0; liveRenderCreated = 0; }
+    if(liveGateTimer){ clearTimeout(liveGateTimer); liveGateTimer = 0; }
+    liveBusy = false; liveDirty = false;
   }
   const col = logcol();
   if(!col) return;
@@ -177,16 +184,37 @@ function rerender(created, live){
   if(snap) playShift(col, snap); // after the scroll settled: deltas = exact visual shifts
 }
 
+// scheduleLiveRerender funnels every live content update through the serialization gate.
+// Gate OPEN → commit on the next frame (same-frame events still coalesce via the rAF). Gate
+// CLOSED (an entrance is playing) → just mark dirty; commitLive's timer flushes the
+// accumulated changes as ONE further animation the moment the gate reopens. The model was
+// already patched before we got here, so nothing waits on the DOM — only the animation does.
 function scheduleLiveRerender(created){
   if(created !== active) return;
+  if(liveBusy){ liveDirty = true; return; } // an animation is in flight — accumulate, don't stack
   liveRenderCreated = created;
   if(liveRenderRAF) return;
   liveRenderRAF = requestAnimationFrame(() => {
     const c = liveRenderCreated;
     liveRenderRAF = 0;
     liveRenderCreated = 0;
-    if(c === active) rerender(c, true);
+    if(c === active) commitLive(c);
   });
+}
+
+// commitLive paints one animated frame and closes the gate for COMMIT_MS. Whatever arrives
+// during that window sets liveDirty and is flushed as a single further animation when the
+// gate reopens — so a burst of streamed blocks queues into clean, non-overlapping grows.
+function commitLive(created){
+  liveBusy = true;
+  liveDirty = false;
+  rerender(created, true);
+  if(liveGateTimer) clearTimeout(liveGateTimer);
+  liveGateTimer = setTimeout(() => {
+    liveGateTimer = 0;
+    liveBusy = false;
+    if(liveDirty && active) scheduleLiveRerender(active);
+  }, COMMIT_MS);
 }
 
 function abortActive(){
@@ -240,8 +268,9 @@ async function loadOlder(created){
   } catch(e){}
 }
 
-// rawUnreadCount is the true unread model, used for the in-log divider/jump. unreadCount
-// is the tab/title display variant, suppressing the active visible tab's badge.
+// rawUnreadCount is the true unread model (line-to-bottom): it drives the in-log divider,
+// the jump target, AND the tab badge — so the active tab shows its real remaining count and
+// counts down as the reader advances, and badge, title, and divider always agree.
 function rawUnreadCount(created){
   const base = readThrough[created];
   if(base === undefined) return 0;
@@ -254,10 +283,6 @@ function rawUnreadCount(created){
     for(const b of (t.blocks || [])) if(b.eventSeq !== undefined && b.eventSeq > base) n++;
   }
   return n;
-}
-function unreadCount(created){
-  if(sameSession(created, active) && documentVisible()) return 0;
-  return rawUnreadCount(created);
 }
 function advanceReadThroughPastViewport(log){
   if(!active || readThrough[active] === undefined || !log || inReadGrace(active)) return false;
@@ -419,7 +444,7 @@ function start(){
     isLive: c => sessionList.some(s => s.created === c),
     onAfterSend: () => { stick = true; markRead(active, true); renderTabs(active); stickToBottom(); },
   });
-  initTabs({ select: selectSession, onNew: onNewSession, afterClose, notice: showNotice, unread: unreadCount });
+  initTabs({ select: selectSession, onNew: onNewSession, afterClose, notice: showNotice, unread: rawUnreadCount });
   // Delegated copy buttons: a fence's .copy copies its code, a bubble's .mcopy copies the
   // whole message's PRIMARY text (the model text render.js stashed on the node — raw
   // markdown source, never the rendered HTML).

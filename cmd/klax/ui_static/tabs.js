@@ -36,27 +36,28 @@ export function renderTabs(active){
   const strip = document.getElementById("tabs");
   if(!strip) return;
   let totalUnread = 0, busyCount = 0;
-  const activeReads = typeof document === "undefined" || document.visibilityState !== "hidden";
+  // The badge AND the browser <title> mirror the in-log truth symmetrically: every tab
+  // (active included) shows its REAL remaining unread (line-to-bottom), counting down as the
+  // reader scrolls and hitting 0 exactly when the divider collapses. The title just sums the
+  // same per-tab counts, so title and tabs never disagree — and no instant reset on entry.
   const existing = new Map();
   strip.querySelectorAll(".tab[data-created]").forEach(t => existing.set(t.dataset.created, t));
   const keep = new Set();
   for(const s of sessions){
-    const rawUnread = deps.unread ? deps.unread(s.created) : 0;
+    const unread = deps.unread ? deps.unread(s.created) : 0;
     const isActive = sameSession(s.created, active);
-    const tabUnread = (isActive && activeReads) ? 0 : rawUnread;
-    const titleUnread = (isActive && activeReads) ? 0 : rawUnread;
-    totalUnread += titleUnread;
+    totalUnread += unread;
     if(s.busy) busyCount++;
     const key = String(s.created);
     const t = existing.get(key) || createTab();
     keep.add(key);
     t.dataset.created = key;
     t._sessionName = s.name || "";
-    t.className = "tab" + (isActive ? " active" : "") + (s.busy ? " busy" : "") + (tabUnread ? " unread" : "");
+    t.className = "tab" + (isActive ? " active" : "") + (s.busy ? " busy" : "") + (unread ? " unread" : "");
     t.querySelector(".tname").textContent = s.name || ("сессия " + s.created);
     const badge = t.querySelector(".badge");
-    badge.textContent = tabUnread || "";
-    badge.classList.toggle("hidden", !tabUnread);
+    badge.textContent = unread || "";
+    badge.classList.toggle("hidden", !unread);
     if(t.parentNode !== strip || strip.children[sessions.indexOf(s)] !== t) strip.appendChild(t);
   }
   for(const [key, t] of existing) if(!keep.has(key)) t.remove();

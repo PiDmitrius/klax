@@ -749,7 +749,12 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 		return changed
 	}
 	emitUsage := func() {
-		if usage.ContextUsed > 0 && usage.ContextWindow > 0 {
+		// Emit as soon as used tokens are known, even before the window is. Claude only
+		// reports its context window in the end-of-turn result, so a brand-new session's
+		// first turn would otherwise show no context line at all until it finished. A UI
+		// frontend renders the count live and folds in the % once the window arrives; the
+		// messenger ignores ProgressKindContext entirely, so this stays UI-only.
+		if usage.ContextUsed > 0 {
 			buf.emitTool(ProgressEvent{Kind: ProgressKindContext, Usage: usage})
 		}
 	}
