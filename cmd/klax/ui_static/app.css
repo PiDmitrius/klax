@@ -64,8 +64,10 @@
   .tab.unread { font-weight: 600; background: var(--unread-bg); }              /* finished w/ new msgs */
   .tab.busy.unread { background: var(--unread-work-bg); }
   .tab.unread:not(.busy) .dot { background: var(--dot-new); }                  /* solid bright green */
+  /* The active tab keeps its calm look (no loud unread bg) but DOES show a count badge now:
+     it tracks the real remaining unread from the divider to the bottom, draining as you read
+     down. The badge still hides itself when unread hits 0 (the .hidden toggle in renderTabs). */
   .tab.active.unread { font-weight: inherit; background: var(--tab-active-bg); }
-  .tab.active .badge { display: none !important; }
   /* Unread count — favicon-like when done, same amber as the work dot while busy. */
   .tab .badge { background: linear-gradient(var(--badge-new-top), var(--badge-new-mid) 50%, var(--badge-new-bottom)); color: #fff; font-size: 11px;
                 font-weight: 700; line-height: 1; min-width: 17px; height: 17px; padding: 0 4px;

@@ -268,8 +268,9 @@ async function loadOlder(created){
   } catch(e){}
 }
 
-// rawUnreadCount is the true unread model, used for the in-log divider/jump. unreadCount
-// is the tab/title display variant, suppressing the active visible tab's badge.
+// rawUnreadCount is the true unread model (line-to-bottom): it drives the in-log divider,
+// the jump target, AND the tab badge — so the active tab shows its real remaining count and
+// counts down as the reader advances, and badge, title, and divider always agree.
 function rawUnreadCount(created){
   const base = readThrough[created];
   if(base === undefined) return 0;
@@ -282,10 +283,6 @@ function rawUnreadCount(created){
     for(const b of (t.blocks || [])) if(b.eventSeq !== undefined && b.eventSeq > base) n++;
   }
   return n;
-}
-function unreadCount(created){
-  if(sameSession(created, active) && documentVisible()) return 0;
-  return rawUnreadCount(created);
 }
 function advanceReadThroughPastViewport(log){
   if(!active || readThrough[active] === undefined || !log || inReadGrace(active)) return false;
@@ -447,7 +444,7 @@ function start(){
     isLive: c => sessionList.some(s => s.created === c),
     onAfterSend: () => { stick = true; markRead(active, true); renderTabs(active); stickToBottom(); },
   });
-  initTabs({ select: selectSession, onNew: onNewSession, afterClose, notice: showNotice, unread: unreadCount });
+  initTabs({ select: selectSession, onNew: onNewSession, afterClose, notice: showNotice, unread: rawUnreadCount });
   // Delegated copy buttons: a fence's .copy copies its code, a bubble's .mcopy copies the
   // whole message's PRIMARY text (the model text render.js stashed on the node — raw
   // markdown source, never the rendered HTML).
