@@ -10,8 +10,14 @@ import { mdSafe, esc, fmtTime, fmtDate } from "./markdown.js";
 
 function blockCls(role){ return role === "tool" ? "tool" : role === "error" ? "error" : role === "system" ? "system" : "assistant"; }
 function contextText(used, window){
-  if(!used || !window) return "";
-  return "📊 Контекст: " + Math.floor(used * 100 / window) + "% (" + Math.floor(used / 1000) + "k/" + Math.floor(window / 1000) + "k)";
+  if(!used) return "";
+  const uk = Math.floor(used / 1000) + "k";
+  // Draw the line as soon as `used` tokens are known. A brand-new session's FIRST turn only
+  // learns its window in the end-of-turn result, but Claude streams used tokens long before
+  // that — so show the count now and fold in the % once the window arrives. No believed
+  // window is invented: only real numbers, upgraded in place.
+  if(!window) return "📊 Контекст: " + uk;
+  return "📊 Контекст: " + Math.floor(used * 100 / window) + "% (" + uk + "/" + Math.floor(window / 1000) + "k)";
 }
 
 // renderModel computes the ordered render items for one session. PURE and unit-testable.
