@@ -3,7 +3,6 @@
 // host (app.js) owns the `stick` flag; these are the primitives it drives.
 
 export function nearBottom(el){ return el.scrollHeight - el.scrollTop - el.clientHeight < 80; }
-export function toBottom(el){ if(el) el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight); }
 
 // selectionInLog reports a live, non-collapsed text selection inside el — the signal to
 // defer a re-render until the selection clears (flush on selectionchange).

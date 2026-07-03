@@ -28,13 +28,15 @@ type uiBlock struct {
 // (the per-turn indicator: enq|run|done|err) and its answer blocks; a standalone row
 // (system/compact/error notice between turns) has role != "user" and no seq/state.
 type uiTurn struct {
-	Seq    int64     `json:"seq,omitempty"` // durable turn_seq (user turns); negative synthetic for legacy markerless; 0 for standalone rows
-	Role   string    `json:"role"`          // user|system|compact|assistant|tool
-	Text   string    `json:"text,omitempty"`
-	Time   string    `json:"time,omitempty"`
-	State  string    `json:"state,omitempty"` // user turns: enq|run|done|err
-	Kind   string    `json:"kind,omitempty"`  // standalone: compact|error
-	Blocks []uiBlock `json:"blocks,omitempty"`
+	Seq       int64     `json:"seq,omitempty"` // durable turn_seq (user turns); negative synthetic for legacy markerless; 0 for standalone rows
+	Role      string    `json:"role"`          // user|system|compact|assistant|tool
+	Text      string    `json:"text,omitempty"`
+	Time      string    `json:"time,omitempty"`
+	State     string    `json:"state,omitempty"` // user turns: enq|run|done|err
+	Kind      string    `json:"kind,omitempty"`  // standalone: compact|error
+	Blocks    []uiBlock `json:"blocks,omitempty"`
+	CtxUsed   int       `json:"ctx_used,omitempty"`
+	CtxWindow int       `json:"ctx_window,omitempty"`
 }
 
 // blockID hashes CANONICAL block content (role/text/tools) — callers must hash BEFORE any
@@ -131,7 +133,7 @@ func groupTurns(items []history.Item) []groupedTurn {
 // On the latest page (`latest`) it also appends turns still queued (enq) or just-started
 // (run) that the transcript hasn't recorded yet, so a reload shows them. `startOrdinal`
 // is the absolute index of the first page unit, used to mint stable legacy ids.
-func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, queueTurns []sessfiles.Turn, busy bool, startOrdinal int, latest bool) []uiTurn {
+func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, queueTurns []sessfiles.Turn, busy bool, startOrdinal int, latest bool, ctxWindow int) []uiTurn {
 	store := d.sessionStore(sk, created)
 	byMarker := make(map[string]sessfiles.Turn, len(queueTurns))
 	for _, t := range queueTurns {
@@ -174,10 +176,24 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 		for _, b := range g.blocks {
 			if b.Role == "assistant" {
 				if b.Text != "" || len(b.Tools) == 0 {
-					ut.Blocks = append(ut.Blocks, uiBlock{ID: blockID(seq, "assistant", b.Text, nil), Role: "assistant", Text: d.rewriteOutboundForUI(sk, created, b.Text), Time: b.Time})
+					ut.Blocks = append(ut.Blocks, uiBlock{
+						ID: blockID(seq, "assistant", b.Text, nil), Role: "assistant",
+						Text: d.rewriteOutboundForUI(sk, created, b.Text), Time: b.Time,
+					})
 				}
 				for _, tc := range b.Tools {
 					ut.Blocks = append(ut.Blocks, uiBlock{ID: blockID(seq, "tool", tc.Label, nil), Role: "tool", Text: tc.Label, Time: b.Time})
+				}
+				// The per-turn context "cut line" comes from the last assistant block's usage —
+				// including a tool-only block (a codex turn whose final token_count lands on a
+				// trailing tool call), so this lives outside the text-block branch above. The
+				// block's own window wins; else fall back to the session window (Claude has none).
+				if b.CtxUsed > 0 {
+					ut.CtxUsed = b.CtxUsed
+					ut.CtxWindow = b.CtxWindow
+					if ut.CtxWindow == 0 {
+						ut.CtxWindow = ctxWindow
+					}
 				}
 				continue
 			}

@@ -8,7 +8,12 @@ import { apiHref } from "./base.js";
 export function esc(s){ return (s||"").replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 export function stripTags(s){ return (s||"").replace(/<[^>]+>/g, ""); }
 
-// --- time (hover-revealed delta @ HH:MM:SS) ---
+// --- time (hover-revealed stamp: Y.m.d over H:i:s) ---
+export function fmtDate(unix){
+  if(!unix) return "";
+  const d = new Date(unix), p = n => String(n).padStart(2,"0");
+  return d.getFullYear()+"."+p(d.getMonth()+1)+"."+p(d.getDate());
+}
 export function fmtTime(unix){
   if(!unix) return "";
   const d = new Date(unix), p = n => String(n).padStart(2,"0");

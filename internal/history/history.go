@@ -32,13 +32,15 @@ func toolCall(name, input string) ToolCall {
 
 // Item is one entry in a rendered transcript.
 type Item struct {
-	Role   string     `json:"role"`             // "user" | "assistant" | "system"
-	Text   string     `json:"text,omitempty"`   // message text (Markdown)
-	Marker string     `json:"marker,omitempty"` // user turns: the klax-turn correlation token
-	Tools  []ToolCall `json:"tools,omitempty"`
-	Kind   string     `json:"kind,omitempty"` // "" | "compact" | "error"
-	Time   string     `json:"time,omitempty"` // RFC3339, empty when unknown
-	Seq    int64      `json:"seq,omitempty"`  // durable turn_seq, set on pending turns surfaced from the queue
+	Role      string     `json:"role"`             // "user" | "assistant" | "system"
+	Text      string     `json:"text,omitempty"`   // message text (Markdown)
+	Marker    string     `json:"marker,omitempty"` // user turns: the klax-turn correlation token
+	Tools     []ToolCall `json:"tools,omitempty"`
+	Kind      string     `json:"kind,omitempty"` // "" | "compact" | "error"
+	Time      string     `json:"time,omitempty"` // RFC3339, empty when unknown
+	CtxUsed   int        `json:"ctx_used,omitempty"`
+	CtxWindow int        `json:"ctx_window,omitempty"`
+	Seq       int64      `json:"seq,omitempty"` // durable turn_seq, set on pending turns surfaced from the queue
 	// Pending drives the client's per-turn dots on reload: "" normal/done | "enq" still
 	// queued | "run" started-but-not-yet-flushed-to-transcript. Lets a full reload show a
 	// queued message exactly as it was instead of dropping it until it runs.
@@ -134,9 +136,9 @@ func readClaude(path string) ([]Item, error) {
 				items = append(items, Item{Role: "user", Text: text, Marker: marker, Time: ts})
 			}
 		case "assistant":
-			text, tools := claudeAssistant(line.Raw)
+			text, tools, ctxUsed := claudeAssistant(line.Raw)
 			if text != "" || len(tools) > 0 {
-				items = append(items, Item{Role: "assistant", Text: text, Tools: tools, Time: ts})
+				items = append(items, Item{Role: "assistant", Text: text, Tools: tools, Time: ts, CtxUsed: ctxUsed})
 			}
 		}
 	}
@@ -174,7 +176,7 @@ func claudeUserText(raw json.RawMessage) (clean, marker string) {
 	return StripTurnMarker(sb.String())
 }
 
-func claudeAssistant(raw json.RawMessage) (string, []ToolCall) {
+func claudeAssistant(raw json.RawMessage) (string, []ToolCall, int) {
 	var w struct {
 		Message struct {
 			Content []struct {
@@ -183,10 +185,15 @@ func claudeAssistant(raw json.RawMessage) (string, []ToolCall) {
 				Name  string          `json:"name"`
 				Input json.RawMessage `json:"input"`
 			} `json:"content"`
+			Usage *struct {
+				InputTokens         int `json:"input_tokens"`
+				CacheReadTokens     int `json:"cache_read_input_tokens"`
+				CacheCreationTokens int `json:"cache_creation_input_tokens"`
+			} `json:"usage"`
 		} `json:"message"`
 	}
 	if json.Unmarshal(raw, &w) != nil {
-		return "", nil
+		return "", nil, 0
 	}
 	var sb strings.Builder
 	var tools []ToolCall
@@ -198,7 +205,11 @@ func claudeAssistant(raw json.RawMessage) (string, []ToolCall) {
 			tools = append(tools, toolCall(b.Name, string(b.Input)))
 		}
 	}
-	return strings.TrimSpace(sb.String()), tools
+	ctxUsed := 0
+	if w.Message.Usage != nil {
+		ctxUsed = w.Message.Usage.InputTokens + w.Message.Usage.CacheReadTokens + w.Message.Usage.CacheCreationTokens
+	}
+	return strings.TrimSpace(sb.String()), tools, ctxUsed
 }
 
 // ---- Codex rollout ----
@@ -221,6 +232,11 @@ func readCodex(path string) ([]Item, error) {
 		return nil, err
 	}
 	var items []Item
+	lastAssistant := -1
+	appendAssistant := func(it Item) {
+		items = append(items, it)
+		lastAssistant = len(items) - 1
+	}
 	for _, raw := range bytes.Split(data, []byte("\n")) {
 		raw = bytes.TrimSpace(raw)
 		if len(raw) == 0 {
@@ -246,6 +262,12 @@ func readCodex(path string) ([]Item, error) {
 			Arguments json.RawMessage `json:"arguments"`
 			Input     json.RawMessage `json:"input"`
 			Action    json.RawMessage `json:"action"`
+			Info      *struct {
+				LastTokenUsage *struct {
+					InputTokens int `json:"input_tokens"`
+				} `json:"last_token_usage"`
+				ModelContextWindow int `json:"model_context_window"`
+			} `json:"info"`
 		}
 		_ = json.Unmarshal(entry.Payload, &p)
 		ts := normalizeTime(entry.Timestamp)
@@ -253,32 +275,38 @@ func readCodex(path string) ([]Item, error) {
 		case entry.Type == "event_msg" && p.Type == "user_message":
 			if t, marker := StripTurnMarker(p.Message); t != "" {
 				items = append(items, Item{Role: "user", Text: t, Marker: marker, Time: ts})
+				lastAssistant = -1
 			}
 		case entry.Type == "event_msg" && p.Type == "agent_message":
 			if t := strings.TrimSpace(p.Message); t != "" {
-				items = append(items, Item{Role: "assistant", Text: t, Time: ts})
+				appendAssistant(Item{Role: "assistant", Text: t, Time: ts})
+			}
+		case entry.Type == "event_msg" && p.Type == "token_count" && lastAssistant >= 0:
+			if p.Info != nil && p.Info.LastTokenUsage != nil {
+				items[lastAssistant].CtxUsed = p.Info.LastTokenUsage.InputTokens
+				items[lastAssistant].CtxWindow = p.Info.ModelContextWindow
 			}
 		case entry.Type == "item.started":
 			if tool, ok := codexHistoryItemTool(entry.Item); ok {
-				items = append(items, Item{Role: "assistant", Tools: []ToolCall{tool}, Time: ts})
+				appendAssistant(Item{Role: "assistant", Tools: []ToolCall{tool}, Time: ts})
 			}
 		case entry.Type == "item.completed" && entry.Item != nil && entry.Item.Type == "web_search" && entry.Item.Query != "":
-			items = append(items, Item{Role: "assistant", Tools: []ToolCall{toolCall("WebSearch", jsonObject("query", entry.Item.Query))}, Time: ts})
+			appendAssistant(Item{Role: "assistant", Tools: []ToolCall{toolCall("WebSearch", jsonObject("query", entry.Item.Query))}, Time: ts})
 		case entry.Type == "response_item" && (p.Type == "function_call" || p.Type == "custom_tool_call"):
 			if p.Name != "" {
 				args := rawJSONArgument(p.Arguments)
 				if args == "" {
 					args = rawJSONArgument(p.Input) // custom_tool_call carries "input" instead of "arguments"
 				}
-				items = append(items, Item{Role: "assistant", Tools: []ToolCall{codexResponseToolCall(p.Namespace, p.Name, args)}, Time: ts})
+				appendAssistant(Item{Role: "assistant", Tools: []ToolCall{codexResponseToolCall(p.Namespace, p.Name, args)}, Time: ts})
 			}
 		case entry.Type == "response_item" && p.Type == "web_search_call":
 			if tool, ok := codexWebSearchTool(p.Action); ok {
-				items = append(items, Item{Role: "assistant", Tools: []ToolCall{tool}, Time: ts})
+				appendAssistant(Item{Role: "assistant", Tools: []ToolCall{tool}, Time: ts})
 			}
 		case entry.Type == "response_item" && p.Type == "tool_search_call":
 			if query := jsonStringField(rawJSONArgument(p.Arguments), "query"); query != "" {
-				items = append(items, Item{Role: "assistant", Tools: []ToolCall{{Name: "ToolSearch", Label: "🔎 Tool search: " + query}}, Time: ts})
+				appendAssistant(Item{Role: "assistant", Tools: []ToolCall{{Name: "ToolSearch", Label: "🔎 Tool search: " + query}}, Time: ts})
 			}
 		}
 	}
