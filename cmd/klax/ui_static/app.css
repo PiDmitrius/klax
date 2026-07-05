@@ -47,7 +47,18 @@
   /* Single top panel: tabs + controls */
   #bar { display: flex; align-items: center; gap: 8px; padding: 6px 8px;
          background: var(--panel); border-bottom: 1px solid var(--border); }
-  #bar .logo { flex: none; display: block; filter: drop-shadow(0 1px 1px rgba(0,0,0,.14)); }
+  #bar .logo { flex: none; display: block; filter: drop-shadow(0 1px 1px rgba(0,0,0,.14)); transition: opacity .2s; }
+  /* Degraded live channel: the poll loop lost the server and is retrying. The brand mark
+     goes amber (the themed work/warning hue) and breathes until a poll succeeds — an
+     explicit "нет соединения" state instead of a UI that looks idle but is silently frozen.
+     CSS wins over the SVG's stop-color/stroke presentation attributes, so no JS repaint. */
+  #bar .logo.degraded rect { stroke: var(--badge-work-stroke); }
+  #bar .logo.degraded stop:nth-child(1) { stop-color: var(--badge-work-top); }
+  #bar .logo.degraded stop:nth-child(2) { stop-color: var(--badge-work-mid); }
+  #bar .logo.degraded stop:nth-child(3) { stop-color: var(--badge-work-bottom); }
+  #bar .logo.degraded { animation: logowarn 1.8s ease-in-out infinite; }
+  @keyframes logowarn { 50% { opacity: .5; } }
+  @media (prefers-reduced-motion: reduce) { #bar .logo.degraded { animation: none; } }
   #tabs { display: flex; gap: 4px; overflow-x: auto; flex: 1; min-width: 0; }
   #bar > button { flex: none; padding: 4px 10px; font-size: 15px; line-height: 1; }
   .tab { padding: 6px 12px; border-radius: 8px; white-space: nowrap; cursor: pointer;
@@ -108,7 +119,7 @@
   @keyframes msgin { from { opacity: 0; transform: translateY(10px); } }
   .readline.ghost { position: absolute; z-index: 3; pointer-events: none;
                     animation: lineout .3s ease-in forwards; }
-  @keyframes lineout { to { opacity: 0; transform: translateY(-9px); } }
+  @keyframes lineout { to { opacity: 0; } }
   @media (prefers-reduced-motion: reduce) { .turn.enter, .msg.enter, .readline.ghost { animation: none; } }
   /* klax-side blocks fill the column for a consistent width — only the colour
      differs between text, tool, error and command output. */

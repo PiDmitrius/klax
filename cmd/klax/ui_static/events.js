@@ -1,105 +1,58 @@
-// events.js — the live channel. applyEvent patches the model from ONE server event
-// (pure-ish: model ops + ctx callbacks, unit-testable). pollLoop drives it: long-poll
-// /api/poll, apply the batch in order (deduped by event seq + block id), and ask the host
-// to re-render affected sessions or reload from the transcript when the cursor is
-// uncoverable. No runningTurn/queuedTurns/readMark — a turn's truth is the server's state.
+// events.js — the live channel: tailLoop long-polls /api/tail with per-session (turn,block,state,trail)
+// cursors and MERGES the returned durable read-model rows (model.replaceTail), so live delivery
+// and reload converge on ONE path. No epoch/ring/reload for content — content is recovered from
+// the durable log; only transient notices ride a small retained buffer.
 
 import { api } from "./base.js";
 
-// applyEvent applies one event to the model; returns the affected session id (to
-// re-render) or null. ctx: { onSessions(list), onNotice(text) }.
-export function applyEvent(model, ev, ctx){
-  ctx = ctx || {};
-  const s = ev.session;
-  const applyHint = () => {
-    const h = ctx.sessionContext && ctx.sessionContext(s);
-    if(h) model.setContextHint(s, ev.turn_seq, h.used, h.window);
-  };
-  switch(ev.type){
-    case "user":
-      model.upsertUser(s, { seq: ev.turn_seq, text: ev.text, time: ev.time, eventSeq: ev.seq }, ev.state || "enq");
-      applyHint();
-      return s;
-    case "turn_start":
-      model.setState(s, ev.turn_seq, "run");
-      applyHint();
-      return s;
-    case "context":
-      model.setContext(s, ev.turn_seq, ev.ctx_used, ev.ctx_window);
-      return s;
-    case "progress":
-      if(ev.ctx_used || ev.ctx_window) model.setContext(s, ev.turn_seq, ev.ctx_used, ev.ctx_window);
-      if(ev.block){ ev.block.eventSeq = ev.seq; model.appendBlock(s, ev.turn_seq, ev.block); }
-      return s;
-    case "final":
-      if(ev.ctx_used || ev.ctx_window) model.setContext(s, ev.turn_seq, ev.ctx_used, ev.ctx_window);
-      if(ev.block){ ev.block.eventSeq = ev.seq; model.appendBlock(s, ev.turn_seq, ev.block); }
-      model.setState(s, ev.turn_seq, "done");
-      return s;
-    case "error":
-      if(ev.block){ ev.block.eventSeq = ev.seq; model.appendBlock(s, ev.turn_seq, ev.block); }
-      model.setState(s, ev.turn_seq, "err");
-      return s;
-    case "compact":
-      model.appendStandalone(s, { role: "system", kind: "compact", eventSeq: ev.seq });
-      return s;
-    case "sessions":
-      if(ctx.onSessions) ctx.onSessions(ev.sessions);
-      return null;
-    case "notice":
-      if(ctx.onNotice) ctx.onNotice(ev.text);
-      return null;
-  }
-  return null;
-}
-
-// --- poll loop (browser) ---
 const POLL_ABORT_MS = 30000; // > server hold (~25s); bounds a wedged request
 
-// pollLoop long-polls forever, applying each batch. `host` provides:
-//   cursor() / setCursor(c)      the poll cursor "<epoch>-<seq>"
-//   lastSeq() / setLastSeq(n)    highest applied event seq (dedup)
-//   model, ctx                   the TurnModel + applyEvent ctx
-//   onAffected(Set<created>)     re-render these sessions
-//   onReload()                   the cursor is uncoverable — reload from /api/sessions + transcript
-export async function pollLoop(host){
-  let backoff = 0, lastEpoch = null;
+// tailLoop is the durable-tail live channel (DURABLE_CURSOR_PLAN.md S4): it POSTs the client's
+// per-session (turn,block,state,trail) cursors to /api/tail, MERGES the returned read-model rows into the model
+// (model.replaceTail — the same rows a reload uses, so live and reload can't disagree), advances
+// each cursor, applies the session strip + notices, and detects a restart via `started`. `host`:
+//   cursors()/setTailCursor(id,c)   the per-session durable content cursors
+//   noticeCursor()/setNoticeCursor(c)  the transient-notice ring cursor
+//   model, ctx{onSessions,onNotice}, onAffected(set), onRestart, onAuthFail, onHealth(ok,fails)
+export async function tailLoop(host){
+  let backoff = 0, fails = 0, lastStarted = null;
+  const health = ok => { fails = ok ? 0 : fails + 1; if(host.onHealth) host.onHealth(ok, fails); };
   for(;;){
+    // The abort timer bounds the WHOLE round-trip, body read included — it is cleared in `finally`,
+    // not right after the fetch. A response whose headers arrive but whose body then stalls (a
+    // half-open socket during a daemon restart) would otherwise hang `await r.json()` with no
+    // timeout and wedge the one live loop indefinitely, freezing timeline+badges+title until reload.
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), POLL_ABORT_MS);
     try {
-      const ac = new AbortController();
-      const t = setTimeout(() => ac.abort(), POLL_ABORT_MS);
-      const cursor = host.cursor();
-      const r = await api("/api/poll" + (cursor ? "?cursor=" + encodeURIComponent(cursor) : ""), { signal: ac.signal });
-      clearTimeout(t);
-      if(r.status === 401){ if(host.onAuthFail) host.onAuthFail(); return; } // expired/invalid token → back to the gate
-      if(!r.ok){ await sleep(backoff = nextBackoff(backoff)); continue; }
+      const body = JSON.stringify({ cursors: host.cursors(), notice: host.noticeCursor(), sess_rev: host.sessRev() });
+      const r = await api("/api/tail", { method: "POST", headers: { "Content-Type": "application/json" }, body, signal: ac.signal });
+      if(r.status === 401){ if(host.onAuthFail) host.onAuthFail(); return; }
+      if(!r.ok){ health(false); await sleep(backoff = nextBackoff(backoff)); continue; }
       const data = await r.json();
       backoff = 0;
-      // A changed epoch means the daemon restarted (vs a same-epoch ring-overflow reload).
-      if(data.epoch !== undefined){
-        if(lastEpoch !== null && data.epoch !== lastEpoch && host.onRestart) host.onRestart();
-        lastEpoch = data.epoch;
+      health(true);
+      if(data.started !== undefined){
+        if(lastStarted !== null && data.started !== lastStarted && host.onRestart) host.onRestart();
+        lastStarted = data.started;
       }
-      // Uncoverable cursor → a single-owner, awaited reload: onReload() reconciles the
-      // model from /api/transcript and owns setting cursor = lastSeq = its WATERMARK (§A3).
-      // We do NOT advance to the poll's reload cursor here (that's the hub head, not the
-      // transcript watermark) and we await so live polling can't race the reconcile.
-      if(data.reload){ await host.onReload(); continue; }
+      if(data.sessions && host.ctx.onSessions) host.ctx.onSessions(data.sessions);
+      if(data.sess_rev !== undefined && host.setSessRev) host.setSessRev(data.sess_rev);
+      if(data.notice !== undefined && host.setNoticeCursor) host.setNoticeCursor(data.notice);
+      for(const n of (data.notices || [])){ if(host.ctx.onNotice) host.ctx.onNotice(n); }
       const affected = new Set();
-      for(const raw of (data.events || [])){
-        let ev;
-        try { ev = typeof raw === "string" ? JSON.parse(raw) : raw; } catch(e){ continue; }
-        if(ev.seq !== undefined && ev.seq <= host.lastSeq()) continue; // already applied
-        try { const s = applyEvent(host.model, ev, host.ctx); if(s !== null && s !== undefined) affected.add(s); }
-        catch(e){ console.error("klax applyEvent", ev && ev.type, e); }
-        if(ev.seq !== undefined) host.setLastSeq(ev.seq); // advance past it either way — never re-loop a bad event
+      const tails = data.tails || {};
+      for(const created in tails){
+        const id = Number(created);
+        try { host.model.replaceTail(id, tails[created].rows); host.setTailCursor(id, tails[created].cursor); affected.add(id); }
+        catch(e){ console.error("klax replaceTail", created, e); }
       }
-      // Advance the cursor ONLY after the whole batch applied, so a mid-batch throw can't
-      // skip unapplied events (the next poll re-fetches from the un-advanced cursor).
-      if(data.cursor) host.setCursor(data.cursor);
       if(affected.size) host.onAffected(affected);
     } catch(e){
+      health(false);
       await sleep(backoff = nextBackoff(backoff));
+    } finally {
+      clearTimeout(t);
     }
   }
 }

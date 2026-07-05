@@ -136,28 +136,10 @@ func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []atta
 		return false
 	}
 
-	emitEcho := func() {
-		if d.uiHub != nil {
-			echoText := text
-			if d.sealer != nil {
-				echoText = d.inboundText(sr.store, sessfiles.Turn{Text: text, Files: files}, sk, sess.Created)
-			}
-			if echoText == "" && len(files) > 0 {
-				names := make([]string, 0, len(files))
-				for _, name := range files {
-					names = append(names, sessfiles.DisplayName(name))
-				}
-				echoText = "📎 " + strings.Join(names, ", ")
-			}
-			if echoText != "" {
-				d.uiEmit(uiUserForKey(sk), uiEvent{
-					Type: "user", Session: sess.Created, TurnSeq: turnSeq, State: "enq",
-					Text: echoText, Nonce: nonce, Time: time.Now().Format(time.RFC3339),
-				})
-			}
-		}
-		d.broadcastSessions(sk)
-	}
+	// The enqueued turn is durable, so the tail poll delivers it (and the sender's optimistic echo
+	// binds by nonce on the /api/send response) — a poke to re-read the durable log is all the UI
+	// needs; no separate user event.
+	emitEcho := func() { d.broadcastSessions(sk) }
 
 	// Accept-during-drain: the message is persisted but NOT started here — startup
 	// replay re-enqueues it after the restart. No runner is launched, so there is no
@@ -347,10 +329,9 @@ func (d *daemon) abortSession(sk string, created int64, closing bool) bool {
 		for _, qm := range queued {
 			if err := sr.store.MarkErr(qm.turnSeq, turnErrAborted); err != nil && !errors.Is(err, sessfiles.ErrRemoved) {
 				log.Printf("durable MarkErr aborted (%s/%d): %v", sk, created, err)
-			} else if err == nil {
-				b := errBlock(qm.turnSeq, turnErrAborted)
-				d.uiEmit(uiUserForKey(sk), uiEvent{Type: "error", Session: created, TurnSeq: qm.turnSeq, State: "err", Block: &b, Text: b.Text})
 			}
+			// The err is durable (MarkErr); the broadcastSessions below pokes the tail, which
+			// delivers the error block from the durable log — no separate error event.
 		}
 	}
 	hasWork := active || cancelFn != nil || len(queued) > 0
@@ -459,7 +440,41 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		del.Final(runner.RunResult{Error: errors.New(turnErrRunStartFailed)})
 		return
 	}
+	// enq→run is now durable — poke so the tab flips "queued"→"processing" immediately. The turn
+	// has no answer block yet (the backend may "think" for seconds), and the delivery-creation poke
+	// above fired BEFORE this MarkRun, so without this the run state would only reach the UI on the
+	// first progress block. The state-coded tail cursor carries the state change with no new block.
+	d.broadcastSessions(sk)
 	backend := d.backendFor(sess)
+
+	// Durable-tail content comes from the backend's transcript FILE, which klax does not own the
+	// write timing of. Two consequences we cover here: (a) a brand-new session has no transcript
+	// address (sess.ID) until the run ends, so its first turn could not be tail-rendered mid-run —
+	// OnSessionID persists the id the moment the backend announces it, making the transcript
+	// addressable at once; (b) a stdout progress event can precede the matching transcript append,
+	// so a poke tied only to stdout can rebuild too early and miss the block until the next event —
+	// watchRunTranscript pokes on the file's own mtime/size change. Both stop when the run returns.
+	watchStop := make(chan struct{})
+	defer close(watchStop)
+	idKnown := make(chan string, 1)
+	onSessionID := func(id string) {
+		if id == "" {
+			return
+		}
+		d.store.UpdateSession(sk, sess.Created, func(cur *session.Session) {
+			if cur.ID == "" {
+				cur.ID = id
+			}
+		})
+		d.saveStore()
+		select {
+		case idKnown <- id:
+		default:
+		}
+		d.uiPoke(uiUserForKey(sk)) // transcript now addressable → let the tail pick up first-turn content
+	}
+	go d.watchRunTranscript(watchStop, idKnown, backend.Name(), sess.CWD, sk, sess.ID)
+
 	result := sr.runner.Run(ctx, backend, runner.RunOptions{
 		Prompt:                    prompt,
 		SessionID:                 sess.ID,
@@ -471,6 +486,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		AppendSystemPrompt:        sess.AppendSystemPrompt,
 		ClaudeTTY:                 sess.ClaudeTTY,
 		SuppressNarrationProgress: !verbose,
+		OnSessionID:               onSessionID,
 	}, del.Progress)
 
 	// Record the turn's terminal state in the durable queue so a future replay skips

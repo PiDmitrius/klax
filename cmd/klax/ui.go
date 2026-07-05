@@ -27,20 +27,18 @@ import (
 // shares sessions with the messengers (cross-channel continuity).
 const uiPrefix = "ui"
 
-// Per-user event ring. Every broadcast event gets a monotonic seq and is retained
-// here so a long-poll can return exactly what a client missed since its cursor
-// ("<epoch>-<seq>"). Bounded by count and bytes; a cursor that predates the ring
-// (overflow) gets `reload` and re-syncs from the transcript. The ring is the only
-// delivery buffer — there is no per-connection state.
+// Per-user NOTICE ring. CONTENT is delivered by the durable-tail poll (/api/tail) from the durable
+// log; only transient notices are retained here, so a client catches the ones it missed since its
+// notice cursor ("<epoch>-<seq>"). Bounded by count and bytes; a cursor that predates the ring
+// (overflow) or a changed epoch (restart) resets it — notices are lost on restart by nature.
 const (
 	uiRingMaxItems = 512
 	uiRingMaxBytes = 8 << 20
 )
 
-// uiPollHold is how long /api/poll holds a request open when there is nothing new
-// before returning an empty batch (the client then re-polls). Well under typical
-// proxy/browser request limits; a cut request is just re-issued from the same
-// cursor (idempotent), so the exact value is not load-bearing.
+// uiPollHold is how long /api/tail holds a request open when there is nothing new before returning
+// a session-strip refresh (the client then re-polls). Well under typical proxy/browser limits; a
+// cut request is just re-issued from the same cursors (idempotent), so the value is not load-bearing.
 const uiPollHold = 25 * time.Second
 
 // uiMaxInflightPerUser bounds concurrently-held polls per user — cheap hygiene
@@ -61,6 +59,11 @@ type uiSessionInfo struct {
 	Messages  int    `json:"messages"`
 	CtxUsed   int    `json:"ctx_used"`
 	CtxWindow int    `json:"ctx_window"`
+	// Durable unread state (DURABLE_CURSOR_PLAN.md S2). ReadThrough is the "<turn>.<block>"
+	// watermark the client seeds its divider from; Unread is the exchange count the badge shows
+	// for a tab the client has not loaded (a loaded tab counts precisely client-side).
+	ReadThrough string `json:"read_through,omitempty"`
+	Unread      int    `json:"unread,omitempty"`
 }
 
 // uiEvent is one server-sent event. The client multiplexes all tabs over a
@@ -104,11 +107,27 @@ type ringItem struct {
 	data json.RawMessage
 }
 
-// uiHub retains events per canonical user for long-poll delivery. Every event gets
-// a monotonic seq (under mu) and is kept in a bounded per-user ring; a poll reads
-// events with seq>cursor. epoch is the process lifetime: a restart changes it, so a
-// client with a stale-epoch cursor is told to reload. notify wakes held polls;
-// inflight bounds concurrent held polls per user. There is no per-connection state.
+// uiHub wakes held tail-polls (notify) and retains only NOTICES per canonical user (seq under mu,
+// bounded ring; the tail poll reads notices with seq>cursor). epoch is the process lifetime — a
+// restart changes it, which the tail reports as `started` (the "klax обновился" banner) and which
+// resets the notice cursor. inflight bounds concurrent held polls. There is no per-connection state.
+// uiUnreadKey keys the read-model cache. readModelEntry caches a session's built rows by the
+// transcript's AND queue's (mtime,size), so an unchanged session's rows — for the unread count AND
+// the live tail — cost two os.Stat calls, not a transcript read + rebuild.
+type uiUnreadKey struct {
+	sk      string
+	created int64
+}
+type readModelEntry struct {
+	tMtime    time.Time
+	tSize     int64
+	qMtime    time.Time
+	qSize     int64
+	busy      bool // buildReadModel input NOT captured by the file stats — key on it so a busy⇄idle
+	ctxWindow int  // flip / ctx-window change can never serve a stale cached read model
+	rows      []uiTurn
+}
+
 type uiHub struct {
 	mu       sync.Mutex
 	epoch    int64
@@ -117,6 +136,10 @@ type uiHub struct {
 	ringSz   map[string]int           // per-user ring byte size
 	notify   map[string]chan struct{} // per-user wake channel (closed-channel broadcast)
 	inflight map[string]int           // per-user concurrently-held polls
+	known    map[string]struct{}      // every user that has ever polled — notice-broadcast target set
+	sessRev  map[string]uint64        // per-user session-strip revision — bumped on every broadcastSessions
+	rmMu     sync.Mutex               // guards rm (read-model cache; separate from mu — off the poll hot path)
+	rm       map[uiUnreadKey]readModelEntry
 }
 
 func newUIHub() *uiHub {
@@ -126,6 +149,9 @@ func newUIHub() *uiHub {
 		ringSz:   make(map[string]int),
 		notify:   make(map[string]chan struct{}),
 		inflight: make(map[string]int),
+		known:    make(map[string]struct{}),
+		sessRev:  make(map[string]uint64),
+		rm:       make(map[uiUnreadKey]readModelEntry),
 	}
 }
 
@@ -154,6 +180,7 @@ func (h *uiHub) head() uint64 {
 func (h *uiHub) enterPoll(user string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.known[user] = struct{}{} // remember this user so notice broadcasts reach them even between polls
 	if h.inflight[user] >= uiMaxInflightPerUser {
 		return false
 	}
@@ -172,27 +199,30 @@ func (h *uiHub) leavePoll(user string) {
 	}
 }
 
-// emitLocked assigns the next seq, stamps it into the payload (so the client can
-// dedupe), appends the marshaled event to the user's ring (trimming to the caps),
-// and wakes any held polls for that user. Caller holds h.mu.
+// emitLocked wakes any held tail-poll for the user, and — for NOTICES only — retains the event in
+// the small per-user ring under a monotonic notice seq. Notices are the one transient broadcast
+// left (command output / banners); CONTENT is recovered from the durable log by the tail, so it is
+// NOT retained — a content emit just notifies. The notify ALWAYS fires (it is the tail-poll wake).
+// Caller holds h.mu.
 func (h *uiHub) emitLocked(user string, ev uiEvent) {
-	h.seq++
-	ev.Seq = h.seq
-	data, err := json.Marshal(ev)
-	if err != nil {
-		log.Printf("ui: marshal event: %v", err)
-		return // seq is burned, but a single skipped seq is invisible to the cursor
+	if ev.Type == "notice" {
+		h.seq++
+		ev.Seq = h.seq
+		if data, err := json.Marshal(ev); err == nil {
+			items := append(h.ring[user], ringItem{seq: h.seq, data: data})
+			sz := h.ringSz[user] + len(data)
+			for len(items) > 1 && (len(items) > uiRingMaxItems || sz > uiRingMaxBytes) {
+				sz -= len(items[0].data)
+				items[0] = ringItem{} // drop the ref so it can be GC'd despite the backing array
+				items = items[1:]
+			}
+			h.ring[user] = items
+			h.ringSz[user] = sz
+		} else {
+			log.Printf("ui: marshal notice: %v", err)
+		}
 	}
-	items := append(h.ring[user], ringItem{seq: h.seq, data: data})
-	sz := h.ringSz[user] + len(data)
-	for len(items) > 1 && (len(items) > uiRingMaxItems || sz > uiRingMaxBytes) {
-		sz -= len(items[0].data)
-		items[0] = ringItem{} // drop the ref so it can be GC'd despite the backing array
-		items = items[1:]
-	}
-	h.ring[user] = items
-	h.ringSz[user] = sz
-	if ch := h.notify[user]; ch != nil { // wake held polls; the next waiter makes a fresh channel
+	if ch := h.notify[user]; ch != nil { // wake held tail-polls; the next waiter makes a fresh channel
 		close(ch)
 		delete(h.notify, user)
 	}
@@ -221,19 +251,59 @@ func (h *uiHub) collect(user string, cursorEpoch int64, cursorSeq uint64) (event
 	return events, head, false
 }
 
-// broadcast queues one event for a user and retains it for the next poll.
+// broadcast queues one event for a user (only notices are retained; see emitLocked).
 func (h *uiHub) broadcast(user string, ev uiEvent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.emitLocked(user, ev)
 }
 
-// broadcastAll queues one event for every user the hub knows about (has retained
-// events for, or is currently polling) — daemon-wide banners (restart/update).
+// poke wakes any held tail-poll for the user WITHOUT retaining anything — for CONTENT changes, which
+// the tail recovers from the durable log. (Session-strip changes use bumpSessions.)
+func (h *uiHub) poke(user string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if ch := h.notify[user]; ch != nil {
+		close(ch)
+		delete(h.notify, user)
+	}
+}
+
+// bumpSessions advances the user's session-strip revision and wakes held polls. The revision lets
+// handleTail return a sessions-only change (rename/create/close/cross-tab read) immediately rather
+// than holding until the timeout — content still has no retained state, but the strip does now.
+func (h *uiHub) bumpSessions(user string) {
+	if user == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.sessRev[user]++
+	if ch := h.notify[user]; ch != nil {
+		close(ch)
+		delete(h.notify, user)
+	}
+}
+
+// sessionsRev is the user's current session-strip revision (the client echoes its last-seen value
+// back on the next tail so the server can detect a strip change with no content tail).
+func (h *uiHub) sessionsRev(user string) uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.sessRev[user]
+}
+
+// broadcastAll queues one event for every user the hub knows about (has ever polled, has retained
+// events, or is currently polling) — daemon-wide banners (restart/update). Since durable-tail
+// removed retained content events, an active user often has no ring/inflight entry in the gap
+// between two tail requests; `known` keeps the banner from being dropped for them.
 func (h *uiHub) broadcastAll(ev uiEvent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	seen := make(map[string]struct{})
+	for user := range h.known {
+		seen[user] = struct{}{}
+	}
 	for user := range h.ring {
 		seen[user] = struct{}{}
 	}
@@ -253,7 +323,8 @@ func (d *daemon) uiNotifyAll(text string) {
 	d.uiHub.broadcastAll(uiEvent{Type: "notice", Text: text})
 }
 
-// uiEmit marshals and broadcasts one event to a user. No-op when the UI is off.
+// uiEmit marshals and broadcasts one event to a user. No-op when the UI is off. Only NOTICES
+// travel this path now; content and session-strip changes use uiPoke.
 func (d *daemon) uiEmit(user string, ev uiEvent) {
 	if d.uiHub == nil || user == "" {
 		return
@@ -261,13 +332,23 @@ func (d *daemon) uiEmit(user string, ev uiEvent) {
 	d.uiHub.broadcast(user, ev)
 }
 
-// broadcastSessions pushes the current tab-strip snapshot to the UI client(s)
-// watching this session key. Cheap no-op when the UI is off or nobody watches.
+// uiPoke wakes a user's held tail-polls (a CONTENT change — delivered from the durable log by the
+// tail). No-op when UI is off. Session-strip changes use broadcastSessions (which also bumps the rev).
+func (d *daemon) uiPoke(user string) {
+	if d.uiHub == nil || user == "" {
+		return
+	}
+	d.uiHub.poke(user)
+}
+
+// broadcastSessions signals a session-strip change: it bumps the user's strip revision AND wakes
+// held polls, so the next tail returns the fresh snapshot IMMEDIATELY (rev differs) instead of
+// parking until the hold timeout when there is no content tail. No-op when the UI is off.
 func (d *daemon) broadcastSessions(sk string) {
 	if d.uiHub == nil {
 		return
 	}
-	d.uiEmit(uiUserForKey(sk), uiEvent{Type: "sessions", Sessions: d.sessionsSnapshot(sk)})
+	d.uiHub.bumpSessions(uiUserForKey(sk))
 }
 
 func (d *daemon) uiUserForChat(chatID string) string {
@@ -356,21 +437,114 @@ func (d *daemon) sessionsSnapshot(sk string) []uiSessionInfo {
 		if model == "" {
 			model = s.Model
 		}
+		// Unread answer-block count for a tab the client has not loaded (a loaded tab ignores this
+		// and counts client-side). Stat-cached, so an unchanged session costs only an os.Stat.
+		unread := d.sessionUnread(sk, s)
 		out = append(out, uiSessionInfo{
-			Created:   s.Created,
-			Name:      s.Name,
-			Active:    s.Active,
-			Busy:      d.isSessionBusy(sk, s.Created),
-			Queued:    d.queuedCount(sk, s.Created),
-			Backend:   backend,
-			Model:     model,
-			CWD:       s.CWD,
-			Messages:  s.Messages,
-			CtxUsed:   s.ContextUsed,
-			CtxWindow: s.ContextWindow,
+			Created:     s.Created,
+			Name:        s.Name,
+			Active:      s.Active,
+			Busy:        d.isSessionBusy(sk, s.Created),
+			Queued:      d.queuedCount(sk, s.Created),
+			Backend:     backend,
+			Model:       model,
+			CWD:         s.CWD,
+			Messages:    s.Messages,
+			CtxUsed:     s.ContextUsed,
+			CtxWindow:   s.ContextWindow,
+			ReadThrough: fmt.Sprintf("%d.%d", s.ReadThroughTurn, s.ReadThroughBlock),
+			Unread:      unread,
 		})
 	}
 	return out
+}
+
+// sessionUnread returns a session's unread answer-block count for its tab badge — a loaded tab
+// ignores this and counts client-side; this serves tabs the client has NOT loaded (finding B). It
+// is cheap: readModel is cached, so this is a recount over cached rows.
+func (d *daemon) sessionUnread(sk string, sess *session.Session) int {
+	return unreadAfter(d.readModel(sk, sess), sess.ReadThroughTurn, sess.ReadThroughBlock)
+}
+
+// readModel builds a session's full read-model rows (durable queue ⋈ transcript) — the SAME rows
+// the client renders, so server and client agree on one path (live delivery and reload converge on
+// buildReadModel). It is a stat-keyed MEMOIZATION of buildReadModel, not a delivery channel: the key
+// is EVERY input — the transcript's and queue's (mtime,size) plus the two non-file inputs (busy,
+// ctxWindow) — so a hit is provably identical to a rebuild, and any change rebuilds once.
+func (d *daemon) readModel(sk string, sess *session.Session) []uiTurn {
+	st := d.sessionStore(sk, sess.Created)
+	if st == nil {
+		return nil
+	}
+	backend := sess.Backend
+	if backend == "" {
+		backend = "claude"
+	}
+	tm, ts, _ := history.Stat(backend, sess.ID, sess.CWD)
+	qm, qs := st.QueueStat()
+	busy := d.isSessionBusy(sk, sess.Created)
+	cw := sess.ContextWindow
+	key := uiUnreadKey{sk: sk, created: sess.Created}
+	if d.uiHub != nil {
+		h := d.uiHub
+		h.rmMu.Lock()
+		if e, ok := h.rm[key]; ok && e.tSize == ts && e.tMtime.Equal(tm) && e.qSize == qs && e.qMtime.Equal(qm) && e.busy == busy && e.ctxWindow == cw {
+			h.rmMu.Unlock()
+			return e.rows
+		}
+		h.rmMu.Unlock()
+	}
+	items, _ := history.Load(backend, sess.ID, sess.CWD)
+	queueTurns, _ := st.InboundLog()
+	rows := d.buildReadModel(sk, sess.Created, groupTurns(items), queueTurns, busy, 0, true, cw)
+	if d.uiHub != nil {
+		h := d.uiHub
+		h.rmMu.Lock()
+		h.rm[key] = readModelEntry{tMtime: tm, tSize: ts, qMtime: qm, qSize: qs, busy: busy, ctxWindow: cw, rows: rows}
+		h.rmMu.Unlock()
+	}
+	return rows
+}
+
+// sessionTail is the live tail of a session's read model past a per-session (turn,block,state,trail)
+// cursor — the rows the client merges to catch up. Empty when nothing is new past the cursor. [S3]
+func (d *daemon) sessionTail(sk string, sess *session.Session, throughTurn int64, throughBlock int, throughState string, throughTrail int) []uiTurn {
+	return tailFrom(d.readModel(sk, sess), throughTurn, throughBlock, throughState, throughTrail)
+}
+
+// watchRunTranscript pokes the user's tail whenever the active run's transcript FILE changes, so a
+// block that lands in the file wakes the held poll even when no further stdout progress event
+// follows (klax does not own the transcript write, and a stdout event can precede the file append).
+// A brand-new session has no transcript address (id) at run start, so it waits for idKnown first.
+// Polls history.Stat on a short tick until stop is closed (the run returns). No-op when UI is off.
+func (d *daemon) watchRunTranscript(stop <-chan struct{}, idKnown <-chan string, backendName, cwd, sk, initialID string) {
+	if d.uiHub == nil {
+		return
+	}
+	id := initialID
+	if id == "" {
+		select {
+		case id = <-idKnown:
+		case <-stop:
+			return
+		}
+	}
+	user := uiUserForKey(sk)
+	var lastM time.Time
+	var lastS int64
+	ticker := time.NewTicker(300 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			if m, s, ok := history.Stat(backendName, id, cwd); ok && (s != lastS || !m.Equal(lastM)) {
+				lastM, lastS = m, s
+				d.uiPoke(user)
+			}
+		}
+	}
 }
 
 // buildUITokens maps each configured ui_token to its canonical user. It rejects
@@ -465,9 +639,10 @@ func isLoopbackAddr(addr string) bool {
 
 func (s *uiServer) routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/poll", s.handlePoll)
+	mux.HandleFunc("/api/tail", s.handleTail)
 	mux.HandleFunc("/api/send", s.handleSend)
 	mux.HandleFunc("/api/abort", s.handleAbort)
+	mux.HandleFunc("/api/read", s.handleRead)
 	mux.HandleFunc("/api/new", s.handleNew)
 	mux.HandleFunc("/api/rename", s.handleRename)
 	mux.HandleFunc("/api/close", s.handleClose)
@@ -494,17 +669,8 @@ func (s *uiServer) auth(r *http.Request) (string, bool) {
 
 func (s *uiServer) chatID(user string) string { return uiPrefix + ":" + user }
 
-// pollResponse is the /api/poll body: events since the cursor, the new cursor to
-// send next, and a reload flag when the cursor is uncoverable.
-type pollResponse struct {
-	Epoch  int64             `json:"epoch"`
-	Cursor string            `json:"cursor"`
-	Events []json.RawMessage `json:"events,omitempty"`
-	Reload bool              `json:"reload,omitempty"`
-}
-
-// parseCursor splits a "<epoch>-<seq>" poll cursor. ok=false on an absent/blank
-// cursor (a fresh client).
+// parseCursor splits a "<epoch>-<seq>" cursor — now only the transient-notice cursor. ok=false on
+// an absent/blank cursor (a fresh client).
 func parseCursor(v string) (epoch int64, seq uint64, ok bool) {
 	i := strings.IndexByte(v, '-')
 	if i <= 0 {
@@ -522,36 +688,135 @@ func (s *uiServer) cursorString(seq uint64) string {
 	return strconv.FormatInt(s.d.uiHub.epoch, 10) + "-" + strconv.FormatUint(seq, 10)
 }
 
-// handlePoll is the long-poll delivery endpoint. The client sends its cursor
-// ("<epoch>-<seq>"); the server returns the user's events with seq>cursor, holding
-// the request up to uiPollHold when there is nothing new (returning an empty batch
-// on timeout, so the client re-polls). Ordinary request/response — no streaming,
-// no heartbeat, no per-connection state — so any proxy handles it, and a cut
-// request is just re-issued from the same cursor (idempotent, no loss).
-func (s *uiServer) handlePoll(w http.ResponseWriter, r *http.Request) {
+// --- durable-tail poll (DURABLE_CURSOR_PLAN.md S4) ---
+// The live channel as a tail of the durable log: the client sends a per-session (turn,block)
+// cursor, the server returns the read-model rows past it (built by the SAME buildReadModel as a
+// reload, so live and reload converge). No epoch/ring/reload for CONTENT — content is recovered
+// from the durable log. `notice` stays a ring cursor: notices are transient broadcasts, not
+// durable, so they keep a small retained buffer (the only surviving ring role).
+type tailReq struct {
+	Cursors map[string]string `json:"cursors"`  // created -> "<turn>.<block>.<state>"
+	Notice  string            `json:"notice"`   // ring cursor for transient notices
+	SessRev uint64            `json:"sess_rev"` // last session-strip revision the client rendered
+}
+type tailSessionData struct {
+	Rows   []uiTurn `json:"rows"`
+	Cursor string   `json:"cursor"` // new "<turn>.<block>" after these rows
+}
+type tailResp struct {
+	Started  int64                      `json:"started"` // hub epoch — a change means the daemon restarted
+	Sessions []uiSessionInfo            `json:"sessions"`
+	Tails    map[string]tailSessionData `json:"tails,omitempty"`
+	Notices  []string                   `json:"notices,omitempty"`
+	Notice   string                     `json:"notice"`
+	SessRev  uint64                     `json:"sess_rev"` // current session-strip revision (client echoes it back)
+}
+
+// parseBlockCursor splits a "<turn>.<block>.<state>.<trail>" content cursor (block may be -1 for a
+// turn with no answer yet; the state code and trail are absent on a legacy cursor). `trail` is the
+// number of trailing non-durable rows (compact/system standalones) after the last durable turn — it
+// lets a standalone appended AFTER the last turn be delivered live exactly once. Absent/blank ⇒
+// (0,-1,"",0) so a brand-new tab's first tail returns from the start.
+func parseBlockCursor(v string) (turn int64, block int, state string, trail int) {
+	parts := strings.SplitN(v, ".", 4)
+	if len(parts) < 2 {
+		return 0, -1, "", 0
+	}
+	turn, _ = strconv.ParseInt(parts[0], 10, 64)
+	block, _ = strconv.Atoi(parts[1])
+	if len(parts) >= 3 {
+		state = parts[2]
+	}
+	if len(parts) >= 4 {
+		trail, _ = strconv.Atoi(parts[3])
+	}
+	return turn, block, state, trail
+}
+
+// tailCursor is the position after applying `rows` — "<turn>.<block>.<state>.<trail>": the last
+// durable turn's seq, its last-block-index (-1 when it has no answer blocks yet), its state code, and
+// the count of standalone rows trailing AFTER it. The state code lets a pure enq→run transition
+// advance the cursor with no new block; the trail count lets a trailing standalone advance it too.
+func tailCursor(rows []uiTurn) string {
+	var turn int64
+	block := -1
+	state := ""
+	trail := 0
+	for _, t := range rows {
+		if t.Role == "user" && t.Seq > 0 {
+			turn = t.Seq
+			block = len(t.Blocks) - 1
+			state = t.State
+			trail = 0
+		} else {
+			trail++ // a standalone / non-durable row after the last durable turn
+		}
+	}
+	return fmt.Sprintf("%d.%d.%s.%d", turn, block, stateCode(state), trail)
+}
+
+func (s *uiServer) buildTail(user, sk string, req tailReq) tailResp {
+	// Read the strip revision BEFORE the snapshot. A concurrent bumpSessions between the two must
+	// never pair a NEWER rev with an OLDER snapshot: the client would ack a strip change it never
+	// rendered, then stop re-requesting it (its next rev matches the server's) and stay stale until a
+	// later wake/timeout. Since bumpSessions mutates the store BEFORE incrementing the rev, a snapshot
+	// taken after `rev` reflects at least rev's state — so resp.SessRev is never ahead of Sessions,
+	// and any bump after `rev` instead closes the wake channel and drives a rebuild.
+	rev := s.d.uiHub.sessionsRev(user)
+	resp := tailResp{Started: s.d.uiHub.epoch, Sessions: s.d.sessionsSnapshot(sk), SessRev: rev}
+	for createdStr, cur := range req.Cursors {
+		created, err := strconv.ParseInt(createdStr, 10, 64)
+		if err != nil {
+			continue
+		}
+		sess := s.d.store.Get(sk, created)
+		if sess == nil {
+			continue
+		}
+		ct, cb, cs, ctr := parseBlockCursor(cur)
+		rows := s.d.sessionTail(sk, sess, ct, cb, cs, ctr)
+		if len(rows) == 0 {
+			continue
+		}
+		if resp.Tails == nil {
+			resp.Tails = make(map[string]tailSessionData)
+		}
+		resp.Tails[createdStr] = tailSessionData{Rows: rows, Cursor: tailCursor(rows)}
+	}
+	// Notices ride the ring (the one transient broadcast left). A reload here just resets the
+	// notice cursor — notices are lost on restart by nature, no replay needed.
+	noticeEpoch, noticeSeq, _ := parseCursor(req.Notice)
+	events, head, reload := s.d.uiHub.collect(user, noticeEpoch, noticeSeq)
+	if !reload {
+		for _, raw := range events {
+			var ev uiEvent
+			if json.Unmarshal(raw, &ev) == nil && ev.Type == "notice" {
+				resp.Notices = append(resp.Notices, ev.Text)
+			}
+		}
+	}
+	resp.Notice = s.cursorString(head)
+	return resp
+}
+
+// handleTail is the durable-tail long-poll: hold on the per-user notify until any watched session
+// has content past its cursor (or a notice), then return the tail rows + refreshed session strip.
+func (s *uiServer) handleTail(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	// Ensure the user has at least one session so the client's /api/sessions load
-	// (cold start) has something to render.
 	sk := s.d.sessionKey(s.chatID(user))
 	s.d.ensureSessionWithCWD(sk, s.d.sessionCWD(s.chatID(user)))
-
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 
-	cursorEpoch, cursorSeq, hasCursor := parseCursor(r.URL.Query().Get("cursor"))
-
-	// Fresh client (no cursor): just establish the cursor at the current head and
-	// return immediately. Content comes from the client's /api/sessions + transcript
-	// load; subsequent polls deliver everything after this head.
-	if !hasCursor {
-		s.writePoll(w, pollResponse{Epoch: s.d.uiHub.epoch, Cursor: s.cursorString(s.d.uiHub.head())})
+	var req tailReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-
 	if !s.d.uiHub.enterPoll(user) {
 		http.Error(w, "too many concurrent polls", http.StatusTooManyRequests)
 		return
@@ -560,33 +825,26 @@ func (s *uiServer) handlePoll(w http.ResponseWriter, r *http.Request) {
 
 	deadline := time.NewTimer(uiPollHold)
 	defer deadline.Stop()
-	for {
-		ch := s.d.uiHub.waitChan(user) // grab BEFORE collect (lost-wakeup-safe)
-		events, head, reload := s.d.uiHub.collect(user, cursorEpoch, cursorSeq)
-		if reload {
-			s.writePoll(w, pollResponse{Epoch: s.d.uiHub.epoch, Cursor: s.cursorString(head), Reload: true})
-			return
-		}
-		if len(events) > 0 {
-			s.writePoll(w, pollResponse{Epoch: s.d.uiHub.epoch, Cursor: s.cursorString(head), Events: events})
-			return
-		}
-		select {
-		case <-ch:
-			// woken by an emit for this user — re-collect
-		case <-deadline.C:
-			// nothing new within the hold — empty batch; head has no events for this
-			// user in (cursor, head], so advancing the cursor to head loses nothing.
-			s.writePoll(w, pollResponse{Epoch: s.d.uiHub.epoch, Cursor: s.cursorString(head)})
-			return
-		case <-r.Context().Done():
-			return
-		}
+	ch := s.d.uiHub.waitChan(user) // grab BEFORE building (lost-wakeup-safe)
+	resp := s.buildTail(user, sk, req)
+	// Return immediately on new content, a notice, OR a session-strip change the client hasn't seen
+	// (resp.SessRev past the client's last-rendered rev). The rev catches a rename/create/close/
+	// cross-tab-read whose wake was lost because this request arrived just after it — without it,
+	// such a strip-only change would park here until the hold timeout (up to uiPollHold).
+	if len(resp.Tails) > 0 || len(resp.Notices) > 0 || resp.SessRev != req.SessRev {
+		_ = json.NewEncoder(w).Encode(resp)
+		return
 	}
-}
-
-func (s *uiServer) writePoll(w http.ResponseWriter, resp pollResponse) {
-	_ = json.NewEncoder(w).Encode(resp)
+	// Nothing new yet — hold until ANY emit for this user (content, a notice, a session-strip
+	// change such as a cross-tab POST /api/read), then return a FRESH build so the snapshot and
+	// any tails land promptly; on timeout return the current strip so badges never go stale.
+	select {
+	case <-ch:
+		_ = json.NewEncoder(w).Encode(s.buildTail(user, sk, req))
+	case <-deadline.C:
+		_ = json.NewEncoder(w).Encode(resp)
+	case <-r.Context().Done():
+	}
 }
 
 func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
@@ -713,6 +971,63 @@ func (s *uiServer) handleAbort(w http.ResponseWriter, r *http.Request) {
 	}
 	s.d.abortSession(sk, body.Session, false)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleRead persists the durable per-session read-through watermark — the (turn_seq, block index)
+// the client reports as it reads down (DURABLE_CURSOR_PLAN.md S2, decision 3). The client pushes
+// it PROACTIVELY (on read-settle and on tab-hide), so the read state is durable before the tab can
+// go away and thus survives reload + daemon restart. The watermark only ever RAISES (monotonic),
+// so a stale or out-of-order report can never un-read messages. Persists only when it actually
+// moved. The unread COUNT the badge shows is computed separately (badge-granularity open question).
+func (s *uiServer) handleRead(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.auth(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Session int64 `json:"session"`
+		Turn    int64 `json:"turn"`
+		Block   int   `json:"block"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if body.Session <= 0 {
+		http.Error(w, "a positive session is required", http.StatusBadRequest)
+		return
+	}
+	sk := s.d.sessionKey(s.chatID(user))
+	if s.d.store.Get(sk, body.Session) == nil {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	raised := false
+	s.d.store.UpdateSession(sk, body.Session, func(cur *session.Session) {
+		raised = raiseReadThrough(cur, body.Turn, body.Block)
+	})
+	if raised {
+		s.d.saveStore()
+		s.d.broadcastSessions(sk) // push the new read_through/unread to this user's other tabs/devices
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// raiseReadThrough advances a session's durable read watermark to (turn, block) only when that is
+// strictly ahead of the stored one — a later turn, or the same turn with a further block — so a
+// duplicate or out-of-order report never regresses it. Returns whether it moved (⇒ worth saving).
+func raiseReadThrough(cur *session.Session, turn int64, block int) bool {
+	if turn < cur.ReadThroughTurn || (turn == cur.ReadThroughTurn && block <= cur.ReadThroughBlock) {
+		return false
+	}
+	cur.ReadThroughTurn = turn
+	cur.ReadThroughBlock = block
+	return true
 }
 
 func (s *uiServer) handleSessions(w http.ResponseWriter, r *http.Request) {
@@ -858,11 +1173,12 @@ func (s *uiServer) handleTranscript(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
-		Turns     []uiTurn `json:"turns"`
-		More      bool     `json:"more"`
-		Offset    int      `json:"offset"`
-		Watermark string   `json:"watermark"`
-	}{Turns: turns, More: start > 0, Offset: start, Watermark: watermark})
+		Turns       []uiTurn `json:"turns"`
+		More        bool     `json:"more"`
+		Offset      int      `json:"offset"`
+		Watermark   string   `json:"watermark"`
+		ReadThrough string   `json:"read_through"` // the tab seeds its unread divider from this
+	}{Turns: turns, More: start > 0, Offset: start, Watermark: watermark, ReadThrough: fmt.Sprintf("%d.%d", sess.ReadThroughTurn, sess.ReadThroughBlock)})
 }
 
 // handleEmoji serves a bundled color-emoji web-font subset (woff2). No auth —

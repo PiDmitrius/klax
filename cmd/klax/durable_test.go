@@ -135,17 +135,9 @@ func TestEnqueueToSessionDuplicateNonceDoesNotRequeue(t *testing.T) {
 		t.Fatal("duplicate enqueueToSession returned false")
 	}
 
-	ev, _, _ := d.uiHub.collect("claw", d.uiHub.epoch, 0)
-	userEvents := 0
-	for _, raw := range ev {
-		if e := decodeEvent(t, raw); e.Type == "user" {
-			userEvents++
-		}
-	}
-	if userEvents != 1 {
-		t.Fatalf("duplicate nonce emitted %d user events, want 1", userEvents)
-	}
-
+	// The duplicate is dropped: it neither requeues nor writes a second durable turn. Because the
+	// UI now renders the durable inbound log (no separate echo event), one log entry == one user
+	// bubble, so this also proves the duplicate never double-surfaces to the tab.
 	sr.mu.Lock()
 	n := len(sr.queue)
 	sr.mu.Unlock()

@@ -36,6 +36,39 @@ export class TurnModel {
     this.byCreated[created] = (rows || []).map(normTurn).concat(arr);
   }
 
+  // evictTop drops the oldest n rows (windowing — early history unloaded from the timeline to keep
+  // a long session responsive). Returns the count actually removed. Each removed row is one
+  // transcript page-unit, so the caller advances its loadOlder offset by the return value; the
+  // caller also guarantees it never evicts an unread row (see app.js capWindow).
+  evictTop(created, n){
+    const arr = this.byCreated[created];
+    if(!arr || n <= 0) return 0;
+    n = Math.min(n, arr.length);
+    if(n <= 0) return 0;
+    this.byCreated[created] = arr.slice(n);
+    return n;
+  }
+
+  // replaceTail merges a live tail from /api/tail — the durable read model from the boundary turn
+  // onward. It drops the existing tail from that turn (with any trailing standalone rows) and
+  // appends the fresh rows, so a grown last turn and brand-new turns re-sync in ONE step — the SAME
+  // buildReadModel rows a reload uses, so live and reload can't disagree. Empty rows are a no-op.
+  // [DURABLE_CURSOR_PLAN.md S4 — client merges rows, not events]
+  replaceTail(created, rows){
+    rows = (rows || []).map(normTurn);
+    if(!rows.length) return;
+    const arr = this.byCreated[created] || [];
+    let fromSeq;
+    for(const t of rows){ if(t.role === "user" && t.seq !== undefined){ fromSeq = t.seq; break; } }
+    if(fromSeq === undefined){ this.byCreated[created] = rows; return; } // no user anchor → replace whole
+    let cut = arr.length;
+    for(let i = 0; i < arr.length; i++){
+      const t = arr[i];
+      if(t.role === "user" && t.seq !== undefined && t.seq >= fromSeq){ cut = i; break; }
+    }
+    this.byCreated[created] = arr.slice(0, cut).concat(rows);
+  }
+
   _seq(arr, seq){ for(const t of arr){ if(t.role === "user" && t.seq === seq) return t; } }
 
   // upsertUser inserts or updates a user turn from a `user` event / send response.

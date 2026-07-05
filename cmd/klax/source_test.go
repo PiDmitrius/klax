@@ -82,7 +82,10 @@ func TestEnqueueToSessionBindsExplicitTarget(t *testing.T) {
 
 // A messenger DM (no nonce) is echoed to the UI hub as a "user" event the instant
 // it is accepted, so it shows up live in the web UI — not only on a reload.
-func TestEnqueueToSessionEchoesUserToUI(t *testing.T) {
+// A mapped messenger DM lands in the durable log; the read model (the tail's source, not a live
+// echo event) renders it as the user's bubble with the original text.
+func TestEnqueueToSessionRendersMessengerDMInReadModel(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	tp := &fakeTransport{}
 	d := newTestDeliveryDaemon(tp)
 	d.identities = map[int64]string{1: "claw"} // tg:1 -> user:claw (a mapped DM)
@@ -90,26 +93,28 @@ func TestEnqueueToSessionEchoesUserToUI(t *testing.T) {
 	d.runners = make(map[runnerKey]*sessionRunner)
 	d.uiHub = newUIHub()
 
-	created := d.store.SessionsFor("user:claw")[0].Created
+	sess := d.store.SessionsFor("user:claw")[0]
+	created := sess.Created
 	// Pre-seed the runner as processing so the spawned queue pump returns at its
 	// guard and no real backend runs.
 	d.runners[runnerKey{sk: "user:claw", created: created}] = &sessionRunner{runner: runner.New(), processing: true}
 
 	d.enqueueToSession("tg:1", "100", "hi there", nil, created, "") // mapped messenger DM: no nonce
 
-	ev, _, _ := d.uiHub.collect("claw", d.uiHub.epoch, 0)
 	found := false
-	for _, raw := range ev {
-		if e := decodeEvent(t, raw); e.Type == "user" && e.Text == "hi there" && e.Session == created {
+	for _, ut := range d.readModel("user:claw", sess) {
+		if ut.Role == "user" && ut.Text == "hi there" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("messenger DM not echoed to the UI hub as a user event; got %d events", len(ev))
+		t.Fatal("messenger DM not rendered as the user's bubble in the read model")
 	}
 }
 
-func TestEnqueueToSessionEchoesInboundImageMarkdownToUI(t *testing.T) {
+// An inbound image the user sends lands in the durable log and the read model (the tail's source,
+// not a live echo event) renders it as a markdown image — never the 📎 file fallback.
+func TestEnqueueToSessionRendersInboundImageAsMarkdown(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	tp := &fakeTransport{}
 	d := newTestDeliveryDaemon(tp)
@@ -123,7 +128,8 @@ func TestEnqueueToSessionEchoesInboundImageMarkdownToUI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	created := d.store.SessionsFor("user:claw")[0].Created
+	sess := d.store.SessionsFor("user:claw")[0]
+	created := sess.Created
 	d.runners[runnerKey{sk: "user:claw", created: created}] = &sessionRunner{runner: runner.New(), processing: true}
 
 	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAIAAAB7QOjdAAAAD0lEQVR4nGP8z8DAwMAAAAYIAQHLR3Z1AAAAAElFTkSuQmCC")
@@ -132,26 +138,26 @@ func TestEnqueueToSessionEchoesInboundImageMarkdownToUI(t *testing.T) {
 	}
 	d.enqueueToSession("tg:1", "100", "", []attachment{{filename: "image.png", data: png}}, created, "")
 
-	ev, _, _ := d.uiHub.collect("claw", d.uiHub.epoch, 0)
-	for _, raw := range ev {
-		e := decodeEvent(t, raw)
-		if e.Type != "user" {
+	found := false
+	for _, ut := range d.readModel("user:claw", sess) {
+		if ut.Role != "user" {
 			continue
 		}
-		if e.Time == "" {
-			t.Fatal("user echo event missing time")
+		if strings.Contains(ut.Text, "📎") {
+			t.Fatalf("image attachment rendered as file fallback: %q", ut.Text)
 		}
-		if strings.Contains(e.Text, "📎") {
-			t.Fatalf("image attachment echoed as file fallback: %q", e.Text)
-		}
-		if strings.Contains(e.Text, "![image.png](/api/file?ref=") && strings.Contains(e.Text, "&w=2&h=1)") {
-			return
+		if strings.Contains(ut.Text, "![image.png](/api/file?ref=") && strings.Contains(ut.Text, "&w=2&h=1)") {
+			found = true
 		}
 	}
-	t.Fatalf("image attachment was not echoed as markdown image; events=%d", len(ev))
+	if !found {
+		t.Fatal("inbound image was not rendered as a markdown image in the read model")
+	}
 }
 
-func TestAbortSessionEchoesQueuedErrorsToUI(t *testing.T) {
+// Aborting a session marks every still-queued turn err in the durable log; the read model (which
+// the tail delivers) then renders both as error turns — no live error event needed.
+func TestAbortSessionMarksQueuedTurnsErrInReadModel(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	tp := &fakeTransport{}
 	d := newTestDeliveryDaemon(tp)
@@ -160,24 +166,23 @@ func TestAbortSessionEchoesQueuedErrorsToUI(t *testing.T) {
 	d.runners = make(map[runnerKey]*sessionRunner)
 	d.uiHub = newUIHub()
 
-	created := d.store.SessionsFor("user:claw")[0].Created
+	sess := d.store.SessionsFor("user:claw")[0]
+	created := sess.Created
 	d.runners[runnerKey{sk: "user:claw", created: created}] = &sessionRunner{runner: runner.New(), processing: true}
 	d.enqueueToSession("tg:1", "100", "one", nil, created, "")
 	d.enqueueToSession("tg:1", "101", "two", nil, created, "")
-	_, head, _ := d.uiHub.collect("claw", d.uiHub.epoch, 0)
 
 	if !d.abortSession("user:claw", created, false) {
 		t.Fatal("abortSession returned false for queued turns")
 	}
-	ev, _, _ := d.uiHub.collect("claw", d.uiHub.epoch, head)
+
 	errs := 0
-	for _, raw := range ev {
-		e := decodeEvent(t, raw)
-		if e.Type == "error" && e.State == "err" && e.Session == created && e.Block != nil && e.Block.Role == "error" {
+	for _, ut := range d.readModel("user:claw", sess) {
+		if ut.State == "err" {
 			errs++
 		}
 	}
 	if errs != 2 {
-		t.Fatalf("queued abort error events = %d, want 2 (events=%d)", errs, len(ev))
+		t.Fatalf("aborted queued turns rendered err = %d, want 2", errs)
 	}
 }

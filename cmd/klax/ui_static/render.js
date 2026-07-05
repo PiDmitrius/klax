@@ -20,43 +20,58 @@ function contextText(used, window){
   return "📊 Контекст: " + Math.floor(used * 100 / window) + "% (" + uk + "/" + Math.floor(window / 1000) + "k)";
 }
 
+// The unread axis is the DURABLE (turn_seq, block index) position, encoded as one comparable
+// number so a read watermark stays a scalar (`readThrough`). A block index never approaches
+// POS_MULT, so pos() is monotonic and collision-free; parse/decode bridge the "<turn>.<block>"
+// wire form the server persists. Legacy markerless turns have a negative seq ⇒ their positions sort
+// before any real watermark ⇒ always "read", exactly as the server's unreadAfter treats them.
+export const POS_MULT = 1e6;
+export function pos(turn, block){ return turn * POS_MULT + block; }
+export function parsePos(s){
+  const i = String(s || "").indexOf(".");
+  if(i < 0) return 0;
+  return pos(parseInt(String(s).slice(0, i), 10) || 0, parseInt(String(s).slice(i + 1), 10) || 0);
+}
+export function decodePos(p){ p = p || 0; return { turn: Math.floor(p / POS_MULT), block: p % POS_MULT }; }
+
 // renderModel computes the ordered render items for one session. PURE and unit-testable.
-// The unread divider stays turn-aware: user bubbles are the human's own messages and do
-// not count as unread; unread answer blocks land inside the turn at the exact block
-// boundary, even when they have the same role as the preceding already-read block.
-export function renderModel(turns, unreadAfter){
+// The unread divider stays turn-aware: user bubbles are the human's own messages and do not count
+// as unread; standalone cosmetic rows (compact/notice) are not counted and just flow to the right
+// side of the divider by document order; unread answer blocks land inside the turn at the exact
+// block boundary. `watermark` is the encoded read position (pos()); undefined ⇒ no divider.
+export function renderModel(turns, watermark){
   const items = [];
   let queuePos = 0, divided = false;
-  const placeDivider = () => { if(!divided && unreadAfter !== undefined){ items.push({ kind: "divider" }); divided = true; } };
-  const isUnread = es => es !== undefined && unreadAfter !== undefined && es > unreadAfter;
-  const blockUnread = b => b && isUnread(b.eventSeq);
+  const has = watermark !== undefined;
+  const unread = p => has && p > watermark;
   for(const t of (turns || [])){
     if(t.role !== "user"){
-      if(isUnread(t.eventSeq)) placeDivider();
-      if(t.kind === "compact") items.push({ kind: "bubble", cls: "system", text: "🗜 контекст свёрнут", md: false, time: t.time, maxEventSeq: t.eventSeq });
-      else if(t.role === "notice") items.push({ kind: "bubble", cls: "notice", text: t.text || "", md: false, time: t.time, maxEventSeq: t.eventSeq });
-      else items.push({ kind: "bubble", cls: (t.kind === "error" || t.role === "error") ? "error" : t.role === "system" ? "system" : "assistant", text: t.text || "", md: true, time: t.time, maxEventSeq: t.eventSeq });
+      // `key` is the standalone's live eventSeq (render-key stability only); it carries no data-pos
+      // so it never drives read-advance, and it is not counted as unread.
+      if(t.kind === "compact") items.push({ kind: "bubble", cls: "system", text: "🗜 контекст свёрнут", md: false, time: t.time, key: t.eventSeq });
+      else if(t.role === "notice") items.push({ kind: "bubble", cls: "notice", text: t.text || "", md: false, time: t.time, key: t.eventSeq });
+      else items.push({ kind: "bubble", cls: (t.kind === "error" || t.role === "error") ? "error" : t.role === "system" ? "system" : "assistant", text: t.text || "", md: true, time: t.time, key: t.eventSeq });
       continue;
     }
+    const blocks_ = t.blocks || [];
     const groups = [];
     let i = 0;
     let lastGroupTime = t.time;
-    while(i < (t.blocks || []).length){
-      if(blockUnread(t.blocks[i]) && !divided && unreadAfter !== undefined){
+    while(i < blocks_.length){
+      if(unread(pos(t.seq, i)) && !divided && has){
         groups.push({ divider: true });
         divided = true;
         continue;
       }
-      const role = t.blocks[i].role, blocks = [];
-      while(i < t.blocks.length && t.blocks[i].role === role){
-        if(blockUnread(t.blocks[i]) && !divided && unreadAfter !== undefined && blocks.length > 0) break;
-        blocks.push(t.blocks[i]); i++;
+      const role = blocks_[i].role, blocks = [];
+      while(i < blocks_.length && blocks_[i].role === role){
+        if(unread(pos(t.seq, i)) && !divided && has && blocks.length > 0) break;
+        blocks.push(blocks_[i]); i++;
       }
-      const seqs = blocks.map(b => b.eventSeq || 0);
       const last = blocks.length ? blocks[blocks.length - 1] : {};
       const group = {
         cls: blockCls(role), blocks, tool: role === "tool", time: last.time,
-        maxEventSeq: Math.max(0, ...seqs) || undefined,
+        maxPos: pos(t.seq, i - 1), // the last block's position — drives read-advance (data-pos)
       };
       groups.push(group);
       if(group.time) lastGroupTime = group.time;
@@ -99,11 +114,11 @@ function metaHTML(time){
 }
 // bubble carries the PRIMARY text on the node (`_raw`): the whole-message copy button
 // puts the model text on the clipboard, never the rendered HTML (app.js delegate).
-function bubble(cls, html, time, maxEventSeq, raw){
+function bubble(cls, html, time, dataPos, raw){
   const meta = metaHTML(time);
   const d = document.createElement("div");
   d.className = "msg " + cls + (meta ? " hasmeta" : "");
-  if(maxEventSeq) d.dataset.maxEventSeq = String(maxEventSeq);
+  if(dataPos) d.dataset.pos = String(dataPos); // encoded (turn,block) position — drives read-advance
   const copy = raw ? '<button class="mcopy" title="Копировать сообщение">⧉</button>' : "";
   d.innerHTML = copy + '<div class="body">'+html+'</div>' + meta;
   if(raw) d._raw = raw;
@@ -151,7 +166,7 @@ function renderKey(it, index){
   if(it.kind === "turn") return "turn:" + it.seq;
   // Prefer the event seq over the list index: it keeps the key stable when items above
   // (the unread divider) come and go, which node reuse and FLIP shifts both rely on.
-  if(it.kind === "bubble") return "bubble:" + (it.maxEventSeq !== undefined ? "e" + it.maxEventSeq : index) + ":" + it.cls;
+  if(it.kind === "bubble") return "bubble:" + (it.key !== undefined ? "e" + it.key : index) + ":" + it.cls;
   return "";
 }
 
@@ -161,12 +176,12 @@ function renderSig(it){
       text: it.text, time: it.time, state: it.state, note: it.note, ctxLine: it.ctxLine,
       groups: it.groups.map(g => ({
         divider: g.divider,
-        cls: g.cls, tool: g.tool, time: g.time, maxEventSeq: g.maxEventSeq,
+        cls: g.cls, tool: g.tool, time: g.time, maxPos: g.maxPos,
         blocks: (g.blocks || []).map(b => ({ id: b.id, role: b.role, text: b.text, kind: b.kind, time: b.time })),
       })),
     });
   }
-  if(it.kind === "bubble") return JSON.stringify({ cls: it.cls, text: it.text, md: it.md, time: it.time, maxEventSeq: it.maxEventSeq });
+  if(it.kind === "bubble") return JSON.stringify({ cls: it.cls, text: it.text, md: it.md, time: it.time, key: it.key });
   return "";
 }
 
@@ -192,7 +207,7 @@ function withFlip(el, key){ el.dataset.flip = key; return el; }
 
 function buildItem(it, onAbort){
   if(it.kind === "divider") return divider();
-  if(it.kind === "bubble") return bubble(it.cls, it.md ? mdSafe(it.text) : esc(it.text), it.time, it.maxEventSeq, it.text);
+  if(it.kind === "bubble") return bubble(it.cls, it.md ? mdSafe(it.text) : esc(it.text), it.time, undefined, it.text);
   const turn = document.createElement("div");
   turn.className = "turn"; turn.dataset.seq = it.seq;
   turn.appendChild(withFlip(bubble("user", mdSafe(it.text), it.time, undefined, it.text), "u"));
@@ -202,7 +217,7 @@ function buildItem(it, onAbort){
     const html = g.blocks.map(b => g.tool ? esc(b.text || "") : mdSafe(b.text || "")).join(g.tool ? "<br>" : "");
     const raw = g.blocks.map(b => b.text || "").join(g.tool ? "\n" : "\n\n");
     const fk = "g:" + ((g.blocks[0] && g.blocks[0].id) || (g.cls + ":" + gi));
-    turn.appendChild(withFlip(bubble(g.cls, html, g.time, g.maxEventSeq, raw), fk));
+    turn.appendChild(withFlip(bubble(g.cls, html, g.time, g.maxPos, raw), fk));
     gi++;
   }
   const ind = indicator(it.state, it.note, onAbort);

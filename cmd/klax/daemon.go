@@ -57,30 +57,30 @@ type runnerKey struct {
 }
 
 type daemon struct {
-	cfg           *config.Config
-	state         *session.State
-	transports    map[string]transport.Transport // "tg" -> tg.Bot, "mx" -> max.Bot
-	formats       map[string]string              // "tg" -> "html", "vk" -> ""
-	disabled      map[string]bool                // disabled transports
-	pollCtx       map[string]context.CancelFunc  // cancel functions for poll goroutines
-	sources       map[string]Source              // inbound channels by name (tg/mx/vk/ui)
-	store         *session.Store
-	runners       map[runnerKey]*sessionRunner // (sessionKey, created) -> runner+queue
-	runnersMu     sync.Mutex
-	mu            sync.Mutex
-	draining      bool           // stop accepting new tasks, wait for current to finish
-	drainWg       sync.WaitGroup // tracks active sessionRunners for drain
-	sendPause     map[string]time.Time
-	sendFails     map[string]int
-	chatEvents    map[string]uint64
-	identities    map[int64]string  // telegram userID -> canonical user ID
-	maxIdents     map[int64]string  // max userID -> canonical user ID
-	vkIdents      map[int]string    // vk userID -> canonical user ID
-	groupChats    map[string]string // chatID -> CWD for group mode chats
-	groupVerb     map[string]bool   // chatID -> verbose progress output for group mode chats
-	tgRich        atomic.Bool       // global: render Telegram replies as Rich Messages (/rich)
-	uiHub         *uiHub            // web UI event hub; nil when the UI is not configured
-	sealer        *sealref.Sealer   // mints/opens file capability refs; nil when UI is off
+	cfg        *config.Config
+	state      *session.State
+	transports map[string]transport.Transport // "tg" -> tg.Bot, "mx" -> max.Bot
+	formats    map[string]string              // "tg" -> "html", "vk" -> ""
+	disabled   map[string]bool                // disabled transports
+	pollCtx    map[string]context.CancelFunc  // cancel functions for poll goroutines
+	sources    map[string]Source              // inbound channels by name (tg/mx/vk/ui)
+	store      *session.Store
+	runners    map[runnerKey]*sessionRunner // (sessionKey, created) -> runner+queue
+	runnersMu  sync.Mutex
+	mu         sync.Mutex
+	draining   bool           // stop accepting new tasks, wait for current to finish
+	drainWg    sync.WaitGroup // tracks active sessionRunners for drain
+	sendPause  map[string]time.Time
+	sendFails  map[string]int
+	chatEvents map[string]uint64
+	identities map[int64]string  // telegram userID -> canonical user ID
+	maxIdents  map[int64]string  // max userID -> canonical user ID
+	vkIdents   map[int]string    // vk userID -> canonical user ID
+	groupChats map[string]string // chatID -> CWD for group mode chats
+	groupVerb  map[string]bool   // chatID -> verbose progress output for group mode chats
+	tgRich     atomic.Bool       // global: render Telegram replies as Rich Messages (/rich)
+	uiHub      *uiHub            // web UI event hub; nil when the UI is not configured
+	sealer     *sealref.Sealer   // mints/opens file capability refs; nil when UI is off
 }
 
 func startupBackoff(attempt int) time.Duration {
@@ -579,7 +579,7 @@ func runDaemon() {
 			text = fmt.Sprintf("✅ klax перезапущен (v%s)", version)
 		}
 		// Messengers get the restart banner here; UI clients show their own notice
-		// on the epoch change their next poll observes (handlePoll/pollLoop).
+		// on the `started` change their next tail observes (handleTail/tailLoop).
 		d.notifyAllUsers(text)
 		removeMarker()
 	}
@@ -677,8 +677,16 @@ func (d *daemon) notifyAllUsers(text string) {
 	d.uiNotifyAll(text)
 }
 
+// drainMaxWait bounds how long a restart waits for active sessions to finish. Without it a session
+// that never idles — e.g. a long-lived agent conversation running THROUGH this daemon, which stays
+// active across every turn — blocks the drain forever, so `klax update` installs a new binary but
+// the old process never exits to pick it up. On timeout we force the restart; the interrupted
+// turn's durable "run" record is recovered (never auto-rerun) on the next start, so no double side
+// effects, and startup replay re-runs anything still "enq".
+const drainMaxWait = 2 * time.Minute
+
 // startDrain puts the daemon into draining mode.
-// Waits for current task AND queued tasks to finish before shutting down.
+// Waits for current task AND queued tasks to finish (bounded by drainMaxWait) before shutting down.
 func (d *daemon) startDrain(reason string) {
 	d.mu.Lock()
 	if d.draining {
@@ -706,9 +714,17 @@ func (d *daemon) startDrain(reason string) {
 	}
 	d.runnersMu.Unlock()
 
-	// Wait for all active session runners to finish.
+	// Wait for all active session runners to finish — bounded, so a persistent/wedged session cannot
+	// block the restart forever (see drainMaxWait).
 	log.Println("waiting for all sessions to drain...")
-	d.drainWg.Wait()
+	done := make(chan struct{})
+	go func() { d.drainWg.Wait(); close(done) }()
+	select {
+	case <-done:
+		log.Println("all sessions drained")
+	case <-time.After(drainMaxWait):
+		log.Printf("drain timed out after %s — forcing restart with sessions still active", drainMaxWait)
+	}
 	d.shutdown()
 }
 
