@@ -33,12 +33,12 @@ func TestQueuedCountExcludesFirstIdleQueuedMessage(t *testing.T) {
 	}
 }
 
-// Every broadcast event gets a monotonic seq and is retained per user; collect
+// Every retained event (a notice — the only kind kept now) gets a monotonic seq per user; collect
 // returns everything after a cursor, the head, and whether the cursor is coverable.
 func TestUIHubCollect(t *testing.T) {
 	h := newUIHub()
 	for i := 0; i < 5; i++ {
-		h.broadcast("claw", uiEvent{Type: "progress", Text: "x"})
+		h.broadcast("claw", uiEvent{Type: "notice", Text: "x"})
 	}
 	// From cursor 0: all 5, head 5, no reload.
 	ev, head, reload := h.collect("claw", h.epoch, 0)
@@ -62,45 +62,20 @@ func TestUIHubCollect(t *testing.T) {
 	}
 }
 
-// A cursor older than the retained ring (overflow) -> reload (transcript backstop).
+// A notice cursor older than the retained ring (overflow) -> reload (transcript backstop).
 func TestUIHubCollectGapOnOverflow(t *testing.T) {
 	h := newUIHub()
 	for i := 0; i < uiRingMaxItems+50; i++ {
-		h.broadcast("claw", uiEvent{Type: "progress", Text: "x"})
+		h.broadcast("claw", uiEvent{Type: "notice", Text: "x"})
 	}
 	if _, _, reload := h.collect("claw", h.epoch, 1); !reload {
 		t.Fatal("a cursor predating the ring must report reload")
 	}
 }
 
-// The user-echo event carries the sender's nonce for server-side idempotency/debugging
-// and round-trips through the ring intact.
-func TestUIUserEventCarriesNonce(t *testing.T) {
-	h := newUIHub()
-	h.broadcast("claw", uiEvent{Type: "user", Session: 5, Text: "hi", Nonce: "n1"})
-	ev, _, _ := h.collect("claw", h.epoch, 0)
-	if len(ev) != 1 {
-		t.Fatalf("got %d events, want 1", len(ev))
-	}
-	if e := decodeEvent(t, ev[0]); e.Type != "user" || e.Text != "hi" || e.Nonce != "n1" || e.Session != 5 {
-		t.Fatalf("user event = %+v, want user/hi/n1/session5", e)
-	}
-}
-
-func TestUIDeliveryContextCanceledRendersAborted(t *testing.T) {
-	d := &daemon{uiHub: newUIHub()}
-	u := d.newUIDelivery(context.Background(), queuedMsg{sessKey: "user:claw", sessCreated: 7, turnSeq: 11})
-	u.Final(runner.RunResult{Error: context.Canceled})
-
-	ev, _, _ := d.uiHub.collect("claw", d.uiHub.epoch, 0)
-	if len(ev) != 2 {
-		t.Fatalf("events = %d, want turn_start + error", len(ev))
-	}
-	e := decodeEvent(t, ev[1])
-	if e.Type != "error" || e.Text != "прервано" || e.Block == nil || e.Block.Text != "прервано" {
-		t.Fatalf("cancel error event = %+v", e)
-	}
-}
+// (The user-echo-via-ring and delivery-emits-error tests were removed with the ring content
+// channel: a turn's user bubble and its aborted/error block now come from the durable log via
+// buildReadModel, delivered by the tail — covered by the tailFrom/unreadAfter tests.)
 
 // Events are retained per user; one user's events never leak into another's.
 func TestUIHubIsolatesUsers(t *testing.T) {
@@ -129,6 +104,39 @@ func TestUIHubWakeOnEmit(t *testing.T) {
 	case <-ch: // emit closed the channel we were holding
 	default:
 		t.Fatal("emit did not wake a held waiter")
+	}
+}
+
+// bumpSessions advances the per-user strip revision AND wakes held polls, so handleTail can return
+// a sessions-only change (rename/create/close/cross-tab read) immediately instead of holding to
+// the timeout — the durable-tail regression pico-codex flagged.
+func TestBumpSessionsAdvancesRevAndWakes(t *testing.T) {
+	h := newUIHub()
+	if h.sessionsRev("claw") != 0 {
+		t.Fatalf("fresh rev = %d, want 0", h.sessionsRev("claw"))
+	}
+	ch := h.waitChan("claw")
+	h.bumpSessions("claw")
+	if got := h.sessionsRev("claw"); got != 1 {
+		t.Fatalf("rev after bump = %d, want 1", got)
+	}
+	select {
+	case <-ch: // the bump woke the held poll
+	default:
+		t.Fatal("bumpSessions did not wake a held poll")
+	}
+}
+
+// A daemon-wide notice must reach a user who polled at least once but is between polls now (no
+// inflight, and no ring entry since content isn't retained) — else the restart/update banner is
+// silently dropped for an open UI.
+func TestBroadcastAllReachesKnownUserBetweenPolls(t *testing.T) {
+	h := newUIHub()
+	h.enterPoll("claw") // marks the user known
+	h.leavePoll("claw") // now: not inflight, no ring entry
+	h.broadcastAll(uiEvent{Type: "notice", Text: "restart"})
+	if ev, _, _ := h.collect("claw", h.epoch, 0); len(ev) != 1 {
+		t.Fatalf("known user between polls missed the notice: got %d events, want 1", len(ev))
 	}
 }
 
@@ -179,9 +187,9 @@ func TestUIServerAuth(t *testing.T) {
 		t.Fatalf("bearer auth: got %q ok=%v", u, ok)
 	}
 
-	// A query-string token is NOT accepted: every UI request (incl. the long-poll)
+	// A query-string token is NOT accepted: every UI request (incl. the tail long-poll)
 	// sets the Authorization header, so there is no ?token= auth path.
-	query := httptest.NewRequest("GET", "/api/poll?token=secret", nil)
+	query := httptest.NewRequest("GET", "/api/tail?token=secret", nil)
 	if _, ok := s.auth(query); ok {
 		t.Fatal("query token must not authenticate")
 	}
@@ -219,53 +227,55 @@ func TestDeliveryForRoutesUIChat(t *testing.T) {
 	del.Close()
 }
 
-// A messenger turn on a canonical "user:" session is mirrored to the web UI (tee),
-// so its answer/progress stream there live — not only on reload. A raw (unmapped)
-// messenger session is not mirrored, and never leaks to a UI hub.
+// A messenger turn on a canonical "user:" session is mirrored to the web UI (tee): its delivery
+// POKES the canonical user's tail so the answer/progress stream there live, not only on reload. A
+// raw (unmapped) messenger session is not mirrored, and never pokes a UI hub.
 func TestDeliveryForMirrorsMessengerToUI(t *testing.T) {
 	d := newTestDeliveryDaemon(&fakeTransport{})
 	d.uiHub = newUIHub()
 
+	canon := d.uiHub.waitChan("claw")
 	del := d.deliveryFor(context.Background(), queuedMsg{chatID: "tg:1", sessKey: "user:claw", sessCreated: 7}, true)
 	if _, ok := del.(teeDelivery); !ok {
 		t.Fatalf("canonical messenger session must mirror to UI (teeDelivery), got %T", del)
 	}
 	del.Close()
-	if ev, _, _ := d.uiHub.collect("claw", d.uiHub.epoch, 0); len(ev) == 0 {
-		t.Fatal("messenger turn not mirrored to the canonical UI hub")
-	} else if e := decodeEvent(t, ev[0]); e.Type != "turn_start" || e.Session != 7 {
-		t.Fatalf("mirror event = %+v, want turn_start session 7", e)
+	select {
+	case <-canon: // the tee's newUIDelivery poked the canonical UI hub
+	default:
+		t.Fatal("messenger turn not mirrored (no poke) to the canonical UI hub")
 	}
 
+	raw := d.uiHub.waitChan("2")
 	del2 := d.deliveryFor(context.Background(), queuedMsg{chatID: "tg:2", sessKey: "tg:2", sessCreated: 9}, true)
 	if _, ok := del2.(teeDelivery); ok {
 		t.Fatal("a raw (unmapped) messenger session must NOT mirror to UI")
 	}
 	del2.Close()
-	if ev, _, _ := d.uiHub.collect("2", d.uiHub.epoch, 0); len(ev) != 0 {
-		t.Fatalf("raw messenger session leaked %d events to a UI hub", len(ev))
+	select {
+	case <-raw:
+		t.Fatal("raw messenger session leaked a poke to a UI hub")
+	default:
 	}
 }
 
+// newUIDelivery pokes the CANONICAL user's tail (user:claw -> "claw"), never the raw messenger id.
 func TestUIDeliveryUsesCanonicalSessionUser(t *testing.T) {
 	h := newUIHub()
 	d := &daemon{uiHub: h}
-	del := d.newUIDelivery(context.Background(), queuedMsg{
-		chatID:      "tg:42",
-		sessKey:     "user:claw",
-		sessCreated: 7,
-	})
-	del.Close()
+	canon := h.waitChan("claw")
+	raw := h.waitChan("42")
+	d.newUIDelivery(context.Background(), queuedMsg{chatID: "tg:42", sessKey: "user:claw", sessCreated: 7})
 
-	ev, _, _ := h.collect("claw", h.epoch, 0)
-	if len(ev) != 1 {
-		t.Fatalf("canonical user got %d events, want 1 turn_start", len(ev))
+	select {
+	case <-canon: // poked the canonical user
+	default:
+		t.Fatal("newUIDelivery did not poke the canonical user")
 	}
-	if e := decodeEvent(t, ev[0]); e.Type != "turn_start" || e.Session != 7 {
-		t.Fatalf("event = %+v, want turn_start for session 7", e)
-	}
-	if raw, _, _ := h.collect("42", h.epoch, 0); len(raw) != 0 {
-		t.Fatal("raw messenger id received the canonical UI event")
+	select {
+	case <-raw:
+		t.Fatal("newUIDelivery poked the raw messenger id instead of the canonical user")
+	default:
 	}
 }
 
@@ -319,13 +329,14 @@ func TestUIServerRoutes(t *testing.T) {
 		t.Fatalf("authenticated /api/sessions: code=%d body=%s", ok.Code, ok.Body.String())
 	}
 
-	// A fresh long-poll (no cursor) returns immediately with a cursor to start from.
-	poll := httptest.NewRecorder()
-	preq := httptest.NewRequest("GET", "/api/poll", nil)
-	preq.Header.Set("Authorization", "Bearer sec")
-	h.ServeHTTP(poll, preq)
-	if poll.Code != 200 || !strings.Contains(poll.Body.String(), `"cursor"`) {
-		t.Fatalf("fresh /api/poll: code=%d body=%s", poll.Code, poll.Body.String())
+	// The tail long-poll is wired and authenticated: a malformed body reaches handleTail and is
+	// rejected 400 (not 404/401), proving the route past auth without holding the poll open.
+	tail := httptest.NewRecorder()
+	treq := httptest.NewRequest("POST", "/api/tail", strings.NewReader("not json"))
+	treq.Header.Set("Authorization", "Bearer sec")
+	h.ServeHTTP(tail, treq)
+	if tail.Code != 400 {
+		t.Fatalf("/api/tail with a bad body: code=%d, want 400 (route reached handleTail)", tail.Code)
 	}
 
 	// The UI has no chat commands: the /api/command endpoint is gone (it falls

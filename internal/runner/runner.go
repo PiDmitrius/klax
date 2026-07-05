@@ -335,6 +335,10 @@ type RunOptions struct {
 	AppendSystemPrompt        string // appended to default system prompt
 	ClaudeTTY                 bool   // run Claude through klax tty instead of claude -p directly
 	SuppressNarrationProgress bool   // keep final-answer text buffered instead of streaming it as narration
+	// OnSessionID, if set, is called once with the backend session id the moment the run first
+	// learns it (the system/init event), BEFORE the run finishes. It lets the caller persist the id
+	// early so a brand-new session's transcript becomes addressable mid-run (durable-tail streaming).
+	OnSessionID func(string)
 }
 
 // ModelUsageInfo captures context window usage from a run.
@@ -854,8 +858,12 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 			switch ev.Type {
 			case EventSystem:
 				if ev.SessionID != "" {
+					first := sessionID == ""
 					sessionID = ev.SessionID
 					startCodexMetaTail(sessionID)
+					if first && opts.OnSessionID != nil {
+						opts.OnSessionID(sessionID) // persist early so a new session's transcript is tail-addressable now
+					}
 				}
 				if ev.Model != "" {
 					model = ev.Model

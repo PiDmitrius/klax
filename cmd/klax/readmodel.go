@@ -246,3 +246,92 @@ func mergeQueueOnlyTurns(base, missing []uiTurn) []uiTurn {
 	}
 	return append(out, missing[mi:]...)
 }
+
+// unreadAfter counts unread answer blocks (the "actions" of a turn — narration + tool calls)
+// relative to a durable read watermark (turn_seq, block index) — the count the tab badge shows. A
+// user turn's block at index bi is unread when (turn.Seq, bi) sorts strictly after (throughTurn,
+// throughBlock); a never-read session is (0,0) ⇒ every block unread (uniform for UI- and
+// messenger-originated sessions). Only answer blocks count — the user's own bubbles do not, and
+// standalone cosmetic rows (compact/notice, Seq==0) are skipped, so the count is >0 exactly when a
+// divider would show (badge↔line invariant) and a trailing notice can never wedge the badge >0.
+func unreadAfter(turns []uiTurn, throughTurn int64, throughBlock int) int {
+	n := 0
+	for _, t := range turns {
+		if t.Role != "user" || t.Seq <= 0 {
+			continue
+		}
+		for bi := range t.Blocks {
+			if t.Seq > throughTurn || (t.Seq == throughTurn && bi > throughBlock) {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// stateCode is the one-letter form of a turn's state carried in the tail cursor. It lets a pure
+// state transition (enq→run when the backend is still "thinking", so no new block yet) advance the
+// cursor and re-deliver the turn ONCE — edge-triggered, so the long-poll neither misses the change
+// (the bubble would stay "queued" until the first block or a reload) nor spins on it.
+func stateCode(state string) string {
+	switch state {
+	case "run":
+		return "r"
+	case "done":
+		return "d"
+	case "err":
+		return "x"
+	default:
+		return "e" // enq / unknown
+	}
+}
+
+// tailFrom returns the live "tail" of a session's read model past a per-session
+// (turn,block,state,trail) cursor — the boundary turn (refreshed, so a grown OR state-changed last
+// turn re-syncs) plus every later turn AND trailing standalone row. It returns nil when nothing is
+// new (the boundary turn has not grown, its state is unchanged, no later turn exists, AND no
+// standalone was appended after the last durable turn), so a long-poll keeps holding rather than
+// spinning. The client replaces its own tail from `throughTurn` with these rows — ONE path, shared
+// with reload, so live delivery and reload converge (no event synthesis, no in-memory ring).
+// `throughState` is the boundary turn's state code the client last saw; `throughTrail` is the count
+// of standalone rows it last saw trailing after the last durable turn — this is how a compact/system
+// standalone appended AFTER the last turn (which has no durable position of its own) is delivered
+// live exactly once instead of only on reload. ("" / 0 on a legacy cursor ⇒ re-syncs once.)
+// [DURABLE_CURSOR_PLAN S3]
+func tailFrom(turns []uiTurn, throughTurn int64, throughBlock int, throughState string, throughTrail int) []uiTurn {
+	boundary := -1
+	fresh := false
+	trail := 0
+	for i, t := range turns {
+		if t.Role != "user" || t.Seq <= 0 {
+			trail++ // a standalone / non-durable row; reset below when a later durable turn is seen
+			continue
+		}
+		trail = 0
+		if t.Seq == throughTurn {
+			boundary = i
+			if len(t.Blocks) > throughBlock+1 {
+				fresh = true // the boundary turn grew past the read block
+			}
+			if stateCode(t.State) != throughState {
+				fresh = true // the boundary turn changed state (e.g. enq→run) with no new block
+			}
+			if throughBlock >= 0 && throughBlock >= len(t.Blocks) {
+				fresh = true // the boundary turn shrank below the read block — re-sync so live == reload
+			}
+		} else if t.Seq > throughTurn {
+			fresh = true // a whole new turn
+		}
+	}
+	if trail != throughTrail {
+		fresh = true // a standalone was appended/removed after the last durable turn
+	}
+	if !fresh {
+		return nil
+	}
+	from := boundary
+	if from < 0 {
+		from = 0 // cursor turn gone / never set → resend from the top; the client reconciles
+	}
+	return turns[from:]
+}

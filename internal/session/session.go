@@ -18,21 +18,27 @@ type ScopeDefaults struct {
 }
 
 type Session struct {
-	ID                 string `json:"id"`                       // session UUID (claude or codex thread_id)
-	Name               string `json:"name"`                     // user-friendly name
-	CWD                string `json:"cwd"`                      // working directory
-	Created            int64  `json:"created"`                  // unix timestamp
-	LastUsed           int64  `json:"last_used"`                // unix timestamp
-	Active             bool   `json:"active"`                   // currently selected
-	Backend            string `json:"backend,omitempty"`        // "claude" (default) or "codex"
-	Model              string `json:"model,omitempty"`          // last used model (from result)
-	ModelOverride      string `json:"model_override,omitempty"` // user-selected model
-	ThinkOverride      string `json:"think_override,omitempty"` // thinking level
-	Sandbox            string `json:"sandbox,omitempty"`        // "on" | "off"
-	ClaudeTTY          bool   `json:"claude_tty,omitempty"`     // drive Claude through klax tty
-	ContextWindow      int    `json:"ctx_window,omitempty"`
-	ContextUsed        int    `json:"ctx_used,omitempty"`
-	Messages           int    `json:"messages"` // user message count
+	ID            string `json:"id"`                       // session UUID (claude or codex thread_id)
+	Name          string `json:"name"`                     // user-friendly name
+	CWD           string `json:"cwd"`                      // working directory
+	Created       int64  `json:"created"`                  // unix timestamp
+	LastUsed      int64  `json:"last_used"`                // unix timestamp
+	Active        bool   `json:"active"`                   // currently selected
+	Backend       string `json:"backend,omitempty"`        // "claude" (default) or "codex"
+	Model         string `json:"model,omitempty"`          // last used model (from result)
+	ModelOverride string `json:"model_override,omitempty"` // user-selected model
+	ThinkOverride string `json:"think_override,omitempty"` // thinking level
+	Sandbox       string `json:"sandbox,omitempty"`        // "on" | "off"
+	ClaudeTTY     bool   `json:"claude_tty,omitempty"`     // drive Claude through klax tty
+	ContextWindow int    `json:"ctx_window,omitempty"`
+	ContextUsed   int    `json:"ctx_used,omitempty"`
+	Messages      int    `json:"messages"` // user message count
+	// UI read-through watermark — the durable per-session unread cursor: the highest
+	// (turn_seq, block index) the user has read. Absent on legacy stores ⇒ 0 ("nothing read
+	// yet"). Consumed from S2 of DURABLE_CURSOR_PLAN.md so the unread divider/badge/title
+	// survive a page reload and a daemon restart instead of re-baselining to "all read".
+	ReadThroughTurn    int64  `json:"read_through_turn,omitempty"`
+	ReadThroughBlock   int    `json:"read_through_block,omitempty"`
 	AppendSystemPrompt string `json:"append_system_prompt,omitempty"`
 	// Deprecated: rate limits moved to global config per backend.
 	// Keep fields for JSON backward compat (old sessions.json).

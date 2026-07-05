@@ -84,6 +84,29 @@ func Load(backend, sessionID, cwd string) ([]Item, error) {
 	return readClaude(path)
 }
 
+// Stat returns the transcript file's mod time and size (zero values + ok=false when the session
+// has no file yet). It is a cheap change-detector: a caller that caches something derived from the
+// transcript (e.g. the UI unread-block count) can stat first and skip re-reading an unchanged file.
+func Stat(backend, sessionID, cwd string) (modTime time.Time, size int64, ok bool) {
+	if sessionID == "" {
+		return time.Time{}, 0, false
+	}
+	var path string
+	if backend == "codex" {
+		path = locateCodex(sessionID)
+	} else {
+		path = locateClaude(sessionID, cwd)
+	}
+	if path == "" {
+		return time.Time{}, 0, false
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}, 0, false
+	}
+	return fi.ModTime(), fi.Size(), true
+}
+
 // ---- Claude transcript ----
 
 func locateClaude(sessionID, cwd string) string {

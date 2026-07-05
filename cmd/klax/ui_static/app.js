@@ -1,11 +1,11 @@
-// app.js — bootstrap + wiring. Owns the model, the active-session render flow, and the
-// poll host (cursor/lastSeq/onReload/onAffected); ties compose + tabs together. The whole
-// old state machine (runningTurn/doneTurns/queuedTurns/tmpTurn/renderedPending/readMark/
+// app.js — bootstrap + wiring. Owns the model, the active-session render flow, and the tail host
+// (per-session content cursors + the notice cursor + onAffected); ties compose + tabs together.
+// The whole old state machine (runningTurn/doneTurns/queuedTurns/tmpTurn/renderedPending/readMark/
 // insertAnswer/breakMerge) is gone — a turn's truth is model turn.state.
 
 import { TurnModel } from "./model.js";
-import { renderSession, beginShift, playShift, clearShiftGhosts } from "./render.js";
-import { pollLoop } from "./events.js";
+import { renderSession, beginShift, playShift, clearShiftGhosts, pos, parsePos, decodePos } from "./render.js";
+import { tailLoop } from "./events.js";
 import { api, getToken, setToken } from "./base.js";
 import { selectionInLog } from "./scroll.js";
 import { initCompose, saveDraft, loadDraft, dropDraft } from "./compose.js";
@@ -14,12 +14,15 @@ import { injectEmojiFont } from "./emoji.js";
 
 const model = new TurnModel();
 const loaded = {};        // created -> transcript loaded?
-const readThrough = {};   // created -> highest event seq the user has actually read
+const readThrough = {};   // created -> encoded (turn,block) read watermark (pos()); undefined until seeded
 const unreadJump = {};    // created -> one-shot scroll to the unread divider
 const readGraceUntil = {}, readGraceTimer = {};
+const readReportTimer = {}; // created -> pending POST /api/read debounce timer
 const READ_GRACE_MS = 1600;
 let active = 0;
-let cursor = null, lastSeq = 0;
+const tailCursors = {};                // created -> "<turn>.<block>.<state>.<trail>" durable content cursor (tailLoop)
+let noticeCursor = "";                 // ring cursor for transient notices (tailLoop)
+let sessRev = 0;                       // last session-strip revision rendered (tailLoop; server returns it early on a strip change)
 let stick = true, pendingRender = false, readOnScroll = true;
 let liveRenderRAF = 0, liveRenderCreated = 0;
 // Live DOM commits are serialized so streamed blocks never animate on top of each other.
@@ -31,6 +34,17 @@ const COMMIT_MS = 200;
 let liveBusy = false, liveDirty = false, liveGateTimer = 0;
 let sessionList = []; // last /api/sessions list — for hash-change validity + lookups
 const offsetFor = {}, moreFor = {}; // created -> first-loaded turn index + has-older-history flag (pagination)
+const loadingOlder = {}; // created -> a loadOlder() is in flight (guards the auto-load-on-scroll + the initial fill)
+// Timeline window (anchored on the "непрочитанные сообщения" line = the read watermark). Measured in
+// BUBBLES (a user turn = its message bubble + one per answer block/tool call; a standalone = 1) — the
+// unit the user sees, so one big turn counts as many, not one. CAP is the loadOlder page in TURNS
+// (server pagination unit).
+//   - everything at/below the line (all unread) is ALWAYS kept;
+//   - ≥ KEEP_ABOVE bubbles of read context are kept above the line (rounded up to a turn boundary);
+//   - older rows evict from the top once total bubbles exceed WIN_MAX (never the viewport-to-bottom range);
+//   - the line is guaranteed loaded (ensureLineLoaded pulls older pages if it sits above the first page);
+//   - older history auto-loads CAP turns at a time when the user scrolls to the top of what is loaded.
+const KEEP_ABOVE = 60, CAP = 20, WIN_MAX = 120;
 const scrollTopFor = {}; // created -> last scrollTop, so tab switches do not snap by a pixel
 const watchedImages = new WeakSet();
 let composerH = 0; // observed #composer height — the bottom-anchor baseline (see start())
@@ -46,7 +60,23 @@ function syncComposerH(){ const c = document.getElementById("composer"); if(c) s
 
 function logcol(){ return document.getElementById("logcol"); }
 function getActive(){ return active; }
-function seqOf(c){ const i = String(c || "").indexOf("-"); return i >= 0 ? (parseInt(String(c).slice(i + 1), 10) || 0) : 0; }
+// stateCode mirrors the server (readmodel.go): the tail cursor carries the boundary turn's state
+// code so a pure enq→run transition (no new block) still advances the cursor and re-delivers the
+// turn once — otherwise the bubble stays "queued" until the first block or a reload.
+function stateCode(s){ return s === "run" ? "r" : s === "done" ? "d" : s === "err" ? "x" : "e"; }
+
+// tailPos is the durable "<turn>.<block>.<state>.<trail>" content cursor for the newest loaded row — where
+// the live tail poll resumes. block -1 for a turn with no answer blocks yet (its first block is new).
+function tailPos(rows){
+  let turn = 0, block = -1, state = "", trail = 0;
+  for(const t of (rows || [])){
+    // `seq > 0` mirrors the server's tailCursor (only positive durable seqs anchor); a legacy negative
+    // synthetic seq counts as trailing, exactly like a standalone, so client seed == server cursor.
+    if(t.role === "user" && t.seq > 0){ turn = t.seq; block = (t.blocks || []).length - 1; state = t.state; trail = 0; }
+    else trail++;
+  }
+  return turn + "." + block + "." + stateCode(state) + "." + trail;
+}
 function sameSession(a, b){ return String(a) === String(b); }
 function documentVisible(){ return typeof document === "undefined" || document.visibilityState !== "hidden"; }
 function clearReadGrace(created){
@@ -77,19 +107,43 @@ function markRead(created, force){
   if(!created) return false;
   if(!force && inReadGrace(created)) return false;
   const visualChange = rawUnreadCount(created) > 0 || unreadJump[created] !== undefined || readGraceUntil[created] !== undefined;
-  readThrough[created] = Math.max(readThrough[created] || 0, lastSeq);
+  const prev = readThrough[created] || 0;
+  const next = Math.max(prev, modelMaxPos(created));
+  readThrough[created] = next;
   delete unreadJump[created];
   clearReadGrace(created);
   readOnScroll = true;
+  if(next !== prev) reportRead(created); // persist ONLY when the watermark actually advanced — no redundant /api/read
   return visualChange;
 }
-function markLoadedRead(created, watermark){
-  if(!created) return;
-  const seq = watermark !== undefined ? watermark : lastSeq;
-  readThrough[created] = Math.max(readThrough[created] || 0, seq);
-  delete unreadJump[created];
-  clearReadGrace(created);
-  readOnScroll = true;
+// modelMaxPos is the (turn,block) position of the LAST answer block currently in the model —
+// "read up to now". A later block (same turn next index, or a new turn) sorts after it, so a new
+// arrival reads as unread. Empty (answerless) turns contribute nothing; their first block, when it
+// lands, is unread by its higher turn_seq anyway.
+function modelMaxPos(created){
+  let max = 0;
+  for(const t of model.turns(created)){
+    if(t.role === "user" && t.seq !== undefined){
+      const nb = (t.blocks || []).length;
+      if(nb > 0){ const p = pos(t.seq, nb - 1); if(p > max) max = p; }
+    }
+  }
+  return max;
+}
+// reportRead pushes the durable read watermark to the server (POST /api/read), debounced so a
+// scroll burst coalesces to one request. flushRead sends it immediately — used on tab-hide, before
+// the tab can freeze; `keepalive` lets that request outlive a backgrounding/close. The server
+// raises the watermark monotonically, so a late or duplicate report is a harmless no-op.
+function reportRead(created){
+  if(!created || readThrough[created] === undefined) return;
+  if(readReportTimer[created]) return;
+  readReportTimer[created] = setTimeout(() => { delete readReportTimer[created]; flushRead(created); }, 400);
+}
+function flushRead(created){
+  if(!created || readThrough[created] === undefined) return;
+  if(readReportTimer[created]){ clearTimeout(readReportTimer[created]); delete readReportTimer[created]; }
+  const { turn, block } = decodePos(readThrough[created]);
+  api("/api/read", { method: "POST", keepalive: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: created, turn, block }) }).catch(()=>{});
 }
 function jumpToUnread(created){ if(created){ unreadJump[created] = true; startReadGrace(created); } }
 function focusComposer(){
@@ -168,7 +222,7 @@ function rerender(created, live){
   if(moreFor[active]){ // older history exists → a "load earlier" button at the top
     const m = document.createElement("button");
     m.id = "more"; m.textContent = "↑ Загрузить раньше";
-    m.addEventListener("click", () => loadOlder(active));
+    m.addEventListener("click", () => loadOlder(active, true)); // showTop: reveal the loaded rows
     col.insertBefore(m, col.firstChild);
   }
   if(unreadJump[active] && rawUnreadCount(active) > 0){
@@ -229,7 +283,7 @@ function sessionContext(created){
 
 async function loadTranscript(created){
   try {
-    const r = await api("/api/transcript?session=" + created);
+    const r = await api("/api/transcript?session=" + created + "&limit=" + CAP);
     if(!r.ok) return;
     const data = await r.json();
     model.reconcile(created, data.turns || []);
@@ -242,30 +296,52 @@ async function loadTranscript(created){
     // load (cursor still null) establishes the baseline from the watermark (§A3); a later
     // lazy tab-load must NOT move the global cursor, or it would skip events for other
     // already-loaded sessions. Re-applied events for this session dedup by seq + block id.
-    if(cursor === null && data.watermark){ cursor = data.watermark; lastSeq = seqOf(data.watermark); }
-    markLoadedRead(created, data.watermark ? seqOf(data.watermark) : undefined); // a freshly (re)loaded tab is read
+    tailCursors[created] = tailPos(data.turns || []); // where the live tail resumes for this tab
+    // Seed the durable read watermark from the server (NOT "all read"): the unread divider then
+    // survives reload/restart. Establish it once; later live reads advance it. With content and
+    // watermark now known, position the active view — jump to the divider if there is unread.
+    if(readThrough[created] === undefined) readThrough[created] = parsePos(data.read_through);
+    await ensureLineLoaded(created); // guarantee the unread line + KEEP_ABOVE context are in the window
+    if(created === active){
+      if(rawUnreadCount(created) > 0){ stick = false; jumpToUnread(created); }
+      else { markRead(created); stick = true; }
+      renderTabs(active);
+    }
     rerender(created);
+    // (No explicit capWindow here: positioning above fires a scroll event that re-caps once the DOM
+    // is real; capWindow's fits-the-viewport guard needs that real geometry to avoid dropping visible
+    // rows on a fresh/short load.)
   } catch(e){}
 }
 
-// loadOlder pages in the previous turn-page and PREPENDS it, keeping the viewport stable
-// (the scroll position is nudged by the height the prepended content added).
-async function loadOlder(created){
-  if(!offsetFor[created]) return; // nothing older
+// loadOlder pages in the previous CAP-turn page and PREPENDS it, keeping the viewport stable (the
+// scroll position is nudged by the height the prepended content added). Guarded so the scroll-driven
+// auto-load and the initial fill can't overlap requests.
+// loadOlder pages in the previous CAP-turn page and PREPENDS it. `showTop` (the manual "load earlier"
+// button) reveals the just-loaded rows at the top of the viewport; otherwise (scroll-driven auto-load)
+// the viewport is kept stable by nudging the scroll by the added height. Guarded against overlap.
+async function loadOlder(created, showTop){
+  if(!offsetFor[created] || loadingOlder[created]) return; // nothing older, or a load already in flight
+  loadingOlder[created] = true;
   const log = document.getElementById("log");
-  const oldH = log ? log.scrollHeight : 0;
+  const oldH = (created === active && log) ? log.scrollHeight : 0;
   try {
-    const r = await api("/api/transcript?session=" + created + "&before=" + offsetFor[created]);
+    const r = await api("/api/transcript?session=" + created + "&before=" + offsetFor[created] + "&limit=" + CAP);
     if(!r.ok) return;
     const data = await r.json();
     model.prepend(created, data.turns || []);
     offsetFor[created] = data.offset || 0;
     moreFor[created] = !!data.more;
-    const prev = stick; stick = false; // never snap to the bottom after loading old history
-    rerender(created);
-    stick = prev;
-    if(log) log.scrollTop += log.scrollHeight - oldH;
-  } catch(e){}
+    if(created === active){
+      const prev = stick; stick = false; // never snap to the bottom after loading old history
+      rerender(created);
+      stick = prev;
+      if(log){
+        if(showTop) log.scrollTop = 0;                   // button: show the older rows just loaded (not off-screen above)
+        else log.scrollTop += log.scrollHeight - oldH;   // scroll-driven: keep the current view stable
+      }
+    }
+  } catch(e){} finally { loadingOlder[created] = false; }
 }
 
 // rawUnreadCount is the true unread model (line-to-bottom): it drives the in-log divider,
@@ -276,27 +352,112 @@ function rawUnreadCount(created){
   if(base === undefined) return 0;
   let n = 0;
   for(const t of model.turns(created)){
-    if(t.role !== "user"){
-      if(t.eventSeq !== undefined && t.eventSeq > base) n++;
-      continue;
-    }
-    for(const b of (t.blocks || [])) if(b.eventSeq !== undefined && b.eventSeq > base) n++;
+    if(t.role !== "user" || t.seq === undefined) continue; // user bubbles + standalone rows don't count
+    for(let i = 0; i < (t.blocks || []).length; i++) if(pos(t.seq, i) > base) n++;
   }
   return n;
+}
+// firstUnreadRow is the index of the "непрочитанные сообщения" line: the first row carrying a block
+// after the read watermark. Returns arr.length when everything is read (line at the very bottom).
+function firstUnreadRow(created){
+  const base = readThrough[created];
+  const arr = model.turns(created);
+  if(base === undefined) return arr.length;
+  for(let i = 0; i < arr.length; i++){
+    const t = arr[i];
+    if(t.role === "user" && t.seq !== undefined){
+      const nb = (t.blocks || []).length;
+      if(nb > 0 && pos(t.seq, nb - 1) > base) return i;
+    }
+  }
+  return arr.length;
+}
+// rowBubbles is a row's on-screen bubble count: a user turn renders as its message bubble PLUS one
+// per answer block (assistant text / tool call); a standalone row is one bubble. The window is
+// measured in these, so one turn with many tool calls counts as many.
+function rowBubbles(t){
+  if(t && t.role === "user" && t.seq !== undefined) return 1 + (t.blocks ? t.blocks.length : 0);
+  return 1;
+}
+// bubblesAbove counts bubbles in rows [0, upto).
+function bubblesAbove(created, upto){
+  const arr = model.turns(created);
+  let n = 0;
+  for(let i = 0; i < upto && i < arr.length; i++) n += rowBubbles(arr[i]);
+  return n;
+}
+// capWindow trims a session's history from the TOP. It KEEPS everything at/below the unread line (all
+// unread) plus a read-context buffer above it, and evicts only older READ rows. For the ACTIVE tab the
+// cut is bounded by BOTH: (a) the bubble budget — keep ≥ KEEP_ABOVE bubbles above the line — AND (b)
+// the VIEWPORT — a row may be dropped only if its rendered element is ENTIRELY off-screen above the
+// viewport (plus a one-screen scrollback buffer). (b) is essential: a tall/zoomed-out viewport can
+// show far more than KEEP_ABOVE bubbles, so the bubble budget alone would drop VISIBLE rows and undo a
+// manual "load earlier" (contract B4). A background tab has no viewport, so it is bounded by the
+// bubble budget once large. Unread/line/divider/badge are never disturbed (evicted rows are read →
+// rawUnreadCount unchanged); each evicted row is one transcript page-unit, so offsetFor advances.
+// Callers run this only with a CURRENT DOM (post-render / scroll), never on the pre-render model.
+function capWindow(created){
+  if(!created || readThrough[created] === undefined) return 0; // no watermark yet — cannot prove a row is read
+  const arr = model.turns(created);
+  if(bubblesAbove(created, arr.length) <= WIN_MAX) return 0; // WHEN: hold up to WIN_MAX bubbles before trimming at all
+  const fu = firstUnreadRow(created); // NEVER evict at/after the unread line
+  let held = 0, cut = fu; // bubble budget: how many top read rows "keep ≥ KEEP_ABOVE bubbles" allows dropping
+  while(cut > 0 && held < KEEP_ABOVE){ cut--; held += rowBubbles(arr[cut]); }
+  if(created === active){
+    // WHERE (active tab only): additionally bound the cut to rows whose element is ENTIRELY off-screen
+    // above the viewport (+1-screen buffer), so a tall/zoomed-out viewport showing > KEEP_ABOVE bubbles
+    // never loses VISIBLE rows. The viewport rule narrows WHERE we may cut; it does not change WHEN.
+    const log = document.getElementById("log"), col = logcol();
+    if(!log || !col) return 0;
+    const cutoff = log.getBoundingClientRect().top - log.clientHeight; // a row whose bottom is above this is off-screen
+    let vp = 0, ri = 0; // DOM message elements are model rows in order; skip the #more button + the divider
+    for(let i = 0; i < col.children.length && ri < cut; i++){
+      const el = col.children[i];
+      if(el.id === "more" || (el.classList && el.classList.contains("readline"))) continue;
+      if(el.getBoundingClientRect().bottom <= cutoff){ ri++; vp = ri; } else break; // first on/near-screen row → stop
+    }
+    cut = vp; // intersect the bubble budget with the off-screen prefix
+  }
+  if(cut <= 0) return 0;
+  const removed = model.evictTop(created, cut);
+  if(removed > 0){
+    offsetFor[created] = (offsetFor[created] || 0) + removed;
+    moreFor[created] = true;
+  }
+  return removed;
+}
+// ensureLineLoaded guarantees the unread line (plus ≥ KEEP_ABOVE bubbles of read context above it) is
+// actually in the window after an initial fetch: if the first page landed entirely below the line
+// (lots of unread, so the line sits older than the page), pull older pages until the line + its
+// context are loaded. Bounded by a guard so a never-read session cannot loop the whole transcript in.
+async function ensureLineLoaded(created){
+  let guard = 0;
+  while(moreFor[created] && bubblesAbove(created, firstUnreadRow(created)) < KEEP_ABOVE && guard++ < 25){
+    await loadOlder(created);
+  }
 }
 function advanceReadThroughPastViewport(log){
   if(!active || readThrough[active] === undefined || !log || inReadGrace(active)) return false;
   const top = log.getBoundingClientRect().top;
   let next = readThrough[active];
-  log.querySelectorAll("[data-max-event-seq]").forEach(el => {
-    const seq = parseInt(el.dataset.maxEventSeq || "0", 10) || 0;
-    if(seq > next && el.getBoundingClientRect().bottom < top + 1) next = seq;
+  log.querySelectorAll("[data-pos]").forEach(el => {
+    const p = parseInt(el.dataset.pos || "0", 10) || 0;
+    if(p > next && el.getBoundingClientRect().bottom < top + 1) next = p;
   });
   if(next <= readThrough[active]) return false;
   readThrough[active] = next;
   if(rawUnreadCount(active) === 0) delete unreadJump[active];
   else startReadGrace(active);
+  reportRead(active);
   return true;
+}
+// badgeCount is the number a tab shows: the client's precise count for a LOADED tab, or the
+// server's unread (from the sessions snapshot) for a tab not yet loaded in this client — so a
+// never-opened / background session still shows a badge (finding B).
+function badgeCount(created){
+  if(loaded[created]) return rawUnreadCount(created);
+  const s = sessionList.find(x => x.created === created);
+  return (s && s.unread) || 0;
 }
 
 async function selectSession(created){
@@ -305,20 +466,22 @@ async function selectSession(created){
   if(active && switching && documentVisible() && stick){
     markRead(active);
   }
-  const hadUnread = loaded[created] && rawUnreadCount(created) > 0;
   active = created;
   // The composer travels with the tab: swap in this session's draft before any scroll
   // math below, then re-baseline the resize observer so the swap itself doesn't anchor.
   if(switching){ loadDraft(created); syncComposerH(); }
   if(location.hash !== "#" + created) location.hash = String(created);
-  // Returning to an already-loaded tab with unread → jump to the "новые сообщения" divider
-  // instead of the bottom; otherwise stick to the bottom.
-  if(hadUnread) jumpToUnread(created);
-  else markRead(created);
-  stick = !hadUnread;
-  renderTabs(active);
-  if(!loaded[created]) await loadTranscript(created);
-  else {
+  if(!loaded[created]){
+    // Not yet loaded: load first (loadTranscript seeds readThrough from the server and then
+    // positions the view — jump to the divider if unread, else the bottom).
+    await loadTranscript(created);
+  } else {
+    // Already loaded: returning to unread jumps to the "новые сообщения" divider, else the bottom.
+    const hadUnread = rawUnreadCount(created) > 0;
+    if(hadUnread) jumpToUnread(created);
+    else markRead(created);
+    stick = !hadUnread;
+    renderTabs(active);
     rerender(created);
     if(!hadUnread) restoreScroll(created);
   }
@@ -333,15 +496,32 @@ async function onSessionsList(list){
   list = list || [];
   sessionList = list;
   const affected = new Set();
+  let activeReadAdvanced = false;
   for(const s of list){
     if(model.setSessionContextHint(s.created, s.ctx_used, s.ctx_window)) affected.add(s.created);
+    // Cross-tab / cross-device read sync: adopt the server's durable read watermark when it is
+    // AHEAD of ours — another browser tab (or the messenger) read further. Monotonic (never
+    // regresses our own, maybe-not-yet-reported, reading), so the divider + badge here catch up.
+    if(loaded[s.created] && s.read_through){
+      const p = parsePos(s.read_through);
+      if(readThrough[s.created] === undefined || p > readThrough[s.created]){
+        readThrough[s.created] = p;
+        affected.add(s.created);
+        if(s.created === active) activeReadAdvanced = true;
+      }
+    }
   }
   if(active && !list.some(s => s.created === active)){
     model.drop(active); delete loaded[active]; markRead(active); dropDraft(active);
     active = 0;
   }
   reconcileSessions(list, active);
-  if(affected.has(active) && loaded[active]) scheduleLiveRerender(active);
+  // A cross-tab read advance is a DISCRETE change: re-render the divider RELIABLY and directly
+  // (like the scroll path) so the marker never lags the badge — NOT via the streaming live-gate,
+  // which is rAF-paused in a background tab and throttled behind in-flight animations. A
+  // context-hint-only change stays gated (it rides the streaming animation).
+  if(activeReadAdvanced && loaded[active]) rerender(active, true);
+  else if(affected.has(active) && loaded[active]) scheduleLiveRerender(active);
   if(!active && list.length){
     const want = parseInt(location.hash.slice(1), 10);
     const a = list.find(s => s.created === want) || list.find(s => s.active) || list[0];
@@ -388,45 +568,54 @@ function fallbackCopy(text, ok){
   } catch(e){}
 }
 
+// setDegraded turns the top-left logo amber while the live channel is down (the poll loop
+// is failing and backing off) and restores it on the next good poll — an explicit,
+// always-visible "нет соединения" state so a silently frozen UI is never mistaken for idle.
+function setDegraded(on){
+  const logo = document.querySelector("#bar .logo");
+  if(!logo) return;
+  logo.classList.toggle("degraded", on);
+  logo.setAttribute("aria-label", on ? "klax — нет соединения с сервером" : "klax");
+}
+
 // the poll host events.js drives
 const host = {
   model,
   ctx: {
-    onSessions: list => { onSessionsList(list); },
+    onSessions: list => { onSessionsList(list).catch(e => console.error("klax sessions", e)); },
     onNotice: onNoticeEvent,
     sessionContext,
   },
-  cursor: () => cursor, setCursor: c => { cursor = c; },
-  lastSeq: () => lastSeq, setLastSeq: n => { lastSeq = n; },
+  // tailLoop: per-session durable content cursors (loaded tabs only) + the transient-notice cursor.
+  cursors: () => { const c = {}; for(const k in loaded){ if(loaded[k] && tailCursors[k]) c[k] = tailCursors[k]; } return c; },
+  setTailCursor: (id, cur) => { tailCursors[id] = cur; },
+  noticeCursor: () => noticeCursor, setNoticeCursor: c => { noticeCursor = c; },
+  sessRev: () => sessRev, setSessRev: v => { sessRev = v; },
   onAffected: set => {
     for(const c of set){
       if(c === active){
         if(documentVisible() && stick){
           markRead(c);
+          // NOTE: capWindow is NOT called here — the live render below runs later and the DOM is still
+          // pre-update, so a viewport measurement would be stale. The stickToBottom in that render
+          // fires a scroll event → the scroll handler re-caps with a CURRENT DOM.
         } else if(rawUnreadCount(c) > 0){
           stick = false;
           startReadGrace(c);
         }
         scheduleLiveRerender(c);
+      } else {
+        capWindow(c); // background loaded tab: no viewport → bound its model (read rows only) so switching to it is cheap
       }
     }
     renderTabs(active);
   },
   onAuthFail: () => { const a = document.getElementById("app"); if(a) a.classList.remove("active"); const g = document.getElementById("gate"); if(g) g.classList.remove("hidden"); },
   onRestart: () => showNotice("klax обновился"),
-  onReload: async () => {
-    // Uncoverable cursor: invalidate EVERYTHING and reset the global cursor, then
-    // re-establish from the server (the active load re-commits the watermark since
-    // cursor is null). Inactive loaded sessions are dropped so they reload fresh on
-    // their next selection rather than keeping a model stale past the gap.
-    Object.keys(loaded).forEach(k => { model.drop(Number(k)); delete loaded[k]; });
-    Object.keys(readThrough).forEach(k => delete readThrough[k]);
-    Object.keys(unreadJump).forEach(k => delete unreadJump[k]);
-    Object.keys(readGraceUntil).forEach(k => clearReadGrace(Number(k)));
-    cursor = null; lastSeq = 0;
-    await syncSessions();
-    if(active && !loaded[active]) await loadTranscript(active);
-  },
+  // Show the amber logo only after the 2nd consecutive failure, so a single dropped poll
+  // (or a fast daemon restart the next poll rides through) never flashes it; clear on any
+  // good poll. The poll loop keeps retrying regardless — this is purely the visible signal.
+  onHealth: (ok, fails) => setDegraded(!ok && fails >= 2),
 };
 
 async function onNewSession(created){ await syncSessions(); await selectSession(created); }
@@ -444,7 +633,7 @@ function start(){
     isLive: c => sessionList.some(s => s.created === c),
     onAfterSend: () => { stick = true; markRead(active, true); renderTabs(active); stickToBottom(); },
   });
-  initTabs({ select: selectSession, onNew: onNewSession, afterClose, notice: showNotice, unread: rawUnreadCount });
+  initTabs({ select: selectSession, onNew: onNewSession, afterClose, notice: showNotice, unread: badgeCount });
   // Delegated copy buttons: a fence's .copy copies its code, a bubble's .mcopy copies the
   // whole message's PRIMARY text (the model text render.js stashed on the node — raw
   // markdown source, never the rendered HTML).
@@ -475,14 +664,22 @@ function start(){
   if(log) log.addEventListener("scroll", () => {
     stick = settledDistance(log) < 80; // settled: a FLIP mid-slide must not unstick us
     if(active) scrollTopFor[active] = log.scrollTop;
+    // Auto-load older history: only while the user is scrolled UP (not `stick`) and nearing the top of
+    // what's loaded. The `!stick` guard is essential: when the whole window fits the viewport (short
+    // window / small screen) the view is simultaneously "at the bottom" (stick → capWindow evicts) AND
+    // "near the top" (scrollTop small) — without it, auto-load and capWindow ping-pong the same page
+    // forever. loadOlder is guarded + preserves the scroll position, so this stays a smooth scroll up.
+    if(active && !stick && log.scrollTop < 300 && moreFor[active] && !loadingOlder[active]) loadOlder(active);
     if(readOnScroll && active && documentVisible()){
       const oldTop = log.scrollTop;
       const oldHeight = log.scrollHeight;
       const advanced = advanceReadThroughPastViewport(log);
       if(stick){
-        if(markRead(active) || advanced){
+        const read = markRead(active);
+        const capped = capWindow(active) > 0; // back at the bottom → evict the older rows scrolled up to read (they reload on the next scroll up)
+        if(read || advanced || capped){
           renderTabs(active);
-          rerender(active, true); // reaching the bottom: divider collapse animates
+          rerender(active, !capped); // structural when we evicted (drop the off-screen DOM cleanly); else animate the divider collapse
         }
       } else if(advanced){
         renderTabs(active);
@@ -511,7 +708,7 @@ function start(){
   const th = document.getElementById("theme");
   if(th) th.addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
   const tb = document.getElementById("tobottom");
-  if(tb) tb.addEventListener("click", () => { stick = true; markRead(active, true); renderTabs(active); rerender(active, true); });
+  if(tb) tb.addEventListener("click", () => { stick = true; markRead(active, true); renderTabs(active); rerender(active); }); // rerender's stickToBottom fires a scroll event → scroll handler re-caps with a current DOM
   window.addEventListener("hashchange", () => { const w = parseInt(location.hash.slice(1), 10); if(w && w !== active && sessionList.some(s => s.created === w)) selectSession(w); });
   document.addEventListener("keydown", e => {
     if(["ArrowDown","PageDown","End"," "].includes(e.key)) allowReadOnScroll();
@@ -521,6 +718,7 @@ function start(){
   document.addEventListener("visibilitychange", () => {
     if(document.visibilityState === "hidden"){
       if(active && stick) markRead(active);
+      flushRead(active); // push the read watermark now, before the tab may freeze/close
     } else {
       syncSessions();
       if(active){
@@ -534,7 +732,7 @@ function start(){
       }
     }
   });
-  syncSessions().then(() => pollLoop(host));
+  syncSessions().then(() => tailLoop(host)); // durable-tail live channel (POST /api/tail)
 }
 
 function gateSubmit(){ const el = document.getElementById("token"); const t = el ? el.value.trim() : ""; if(t){ setToken(t); start(); } }

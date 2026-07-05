@@ -60,6 +60,16 @@ type NamedReader struct {
 
 func (s *Store) queuePath() string { return filepath.Join(s.dir, "queue.jsonl") }
 
+// QueueStat returns queue.jsonl's mod time and size (zero when absent) — a cheap change-detector
+// for callers that cache something derived from the queue (e.g. the UI read model).
+func (s *Store) QueueStat() (time.Time, int64) {
+	fi, err := os.Stat(s.queuePath())
+	if err != nil {
+		return time.Time{}, 0
+	}
+	return fi.ModTime(), fi.Size()
+}
+
 // Enqueue durably accepts one inbound message: it reserves the next turn_seq,
 // streams the files to disk (each fsynced), then appends a fsynced enq record.
 // Returns the turn_seq, the opaque turn_marker to inject into the prompt, the stored
