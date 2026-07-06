@@ -10,11 +10,13 @@ import (
 )
 
 type ScopeDefaults struct {
-	Backend   string `json:"backend,omitempty"`
-	Model     string `json:"model,omitempty"`
-	Think     string `json:"think,omitempty"`
-	Sandbox   string `json:"sandbox,omitempty"`    // "on" | "off"
-	ClaudeTTY bool   `json:"claude_tty,omitempty"` // drive Claude through klax tty
+	Backend string `json:"backend,omitempty"`
+	Model   string `json:"model,omitempty"`
+	Think   string `json:"think,omitempty"`
+	Sandbox string `json:"sandbox,omitempty"` // "on" | "off"
+	// NOTE: TTY is deliberately NOT a scope default. It is an execution mode, not a
+	// preference, so it never seeds new sessions — it is per-session opt-in only
+	// (Session.ClaudeTTY), off by default, toggled per session via /tty or the web UI.
 }
 
 type Session struct {
@@ -377,7 +379,6 @@ func (s *Store) Ensure(chatID, name, cwd string, defaults ScopeDefaults) *Sessio
 		ModelOverride: def.Model,
 		ThinkOverride: def.Think,
 		Sandbox:       def.Sandbox,
-		ClaudeTTY:     def.ClaudeTTY,
 	}
 	cs.Sessions = append(cs.Sessions, sess)
 	return cloneSession(sess)
@@ -406,7 +407,6 @@ func (s *Store) New(chatID, name, cwd string, defaults ScopeDefaults) *Session {
 		ModelOverride: def.Model,
 		ThinkOverride: def.Think,
 		Sandbox:       def.Sandbox,
-		ClaudeTTY:     def.ClaudeTTY,
 	}
 	cs.Sessions = append(cs.Sessions, sess)
 	return cloneSession(sess)
