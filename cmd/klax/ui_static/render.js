@@ -115,13 +115,20 @@ function metaHTML(time){
 // bubble carries the PRIMARY text on the node (`_raw`): the whole-message copy button
 // puts the model text on the clipboard, never the rendered HTML (app.js delegate).
 function bubble(cls, html, time, dataPos, raw){
-  const meta = metaHTML(time);
   const d = document.createElement("div");
+  updateBubble(d, cls, html, time, dataPos, raw);
+  return d;
+}
+
+function updateBubble(d, cls, html, time, dataPos, raw){
+  const meta = metaHTML(time);
   d.className = "msg " + cls + (meta ? " hasmeta" : "");
   if(dataPos) d.dataset.pos = String(dataPos); // encoded (turn,block) position — drives read-advance
+  else delete d.dataset.pos;
   const copy = raw ? '<button class="mcopy" title="Копировать сообщение">⧉</button>' : "";
   d.innerHTML = copy + '<div class="body">'+html+'</div>' + meta;
   if(raw) d._raw = raw;
+  else delete d._raw;
   return d;
 }
 // indicator is the per-turn tail dots: null for a settled turn (done/err — err shows its
@@ -217,14 +224,28 @@ function buildTurn(it, onAbort, old){
   if(old) Array.from(old.children).forEach(ch => {
     if(ch.dataset && ch.dataset.flip && ch.dataset.csig !== undefined) reuse.set(ch.dataset.flip, ch);
   });
-  // put appends a child, reusing the old node verbatim when its signature is unchanged — make() (and
-  // the markdown parse inside it) runs ONLY when a rebuild is actually needed.
-  const put = (key, sig, make) => {
+  // put appends a child, reusing the old node verbatim when its signature is unchanged. When a
+  // bubble's content changed but its FLIP key is the same, patch the existing .msg in place instead
+  // of replacing it: wrapped monospace tool text otherwise visibly blinks during tail re-syncs.
+  const put = (key, sig, make, patch) => {
     const o = reuse.get(key);
     if(o && o.dataset.csig === sig){ reuse.delete(key); turn.appendChild(o); return; }
+    if(o && patch && patch(o)){
+      reuse.delete(key);
+      o.dataset.flip = key; o.dataset.csig = sig;
+      turn.appendChild(o);
+      return;
+    }
     const el = make(); el.dataset.flip = key; el.dataset.csig = sig; turn.appendChild(el);
   };
-  put("u", childSig("u", [it.text, it.time]), () => bubble("user", mdSafe(it.text), it.time, undefined, it.text));
+  const patchBubble = (cls, html, time, dataPos, raw) => old => {
+    if(!old.classList || !old.classList.contains("msg")) return false;
+    updateBubble(old, cls, html, time, dataPos, raw);
+    return true;
+  };
+  const userHTML = mdSafe(it.text), userSig = childSig("u", [it.text, it.time]);
+  put("u", userSig, () => bubble("user", userHTML, it.time, undefined, it.text),
+    patchBubble("user", userHTML, it.time, undefined, it.text));
   let gi = 0;
   for(const g of it.groups){
     if(g.divider){ turn.appendChild(divider()); continue; } // divider: cheap + tracked via snap.divider, not a reuse unit
@@ -232,11 +253,10 @@ function buildTurn(it, onAbort, old){
     const fk = "g:" + ((g.blocks[0] && g.blocks[0].id) || (g.cls + ":" + idx));
     const sig = childSig("g", { cls: g.cls, tool: g.tool, time: g.time, maxPos: g.maxPos,
       blocks: (g.blocks || []).map(b => ({ id: b.id, role: b.role, text: b.text, kind: b.kind, time: b.time })) });
-    put(fk, sig, () => {
-      const html = g.blocks.map(b => g.tool ? esc(b.text || "") : mdSafe(b.text || "")).join(g.tool ? "<br>" : "");
-      const raw = g.blocks.map(b => b.text || "").join(g.tool ? "\n" : "\n\n");
-      return bubble(g.cls, html, g.time, g.maxPos, raw);
-    });
+    const html = g.blocks.map(b => g.tool ? esc(b.text || "") : mdSafe(b.text || "")).join(g.tool ? "<br>" : "");
+    const raw = g.blocks.map(b => b.text || "").join(g.tool ? "\n" : "\n\n");
+    put(fk, sig, () => bubble(g.cls, html, g.time, g.maxPos, raw),
+      patchBubble(g.cls, html, g.time, g.maxPos, raw));
   }
   // The working/queued dots — the turn's in-progress indicator. INVARIANT: a turn in progress ALWAYS
   // shows this block, the WHOLE time it runs; it disappears only when the turn settles (done/err).
@@ -248,7 +268,9 @@ function buildTurn(it, onAbort, old){
   // The context "cut line" is the turn's final element — below the dots while running, and the last
   // line once the dots are gone (it slides up to close the gap).
   if(it.ctxLine){
-    put("g:ctx:" + it.seq, childSig("ctx", [it.ctxLine, it.ctxTime]), () => bubble("tool", esc(it.ctxLine), it.ctxTime, undefined, it.ctxLine));
+    const ctxHTML = esc(it.ctxLine), ctxSig = childSig("ctx", [it.ctxLine, it.ctxTime]);
+    put("g:ctx:" + it.seq, ctxSig, () => bubble("tool", ctxHTML, it.ctxTime, undefined, it.ctxLine),
+      patchBubble("tool", ctxHTML, it.ctxTime, undefined, it.ctxLine));
   }
   return turn;
 }
