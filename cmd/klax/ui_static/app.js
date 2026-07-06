@@ -216,6 +216,17 @@ function rerender(created, live){
   if(!col) return;
   if(selectionInLog(col)){ pendingRender = true; return; } // don't collapse a live selection
   if(!live) clearShiftGhosts(); // a structural render must not inherit a fading divider
+  // A live render that COLLAPSES the unread line is anchored on the messages BELOW the line,
+  // not on the viewport bottom: the only height that vanishes is the line (all of it above
+  // those messages), so nudging scrollTop by the height delta pins every message below the
+  // line exactly where it sits. Without this the stick path would snap to the true bottom —
+  // jerking the lower messages by up to the 80px stick slack and flicking them as the FLIP
+  // animates that snap. (settledDistance is unchanged by the nudge, so `stick` stays valid.)
+  const log = document.getElementById("log");
+  const anchorLive = !!(live && log);
+  const beforeTop = anchorLive ? log.scrollTop : 0;
+  const beforeColH = anchorLive ? col.offsetHeight : 0;
+  const hadDivider = anchorLive && !!col.querySelector(".readline");
   const snap = live ? beginShift(col) : null;
   renderSession(col, model.turns(active), readThrough[active], abortActive);
   watchInlineImages(col);
@@ -225,6 +236,7 @@ function rerender(created, live){
     m.addEventListener("click", () => loadOlder(active, true)); // showTop: reveal the loaded rows
     col.insertBefore(m, col.firstChild);
   }
+  const dividerGone = hadDivider && !col.querySelector(".readline");
   if(unreadJump[active] && rawUnreadCount(active) > 0){
     const dv = col.querySelector(".readline");
     if(dv){
@@ -233,6 +245,8 @@ function rerender(created, live){
       stick = false;
       delete unreadJump[active];
     }
+  } else if(dividerGone){
+    log.scrollTop = Math.max(0, beforeTop + (col.offsetHeight - beforeColH)); // hold the lower messages still
   } else if(stick) stickToBottom();
   toggleToBottom();
   if(snap) playShift(col, snap); // after the scroll settled: deltas = exact visual shifts
