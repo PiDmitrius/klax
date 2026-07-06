@@ -1,16 +1,17 @@
-// events.js — the live channel: tailLoop long-polls /api/tail with per-session (turn,block,state,trail)
-// cursors and MERGES the returned durable read-model rows (model.replaceTail), so live delivery
-// and reload converge on ONE path. No epoch/ring/reload for content — content is recovered from
-// the durable log; only transient notices ride a small retained buffer.
+// events.js — the live channel: tailLoop long-polls /api/tail with per-session
+// (turn,block,state,trail[,head]) cursors and MERGES the returned durable read-model rows
+// (model.replaceTail), so live delivery and reload converge on ONE path. No epoch/ring/reload for
+// content — content is recovered from the durable log; only transient notices ride a small retained buffer.
 
 import { api } from "./base.js";
 
 const POLL_ABORT_MS = 30000; // > server hold (~25s); bounds a wedged request
 
 // tailLoop is the durable-tail live channel (DURABLE_CURSOR_PLAN.md S4): it POSTs the client's
-// per-session (turn,block,state,trail) cursors to /api/tail, MERGES the returned read-model rows into the model
-// (model.replaceTail — the same rows a reload uses, so live and reload can't disagree), advances
-// each cursor, applies the session strip + notices, and detects a restart via `started`. `host`:
+// per-session (turn,block,state,trail[,head]) cursors to /api/tail, MERGES the returned read-model
+// rows into the model (model.replaceTail — the same rows a reload uses, so live and reload can't
+// disagree), advances each cursor, applies the session strip + notices, and detects a restart via
+// `started`. `host`:
 //   cursors()/setTailCursor(id,c)   the per-session durable content cursors
 //   noticeCursor()/setNoticeCursor(c)  the transient-notice ring cursor
 //   model, ctx{onSessions,onNotice}, onAffected(set), onRestart, onAuthFail, onHealth(ok,fails)

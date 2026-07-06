@@ -50,7 +50,9 @@ func TestReadModelQueuedSurfaced(t *testing.T) {
 }
 
 // A run turn in the transcript renders "run" only while the session is busy and it is the
-// newest run; an idle session (a missed MarkDone) resolves it to "done".
+// newest run; an idle session (a missed MarkDone) resolves it to "done". While running, the
+// most-recent (in-progress) block is HELD back — represented by the working dots — so it never
+// shows as a settled bubble under the dots; the final block is revealed only at done.
 func TestReadModelRunningVsStale(t *testing.T) {
 	d, created := newReadModelDaemon(t)
 	sr := d.getRunner("user:claw", created)
@@ -61,17 +63,29 @@ func TestReadModelRunningVsStale(t *testing.T) {
 	if err := sr.store.MarkRun(seq); err != nil {
 		t.Fatal(err)
 	}
-	items := []history.Item{{Role: "user", Text: "go", Marker: marker}, {Role: "assistant", Text: "working"}}
+	items := []history.Item{
+		{Role: "user", Text: "go", Marker: marker},
+		{Role: "assistant", Text: "working"},
+		{Role: "assistant", Text: "here is the answer"},
+	}
 
 	busy := testRM(d, created, items, true, true)
 	if len(busy) != 1 || busy[0].State != "run" {
 		t.Fatalf("busy newest run should be run: %+v", busy)
 	}
+	// Running: the last (in-progress) block is held, so only the earlier settled block shows and it
+	// has a stable id. The dots stand in for the block still being generated.
 	if len(busy[0].Blocks) != 1 || busy[0].Blocks[0].ID == "" || busy[0].Blocks[0].Role != "assistant" {
-		t.Fatalf("answer block/id missing: %+v", busy[0].Blocks)
+		t.Fatalf("running turn should show only settled blocks (last held): %+v", busy[0].Blocks)
 	}
-	if idle := testRM(d, created, items, false, true); idle[0].State != "done" {
+	// Idle (a missed MarkDone → resolved done): the turn is settled, so ALL blocks show — nothing
+	// is held, and the final message appears exactly here, when the engine knows the turn is over.
+	idle := testRM(d, created, items, false, true)
+	if idle[0].State != "done" {
 		t.Fatalf("idle run (missed MarkDone) must resolve to done, got %q", idle[0].State)
+	}
+	if len(idle[0].Blocks) != 2 {
+		t.Fatalf("settled turn shows all blocks (no hold): %+v", idle[0].Blocks)
 	}
 }
 

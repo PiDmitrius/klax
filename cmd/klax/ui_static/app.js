@@ -20,7 +20,7 @@ const readGraceUntil = {}, readGraceTimer = {};
 const readReportTimer = {}; // created -> pending POST /api/read debounce timer
 const READ_GRACE_MS = 1600;
 let active = 0;
-const tailCursors = {};                // created -> "<turn>.<block>.<state>.<trail>" durable content cursor (tailLoop)
+const tailCursors = {};                // created -> "<turn>.<block>.<state>.<trail>[.<head>]" durable content cursor
 let noticeCursor = "";                 // ring cursor for transient notices (tailLoop)
 let sessRev = 0;                       // last session-strip revision rendered (tailLoop; server returns it early on a strip change)
 let stick = true, pendingRender = false, readOnScroll = true;
@@ -65,17 +65,24 @@ function getActive(){ return active; }
 // turn once — otherwise the bubble stays "queued" until the first block or a reload.
 function stateCode(s){ return s === "run" ? "r" : s === "done" ? "d" : s === "err" ? "x" : "e"; }
 
-// tailPos is the durable "<turn>.<block>.<state>.<trail>" content cursor for the newest loaded row — where
-// the live tail poll resumes. block -1 for a turn with no answer blocks yet (its first block is new).
+// tailPos is the durable "<turn>.<block>.<state>.<trail>[.<head>]" content cursor to resume the live
+// tail from — it MIRRORS the server's tailCursor. The anchor (turn/block/state) is the OLDEST
+// unsettled turn (enq/run) so a still-running turn behind a newer queued one keeps getting its blocks
+// + completion; `head` (the newest turn) is appended only when it is past the anchor, so an
+// already-seen queued turn is not re-flagged new. block -1 for a turn with no answer blocks yet.
 function tailPos(rows){
-  let turn = 0, block = -1, state = "", trail = 0;
+  let head = 0, turn = 0, block = -1, state = "", trail = 0, anchored = false;
   for(const t of (rows || [])){
     // `seq > 0` mirrors the server's tailCursor (only positive durable seqs anchor); a legacy negative
     // synthetic seq counts as trailing, exactly like a standalone, so client seed == server cursor.
-    if(t.role === "user" && t.seq > 0){ turn = t.seq; block = (t.blocks || []).length - 1; state = t.state; trail = 0; }
+    if(t.role === "user" && t.seq > 0){
+      head = t.seq; trail = 0;
+      if(!anchored){ turn = t.seq; block = (t.blocks || []).length - 1; state = t.state; anchored = t.state === "enq" || t.state === "run"; }
+    }
     else trail++;
   }
-  return turn + "." + block + "." + stateCode(state) + "." + trail;
+  const base = turn + "." + block + "." + stateCode(state) + "." + trail;
+  return (anchored && turn !== head) ? base + "." + head : base;
 }
 function sameSession(a, b){ return String(a) === String(b); }
 function documentVisible(){ return typeof document === "undefined" || document.visibilityState !== "hidden"; }
@@ -306,10 +313,8 @@ async function loadTranscript(created){
     loaded[created] = true;
     offsetFor[created] = data.offset || 0;
     moreFor[created] = !!data.more;
-    // The poll cursor is GLOBAL (one stream for all the user's sessions). Only the FIRST
-    // load (cursor still null) establishes the baseline from the watermark (§A3); a later
-    // lazy tab-load must NOT move the global cursor, or it would skip events for other
-    // already-loaded sessions. Re-applied events for this session dedup by seq + block id.
+    // Seed this tab's durable tail cursor from its loaded rows. Each loaded tab has its own cursor,
+    // so lazy-loading one session cannot skip content for any other session.
     tailCursors[created] = tailPos(data.turns || []); // where the live tail resumes for this tab
     // Seed the durable read watermark from the server (NOT "all read"): the unread divider then
     // survives reload/restart. Establish it once; later live reads advance it. With content and
@@ -607,6 +612,12 @@ const host = {
   sessRev: () => sessRev, setSessRev: v => { sessRev = v; },
   onAffected: set => {
     for(const c of set){
+      // replaceTail rebuilt these turns from the durable read model, which does NOT carry the
+      // client-side context HINT (it lives on the sessions strip). Restore it, else a running turn's
+      // live "Контекст" line vanishes whenever the tail re-sends that turn — e.g. when a new message
+      // is queued behind it (the tail now anchors on the running turn, so it comes back down).
+      const h = sessionContext(c);
+      if(h) model.setSessionContextHint(c, h.used, h.window);
       if(c === active){
         if(documentVisible() && stick){
           markRead(c);
@@ -647,7 +658,7 @@ function start(){
     isLive: c => sessionList.some(s => s.created === c),
     onAfterSend: () => { stick = true; markRead(active, true); renderTabs(active); stickToBottom(); },
   });
-  initTabs({ select: selectSession, onNew: onNewSession, afterClose, notice: showNotice, unread: badgeCount });
+  initTabs({ select: selectSession, onNew: onNewSession, afterClose, notice: showNotice, unread: badgeCount, focus: focusComposer });
   // Delegated copy buttons: a fence's .copy copies its code, a bubble's .mcopy copies the
   // whole message's PRIMARY text (the model text render.js stashed on the node — raw
   // markdown source, never the rendered HTML).
