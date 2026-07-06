@@ -120,7 +120,13 @@ export function openSettings(created, title, isNew){
   fetchSettings(created).then(d => { if(settingsFor === created) renderSettings(d); })
     .catch(() => { if(settingsFor === created) document.getElementById("sbody").innerHTML = '<div class="shint">Не удалось загрузить настройки</div>'; });
 }
-function closeSettings(){ settingsFor = 0; settingsIsNew = false; document.getElementById("smodal").classList.add("hidden"); }
+function closeSettings(){
+  settingsFor = 0; settingsIsNew = false;
+  document.getElementById("smodal").classList.add("hidden");
+  // Dismissing settings (notably the "Новая сессия" dialog that auto-opens on create and
+  // grabs the name field) hands focus back to the composer so you can type straight away.
+  if(deps.focus) deps.focus();
+}
 
 function renderSettings(d){
   if(settingsFor !== d.created) return;

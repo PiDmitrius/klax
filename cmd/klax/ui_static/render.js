@@ -199,35 +199,64 @@ function stamp(node, key, sig){
   return node;
 }
 
-// withFlip tags a turn child as an independently animatable FLIP unit. A group bubble is
-// keyed by its FIRST block's id: when reading merges the bubbles a divider used to split,
-// the merged bubble inherits the leading part's identity and stays put — only the content
-// below slides up into the collapsed gap.
-function withFlip(el, key){ el.dataset.flip = key; return el; }
+// Each turn child carries a FLIP key (data-flip) AND a content signature (data-csig). The key is an
+// independently animatable unit — a group bubble is keyed by its FIRST block's id, so when reading
+// merges the bubbles a divider used to split, the merged bubble inherits the leading part's identity
+// and stays put. The signature is EVERYTHING that determines the child's DOM, so buildTurn can reuse
+// an unchanged child verbatim on the next render (no markdown re-parse, no repaint) — only the block
+// that actually changed and the transient dots indicator get rebuilt.
+function childSig(kind, extra){ return JSON.stringify([kind, extra]); }
+
+// buildTurn renders a user turn, REUSING unchanged child nodes from `old` verbatim so a streaming
+// delta or a run→done flip only touches the block that changed — the finished blocks above never
+// re-parse or flicker. `old` is the previous turn node (or null for a fresh build).
+function buildTurn(it, onAbort, old){
+  const turn = document.createElement("div");
+  turn.className = "turn"; turn.dataset.seq = it.seq;
+  const reuse = new Map();
+  if(old) Array.from(old.children).forEach(ch => {
+    if(ch.dataset && ch.dataset.flip && ch.dataset.csig !== undefined) reuse.set(ch.dataset.flip, ch);
+  });
+  // put appends a child, reusing the old node verbatim when its signature is unchanged — make() (and
+  // the markdown parse inside it) runs ONLY when a rebuild is actually needed.
+  const put = (key, sig, make) => {
+    const o = reuse.get(key);
+    if(o && o.dataset.csig === sig){ reuse.delete(key); turn.appendChild(o); return; }
+    const el = make(); el.dataset.flip = key; el.dataset.csig = sig; turn.appendChild(el);
+  };
+  put("u", childSig("u", [it.text, it.time]), () => bubble("user", mdSafe(it.text), it.time, undefined, it.text));
+  let gi = 0;
+  for(const g of it.groups){
+    if(g.divider){ turn.appendChild(divider()); continue; } // divider: cheap + tracked via snap.divider, not a reuse unit
+    const idx = gi++;
+    const fk = "g:" + ((g.blocks[0] && g.blocks[0].id) || (g.cls + ":" + idx));
+    const sig = childSig("g", { cls: g.cls, tool: g.tool, time: g.time, maxPos: g.maxPos,
+      blocks: (g.blocks || []).map(b => ({ id: b.id, role: b.role, text: b.text, kind: b.kind, time: b.time })) });
+    put(fk, sig, () => {
+      const html = g.blocks.map(b => g.tool ? esc(b.text || "") : mdSafe(b.text || "")).join(g.tool ? "<br>" : "");
+      const raw = g.blocks.map(b => b.text || "").join(g.tool ? "\n" : "\n\n");
+      return bubble(g.cls, html, g.time, g.maxPos, raw);
+    });
+  }
+  // The working/queued dots — the turn's in-progress indicator. INVARIANT: a turn in progress ALWAYS
+  // shows this block, the WHOLE time it runs; it disappears only when the turn settles (done/err).
+  // Kept a reuse unit so a stream that adds a block above doesn't re-create the animated dots (which
+  // would restart the blink) or flicker them.
+  if(it.state === "run" || it.state === "enq"){
+    put("dots", childSig("dots", [it.state, it.note]), () => indicator(it.state, it.note, onAbort));
+  }
+  // The context "cut line" is the turn's final element — below the dots while running, and the last
+  // line once the dots are gone (it slides up to close the gap).
+  if(it.ctxLine){
+    put("g:ctx:" + it.seq, childSig("ctx", [it.ctxLine, it.ctxTime]), () => bubble("tool", esc(it.ctxLine), it.ctxTime, undefined, it.ctxLine));
+  }
+  return turn;
+}
 
 function buildItem(it, onAbort){
   if(it.kind === "divider") return divider();
   if(it.kind === "bubble") return bubble(it.cls, it.md ? mdSafe(it.text) : esc(it.text), it.time, undefined, it.text);
-  const turn = document.createElement("div");
-  turn.className = "turn"; turn.dataset.seq = it.seq;
-  turn.appendChild(withFlip(bubble("user", mdSafe(it.text), it.time, undefined, it.text), "u"));
-  let gi = 0;
-  for(const g of it.groups){
-    if(g.divider){ turn.appendChild(divider()); continue; }
-    const html = g.blocks.map(b => g.tool ? esc(b.text || "") : mdSafe(b.text || "")).join(g.tool ? "<br>" : "");
-    const raw = g.blocks.map(b => b.text || "").join(g.tool ? "\n" : "\n\n");
-    const fk = "g:" + ((g.blocks[0] && g.blocks[0].id) || (g.cls + ":" + gi));
-    turn.appendChild(withFlip(bubble(g.cls, html, g.time, g.maxPos, raw), fk));
-    gi++;
-  }
-  const ind = indicator(it.state, it.note, onAbort);
-  if(ind) turn.appendChild(withFlip(ind, "dots"));
-  // The context "cut line" is the turn's final element — below the dots while running, and
-  // the last line once the dots are gone (it slides up to close the gap).
-  if(it.ctxLine){
-    turn.appendChild(withFlip(bubble("tool", esc(it.ctxLine), it.ctxTime, undefined, it.ctxLine), "g:ctx:" + it.seq));
-  }
-  return turn;
+  return buildTurn(it, onAbort, null);
 }
 
 export function paint(col, items, onAbort){
@@ -242,7 +271,11 @@ export function paint(col, items, onAbort){
       frag.appendChild(old);
       return;
     }
-    frag.appendChild(stamp(buildItem(it, onAbort), key, sig));
+    // A changed/new turn is rebuilt REUSING its unchanged child nodes from the old turn (verbatim, no
+    // re-parse); other item kinds are built fresh. Consume the old key either way.
+    const built = it.kind === "turn" ? buildTurn(it, onAbort, old || null) : buildItem(it, onAbort);
+    if(old) nodes.delete(key);
+    frag.appendChild(stamp(built, key, sig));
   });
   const images = reusableImages(col);
   reuseImages(frag, images);

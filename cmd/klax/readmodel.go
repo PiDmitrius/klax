@@ -202,6 +202,15 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 		if state == "err" {
 			ut.Blocks = append(ut.Blocks, errBlock(seq, reason))
 		}
+		// While the turn is still RUNNING, hold back its most-recent (in-progress) block: the message
+		// currently being generated is represented by the working dots, not shown as a settled bubble.
+		// The final block is revealed only at `done`, so it appears ALREADY settled with no dots
+		// trailing it — the engine shows a message as "the last in the turn" exactly when it knows,
+		// via done, that it is. This makes completion deterministic: there is never an [answer,
+		// run+dots] frame before [answer, done]. (A turn with no blocks yet just shows the dots.)
+		if state == "run" && len(ut.Blocks) > 0 {
+			ut.Blocks = ut.Blocks[:len(ut.Blocks)-1]
+		}
 		turns = append(turns, ut)
 	}
 
@@ -287,18 +296,23 @@ func stateCode(state string) string {
 }
 
 // tailFrom returns the live "tail" of a session's read model past a per-session
-// (turn,block,state,trail) cursor — the boundary turn (refreshed, so a grown OR state-changed last
-// turn re-syncs) plus every later turn AND trailing standalone row. It returns nil when nothing is
-// new (the boundary turn has not grown, its state is unchanged, no later turn exists, AND no
-// standalone was appended after the last durable turn), so a long-poll keeps holding rather than
-// spinning. The client replaces its own tail from `throughTurn` with these rows — ONE path, shared
-// with reload, so live delivery and reload converge (no event synthesis, no in-memory ring).
+// (turn,block,state,trail,head) cursor — the boundary turn (refreshed, so a grown OR state-changed
+// last turn re-syncs) plus every later turn AND trailing standalone row. It returns nil when nothing
+// is new (the boundary turn has not grown, its state is unchanged, no later turn exists past `head`,
+// AND no standalone was appended after the last durable turn), so a long-poll keeps holding rather
+// than spinning. The client replaces its own tail from `throughTurn` with these rows — ONE path,
+// shared with reload, so live delivery and reload converge (no event synthesis, no in-memory ring).
 // `throughState` is the boundary turn's state code the client last saw; `throughTrail` is the count
 // of standalone rows it last saw trailing after the last durable turn — this is how a compact/system
 // standalone appended AFTER the last turn (which has no durable position of its own) is delivered
 // live exactly once instead of only on reload. ("" / 0 on a legacy cursor ⇒ re-syncs once.)
-// [DURABLE_CURSOR_PLAN S3]
-func tailFrom(turns []uiTurn, throughTurn int64, throughBlock int, throughState string, throughTrail int) []uiTurn {
+//
+// `head` is the newest durable turn the client has already seen. It is normally == throughTurn, but
+// when a turn is still RUNNING behind a newer QUEUED one, the boundary anchors on the running turn
+// (so its later blocks + completion are delivered) while `head` stays on the newest turn — so the
+// already-seen queued turn is NOT re-flagged as "new" on every poll (which would busy-loop the
+// long-poll). A whole new turn is one past `head`, not past the boundary. [DURABLE_CURSOR_PLAN S3]
+func tailFrom(turns []uiTurn, throughTurn int64, throughBlock int, throughState string, throughTrail int, head int64) []uiTurn {
 	boundary := -1
 	fresh := false
 	trail := 0
@@ -314,13 +328,13 @@ func tailFrom(turns []uiTurn, throughTurn int64, throughBlock int, throughState 
 				fresh = true // the boundary turn grew past the read block
 			}
 			if stateCode(t.State) != throughState {
-				fresh = true // the boundary turn changed state (e.g. enq→run) with no new block
+				fresh = true // the boundary turn changed state (e.g. enq→run, run→done) with no new block
 			}
 			if throughBlock >= 0 && throughBlock >= len(t.Blocks) {
 				fresh = true // the boundary turn shrank below the read block — re-sync so live == reload
 			}
-		} else if t.Seq > throughTurn {
-			fresh = true // a whole new turn
+		} else if t.Seq > head {
+			fresh = true // a whole new turn (past everything the client has seen, not just the boundary)
 		}
 	}
 	if trail != throughTrail {

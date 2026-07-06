@@ -506,10 +506,11 @@ func (d *daemon) readModel(sk string, sess *session.Session) []uiTurn {
 	return rows
 }
 
-// sessionTail is the live tail of a session's read model past a per-session (turn,block,state,trail)
-// cursor — the rows the client merges to catch up. Empty when nothing is new past the cursor. [S3]
-func (d *daemon) sessionTail(sk string, sess *session.Session, throughTurn int64, throughBlock int, throughState string, throughTrail int) []uiTurn {
-	return tailFrom(d.readModel(sk, sess), throughTurn, throughBlock, throughState, throughTrail)
+// sessionTail is the live tail of a session's read model past a per-session
+// (turn,block,state,trail,head) cursor — the rows the client merges to catch up. Empty when nothing
+// is new past the cursor. [S3]
+func (d *daemon) sessionTail(sk string, sess *session.Session, throughTurn int64, throughBlock int, throughState string, throughTrail int, head int64) []uiTurn {
+	return tailFrom(d.readModel(sk, sess), throughTurn, throughBlock, throughState, throughTrail, head)
 }
 
 // watchRunTranscript pokes the user's tail whenever the active run's transcript FILE changes, so a
@@ -689,19 +690,19 @@ func (s *uiServer) cursorString(seq uint64) string {
 }
 
 // --- durable-tail poll (DURABLE_CURSOR_PLAN.md S4) ---
-// The live channel as a tail of the durable log: the client sends a per-session (turn,block)
-// cursor, the server returns the read-model rows past it (built by the SAME buildReadModel as a
-// reload, so live and reload converge). No epoch/ring/reload for CONTENT — content is recovered
-// from the durable log. `notice` stays a ring cursor: notices are transient broadcasts, not
-// durable, so they keep a small retained buffer (the only surviving ring role).
+// The live channel as a tail of the durable log: the client sends a per-session
+// "<turn>.<block>.<state>.<trail>[.<head>]" cursor, the server returns the read-model rows past it
+// (built by the SAME buildReadModel as a reload, so live and reload converge). No epoch/ring/reload
+// for CONTENT — content is recovered from the durable log. `notice` stays a ring cursor: notices are
+// transient broadcasts, not durable, so they keep a small retained buffer (the only surviving ring role).
 type tailReq struct {
-	Cursors map[string]string `json:"cursors"`  // created -> "<turn>.<block>.<state>"
+	Cursors map[string]string `json:"cursors"`  // created -> "<turn>.<block>.<state>.<trail>[.<head>]"
 	Notice  string            `json:"notice"`   // ring cursor for transient notices
 	SessRev uint64            `json:"sess_rev"` // last session-strip revision the client rendered
 }
 type tailSessionData struct {
 	Rows   []uiTurn `json:"rows"`
-	Cursor string   `json:"cursor"` // new "<turn>.<block>" after these rows
+	Cursor string   `json:"cursor"` // new content cursor after these rows
 }
 type tailResp struct {
 	Started  int64                      `json:"started"` // hub epoch — a change means the daemon restarted
@@ -712,15 +713,17 @@ type tailResp struct {
 	SessRev  uint64                     `json:"sess_rev"` // current session-strip revision (client echoes it back)
 }
 
-// parseBlockCursor splits a "<turn>.<block>.<state>.<trail>" content cursor (block may be -1 for a
-// turn with no answer yet; the state code and trail are absent on a legacy cursor). `trail` is the
-// number of trailing non-durable rows (compact/system standalones) after the last durable turn — it
-// lets a standalone appended AFTER the last turn be delivered live exactly once. Absent/blank ⇒
-// (0,-1,"",0) so a brand-new tab's first tail returns from the start.
-func parseBlockCursor(v string) (turn int64, block int, state string, trail int) {
-	parts := strings.SplitN(v, ".", 4)
+// parseBlockCursor splits a "<turn>.<block>.<state>.<trail>[.<head>]" content cursor (block may be
+// -1 for a turn with no answer yet; the state code, trail, and head are absent on a legacy cursor).
+// `trail` is the number of trailing non-durable rows (compact/system standalones) after the last
+// durable turn — it lets a standalone appended AFTER the last turn be delivered live exactly once.
+// `head` is the newest durable turn the client has seen (only present when the cursor anchors on an
+// OLDER still-running turn behind a queued one); it defaults to `turn` so a normal/legacy cursor is
+// unchanged. Absent/blank ⇒ (0,-1,"",0,0) so a brand-new tab's first tail returns from the start.
+func parseBlockCursor(v string) (turn int64, block int, state string, trail int, head int64) {
+	parts := strings.SplitN(v, ".", 5)
 	if len(parts) < 2 {
-		return 0, -1, "", 0
+		return 0, -1, "", 0, 0
 	}
 	turn, _ = strconv.ParseInt(parts[0], 10, 64)
 	block, _ = strconv.Atoi(parts[1])
@@ -730,29 +733,42 @@ func parseBlockCursor(v string) (turn int64, block int, state string, trail int)
 	if len(parts) >= 4 {
 		trail, _ = strconv.Atoi(parts[3])
 	}
-	return turn, block, state, trail
+	head = turn // no separate head ⇒ the cursor anchor IS the newest turn seen
+	if len(parts) >= 5 {
+		head, _ = strconv.ParseInt(parts[4], 10, 64)
+	}
+	return turn, block, state, trail, head
 }
 
-// tailCursor is the position after applying `rows` — "<turn>.<block>.<state>.<trail>": the last
-// durable turn's seq, its last-block-index (-1 when it has no answer blocks yet), its state code, and
-// the count of standalone rows trailing AFTER it. The state code lets a pure enq→run transition
-// advance the cursor with no new block; the trail count lets a trailing standalone advance it too.
+// tailCursor is the position after applying `rows` — "<turn>.<block>.<state>.<trail>[.<head>]". The
+// anchor (turn/block/state) is the OLDEST turn that is still UNSETTLED (enq/run): the cursor must not
+// advance past it, so its later blocks and its completion are still delivered. When every turn is
+// settled, the anchor is simply the last durable turn (the plain case). `trail` is the count of
+// standalone rows after the last durable turn; `head` is the last durable turn's seq — emitted only
+// when it is NEWER than the anchor (a queued turn sitting behind the still-running one), so the tail
+// can tell a genuinely new turn from the already-seen queued one. State code + trail also advance the
+// cursor on a pure enq→run transition or a trailing standalone with no new block.
 func tailCursor(rows []uiTurn) string {
-	var turn int64
-	block := -1
-	state := ""
+	var head, aTurn int64
+	aBlock := -1
+	aState := ""
 	trail := 0
+	anchored := false // locked onto the oldest unsettled turn — do not advance the anchor past it
 	for _, t := range rows {
 		if t.Role == "user" && t.Seq > 0 {
-			turn = t.Seq
-			block = len(t.Blocks) - 1
-			state = t.State
-			trail = 0
+			head, trail = t.Seq, 0
+			if !anchored {
+				aTurn, aBlock, aState = t.Seq, len(t.Blocks)-1, t.State
+				anchored = t.State == "enq" || t.State == "run"
+			}
 		} else {
 			trail++ // a standalone / non-durable row after the last durable turn
 		}
 	}
-	return fmt.Sprintf("%d.%d.%s.%d", turn, block, stateCode(state), trail)
+	if anchored && aTurn != head {
+		return fmt.Sprintf("%d.%d.%s.%d.%d", aTurn, aBlock, stateCode(aState), trail, head)
+	}
+	return fmt.Sprintf("%d.%d.%s.%d", aTurn, aBlock, stateCode(aState), trail)
 }
 
 func (s *uiServer) buildTail(user, sk string, req tailReq) tailResp {
@@ -773,8 +789,8 @@ func (s *uiServer) buildTail(user, sk string, req tailReq) tailResp {
 		if sess == nil {
 			continue
 		}
-		ct, cb, cs, ctr := parseBlockCursor(cur)
-		rows := s.d.sessionTail(sk, sess, ct, cb, cs, ctr)
+		ct, cb, cs, ctr, chd := parseBlockCursor(cur)
+		rows := s.d.sessionTail(sk, sess, ct, cb, cs, ctr, chd)
 		if len(rows) == 0 {
 			continue
 		}
