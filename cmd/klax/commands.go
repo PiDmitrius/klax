@@ -301,8 +301,9 @@ func (d *daemon) handleTTYSet(chatID, msgID, sk, mode string) {
 		return
 	}
 	on := mode == "on"
-	// TTY is per-session only (not a scope default): toggle THIS session, never seed new
-	// ones. New sessions stay TTY-off by default; enable it per session when you want it.
+	d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
+		def.ClaudeTTY = on
+	})
 	sess = d.store.UpdateActive(sk, func(sess *session.Session) {
 		sess.ClaudeTTY = on
 	})

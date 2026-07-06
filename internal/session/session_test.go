@@ -209,6 +209,7 @@ func TestNewSnapshotsScopeDefaults(t *testing.T) {
 		def.Model = "gpt-5.4"
 		def.Think = "high"
 		def.Sandbox = "on"
+		def.ClaudeTTY = true
 	})
 
 	sess := store.New("user:claw", "main", "/tmp/project", *store.ScopeDefaults("user:claw"))
@@ -224,9 +225,8 @@ func TestNewSnapshotsScopeDefaults(t *testing.T) {
 	if sess.Sandbox != "on" {
 		t.Fatalf("sandbox = %q, want on", sess.Sandbox)
 	}
-	// TTY is NOT a scope default — a new session is always TTY-off regardless of the scope.
-	if sess.ClaudeTTY {
-		t.Fatal("claude tty must never be seeded from scope defaults")
+	if !sess.ClaudeTTY {
+		t.Fatal("claude tty default was not copied to new session")
 	}
 
 	store.UpdateScopeDefaults("user:claw", func(def *ScopeDefaults) {
@@ -234,6 +234,7 @@ func TestNewSnapshotsScopeDefaults(t *testing.T) {
 		def.Model = "sonnet"
 		def.Think = "medium"
 		def.Sandbox = "off"
+		def.ClaudeTTY = false
 	})
 
 	sess = store.Active("user:claw")
@@ -251,6 +252,9 @@ func TestNewSnapshotsScopeDefaults(t *testing.T) {
 	}
 	if sess.Sandbox != "on" {
 		t.Fatalf("snapshot sandbox changed to %q", sess.Sandbox)
+	}
+	if !sess.ClaudeTTY {
+		t.Fatal("snapshot claude tty changed")
 	}
 }
 
