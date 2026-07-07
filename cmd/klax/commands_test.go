@@ -118,6 +118,7 @@ func TestAbortSessionDetectsProcessingAndFlagsClosing(t *testing.T) {
 }
 
 func TestCreateSessionUsesUserDefaultCWD(t *testing.T) {
+	userCWD := t.TempDir()
 	st := &session.Store{
 		Chats: make(map[string]*session.ChatSessions),
 		Scope: make(map[string]*session.ScopeDefaults),
@@ -126,7 +127,7 @@ func TestCreateSessionUsesUserDefaultCWD(t *testing.T) {
 		cfg: &config.Config{
 			DefaultCWD: "/tmp/global",
 			Users: []config.UserIdentity{
-				{ID: "claw", CWD: "/tmp/claw-work"},
+				{ID: "claw", CWD: userCWD},
 			},
 		},
 		store: st,
@@ -134,12 +135,36 @@ func TestCreateSessionUsesUserDefaultCWD(t *testing.T) {
 
 	sess, _ := d.createSession("ui:claw", "user:claw", "main")
 
-	if sess.CWD != "/tmp/claw-work" {
+	if sess.CWD != userCWD {
 		t.Fatalf("session cwd = %q, want user default", sess.CWD)
 	}
 }
 
+func TestCreateSessionFallsBackWhenUserDefaultCWDIsInvalid(t *testing.T) {
+	globalCWD := t.TempDir()
+	st := &session.Store{
+		Chats: make(map[string]*session.ChatSessions),
+		Scope: make(map[string]*session.ScopeDefaults),
+	}
+	d := &daemon{
+		cfg: &config.Config{
+			DefaultCWD: globalCWD,
+			Users: []config.UserIdentity{
+				{ID: "claw", CWD: "/no/such/klax/cwd"},
+			},
+		},
+		store: st,
+	}
+
+	sess, _ := d.createSession("ui:claw", "user:claw", "main")
+
+	if sess.CWD != globalCWD {
+		t.Fatalf("session cwd = %q, want global fallback", sess.CWD)
+	}
+}
+
 func TestEnsureSessionUsesUserDefaultOnlyForNewSession(t *testing.T) {
+	userCWD := t.TempDir()
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	st, err := session.LoadStore()
 	if err != nil {
@@ -149,7 +174,7 @@ func TestEnsureSessionUsesUserDefaultOnlyForNewSession(t *testing.T) {
 		cfg: &config.Config{
 			DefaultCWD: "/tmp/global",
 			Users: []config.UserIdentity{
-				{ID: "claw", CWD: "/tmp/claw-work"},
+				{ID: "claw", CWD: userCWD},
 			},
 		},
 		store: st,
@@ -157,7 +182,7 @@ func TestEnsureSessionUsesUserDefaultOnlyForNewSession(t *testing.T) {
 
 	d.ensureSessionWithCWD("user:claw", "")
 	sess := st.Active("user:claw")
-	if sess == nil || sess.CWD != "/tmp/claw-work" {
+	if sess == nil || sess.CWD != userCWD {
 		t.Fatalf("new session = %+v, want user cwd", sess)
 	}
 

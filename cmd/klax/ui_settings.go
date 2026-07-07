@@ -163,10 +163,11 @@ func (d *daemon) applyUISessionSettings(sk string, created int64, p uiSettingsPa
 	}
 	newCWD := sess.CWD
 	if p.CWD != nil {
-		newCWD = strings.TrimSpace(*p.CWD)
-		if newCWD == "" {
-			return &uiErr{http.StatusBadRequest, "рабочий каталог не может быть пустым"}
+		cwd, err := resolveWorkingDir(*p.CWD)
+		if err != nil {
+			return &uiErr{http.StatusBadRequest, err.Error()}
 		}
+		newCWD = cwd
 	}
 	newPrompt := sess.AppendSystemPrompt
 	if p.Prompt != nil {
