@@ -14,6 +14,7 @@ type UserIdentity struct {
 	MaxID      int64  `json:"mx_id,omitempty"`    // MAX user ID
 	VKID       int64  `json:"vk_id,omitempty"`    // VK user ID
 	UIToken    string `json:"ui_token,omitempty"` // bearer token authenticating as this user in the web UI
+	CWD        string `json:"cwd,omitempty"`      // default working directory for this user's new DM/UI sessions
 }
 
 // BackendConfig holds per-backend settings.
