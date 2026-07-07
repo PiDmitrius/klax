@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/PiDmitrius/klax/internal/config"
 	"github.com/PiDmitrius/klax/internal/runner"
 	"github.com/PiDmitrius/klax/internal/session"
 )
@@ -113,6 +114,60 @@ func TestAbortSessionDetectsProcessingAndFlagsClosing(t *testing.T) {
 	sr.mu.Unlock()
 	if !closing {
 		t.Fatal("closing flag was not set so a starting run would not bail")
+	}
+}
+
+func TestCreateSessionUsesUserDefaultCWD(t *testing.T) {
+	st := &session.Store{
+		Chats: make(map[string]*session.ChatSessions),
+		Scope: make(map[string]*session.ScopeDefaults),
+	}
+	d := &daemon{
+		cfg: &config.Config{
+			DefaultCWD: "/tmp/global",
+			Users: []config.UserIdentity{
+				{ID: "claw", CWD: "/tmp/claw-work"},
+			},
+		},
+		store: st,
+	}
+
+	sess, _ := d.createSession("ui:claw", "user:claw", "main")
+
+	if sess.CWD != "/tmp/claw-work" {
+		t.Fatalf("session cwd = %q, want user default", sess.CWD)
+	}
+}
+
+func TestEnsureSessionUsesUserDefaultOnlyForNewSession(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	st, err := session.LoadStore()
+	if err != nil {
+		t.Fatalf("LoadStore: %v", err)
+	}
+	d := &daemon{
+		cfg: &config.Config{
+			DefaultCWD: "/tmp/global",
+			Users: []config.UserIdentity{
+				{ID: "claw", CWD: "/tmp/claw-work"},
+			},
+		},
+		store: st,
+	}
+
+	d.ensureSessionWithCWD("user:claw", "")
+	sess := st.Active("user:claw")
+	if sess == nil || sess.CWD != "/tmp/claw-work" {
+		t.Fatalf("new session = %+v, want user cwd", sess)
+	}
+
+	st.UpdateActive("user:claw", func(sess *session.Session) {
+		sess.CWD = "/tmp/custom-session"
+	})
+	d.ensureSessionWithCWD("user:claw", "")
+	sess = st.Active("user:claw")
+	if sess.CWD != "/tmp/custom-session" {
+		t.Fatalf("existing session cwd = %q, want preserved custom cwd", sess.CWD)
 	}
 }
 

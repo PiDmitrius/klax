@@ -390,6 +390,9 @@ func sessionNameArg(args []string) string {
 func (d *daemon) createSession(chatID, sk, name string) (*session.Session, *session.ScopeDefaults) {
 	cwd := d.sessionCWD(chatID)
 	if cwd == "" {
+		cwd = d.userDefaultCWD(sk)
+	}
+	if cwd == "" {
 		cwd = d.cfg.DefaultCWD
 	}
 	if cwd == "" {

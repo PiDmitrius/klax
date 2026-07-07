@@ -1112,6 +1112,23 @@ func (d *daemon) sessionCWD(chatID string) string {
 	return ""
 }
 
+func (d *daemon) userDefaultCWD(sk string) string {
+	if d.cfg == nil {
+		return ""
+	}
+	const prefix = "user:"
+	if !strings.HasPrefix(sk, prefix) {
+		return ""
+	}
+	id := strings.TrimPrefix(sk, prefix)
+	for _, u := range d.cfg.Users {
+		if u.ID == id {
+			return strings.TrimSpace(u.CWD)
+		}
+	}
+	return ""
+}
+
 // enableGroupChat enables group mode for a chat with the given CWD.
 func (d *daemon) enableGroupChat(chatID, cwd string) {
 	d.mu.Lock()
@@ -1303,6 +1320,9 @@ func (d *daemon) ensureSessionWithCWD(sessionKey, forceCWD string) {
 		}
 	}
 	cwd := forceCWD
+	if cwd == "" {
+		cwd = d.userDefaultCWD(sessionKey)
+	}
 	if cwd == "" {
 		cwd = d.cfg.DefaultCWD
 	}
