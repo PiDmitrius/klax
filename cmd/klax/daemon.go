@@ -1123,7 +1123,16 @@ func (d *daemon) userDefaultCWD(sk string) string {
 	id := strings.TrimPrefix(sk, prefix)
 	for _, u := range d.cfg.Users {
 		if u.ID == id {
-			return strings.TrimSpace(u.CWD)
+			cwd := strings.TrimSpace(u.CWD)
+			if cwd == "" {
+				return ""
+			}
+			resolved, err := resolveWorkingDir(cwd)
+			if err != nil {
+				log.Printf("user cwd ignored for %s: %v", sk, err)
+				return ""
+			}
+			return resolved
 		}
 	}
 	return ""

@@ -551,8 +551,13 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			d.sendMessage(chatID, msgID, sessionBusyText)
 			return
 		}
+		cwd, err := resolveWorkingDir(strings.Join(args, " "))
+		if err != nil {
+			d.sendMessage(chatID, msgID, fmt.Sprintf("❌ %s", html.EscapeString(err.Error())))
+			return
+		}
 		sess := d.store.UpdateActive(sk, func(sess *session.Session) {
-			sess.CWD = strings.Join(args, " ")
+			sess.CWD = cwd
 		})
 		if sess == nil {
 			d.sendMessage(chatID, msgID, "Нет активной сессии")
