@@ -278,9 +278,28 @@
   .srow { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 32px; margin-bottom: 8px; }
   .srow > label { color: var(--muted); font-size: 13px; flex: none; }
   .srow .sctl { flex: 1; display: flex; justify-content: flex-end; }
-  .srow select, .sname { width: 240px; max-width: 100%; padding: 7px 9px; border-radius: 8px;
-               border: 1px solid var(--border); background: var(--panel); color: var(--fg); font: inherit; }
-  .srow select:disabled, .sname:disabled, .stoggle input:disabled { opacity: .45; cursor: not-allowed; }
+  .sname { width: 240px; max-width: 100%; padding: 7px 9px; border-radius: 8px;
+           border: 1px solid var(--border); background: var(--panel); color: var(--fg); font: inherit; }
+  .sname:disabled, .stoggle input:disabled { opacity: .45; cursor: not-allowed; }
+  /* Custom dropdown (tabs.js selectHTML) — replaces the native <select> so it matches the UI and its
+     open state is ours to see (background refreshes hold off while a menu is open). */
+  .sselect { position: relative; width: 240px; max-width: 100%; }
+  .sselect-btn { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+                 padding: 7px 9px; border-radius: 8px; border: 1px solid var(--border);
+                 background: var(--panel); color: var(--fg); font: inherit; cursor: pointer; text-align: left; }
+  .sselect-btn:hover, .sselect.open .sselect-btn { border-color: var(--accent); }
+  .sselect-cur { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sselect-caret { flex: none; color: var(--muted); font-size: 10px; transition: transform .15s; }
+  .sselect.open .sselect-caret { transform: rotate(180deg); }
+  .sselect.disabled { opacity: .45; }
+  .sselect.disabled .sselect-btn { cursor: not-allowed; pointer-events: none; }
+  .sselect-menu { position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 10;
+                  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+                  box-shadow: 0 8px 24px rgba(0,0,0,.3); padding: 4px; max-height: 232px; overflow-y: auto; }
+  .sselect-opt { padding: 7px 9px; border-radius: 6px; cursor: pointer; font-size: 13px;
+                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sselect-opt:hover { background: var(--tool-bg); }
+  .sselect-opt.sel { color: var(--accent); font-weight: 600; }
   .stoggle { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; font-size: 13px; }
   .stoggle input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
   .shint { color: var(--muted); font-size: 11px; margin: 0 0 8px; }

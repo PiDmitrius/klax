@@ -22,10 +22,12 @@ export function initTabs(d){
   if(sok) sok.addEventListener("click", closeSettings);
   const sm = document.getElementById("smodal");
   if(sm) sm.addEventListener("click", e => { if(e.target === sm) closeSettings(); }); // backdrop closes
+  document.addEventListener("click", () => closeAllSelects()); // any click outside a menu closes it (menus stopPropagation their own)
   document.addEventListener("keydown", e => {
     if(e.key !== "Escape" || !settingsFor) return;
     const cm = document.getElementById("modal");
     if(cm && !cm.classList.contains("hidden")) return; // the confirm dialog owns Escape while open
+    if(document.querySelector(".sselect.open")){ closeAllSelects(); return; } // Escape closes an open dropdown first
     closeSettings();
   });
 }
@@ -112,6 +114,44 @@ async function closeSession(created, name){
 function fetchSettings(created){ return api("/api/settings?session=" + created).then(r => r.ok ? r.json() : Promise.reject(r)); }
 function ctxClass(pct){ return pct >= 90 ? "crit" : pct >= 70 ? "hot" : ""; } // matches .sctx-fill.hot/.crit
 
+// Custom dropdown (no native <select>, which renders in the OS style and whose open state we cannot
+// see): a styled button + an absolutely-positioned menu. "Open" is our own class, so a background
+// refresh can honestly hold off while a menu is open instead of yanking it (see maybeRefreshSettings).
+function selectHTML(id, list, cur, withDefault, disabled){
+  const opts = (withDefault ? [{ value: "", label: "По умолчанию" }] : []).concat(list || []);
+  const curOpt = opts.find(o => o.value === cur);
+  const curLabel = curOpt ? curOpt.label : (cur || "—");
+  const menu = opts.map(o => '<div class="sselect-opt'+(o.value === cur ? " sel" : "")+'" data-value="'+esc(o.value)+'">'+esc(o.label)+'</div>').join("");
+  return '<div class="sselect'+(disabled ? " disabled" : "")+'" id="'+id+'" data-value="'+esc(cur)+'">'
+    +'<button type="button" class="sselect-btn"'+(disabled ? " disabled" : "")+'><span class="sselect-cur">'+esc(curLabel)+'</span><span class="sselect-caret">▾</span></button>'
+    +'<div class="sselect-menu hidden">'+menu+'</div></div>';
+}
+function closeAllSelects(except){
+  document.querySelectorAll(".sselect.open").forEach(s => {
+    if(s === except) return;
+    s.classList.remove("open");
+    const m = s.querySelector(".sselect-menu"); if(m) m.classList.add("hidden");
+  });
+}
+function wireSelect(id, onPick){
+  const root = document.getElementById(id);
+  if(!root || root.classList.contains("disabled")) return;
+  const btn = root.querySelector(".sselect-btn"), menu = root.querySelector(".sselect-menu");
+  btn.addEventListener("click", e => {
+    e.stopPropagation();
+    const willOpen = menu.classList.contains("hidden");
+    closeAllSelects();
+    if(willOpen){ menu.classList.remove("hidden"); root.classList.add("open"); }
+  });
+  menu.addEventListener("click", e => e.stopPropagation()); // a click on the menu chrome (padding/scrollbar) must not close it
+  menu.querySelectorAll(".sselect-opt").forEach(opt => opt.addEventListener("click", e => {
+    e.stopPropagation();
+    menu.classList.add("hidden"); root.classList.remove("open");
+    const v = opt.dataset.value;
+    if(v !== root.dataset.value) onPick(v);
+  }));
+}
+
 export function openSettings(created, title, isNew){
   settingsFor = created; settingsIsNew = !!isNew; settingsAutofocused = false;
   const tt = document.querySelector(".smodal-title"); if(tt) tt.textContent = title || "Настройки сессии";
@@ -130,19 +170,14 @@ function closeSettings(){
 
 function renderSettings(d){
   if(settingsFor !== d.created) return;
-  const opts = (list, cur, withDefault) => {
-    let h = withDefault ? '<option value=""'+(cur===""?" selected":"")+'>По умолчанию</option>' : "";
-    (list||[]).forEach(o => { h += '<option value="'+esc(o.value)+'"'+(o.value===cur?" selected":"")+'>'+esc(o.label)+'</option>'; });
-    return h;
-  };
   const lock = d.busy, dis = lock ? " disabled" : "";
   let h = "";
   if(lock) h += '<div class="sbusy">⏳ Сессия занята — параметры запуска нельзя менять до завершения.</div>';
   h += '<div class="srow"><label>Имя</label><div class="sctl"><input class="sname" type="text" maxlength="80" value="'+esc(d.name)+'"></div></div>';
-  h += '<div class="srow"><label>Движок</label><div class="sctl"><select id="s-backend"'+((d.backend_locked||lock)?" disabled":"")+'>'+opts(d.backends, d.backend, false)+'</select></div></div>';
+  h += '<div class="srow"><label>Движок</label><div class="sctl">'+selectHTML("s-backend", d.backends, d.backend, false, !!(d.backend_locked || lock))+'</div></div>';
   if(d.backend_locked) h += '<div class="shint">Движок зафиксирован после первого сообщения.</div>';
-  h += '<div class="srow"><label>Модель</label><div class="sctl"><select id="s-model"'+dis+'>'+opts(d.models, d.model, true)+'</select></div></div>';
-  h += '<div class="srow"><label>Мышление</label><div class="sctl"><select id="s-think"'+dis+'>'+opts(d.efforts, d.think, true)+'</select></div></div>';
+  h += '<div class="srow"><label>Модель</label><div class="sctl">'+selectHTML("s-model", d.models, d.model, true, !!lock)+'</div></div>';
+  h += '<div class="srow"><label>Мышление</label><div class="sctl">'+selectHTML("s-think", d.efforts, d.think, true, !!lock)+'</div></div>';
   h += '<div class="srow"><label>Sandbox</label><div class="sctl"><label class="stoggle"><input type="checkbox" id="s-sandbox"'+(d.sandbox==="on"?" checked":"")+dis+'><span>'+(d.sandbox==="on"?"вкл":"выкл")+'</span></label></div></div>';
   if(d.tty_available)
     h += '<div class="srow"><label>TTY</label><div class="sctl"><label class="stoggle"><input type="checkbox" id="s-tty"'+(d.tty?" checked":"")+dis+'><span>'+(d.tty?"вкл":"выкл")+'</span></label></div></div>';
@@ -167,10 +202,10 @@ function renderSettings(d){
     nameInput.focus();
     nameInput.select();
   }
+  wireSelect("s-backend", v => patchSettings(d.created, { backend: v }));
+  wireSelect("s-model",   v => patchSettings(d.created, { model: v }));
+  wireSelect("s-think",   v => patchSettings(d.created, { think: v }));
   const wire = (sel, fn) => { const el = b.querySelector(sel); if(el) el.onchange = fn; };
-  wire("#s-backend", e => patchSettings(d.created, { backend: e.target.value }));
-  wire("#s-model",   e => patchSettings(d.created, { model: e.target.value }));
-  wire("#s-think",   e => patchSettings(d.created, { think: e.target.value }));
   wire("#s-sandbox", e => patchSettings(d.created, { sandbox: e.target.checked ? "on" : "off" }));
   wire("#s-tty",     e => patchSettings(d.created, { tty: e.target.checked }));
   const cwd = b.querySelector(".scwd");
@@ -191,11 +226,23 @@ function patchSettings(created, patch){
     .catch(() => notice("не удалось применить"));
 }
 
-// maybeRefreshSettings re-syncs an open dialog when sessions change (busy lock/unlock,
-// ctx update) — but never while the user is editing a text field.
+// maybeRefreshSettings re-syncs an open dialog when sessions change (busy lock/unlock, ctx update).
+// It must NOT clobber a text field mid-edit — those hold unsaved keystrokes that a re-render would
+// drop — so it skips while a text input / textarea in the body has focus. Selects and checkboxes
+// apply immediately on change (nothing unsaved), so a busy/context refresh may proceed even while one
+// is focused; we just restore focus to that same control afterward so it isn't yanked out. Otherwise
+// the dialog would stay stale (banner/disabled state) for as long as a select kept focus.
 function maybeRefreshSettings(){
   if(!settingsFor) return;
+  if(document.querySelector(".sselect.open")) return; // a dropdown is open — hold the refresh, don't yank the menu
   const ae = document.activeElement, body = document.getElementById("sbody");
-  if(ae && body && body.contains(ae)) return;
-  fetchSettings(settingsFor).then(d => { if(settingsFor === d.created) renderSettings(d); }).catch(()=>{});
+  const inBody = !!(ae && body && body.contains(ae));
+  if(inBody && (ae.tagName === "TEXTAREA" || (ae.tagName === "INPUT" && (ae.type || "text") === "text"))) return;
+  const keepId = inBody ? ae.id : "";
+  fetchSettings(settingsFor).then(d => {
+    if(settingsFor !== d.created) return;
+    const refocus = keepId && document.activeElement && document.activeElement.id === keepId; // still there after the async fetch
+    renderSettings(d);
+    if(refocus){ const el = document.getElementById(keepId); if(el && !el.disabled) el.focus(); }
+  }).catch(()=>{});
 }
