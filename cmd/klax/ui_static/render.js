@@ -39,7 +39,9 @@ export function decodePos(p){ p = p || 0; return { turn: Math.floor(p / POS_MULT
 // as unread; standalone cosmetic rows (compact/notice) are not counted and just flow to the right
 // side of the divider by document order; unread answer blocks land inside the turn at the exact
 // block boundary. `watermark` is the encoded read position (pos()); undefined ⇒ no divider.
-export function renderModel(turns, watermark){
+// `contextHint` is the current session-level usage snapshot, used only as a live fallback while
+// the running turn has not yet produced turn-local usage.
+export function renderModel(turns, watermark, contextHint){
   const items = [];
   let queuePos = 0, divided = false;
   const has = watermark !== undefined;
@@ -69,8 +71,10 @@ export function renderModel(turns, watermark){
         blocks.push(blocks_[i]); i++;
       }
       const last = blocks.length ? blocks[blocks.length - 1] : {};
+      const startPos = pos(t.seq, i - blocks.length);
       const group = {
         cls: blockCls(role), blocks, tool: role === "tool", time: last.time,
+        startPos,
         maxPos: pos(t.seq, i - 1), // the last block's position — drives read-advance (data-pos)
       };
       groups.push(group);
@@ -81,12 +85,14 @@ export function renderModel(turns, watermark){
     // turn: BELOW the working dots, not above them. While the turn runs the order is
     // [answer][dots][context] — new content is born at the dots, the context line stays at
     // the bottom; when the turn settles the dots vanish and the context slides up to close
-    // the gap, still the bottom line. Live % (session hint as fallback) while running; the
-    // settled line uses turn-local context only, so a stale hint never becomes a fake final.
+    // the gap, still the bottom line. A running turn falls back to the current session context
+    // snapshot until turn-local usage appears; do not store that snapshot on the turn itself, or a
+    // copied hint can outlive the fresh session strip and render stale values under the dots.
     // It is NOT a group — buildItem renders it after the dots indicator.
     const finalCtx = contextText(t.ctx_used, t.ctx_window);
+    const liveCtx = contextText(contextHint && contextHint.used, contextHint && contextHint.window);
     const ctxLine = (t.state === "done" || t.state === "err") ? finalCtx
-      : t.state === "run" ? (finalCtx || contextText(t.ctx_hint_used, t.ctx_hint_window))
+      : t.state === "run" ? (finalCtx || liveCtx)
       : "";
     const note = t.state === "enq" ? "в очереди · " + queuePos : undefined;
     items.push({ kind: "turn", seq: t.seq, text: t.text || "", time: t.time, groups, state: t.state, note, ctxLine, ctxTime: lastGroupTime });
@@ -183,7 +189,7 @@ function renderSig(it){
       text: it.text, time: it.time, state: it.state, note: it.note, ctxLine: it.ctxLine,
       groups: it.groups.map(g => ({
         divider: g.divider,
-        cls: g.cls, tool: g.tool, time: g.time, maxPos: g.maxPos,
+        cls: g.cls, tool: g.tool, time: g.time, startPos: g.startPos, maxPos: g.maxPos,
         blocks: (g.blocks || []).map(b => ({ id: b.id, role: b.role, text: b.text, kind: b.kind, time: b.time })),
       })),
     });
@@ -207,11 +213,12 @@ function stamp(node, key, sig){
 }
 
 // Each turn child carries a FLIP key (data-flip) AND a content signature (data-csig). The key is an
-// independently animatable unit — a group bubble is keyed by its FIRST block's id, so when reading
-// merges the bubbles a divider used to split, the merged bubble inherits the leading part's identity
-// and stays put. The signature is EVERYTHING that determines the child's DOM, so buildTurn can reuse
-// an unchanged child verbatim on the next render (no markdown re-parse, no repaint) — only the block
-// that actually changed and the transient dots indicator get rebuilt.
+// independently animatable unit — answer groups are keyed by the durable position of their first
+// block, not by content-derived block IDs, so tool-label/text changes patch the same DOM node instead
+// of creating an entering replacement. When reading merges bubbles a divider used to split, the
+// merged bubble inherits the leading part's position key and stays put. The signature is EVERYTHING
+// that determines the child's DOM, so buildTurn can reuse an unchanged child verbatim on the next
+// render (no markdown re-parse, no repaint) — only changed blocks and transient indicators update.
 function childSig(kind, extra){ return JSON.stringify([kind, extra]); }
 
 // buildTurn renders a user turn, REUSING unchanged child nodes from `old` verbatim so a streaming
@@ -246,11 +253,9 @@ function buildTurn(it, onAbort, old){
   const userHTML = mdSafe(it.text), userSig = childSig("u", [it.text, it.time]);
   put("u", userSig, () => bubble("user", userHTML, it.time, undefined, it.text),
     patchBubble("user", userHTML, it.time, undefined, it.text));
-  let gi = 0;
   for(const g of it.groups){
     if(g.divider){ turn.appendChild(divider()); continue; } // divider: cheap + tracked via snap.divider, not a reuse unit
-    const idx = gi++;
-    const fk = "g:" + ((g.blocks[0] && g.blocks[0].id) || (g.cls + ":" + idx));
+    const fk = "g:" + g.startPos;
     const sig = childSig("g", { cls: g.cls, tool: g.tool, time: g.time, maxPos: g.maxPos,
       blocks: (g.blocks || []).map(b => ({ id: b.id, role: b.role, text: b.text, kind: b.kind, time: b.time })) });
     const html = g.blocks.map(b => g.tool ? esc(b.text || "") : mdSafe(b.text || "")).join(g.tool ? "<br>" : "");
@@ -304,8 +309,8 @@ export function paint(col, items, onAbort){
   col.replaceChildren(frag);
 }
 
-export function renderSession(col, turns, unreadAfter, onAbort){
-  paint(col, renderModel(turns, unreadAfter), onAbort);
+export function renderSession(col, turns, unreadAfter, onAbort, contextHint){
+  paint(col, renderModel(turns, unreadAfter, contextHint), onAbort);
 }
 
 // --- smooth live updates (FLIP) ---
