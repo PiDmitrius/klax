@@ -252,6 +252,11 @@ function noMotion(){ return { motionMS: 0, mergeHeldSplits: false, holdSplits: n
 function rerender(created, live, opts){
   opts = opts || {};
   if(created !== active) return noMotion();
+  if(!live && liveBusy && created === active && !opts.forceStructural){
+    liveDirty = true;
+    animTrace("structural-deferred", { created, reason: opts.structuralReason || "" });
+    return noMotion();
+  }
   if(!live){ // a structural render (tab switch, load, foreground) supersedes any queued live animation
     if(liveRenderRAF){ cancelAnimationFrame(liveRenderRAF); liveRenderRAF = 0; liveRenderCreated = 0; }
     if(liveGateTimer){ clearTimeout(liveGateTimer); liveGateTimer = 0; }
@@ -307,6 +312,10 @@ function rerender(created, live, opts){
     holdSplits,
     stickAfter: !!(dividerGone && stick && motionMS),
   };
+}
+
+function rerenderStructural(created, reason, force){
+  return rerender(created, false, { structuralReason: reason, forceStructural: !!force });
 }
 
 // scheduleLiveRerender funnels every live content update through the serialization gate.
@@ -397,7 +406,7 @@ async function loadTranscript(created){
       else { markRead(created); stick = true; }
       renderTabs(active);
     }
-    rerender(created);
+    rerenderStructural(created, "loadTranscript", true);
     // (No explicit capWindow here: positioning above fires a scroll event that re-caps once the DOM
     // is real; capWindow's fits-the-viewport guard needs that real geometry to avoid dropping visible
     // rows on a fresh/short load.)
@@ -424,7 +433,7 @@ async function loadOlder(created, showTop){
     moreFor[created] = !!data.more;
     if(created === active){
       const prev = stick; stick = false; // never snap to the bottom after loading old history
-      rerender(created);
+      rerenderStructural(created, "loadOlder", true);
       stick = prev;
       if(log){
         if(showTop) log.scrollTop = 0;                   // button: show the older rows just loaded (not off-screen above)
@@ -572,7 +581,7 @@ async function selectSession(created){
     else markRead(created);
     stick = !hadUnread;
     renderTabs(active);
-    rerender(created);
+    rerenderStructural(created, "selectSession", true);
     if(!hadUnread) restoreScroll(created);
   }
   focusComposer();
@@ -772,12 +781,12 @@ function start(){
         const capped = capWindow(active) > 0; // back at the bottom → evict the older rows scrolled up to read (they reload on the next scroll up)
         if(read || advanced || capped){
           renderTabs(active);
-          if(capped) rerender(active); // structural when we evicted: drop the off-screen DOM cleanly
+          if(capped) rerenderStructural(active, "scroll-capped"); // structural when we evicted: drop the off-screen DOM cleanly
           else commitLive(active); // animate divider collapse and finish any split-bubble merge
         }
       } else if(advanced){
         renderTabs(active);
-        rerender(active);
+        rerenderStructural(active, "scroll-advanced");
         log.scrollTop = oldTop + (log.scrollHeight - oldHeight);
         scrollTopFor[active] = log.scrollTop;
       }
@@ -802,7 +811,7 @@ function start(){
   const th = document.getElementById("theme");
   if(th) th.addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
   const tb = document.getElementById("tobottom");
-  if(tb) tb.addEventListener("click", () => { stick = true; markRead(active, true); renderTabs(active); rerender(active); }); // rerender's stickToBottom fires a scroll event → scroll handler re-caps with a current DOM
+  if(tb) tb.addEventListener("click", () => { stick = true; markRead(active, true); renderTabs(active); rerenderStructural(active, "to-bottom"); }); // rerender's stickToBottom fires a scroll event → scroll handler re-caps with a current DOM
   window.addEventListener("hashchange", () => { const w = parseInt(location.hash.slice(1), 10); if(w && w !== active && sessionList.some(s => s.created === w)) selectSession(w); });
   document.addEventListener("keydown", e => {
     if(["ArrowDown","PageDown","End"," "].includes(e.key)) allowReadOnScroll();
@@ -822,7 +831,7 @@ function start(){
         } else {
           markRead(active);
         }
-        rerender(active);
+        rerenderStructural(active, "visibility");
       }
     }
   });
