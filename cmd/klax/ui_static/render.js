@@ -366,10 +366,9 @@ export function beginShift(col){
           if(!ch.classList || !ch.classList.contains("readline")) continue;
           for(let j = i + 1; j < children.length; j++){
             const fk = children[j].dataset && children[j].dataset.flip;
-            const m = fk && fk.match(/^g:(\d+)$/);
-            if(!m) continue;
-            const p = Number(m[1]);
-            splits.add(p);
+            if(!fk || !fk.startsWith("g:")) continue;
+            const p = Number(fk.slice(2));
+            if(Number.isFinite(p)) splits.add(p);
             break;
           }
         }

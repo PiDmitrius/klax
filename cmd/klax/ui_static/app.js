@@ -229,8 +229,6 @@ function rerender(created, live, opts){
   if(!live) clearShiftGhosts(); // a structural render must not inherit a fading divider
   const log = document.getElementById("log");
   const anchorLive = !!(live && log);
-  const beforeTop = anchorLive ? log.scrollTop : 0;
-  const beforeColH = anchorLive ? col.offsetHeight : 0;
   const hadDivider = anchorLive && !!col.querySelector(".readline");
   const snap = live ? beginShift(col) : null;
   const holdSplits = opts.holdSplits || (!opts.noHoldSplits && hadDivider && rawUnreadCount(active) === 0 && snap && snap.holdSplits && snap.holdSplits.size ? snap.holdSplits : null);
@@ -252,10 +250,8 @@ function rerender(created, live, opts){
       delete unreadJump[active];
     }
   } else if(dividerGone){
-    // At the bottom, playShift owns the visible sequence: line fades, blocks collapse, split bubbles
-    // join. Away from the bottom (or with reduced motion), preserve the reader's viewport instead:
-    // the divider may be off-screen, so moving visible content for it is a regression.
-    if(!stick || !snap) log.scrollTop = Math.max(0, beforeTop + (col.offsetHeight - beforeColH));
+    // Do not stick/scroll-compensate immediately: playShift holds the old visual positions while
+    // the divider ghost fades, then starts the collapse. Scrolling here would collapse early.
   } else if(stick) stickToBottom();
   toggleToBottom();
   const motionMS = snap ? playShift(col, snap) : 0; // after scroll decisions: deltas = exact visual shifts
