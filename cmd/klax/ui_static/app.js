@@ -61,6 +61,27 @@ function syncComposerH(){ const c = document.getElementById("composer"); if(c) s
 
 function logcol(){ return document.getElementById("logcol"); }
 function getActive(){ return active; }
+
+const ANIM_TRACE_BUILD = "unread-baseline-trace-1";
+function animTrace(event, data){
+  if(typeof window === "undefined") return;
+  const row = Object.assign({ t: Math.round(performance.now()), event, active, build: ANIM_TRACE_BUILD }, data || {});
+  const trace = window.__klaxAnimTrace || (window.__klaxAnimTrace = []);
+  trace.push(row);
+  if(trace.length > 120) trace.splice(0, trace.length - 120);
+  window.__klaxAnimBuild = ANIM_TRACE_BUILD;
+  try {
+    if(localStorage.getItem("klax_anim_debug") === "1") console.debug("[klax-anim]", row);
+  } catch(e){}
+}
+
+function splitCount(holdSplits){
+  if(!holdSplits || !holdSplits.forEach) return 0;
+  let n = 0;
+  holdSplits.forEach(s => { n += s && s.size ? s.size : 0; });
+  return n;
+}
+
 // stateCode mirrors the server (readmodel.go): the tail cursor carries the boundary turn's state
 // code so a pure enq→run transition (no new block) still advances the cursor and re-delivers the
 // turn once — otherwise the bubble stays "queued" until the first block or a reload.
@@ -229,9 +250,16 @@ function rerender(created, live, opts){
   if(!live) clearShiftGhosts(); // a structural render must not inherit a fading divider
   const log = document.getElementById("log");
   const anchorLive = !!(live && log);
-  const hadDivider = anchorLive && !!col.querySelector(".readline");
+  const domHadDivider = !!col.querySelector(".readline");
+  const hadDivider = anchorLive && domHadDivider;
   const snap = live ? beginShift(col) : null;
   const holdSplits = opts.holdSplits || (!opts.noHoldSplits && hadDivider && rawUnreadCount(active) === 0 && snap && snap.holdSplits && snap.holdSplits.size ? snap.holdSplits : null);
+  animTrace("rerender-before", {
+    created, live: !!live, structural: !live, domHadDivider, hadDivider, unread: rawUnreadCount(active),
+    snap: !!snap, snapSplits: snap ? splitCount(snap.holdSplits) : 0,
+    holdSplits: splitCount(holdSplits), joinHeldSplits: !!opts.joinHeldSplits,
+    noHoldSplits: !!opts.noHoldSplits, stick,
+  });
   renderSession(col, model.turns(active), readThrough[active], abortActive, sessionContextHint(active), holdSplits, !!opts.joinHeldSplits);
   watchInlineImages(col);
   if(moreFor[active]){ // older history exists → a "load earlier" button at the top
@@ -255,6 +283,11 @@ function rerender(created, live, opts){
   } else if(stick) stickToBottom();
   toggleToBottom();
   const motionMS = snap ? playShift(col, snap) : 0; // after scroll decisions: deltas = exact visual shifts
+  animTrace("rerender-after", {
+    created, live: !!live, dividerGone, motionMS,
+    mergeHeldSplits: !!(dividerGone && holdSplits),
+    holdSplits: splitCount(holdSplits), stickAfter: !!(dividerGone && stick && motionMS),
+  });
   return {
     motionMS,
     mergeHeldSplits: !!(dividerGone && holdSplits),
@@ -270,9 +303,10 @@ function rerender(created, live, opts){
 // already patched before we got here, so nothing waits on the DOM — only the animation does.
 function scheduleLiveRerender(created){
   if(created !== active) return;
-  if(liveBusy){ liveDirty = true; return; } // an animation is in flight — accumulate, don't stack
+  if(liveBusy){ liveDirty = true; animTrace("schedule-dirty", { created }); return; } // an animation is in flight — accumulate, don't stack
   liveRenderCreated = created;
   if(liveRenderRAF) return;
+  animTrace("schedule-live", { created });
   liveRenderRAF = requestAnimationFrame(() => {
     const c = liveRenderCreated;
     liveRenderRAF = 0;
@@ -287,18 +321,22 @@ function scheduleLiveRerender(created){
 function commitLive(created){
   liveBusy = true;
   liveDirty = false;
+  animTrace("commit-start", { created });
   const first = rerender(created, true);
   if(liveGateTimer) clearTimeout(liveGateTimer);
   const openGate = () => {
     liveGateTimer = 0;
     liveBusy = false;
+    animTrace("commit-open", { created, liveDirty });
     if(liveDirty && active) scheduleLiveRerender(active);
   };
   liveGateTimer = setTimeout(() => {
     if(first.mergeHeldSplits && active === created){
+      animTrace("merge-join", { created, holdSplits: splitCount(first.holdSplits) });
       const joined = rerender(created, true, { holdSplits: first.holdSplits, joinHeldSplits: true });
       const joinWait = Math.max(MERGE_JOIN_MS, joined.motionMS || 0);
       liveGateTimer = setTimeout(() => {
+        animTrace("merge-final", { created });
         const merged = rerender(created, true, { noHoldSplits: true });
         if(first.stickAfter && active === created && stick) stickToBottom();
         liveGateTimer = setTimeout(openGate, Math.max(COMMIT_MS, merged.motionMS || 0));
