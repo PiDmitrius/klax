@@ -235,7 +235,7 @@ function rerender(created, live){
   const beforeColH = anchorLive ? col.offsetHeight : 0;
   const hadDivider = anchorLive && !!col.querySelector(".readline");
   const snap = live ? beginShift(col) : null;
-  renderSession(col, model.turns(active), readThrough[active], abortActive);
+  renderSession(col, model.turns(active), readThrough[active], abortActive, sessionContextHint(active));
   watchInlineImages(col);
   if(moreFor[active]){ // older history exists → a "load earlier" button at the top
     const m = document.createElement("button");
@@ -296,10 +296,14 @@ function abortActive(){
   if(active) api("/api/abort", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: active }) }).catch(()=>{});
 }
 
-function sessionContext(created){
-  const s = sessionList.find(x => x.created === created);
-  if(!s || !s.ctx_used || !s.ctx_window) return null;
-  return { used: s.ctx_used, window: s.ctx_window };
+function sessionContextHint(created, list){
+  const s = (list || sessionList).find(x => x.created === created);
+  if(!s || !s.ctx_used) return null;
+  return { used: s.ctx_used, window: s.ctx_window || 0 };
+}
+
+function hasRunningTurn(created){
+  return model.turns(created).some(t => t.role === "user" && t.state === "run");
 }
 
 async function loadTranscript(created){
@@ -308,8 +312,6 @@ async function loadTranscript(created){
     if(!r.ok) return;
     const data = await r.json();
     model.reconcile(created, data.turns || []);
-    const h = sessionContext(created);
-    if(h) model.setSessionContextHint(created, h.used, h.window);
     loaded[created] = true;
     offsetFor[created] = data.offset || 0;
     moreFor[created] = !!data.more;
@@ -513,11 +515,16 @@ async function selectSession(created){
 // on a dead session.
 async function onSessionsList(list){
   list = list || [];
+  const oldList = sessionList;
   sessionList = list;
   const affected = new Set();
   let activeReadAdvanced = false;
   for(const s of list){
-    if(model.setSessionContextHint(s.created, s.ctx_used, s.ctx_window)) affected.add(s.created);
+    const oldCtx = sessionContextHint(s.created, oldList);
+    const newCtx = sessionContextHint(s.created, list);
+    if(loaded[s.created] && hasRunningTurn(s.created) && ((oldCtx && oldCtx.used) !== (newCtx && newCtx.used) || (oldCtx && oldCtx.window) !== (newCtx && newCtx.window))){
+      affected.add(s.created);
+    }
     // Cross-tab / cross-device read sync: adopt the server's durable read watermark when it is
     // AHEAD of ours — another browser tab (or the messenger) read further. Monotonic (never
     // regresses our own, maybe-not-yet-reported, reading), so the divider + badge here catch up.
@@ -603,7 +610,6 @@ const host = {
   ctx: {
     onSessions: list => { onSessionsList(list).catch(e => console.error("klax sessions", e)); },
     onNotice: onNoticeEvent,
-    sessionContext,
   },
   // tailLoop: per-session durable content cursors (loaded tabs only) + the transient-notice cursor.
   cursors: () => { const c = {}; for(const k in loaded){ if(loaded[k] && tailCursors[k]) c[k] = tailCursors[k]; } return c; },
@@ -612,12 +618,6 @@ const host = {
   sessRev: () => sessRev, setSessRev: v => { sessRev = v; },
   onAffected: set => {
     for(const c of set){
-      // replaceTail rebuilt these turns from the durable read model, which does NOT carry the
-      // client-side context HINT (it lives on the sessions strip). Restore it, else a running turn's
-      // live "Контекст" line vanishes whenever the tail re-sends that turn — e.g. when a new message
-      // is queued behind it (the tail now anchors on the running turn, so it comes back down).
-      const h = sessionContext(c);
-      if(h) model.setSessionContextHint(c, h.used, h.window);
       if(c === active){
         if(documentVisible() && stick){
           markRead(c);

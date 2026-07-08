@@ -2,6 +2,9 @@ package main
 
 import (
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -40,5 +43,87 @@ func TestServeModule(t *testing.T) {
 	s.handleSPA(rec, httptest.NewRequest("GET", "/render.js", nil))
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "renderModel") {
 		t.Fatalf("handleSPA /render.js: code %d", rec.Code)
+	}
+}
+
+func TestTimelineDoesNotStoreSessionContextHintsOnTurns(t *testing.T) {
+	files := []string{
+		"ui_static/app.js",
+		"ui_static/model.js",
+		"ui_static/render.js",
+	}
+	for _, name := range files {
+		body, err := moduleFS.ReadFile(name)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		src := string(body)
+		for _, bad := range []string{"ctx_hint", "setContextHint", "setSessionContextHint"} {
+			if strings.Contains(src, bad) {
+				t.Fatalf("%s still contains stale context hint path %q", name, bad)
+			}
+		}
+	}
+}
+
+func TestRenderModelContextFallbackAndStableGroupPositions(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not found")
+	}
+	dir := t.TempDir()
+	for _, name := range []string{"base.js", "markdown.js", "render.js"} {
+		body, err := moduleFS.ReadFile("ui_static/" + name)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), body, 0600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"type":"module"}`), 0600); err != nil {
+		t.Fatalf("write package.json: %v", err)
+	}
+	script := `
+import { renderModel, pos } from "./render.js";
+
+function assert(cond, msg){
+  if(!cond) throw new Error(msg);
+}
+function ctx(turn, hint){
+  return renderModel([turn], undefined, hint)[0].ctxLine;
+}
+
+const base = { seq: 2, role: "user", text: "u", time: "2026-01-01T00:00:00Z", blocks: [] };
+assert(ctx({ ...base, state: "run" }, { used: 50000, window: 200000 }) === "📊 Контекст: 25% (50k/200k)", "running turn must show session fallback");
+assert(ctx({ ...base, state: "run", ctx_used: 120000, ctx_window: 200000 }, { used: 50000, window: 200000 }) === "📊 Контекст: 60% (120k/200k)", "turn-local context must win");
+assert(ctx({ ...base, state: "done" }, { used: 50000, window: 200000 }) === "", "done turn must not use session fallback");
+assert(ctx({ ...base, state: "enq" }, { used: 50000, window: 200000 }) === "", "queued turn must not show context fallback");
+assert(ctx({ ...base, state: "run" }, { used: 50000, window: 0 }) === "📊 Контекст: 50k", "used-only fallback must render count");
+
+const tools = [
+  { id: "a", role: "tool", text: "one" },
+  { id: "b", role: "tool", text: "two" },
+  { id: "c", role: "tool", text: "three" },
+];
+const split = renderModel([{ ...base, state: "done", blocks: tools }], pos(2, 1))[0].groups.filter(g => !g.divider);
+assert(split.length === 2, "unread divider must split a tool group");
+assert(split[0].startPos === pos(2, 0), "leading split group startPos");
+assert(split[1].startPos === pos(2, 2), "trailing split group startPos");
+
+const merged = renderModel([{ ...base, state: "done", blocks: tools }], pos(2, 3))[0].groups.filter(g => !g.divider);
+assert(merged.length === 1, "read groups must merge");
+assert(merged[0].startPos === pos(2, 0), "merged group must inherit leading startPos");
+
+const oldTool = renderModel([{ ...base, state: "done", blocks: [{ id: "old", role: "tool", text: "old label" }] }], undefined)[0].groups[0];
+const newTool = renderModel([{ ...base, state: "done", blocks: [{ id: "new", role: "tool", text: "new label" }] }], undefined)[0].groups[0];
+assert(oldTool.startPos === newTool.startPos, "tool text/id changes must keep position key stable");
+`
+	scriptPath := filepath.Join(dir, "render_model_test.mjs")
+	if err := os.WriteFile(scriptPath, []byte(script), 0600); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	out, err := exec.Command("node", scriptPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node renderModel test failed: %v\n%s", err, out)
 	}
 }
