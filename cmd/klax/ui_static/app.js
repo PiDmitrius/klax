@@ -63,6 +63,17 @@ function logcol(){ return document.getElementById("logcol"); }
 function getActive(){ return active; }
 
 const ANIM_TRACE_BUILD = "unread-baseline-trace-1";
+function initAnimTrace(){
+  if(typeof window === "undefined") return;
+  window.__klaxAnimBuild = ANIM_TRACE_BUILD;
+  if(!window.__klaxAnimTrace) window.__klaxAnimTrace = [];
+  window.klaxAnimDump = function(){
+    const rows = window.__klaxAnimTrace.slice(-60);
+    console.table(rows);
+    return rows;
+  };
+}
+
 function animTrace(event, data){
   if(typeof window === "undefined") return;
   const row = Object.assign({ t: Math.round(performance.now()), event, active, build: ANIM_TRACE_BUILD }, data || {});
@@ -81,6 +92,7 @@ function splitCount(holdSplits){
   holdSplits.forEach(s => { n += s && s.size ? s.size : 0; });
   return n;
 }
+initAnimTrace();
 
 // stateCode mirrors the server (readmodel.go): the tail cursor carries the boundary turn's state
 // code so a pure enq→run transition (no new block) still advances the cursor and re-delivers the
