@@ -233,7 +233,7 @@ function rerender(created, live, opts){
   const beforeColH = anchorLive ? col.offsetHeight : 0;
   const hadDivider = anchorLive && !!col.querySelector(".readline");
   const snap = live ? beginShift(col) : null;
-  const holdSplits = opts.holdSplits || (!opts.noHoldSplits && hadDivider && snap && snap.holdSplits && snap.holdSplits.size ? snap.holdSplits : null);
+  const holdSplits = opts.holdSplits || (!opts.noHoldSplits && hadDivider && rawUnreadCount(active) === 0 && snap && snap.holdSplits && snap.holdSplits.size ? snap.holdSplits : null);
   renderSession(col, model.turns(active), readThrough[active], abortActive, sessionContextHint(active), holdSplits, !!opts.joinHeldSplits);
   watchInlineImages(col);
   if(moreFor[active]){ // older history exists → a "load earlier" button at the top
@@ -242,18 +242,16 @@ function rerender(created, live, opts){
     m.addEventListener("click", () => loadOlder(active, true)); // showTop: reveal the loaded rows
     col.insertBefore(m, col.firstChild);
   }
-  const currentDivider = col.querySelector(".readline");
-  const dividerChanged = hadDivider && (!currentDivider || (snap && snap.divider && Math.abs(currentDivider.getBoundingClientRect().top - snap.divider.top) > 1));
-  if(snap) snap.dividerChanged = dividerChanged;
+  const dividerGone = hadDivider && !col.querySelector(".readline");
   if(unreadJump[active] && rawUnreadCount(active) > 0){
-    const dv = currentDivider;
+    const dv = col.querySelector(".readline");
     if(dv){
       readOnScroll = false;
       dv.scrollIntoView({ block: "start" });
       stick = false;
       delete unreadJump[active];
     }
-  } else if(dividerChanged){
+  } else if(dividerGone){
     // At the bottom, playShift owns the visible sequence: line fades, blocks collapse, split bubbles
     // join. Away from the bottom (or with reduced motion), preserve the reader's viewport instead:
     // the divider may be off-screen, so moving visible content for it is a regression.
@@ -263,9 +261,9 @@ function rerender(created, live, opts){
   const motionMS = snap ? playShift(col, snap) : 0; // after scroll decisions: deltas = exact visual shifts
   return {
     motionMS,
-    mergeHeldSplits: !!holdSplits,
+    mergeHeldSplits: !!(dividerGone && holdSplits),
     holdSplits,
-    stickAfter: !!(dividerChanged && stick && motionMS),
+    stickAfter: !!(dividerGone && stick && motionMS),
   };
 }
 
@@ -719,6 +717,8 @@ function start(){
     // forever. loadOlder is guarded + preserves the scroll position, so this stays a smooth scroll up.
     if(active && !stick && log.scrollTop < 300 && moreFor[active] && !loadingOlder[active]) loadOlder(active);
     if(readOnScroll && active && documentVisible()){
+      const oldTop = log.scrollTop;
+      const oldHeight = log.scrollHeight;
       const advanced = advanceReadThroughPastViewport(log);
       if(stick){
         const read = markRead(active);
@@ -730,7 +730,9 @@ function start(){
         }
       } else if(advanced){
         renderTabs(active);
-        commitLive(active);
+        rerender(active);
+        log.scrollTop = oldTop + (log.scrollHeight - oldHeight);
+        scrollTopFor[active] = log.scrollTop;
       }
     }
     toggleToBottom();
@@ -753,7 +755,7 @@ function start(){
   const th = document.getElementById("theme");
   if(th) th.addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
   const tb = document.getElementById("tobottom");
-  if(tb) tb.addEventListener("click", () => { stick = true; markRead(active, true); renderTabs(active); commitLive(active); });
+  if(tb) tb.addEventListener("click", () => { stick = true; markRead(active, true); renderTabs(active); rerender(active); }); // rerender's stickToBottom fires a scroll event → scroll handler re-caps with a current DOM
   window.addEventListener("hashchange", () => { const w = parseInt(location.hash.slice(1), 10); if(w && w !== active && sessionList.some(s => s.created === w)) selectSession(w); });
   document.addEventListener("keydown", e => {
     if(["ArrowDown","PageDown","End"," "].includes(e.key)) allowReadOnScroll();
@@ -773,7 +775,7 @@ function start(){
         } else {
           markRead(active);
         }
-        commitLive(active);
+        rerender(active);
       }
     }
   });
