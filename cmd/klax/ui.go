@@ -69,7 +69,7 @@ type uiSessionInfo struct {
 // uiEvent is one server-sent event. The client multiplexes all tabs over a
 // single stream and routes by Session (a session's Created).
 type uiEvent struct {
-	Type      string          `json:"type"`            // sessions|turn_start|context|progress|final|error|notice|compact|user
+	Type      string          `json:"type"`            // sessions|turn_start|context|progress|final|error|notice|user
 	Seq       uint64          `json:"seq,omitempty"`   // monotonic id for client dedupe + unread; set by emitLocked
 	Nonce     string          `json:"nonce,omitempty"` // user-event: the sender's send nonce, so it skips its own echo
 	Session   int64           `json:"session,omitempty"`
@@ -715,7 +715,7 @@ type tailResp struct {
 
 // parseBlockCursor splits a "<turn>.<block>.<state>.<trail>[.<head>]" content cursor (block may be
 // -1 for a turn with no answer yet; the state code, trail, and head are absent on a legacy cursor).
-// `trail` is the number of trailing non-durable rows (compact/system standalones) after the last
+// `trail` is the number of trailing non-durable rows after the last
 // durable turn — it lets a standalone appended AFTER the last turn be delivered live exactly once.
 // `head` is the newest durable turn the client has seen (only present when the cursor anchors on an
 // OLDER still-running turn behind a queued one); it defaults to `turn` so a normal/legacy cursor is

@@ -109,7 +109,7 @@ export class TurnModel {
     t.blocks.push({ ...block });
   }
 
-  // appendStandalone adds a non-turn row (a compact/system notice between turns).
+  // appendStandalone adds a non-turn, non-durable row between turns.
   appendStandalone(created, row){
     const arr = this.byCreated[created] = this.byCreated[created] || [];
     arr.push({ role: row.role || "system", kind: row.kind, text: row.text, eventSeq: row.eventSeq });

@@ -25,15 +25,15 @@ type uiBlock struct {
 }
 
 // uiTurn is one row of the read model. A user row carries the durable turn seq + state
-// (the per-turn indicator: enq|run|done|err) and its answer blocks; a standalone row
-// (system/compact/error notice between turns) has role != "user" and no seq/state.
+// (the per-turn indicator: enq|run|done|err) and its answer blocks; a standalone
+// non-turn row has role != "user" and no seq/state.
 type uiTurn struct {
 	Seq       int64     `json:"seq,omitempty"` // durable turn_seq (user turns); negative synthetic for legacy markerless; 0 for standalone rows
-	Role      string    `json:"role"`          // user|system|compact|assistant|tool
+	Role      string    `json:"role"`          // user|system|assistant|tool|notice
 	Text      string    `json:"text,omitempty"`
 	Time      string    `json:"time,omitempty"`
 	State     string    `json:"state,omitempty"` // user turns: enq|run|done|err
-	Kind      string    `json:"kind,omitempty"`  // standalone: compact|error
+	Kind      string    `json:"kind,omitempty"`  // standalone: error
 	Blocks    []uiBlock `json:"blocks,omitempty"`
 	CtxUsed   int       `json:"ctx_used,omitempty"`
 	CtxWindow int       `json:"ctx_window,omitempty"`
@@ -106,7 +106,7 @@ type groupedTurn struct {
 }
 
 // groupTurns folds a flat transcript into top-level units: a user item starts a turn and
-// the following assistant/tool items become its blocks; a system/compact/error item (or
+// the following assistant/tool items become its blocks; a system/error item (or
 // an answer block with no preceding user) is a standalone unit.
 func groupTurns(items []history.Item) []groupedTurn {
 	var out []groupedTurn
@@ -120,7 +120,7 @@ func groupTurns(items []history.Item) []groupedTurn {
 				continue
 			}
 			out = append(out, groupedTurn{lead: it})
-		default: // system | compact | error notice
+		default: // system | error notice
 			out = append(out, groupedTurn{lead: it})
 		}
 	}
@@ -202,13 +202,11 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 		if state == "err" {
 			ut.Blocks = append(ut.Blocks, errBlock(seq, reason))
 		}
-		// While the turn is still RUNNING, hold back its most-recent (in-progress) block: the message
-		// currently being generated is represented by the working dots, not shown as a settled bubble.
-		// The final block is revealed only at `done`, so it appears ALREADY settled with no dots
-		// trailing it — the engine shows a message as "the last in the turn" exactly when it knows,
-		// via done, that it is. This makes completion deterministic: there is never an [answer,
-		// run+dots] frame before [answer, done]. (A turn with no blocks yet just shows the dots.)
-		if state == "run" && len(ut.Blocks) > 0 {
+		// While the turn is still RUNNING, hold back only the most-recent assistant text block:
+		// the message currently being generated is represented by the working dots, not shown as
+		// a settled bubble. Tool/progress blocks are already discrete events and must remain
+		// visible immediately, including compaction.
+		if state == "run" && len(ut.Blocks) > 0 && ut.Blocks[len(ut.Blocks)-1].Role == "assistant" {
 			ut.Blocks = ut.Blocks[:len(ut.Blocks)-1]
 		}
 		turns = append(turns, ut)
@@ -261,7 +259,7 @@ func mergeQueueOnlyTurns(base, missing []uiTurn) []uiTurn {
 // user turn's block at index bi is unread when (turn.Seq, bi) sorts strictly after (throughTurn,
 // throughBlock); a never-read session is (0,0) ⇒ every block unread (uniform for UI- and
 // messenger-originated sessions). Only answer blocks count — the user's own bubbles do not, and
-// standalone cosmetic rows (compact/notice, Seq==0) are skipped, so the count is >0 exactly when a
+// standalone non-durable rows (Seq==0) are skipped, so the count is >0 exactly when a
 // divider would show (badge↔line invariant) and a trailing notice can never wedge the badge >0.
 func unreadAfter(turns []uiTurn, throughTurn int64, throughBlock int) int {
 	n := 0
@@ -303,7 +301,7 @@ func stateCode(state string) string {
 // than spinning. The client replaces its own tail from `throughTurn` with these rows — ONE path,
 // shared with reload, so live delivery and reload converge (no event synthesis, no in-memory ring).
 // `throughState` is the boundary turn's state code the client last saw; `throughTrail` is the count
-// of standalone rows it last saw trailing after the last durable turn — this is how a compact/system
+// of standalone rows it last saw trailing after the last durable turn — this is how a non-durable
 // standalone appended AFTER the last turn (which has no durable position of its own) is delivered
 // live exactly once instead of only on reload. ("" / 0 on a legacy cursor ⇒ re-syncs once.)
 //

@@ -36,12 +36,15 @@ export function decodePos(p){ p = p || 0; return { turn: Math.floor(p / POS_MULT
 
 // renderModel computes the ordered render items for one session. PURE and unit-testable.
 // The unread divider stays turn-aware: user bubbles are the human's own messages and do not count
-// as unread; standalone cosmetic rows (compact/notice) are not counted and just flow to the right
+// as unread; standalone non-durable rows are not counted and just flow to the right
 // side of the divider by document order; unread answer blocks land inside the turn at the exact
 // block boundary. `watermark` is the encoded read position (pos()); undefined ⇒ no divider.
 // `contextHint` is the current session-level usage snapshot, used only as a live fallback while
 // the running turn has not yet produced turn-local usage.
-export function renderModel(turns, watermark, contextHint){
+// `holdSplits` preserves group boundaries that used to be separated by the unread divider for one
+// live frame after the divider disappears. That lets the line fade out before the two bubble pieces
+// merge back into one.
+export function renderModel(turns, watermark, contextHint, holdSplits, joinHeldSplits){
   const items = [];
   let queuePos = 0, divided = false;
   const has = watermark !== undefined;
@@ -50,13 +53,13 @@ export function renderModel(turns, watermark, contextHint){
     if(t.role !== "user"){
       // `key` is the standalone's live eventSeq (render-key stability only); it carries no data-pos
       // so it never drives read-advance, and it is not counted as unread.
-      if(t.kind === "compact") items.push({ kind: "bubble", cls: "system", text: "🗜 контекст свёрнут", md: false, time: t.time, key: t.eventSeq });
-      else if(t.role === "notice") items.push({ kind: "bubble", cls: "notice", text: t.text || "", md: false, time: t.time, key: t.eventSeq });
-      else items.push({ kind: "bubble", cls: (t.kind === "error" || t.role === "error") ? "error" : t.role === "system" ? "system" : "assistant", text: t.text || "", md: true, time: t.time, key: t.eventSeq });
+      if(t.role === "notice") items.push({ kind: "bubble", cls: "notice", text: t.text || "", md: false, time: t.time, key: t.eventSeq });
+      else items.push({ kind: "bubble", cls: (t.kind === "error" || t.role === "error") ? "error" : t.role === "system" ? "system" : t.role === "tool" ? "tool" : "assistant", text: t.text || "", md: t.role !== "tool", time: t.time, key: t.eventSeq });
       continue;
     }
     const blocks_ = t.blocks || [];
     const groups = [];
+    const held = holdSplits && holdSplits.get && holdSplits.get(t.seq);
     let i = 0;
     let lastGroupTime = t.time;
     while(i < blocks_.length){
@@ -66,7 +69,9 @@ export function renderModel(turns, watermark, contextHint){
         continue;
       }
       const role = blocks_[i].role, blocks = [];
+      const groupStart = i;
       while(i < blocks_.length && blocks_[i].role === role){
+        if(held && i > groupStart && held.has(pos(t.seq, i))) break;
         if(unread(pos(t.seq, i)) && !divided && has && blocks.length > 0) break;
         blocks.push(blocks_[i]); i++;
       }
@@ -79,6 +84,15 @@ export function renderModel(turns, watermark, contextHint){
       };
       groups.push(group);
       if(group.time) lastGroupTime = group.time;
+    }
+    if(joinHeldSplits && held){
+      for(let j = 1; j < groups.length; j++){
+        const prev = groups[j - 1], cur = groups[j];
+        if(!prev || !cur || prev.divider || cur.divider) continue;
+        if(!held.has(cur.startPos) || prev.cls !== cur.cls || prev.tool !== cur.tool) continue;
+        prev.joinNext = true;
+        cur.joinPrev = true;
+      }
     }
     if(t.state === "enq") queuePos++;
     // Context is ONE left tool-line — the turn's "cut line", always the LAST element of the
@@ -190,6 +204,7 @@ function renderSig(it){
       groups: it.groups.map(g => ({
         divider: g.divider,
         cls: g.cls, tool: g.tool, time: g.time, startPos: g.startPos, maxPos: g.maxPos,
+        joinPrev: !!g.joinPrev, joinNext: !!g.joinNext,
         blocks: (g.blocks || []).map(b => ({ id: b.id, role: b.role, text: b.text, kind: b.kind, time: b.time })),
       })),
     });
@@ -254,14 +269,15 @@ function buildTurn(it, onAbort, old){
   put("u", userSig, () => bubble("user", userHTML, it.time, undefined, it.text),
     patchBubble("user", userHTML, it.time, undefined, it.text));
   for(const g of it.groups){
-    if(g.divider){ turn.appendChild(divider()); continue; } // divider: cheap + tracked via snap.divider, not a reuse unit
+    if(g.divider){ turn.appendChild(divider()); continue; } // a fresh in-flow node; dismissal fades it via fadeOutDivider, then the next render drops it
     const fk = "g:" + g.startPos;
-    const sig = childSig("g", { cls: g.cls, tool: g.tool, time: g.time, maxPos: g.maxPos,
+    const cls = g.cls + (g.joinPrev ? " join-prev" : "") + (g.joinNext ? " join-next" : "");
+    const sig = childSig("g", { cls: g.cls, tool: g.tool, time: g.time, maxPos: g.maxPos, joinPrev: !!g.joinPrev, joinNext: !!g.joinNext,
       blocks: (g.blocks || []).map(b => ({ id: b.id, role: b.role, text: b.text, kind: b.kind, time: b.time })) });
     const html = g.blocks.map(b => g.tool ? esc(b.text || "") : mdSafe(b.text || "")).join(g.tool ? "<br>" : "");
     const raw = g.blocks.map(b => b.text || "").join(g.tool ? "\n" : "\n\n");
-    put(fk, sig, () => bubble(g.cls, html, g.time, g.maxPos, raw),
-      patchBubble(g.cls, html, g.time, g.maxPos, raw));
+    put(fk, sig, () => bubble(cls, html, g.time, g.maxPos, raw),
+      patchBubble(cls, html, g.time, g.maxPos, raw));
   }
   // The working/queued dots — the turn's in-progress indicator. INVARIANT: a turn in progress ALWAYS
   // shows this block, the WHOLE time it runs; it disappears only when the turn settles (done/err).
@@ -309,20 +325,21 @@ export function paint(col, items, onAbort){
   col.replaceChildren(frag);
 }
 
-export function renderSession(col, turns, unreadAfter, onAbort, contextHint){
-  paint(col, renderModel(turns, unreadAfter, contextHint), onAbort);
+export function renderSession(col, turns, unreadAfter, onAbort, contextHint, holdSplits, joinHeldSplits){
+  paint(col, renderModel(turns, unreadAfter, contextHint, holdSplits, joinHeldSplits), onAbort);
 }
 
 // --- smooth live updates (FLIP) ---
-// beginShift snapshots visual positions before a LIVE re-render; playShift then slides
-// every surviving unit from its old position to the new one, fades a ghost of a vanished
-// unread divider in place while the messages below close the gap, and gives genuinely new
-// nodes a short entry animation. A FLIP *unit* is what actually moves: a standalone keyed
-// bubble, or a CHILD of a .turn (user bubble / answer group / indicator, keyed
-// turnKey|data-flip) — the .turn container itself is never transformed, so parent and
-// child shifts cannot compound, and an in-turn divider collapse animates block-level.
-// Transforms only — layout and all scroll maths stay exact. Reduced motion disables it.
-const SHIFT_MS = 180, SHIFT_CAP = 800, DIVIDER_FADE_MS = 300; // DIVIDER_FADE_MS matches .readline.ghost lineout in app.css
+// beginShift snapshots visual positions before a LIVE re-render; playShift then slides every
+// surviving unit from its old position to the new one and gives genuinely new nodes a short entry
+// animation. A FLIP *unit* is what actually moves: a standalone keyed bubble, or a CHILD of a .turn
+// (user bubble / answer group / indicator, keyed turnKey|data-flip) — the .turn container itself is
+// never transformed, so parent and child shifts cannot compound, and an in-turn divider collapse
+// animates block-level. Transforms only — layout and all scroll maths stay exact. Reduced motion
+// disables it. Dismissing the unread line is a SEPARATE first phase (fadeOutDivider): the line fades
+// in place, THEN a follow-up render removes it and this FLIP collapses the gap.
+export const DIVIDER_FADE_MS = 300; // .readline.leaving lineout duration in app.css
+const SHIFT_MS = 180, SHIFT_CAP = 800;
 
 function reducedMotion(){
   return typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -330,7 +347,7 @@ function reducedMotion(){
 
 export function beginShift(col){
   if(reducedMotion()) return null;
-  const units = new Map(), keys = new Set();
+  const units = new Map(), keys = new Set(), holdSplits = new Map();
   Array.from(col.children).forEach(node => {
     const key = node.dataset && node.dataset.renderKey;
     if(!key) return;
@@ -340,17 +357,34 @@ export function beginShift(col){
         const fk = ch.dataset && ch.dataset.flip;
         if(fk) units.set(key + "|" + fk, ch.getBoundingClientRect().top); // visual pos, mid-animation included
       });
+      const seq = Number(node.dataset.seq);
+      if(Number.isFinite(seq)){
+        const children = Array.from(node.children);
+        const splits = new Set();
+        for(let i = 0; i < children.length; i++){
+          const ch = children[i];
+          if(!ch.classList || !ch.classList.contains("readline")) continue;
+          for(let j = i + 1; j < children.length; j++){
+            const fk = children[j].dataset && children[j].dataset.flip;
+            const m = fk && fk.match(/^g:(\d+)$/);
+            if(!m) continue;
+            const p = Number(m[1]);
+            splits.add(p);
+            break;
+          }
+        }
+        if(splits.size) holdSplits.set(seq, splits);
+      }
     } else {
       units.set(key, node.getBoundingClientRect().top);
     }
   });
   col.querySelectorAll(".enter").forEach(n => n.classList.remove("enter"));
-  const dv = col.querySelector(".readline");
-  return { units, keys, divider: dv ? dv.getBoundingClientRect() : null, hadAny: col.children.length > 0 };
+  return { units, keys, holdSplits, hadAny: col.children.length > 0 };
 }
 
 export function playShift(col, snap){
-  if(!snap) return;
+  if(!snap) return 0;
   const nodes = [], freshTurns = [];
   Array.from(col.children).forEach(node => {
     const key = node.dataset && node.dataset.renderKey;
@@ -386,47 +420,25 @@ export function playShift(col, snap){
     el.classList.add("enter");
     el.addEventListener("animationend", () => el.classList.remove("enter"), { once: true });
   });
-  // When the "непрочитанные сообщения" line vanishes, split the motion into two phases so
-  // the sliding blocks never cross the still-visible line: the ghost fades out FIRST, and
-  // only then does the gap collapse. A transition-delay equal to the fade holds every shifted
-  // block at its old position while the line fades, then slides it up. A plain reflow (no
-  // divider gone) has zero delay and collapses immediately, exactly as before.
-  const dividerGone = snap.divider && !col.querySelector(".readline");
-  const collapseDelay = dividerGone ? DIVIDER_FADE_MS : 0;
   if(shifts.length){
     void col.offsetHeight; // commit the start positions before transitioning
     shifts.forEach(([el]) => {
-      el.style.transition = "transform " + SHIFT_MS + "ms ease-out" + (collapseDelay ? " " + collapseDelay + "ms" : "");
+      el.style.transition = "transform " + SHIFT_MS + "ms ease-out";
       el.style.transform = "";
       el.addEventListener("transitionend", () => { el.style.transition = ""; }, { once: true });
     });
   }
-  if(dividerGone) fadeDividerGhost(snap.divider);
+  return (shifts.length || fresh.length) ? SHIFT_MS : 0;
 }
 
-// clearShiftGhosts removes any fading divider ghost — structural renders (tab switch,
-// transcript reload, pagination) must not inherit a ghost from the previous view.
-export function clearShiftGhosts(){
-  const wrap = document.getElementById("logwrap");
-  if(wrap) wrap.querySelectorAll(".readline.ghost").forEach(n => n.remove());
-}
-
-// The removed "непрочитанные сообщения" line fades out exactly where it stood (an
-// absolutely positioned ghost in #logwrap) while the FLIP above collapses the gap.
-function fadeDividerGhost(rect){
-  const wrap = document.getElementById("logwrap");
-  if(!wrap) return;
-  const w = wrap.getBoundingClientRect();
-  if(rect.bottom < w.top - 40 || rect.top > w.bottom + 40) return; // was offscreen anyway
-  const old = wrap.querySelector(".readline.ghost");
-  if(old) old.remove();
-  const g = divider();
-  g.className = "readline ghost";
-  g.style.top = (rect.top - w.top) + "px";
-  g.style.left = (rect.left - w.left) + "px";
-  g.style.width = rect.width + "px";
-  wrap.appendChild(g);
-  const drop = () => g.remove();
-  g.addEventListener("animationend", drop, { once: true });
-  setTimeout(drop, 500);
+// fadeOutDivider dismisses the unread line as its FIRST phase: the real in-flow .readline node fades
+// in place (opacity → 0) exactly where it sits, so it scrolls with the messages and needs no ghost or
+// coordinates. commitLive waits DIVIDER_FADE_MS, then a normal render removes it and playShift
+// collapses the gap. Returns false (no node / reduced motion) so the caller collapses immediately.
+export function fadeOutDivider(col){
+  if(!col || reducedMotion()) return false;
+  const dv = col.querySelector(".readline");
+  if(!dv) return false;
+  dv.classList.add("leaving");
+  return true;
 }
