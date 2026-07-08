@@ -111,8 +111,7 @@
   .turn { display: flex; flex-direction: column; gap: 10px; align-self: stretch; }
   .msg { position: relative; padding: 8px 12px; border-radius: 10px; word-wrap: break-word; }
   .msg.join-next { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
-  .msg.join-prev { margin-top: -10px; border-top-left-radius: 0; border-top-right-radius: 0;
-                   transition: margin-top .18s ease-out, border-radius .18s ease-out; }
+  .msg.join-prev { margin-top: -10px; border-top-left-radius: 0; border-top-right-radius: 0; }
   .readline { display: flex; align-items: center; gap: 8px; align-self: stretch; color: var(--accent); font-size: 11px; opacity: .9; }
   .readline::before, .readline::after { content: ""; flex: 1; height: 1px; background: var(--accent); opacity: .45; }
   /* Live-update motion: genuinely new messages slide in briefly; moved nodes get inline
