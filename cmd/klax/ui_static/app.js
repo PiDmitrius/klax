@@ -31,6 +31,7 @@ let liveRenderRAF = 0, liveRenderCreated = 0;
 // block growing out of the dots, instead of a cascade of overlapping slide-ins. Only the
 // animation is throttled (COMMIT_MS, a hair over the 180ms entrance) — the data stays live.
 const COMMIT_MS = 200;
+const MERGE_JOIN_MS = 180;
 let liveBusy = false, liveDirty = false, liveGateTimer = 0;
 let sessionList = []; // last /api/sessions list — for hash-change validity + lookups
 const offsetFor = {}, moreFor = {}; // created -> first-loaded turn index + has-older-history flag (pagination)
@@ -106,7 +107,7 @@ function startReadGrace(created){
     if(active === created && documentVisible() && stick && rawUnreadCount(created) > 0){
       markRead(created, true);
       renderTabs(active);
-      rerender(created, true); // the unread line fades out, messages close the gap
+      commitLive(created); // the unread line fades out, messages close the gap, then split bubbles merge.
     }
   }, READ_GRACE_MS + 40);
 }
@@ -207,35 +208,31 @@ function applyTheme(t){
   const b = document.getElementById("theme"); if(b) b.textContent = t === "dark" ? "☀️" : "🌙";
 }
 
+function noMotion(){ return { motionMS: 0, mergeHeldSplits: false, holdSplits: null, stickAfter: false }; }
+
 // rerender(created, live): live=true marks event-driven updates — they run through the
 // FLIP snapshot (render.js beginShift/playShift) so new messages slide in and a vanished
 // unread divider collapses smoothly instead of jerking the screen. Structural renders
 // (tab switch, transcript load, pagination, foregrounding) stay instant — their scroll
 // repositioning must not be animated over.
-function rerender(created, live){
-  if(created !== active) return;
+function rerender(created, live, opts){
+  opts = opts || {};
+  if(created !== active) return noMotion();
   if(!live){ // a structural render (tab switch, load, foreground) supersedes any queued live animation
     if(liveRenderRAF){ cancelAnimationFrame(liveRenderRAF); liveRenderRAF = 0; liveRenderCreated = 0; }
     if(liveGateTimer){ clearTimeout(liveGateTimer); liveGateTimer = 0; }
     liveBusy = false; liveDirty = false;
   }
   const col = logcol();
-  if(!col) return;
-  if(selectionInLog(col)){ pendingRender = true; return; } // don't collapse a live selection
+  if(!col) return noMotion();
+  if(selectionInLog(col)){ pendingRender = true; return noMotion(); } // don't collapse a live selection
   if(!live) clearShiftGhosts(); // a structural render must not inherit a fading divider
-  // A live render that COLLAPSES the unread line is anchored on the messages BELOW the line,
-  // not on the viewport bottom: the only height that vanishes is the line (all of it above
-  // those messages), so nudging scrollTop by the height delta pins every message below the
-  // line exactly where it sits. Without this the stick path would snap to the true bottom —
-  // jerking the lower messages by up to the 80px stick slack and flicking them as the FLIP
-  // animates that snap. (settledDistance is unchanged by the nudge, so `stick` stays valid.)
   const log = document.getElementById("log");
   const anchorLive = !!(live && log);
-  const beforeTop = anchorLive ? log.scrollTop : 0;
-  const beforeColH = anchorLive ? col.offsetHeight : 0;
   const hadDivider = anchorLive && !!col.querySelector(".readline");
   const snap = live ? beginShift(col) : null;
-  renderSession(col, model.turns(active), readThrough[active], abortActive, sessionContextHint(active));
+  const holdSplits = opts.holdSplits || (!opts.noHoldSplits && hadDivider && rawUnreadCount(active) === 0 && snap && snap.holdSplits && snap.holdSplits.size ? snap.holdSplits : null);
+  renderSession(col, model.turns(active), readThrough[active], abortActive, sessionContextHint(active), holdSplits, !!opts.joinHeldSplits);
   watchInlineImages(col);
   if(moreFor[active]){ // older history exists → a "load earlier" button at the top
     const m = document.createElement("button");
@@ -253,10 +250,17 @@ function rerender(created, live){
       delete unreadJump[active];
     }
   } else if(dividerGone){
-    log.scrollTop = Math.max(0, beforeTop + (col.offsetHeight - beforeColH)); // hold the lower messages still
+    // Do not stick/scroll-compensate immediately: playShift holds the old visual positions while
+    // the divider ghost fades, then starts the collapse. Scrolling here would collapse early.
   } else if(stick) stickToBottom();
   toggleToBottom();
-  if(snap) playShift(col, snap); // after the scroll settled: deltas = exact visual shifts
+  const motionMS = snap ? playShift(col, snap) : 0; // after scroll decisions: deltas = exact visual shifts
+  return {
+    motionMS,
+    mergeHeldSplits: !!(dividerGone && holdSplits),
+    holdSplits,
+    stickAfter: !!(dividerGone && stick && motionMS),
+  };
 }
 
 // scheduleLiveRerender funnels every live content update through the serialization gate.
@@ -283,13 +287,27 @@ function scheduleLiveRerender(created){
 function commitLive(created){
   liveBusy = true;
   liveDirty = false;
-  rerender(created, true);
+  const first = rerender(created, true);
   if(liveGateTimer) clearTimeout(liveGateTimer);
-  liveGateTimer = setTimeout(() => {
+  const openGate = () => {
     liveGateTimer = 0;
     liveBusy = false;
     if(liveDirty && active) scheduleLiveRerender(active);
-  }, COMMIT_MS);
+  };
+  liveGateTimer = setTimeout(() => {
+    if(first.mergeHeldSplits && active === created){
+      const joined = rerender(created, true, { holdSplits: first.holdSplits, joinHeldSplits: true });
+      const joinWait = Math.max(MERGE_JOIN_MS, joined.motionMS || 0);
+      liveGateTimer = setTimeout(() => {
+        const merged = rerender(created, true, { noHoldSplits: true });
+        if(first.stickAfter && active === created && stick) stickToBottom();
+        liveGateTimer = setTimeout(openGate, Math.max(COMMIT_MS, merged.motionMS || 0));
+      }, joinWait);
+      return;
+    }
+    if(first.stickAfter && active === created && stick) stickToBottom();
+    openGate();
+  }, Math.max(COMMIT_MS, first.motionMS || 0));
 }
 
 function abortActive(){
@@ -542,11 +560,10 @@ async function onSessionsList(list){
     active = 0;
   }
   reconcileSessions(list, active);
-  // A cross-tab read advance is a DISCRETE change: re-render the divider RELIABLY and directly
-  // (like the scroll path) so the marker never lags the badge — NOT via the streaming live-gate,
-  // which is rAF-paused in a background tab and throttled behind in-flight animations. A
-  // context-hint-only change stays gated (it rides the streaming animation).
-  if(activeReadAdvanced && loaded[active]) rerender(active, true);
+  // A cross-tab read advance is a DISCRETE change: start the live animation immediately so the
+  // marker never lags the badge. commitLive owns the full divider-collapse sequence, including the
+  // post-fade merge when the unread line used to split one bubble.
+  if(activeReadAdvanced && loaded[active]) commitLive(active);
   else if(affected.has(active) && loaded[active]) scheduleLiveRerender(active);
   if(!active && list.length){
     const want = parseInt(location.hash.slice(1), 10);
@@ -577,7 +594,7 @@ function noticeText(s){ return (s || "").replace(/<br\s*\/?>/gi, "\n").replace(/
 function onNoticeEvent(text){
   const t = noticeText(text);
   showNotice(t);
-  if(active){ model.appendStandalone(active, { role: "notice", text: t }); rerender(active, true); }
+  if(active){ model.appendStandalone(active, { role: "notice", text: t }); commitLive(active); }
 }
 
 // toggleToBottom shows the down-arrow affordance only when the user has scrolled up.
@@ -679,7 +696,7 @@ function start(){
     if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
     else fallbackCopy(text, done);
   });
-  document.addEventListener("selectionchange", () => { if(pendingRender && !selectionInLog(logcol())){ pendingRender = false; rerender(active, true); } });
+  document.addEventListener("selectionchange", () => { if(pendingRender && !selectionInLog(logcol())){ pendingRender = false; commitLive(active); } });
   const log = document.getElementById("log");
   const allowReadOnScroll = () => { readOnScroll = true; };
   if(log){
@@ -704,7 +721,8 @@ function start(){
         const capped = capWindow(active) > 0; // back at the bottom → evict the older rows scrolled up to read (they reload on the next scroll up)
         if(read || advanced || capped){
           renderTabs(active);
-          rerender(active, !capped); // structural when we evicted (drop the off-screen DOM cleanly); else animate the divider collapse
+          if(capped) rerender(active); // structural when we evicted: drop the off-screen DOM cleanly
+          else commitLive(active); // animate divider collapse and finish any split-bubble merge
         }
       } else if(advanced){
         renderTabs(active);

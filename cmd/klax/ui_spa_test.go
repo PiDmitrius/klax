@@ -114,6 +114,14 @@ const merged = renderModel([{ ...base, state: "done", blocks: tools }], pos(2, 3
 assert(merged.length === 1, "read groups must merge");
 assert(merged[0].startPos === pos(2, 0), "merged group must inherit leading startPos");
 
+const held = new Map([[2, new Set([pos(2, 2)])]]);
+const heldGroups = renderModel([{ ...base, state: "done", blocks: tools }], pos(2, 3), null, held)[0].groups;
+assert(heldGroups.length === 2, "held split must keep two groups after divider removal");
+assert(!heldGroups.some(g => g.divider), "held split must not keep the unread divider");
+assert(heldGroups[0].startPos === pos(2, 0) && heldGroups[1].startPos === pos(2, 2), "held split positions");
+const joinedGroups = renderModel([{ ...base, state: "done", blocks: tools }], pos(2, 3), null, held, true)[0].groups;
+assert(joinedGroups[0].joinNext === true && joinedGroups[1].joinPrev === true, "held split join flags");
+
 const oldTool = renderModel([{ ...base, state: "done", blocks: [{ id: "old", role: "tool", text: "old label" }] }], undefined)[0].groups[0];
 const newTool = renderModel([{ ...base, state: "done", blocks: [{ id: "new", role: "tool", text: "new label" }] }], undefined)[0].groups[0];
 assert(oldTool.startPos === newTool.startPos, "tool text/id changes must keep position key stable");

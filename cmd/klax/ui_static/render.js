@@ -41,7 +41,10 @@ export function decodePos(p){ p = p || 0; return { turn: Math.floor(p / POS_MULT
 // block boundary. `watermark` is the encoded read position (pos()); undefined ⇒ no divider.
 // `contextHint` is the current session-level usage snapshot, used only as a live fallback while
 // the running turn has not yet produced turn-local usage.
-export function renderModel(turns, watermark, contextHint){
+// `holdSplits` preserves group boundaries that used to be separated by the unread divider for one
+// live frame after the divider disappears. That lets the line fade out before the two bubble pieces
+// merge back into one.
+export function renderModel(turns, watermark, contextHint, holdSplits, joinHeldSplits){
   const items = [];
   let queuePos = 0, divided = false;
   const has = watermark !== undefined;
@@ -57,6 +60,7 @@ export function renderModel(turns, watermark, contextHint){
     }
     const blocks_ = t.blocks || [];
     const groups = [];
+    const held = holdSplits && holdSplits.get && holdSplits.get(t.seq);
     let i = 0;
     let lastGroupTime = t.time;
     while(i < blocks_.length){
@@ -66,7 +70,9 @@ export function renderModel(turns, watermark, contextHint){
         continue;
       }
       const role = blocks_[i].role, blocks = [];
+      const groupStart = i;
       while(i < blocks_.length && blocks_[i].role === role){
+        if(held && i > groupStart && held.has(pos(t.seq, i))) break;
         if(unread(pos(t.seq, i)) && !divided && has && blocks.length > 0) break;
         blocks.push(blocks_[i]); i++;
       }
@@ -79,6 +85,15 @@ export function renderModel(turns, watermark, contextHint){
       };
       groups.push(group);
       if(group.time) lastGroupTime = group.time;
+    }
+    if(joinHeldSplits && held){
+      for(let j = 1; j < groups.length; j++){
+        const prev = groups[j - 1], cur = groups[j];
+        if(!prev || !cur || prev.divider || cur.divider) continue;
+        if(!held.has(cur.startPos) || prev.cls !== cur.cls || prev.tool !== cur.tool) continue;
+        prev.joinNext = true;
+        cur.joinPrev = true;
+      }
     }
     if(t.state === "enq") queuePos++;
     // Context is ONE left tool-line — the turn's "cut line", always the LAST element of the
@@ -190,6 +205,7 @@ function renderSig(it){
       groups: it.groups.map(g => ({
         divider: g.divider,
         cls: g.cls, tool: g.tool, time: g.time, startPos: g.startPos, maxPos: g.maxPos,
+        joinPrev: !!g.joinPrev, joinNext: !!g.joinNext,
         blocks: (g.blocks || []).map(b => ({ id: b.id, role: b.role, text: b.text, kind: b.kind, time: b.time })),
       })),
     });
@@ -256,12 +272,13 @@ function buildTurn(it, onAbort, old){
   for(const g of it.groups){
     if(g.divider){ turn.appendChild(divider()); continue; } // divider: cheap + tracked via snap.divider, not a reuse unit
     const fk = "g:" + g.startPos;
-    const sig = childSig("g", { cls: g.cls, tool: g.tool, time: g.time, maxPos: g.maxPos,
+    const cls = g.cls + (g.joinPrev ? " join-prev" : "") + (g.joinNext ? " join-next" : "");
+    const sig = childSig("g", { cls: g.cls, tool: g.tool, time: g.time, maxPos: g.maxPos, joinPrev: !!g.joinPrev, joinNext: !!g.joinNext,
       blocks: (g.blocks || []).map(b => ({ id: b.id, role: b.role, text: b.text, kind: b.kind, time: b.time })) });
     const html = g.blocks.map(b => g.tool ? esc(b.text || "") : mdSafe(b.text || "")).join(g.tool ? "<br>" : "");
     const raw = g.blocks.map(b => b.text || "").join(g.tool ? "\n" : "\n\n");
-    put(fk, sig, () => bubble(g.cls, html, g.time, g.maxPos, raw),
-      patchBubble(g.cls, html, g.time, g.maxPos, raw));
+    put(fk, sig, () => bubble(cls, html, g.time, g.maxPos, raw),
+      patchBubble(cls, html, g.time, g.maxPos, raw));
   }
   // The working/queued dots — the turn's in-progress indicator. INVARIANT: a turn in progress ALWAYS
   // shows this block, the WHOLE time it runs; it disappears only when the turn settles (done/err).
@@ -309,8 +326,8 @@ export function paint(col, items, onAbort){
   col.replaceChildren(frag);
 }
 
-export function renderSession(col, turns, unreadAfter, onAbort, contextHint){
-  paint(col, renderModel(turns, unreadAfter, contextHint), onAbort);
+export function renderSession(col, turns, unreadAfter, onAbort, contextHint, holdSplits, joinHeldSplits){
+  paint(col, renderModel(turns, unreadAfter, contextHint, holdSplits, joinHeldSplits), onAbort);
 }
 
 // --- smooth live updates (FLIP) ---
@@ -330,7 +347,7 @@ function reducedMotion(){
 
 export function beginShift(col){
   if(reducedMotion()) return null;
-  const units = new Map(), keys = new Set();
+  const units = new Map(), keys = new Set(), holdSplits = new Map();
   Array.from(col.children).forEach(node => {
     const key = node.dataset && node.dataset.renderKey;
     if(!key) return;
@@ -340,17 +357,34 @@ export function beginShift(col){
         const fk = ch.dataset && ch.dataset.flip;
         if(fk) units.set(key + "|" + fk, ch.getBoundingClientRect().top); // visual pos, mid-animation included
       });
+      const seq = Number(node.dataset.seq);
+      if(Number.isFinite(seq)){
+        const children = Array.from(node.children);
+        const splits = new Set();
+        for(let i = 0; i < children.length; i++){
+          const ch = children[i];
+          if(!ch.classList || !ch.classList.contains("readline")) continue;
+          for(let j = i + 1; j < children.length; j++){
+            const fk = children[j].dataset && children[j].dataset.flip;
+            if(!fk || !fk.startsWith("g:")) continue;
+            const p = Number(fk.slice(2));
+            if(Number.isFinite(p)) splits.add(p);
+            break;
+          }
+        }
+        if(splits.size) holdSplits.set(seq, splits);
+      }
     } else {
       units.set(key, node.getBoundingClientRect().top);
     }
   });
   col.querySelectorAll(".enter").forEach(n => n.classList.remove("enter"));
   const dv = col.querySelector(".readline");
-  return { units, keys, divider: dv ? dv.getBoundingClientRect() : null, hadAny: col.children.length > 0 };
+  return { units, keys, holdSplits, divider: dv ? dv.getBoundingClientRect() : null, hadAny: col.children.length > 0 };
 }
 
 export function playShift(col, snap){
-  if(!snap) return;
+  if(!snap) return 0;
   const nodes = [], freshTurns = [];
   Array.from(col.children).forEach(node => {
     const key = node.dataset && node.dataset.renderKey;
@@ -402,6 +436,8 @@ export function playShift(col, snap){
     });
   }
   if(dividerGone) fadeDividerGhost(snap.divider);
+  if(dividerGone) return DIVIDER_FADE_MS + (shifts.length ? SHIFT_MS : 0);
+  return (shifts.length || fresh.length) ? SHIFT_MS : 0;
 }
 
 // clearShiftGhosts removes any fading divider ghost — structural renders (tab switch,
