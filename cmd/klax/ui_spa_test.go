@@ -122,6 +122,13 @@ assert(heldGroups[0].startPos === pos(2, 0) && heldGroups[1].startPos === pos(2,
 const joinedGroups = renderModel([{ ...base, state: "done", blocks: tools }], pos(2, 3), null, held, true)[0].groups;
 assert(joinedGroups[0].joinNext === true && joinedGroups[1].joinPrev === true, "held split join flags");
 
+const mixed = [
+  { id: "m1", role: "assistant", text: "message" },
+  { id: "m2", role: "tool", text: "tool" },
+];
+const mixedJoined = renderModel([{ ...base, state: "done", blocks: mixed }], pos(2, 2), null, new Map([[2, new Set([pos(2, 1)])]]), true)[0].groups;
+assert(!mixedJoined.some(g => g.joinPrev || g.joinNext), "mixed-role held split must not join");
+
 const oldTool = renderModel([{ ...base, state: "done", blocks: [{ id: "old", role: "tool", text: "old label" }] }], undefined)[0].groups[0];
 const newTool = renderModel([{ ...base, state: "done", blocks: [{ id: "new", role: "tool", text: "new label" }] }], undefined)[0].groups[0];
 assert(oldTool.startPos === newTool.startPos, "tool text/id changes must keep position key stable");

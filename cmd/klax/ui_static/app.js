@@ -62,39 +62,6 @@ function syncComposerH(){ const c = document.getElementById("composer"); if(c) s
 function logcol(){ return document.getElementById("logcol"); }
 function getActive(){ return active; }
 
-const ANIM_TRACE_BUILD = "unread-baseline-trace-1";
-function initAnimTrace(){
-  if(typeof window === "undefined") return;
-  window.__klaxAnimBuild = ANIM_TRACE_BUILD;
-  if(!window.__klaxAnimTrace) window.__klaxAnimTrace = [];
-  window.klaxAnimDump = function(){
-    const rows = window.__klaxAnimTrace.slice(-60);
-    console.table(rows);
-    return rows;
-  };
-  console.info("[klax-anim] loaded", ANIM_TRACE_BUILD);
-}
-
-function animTrace(event, data){
-  if(typeof window === "undefined") return;
-  const row = Object.assign({ t: Math.round(performance.now()), event, active, build: ANIM_TRACE_BUILD }, data || {});
-  const trace = window.__klaxAnimTrace || (window.__klaxAnimTrace = []);
-  trace.push(row);
-  if(trace.length > 120) trace.splice(0, trace.length - 120);
-  window.__klaxAnimBuild = ANIM_TRACE_BUILD;
-  try {
-    if(localStorage.getItem("klax_anim_debug") === "1") console.debug("[klax-anim]", row);
-  } catch(e){}
-}
-
-function splitCount(holdSplits){
-  if(!holdSplits || !holdSplits.forEach) return 0;
-  let n = 0;
-  holdSplits.forEach(s => { n += s && s.size ? s.size : 0; });
-  return n;
-}
-initAnimTrace();
-
 // stateCode mirrors the server (readmodel.go): the tail cursor carries the boundary turn's state
 // code so a pure enq→run transition (no new block) still advances the cursor and re-delivers the
 // turn once — otherwise the bubble stays "queued" until the first block or a reload.
@@ -254,7 +221,6 @@ function rerender(created, live, opts){
   if(created !== active) return noMotion();
   if(!live && liveBusy && created === active && !opts.forceStructural){
     liveDirty = true;
-    animTrace("structural-deferred", { created, reason: opts.structuralReason || "" });
     return noMotion();
   }
   if(!live){ // a structural render (tab switch, load, foreground) supersedes any queued live animation
@@ -268,16 +234,11 @@ function rerender(created, live, opts){
   if(!live) clearShiftGhosts(); // a structural render must not inherit a fading divider
   const log = document.getElementById("log");
   const anchorLive = !!(live && log);
-  const domHadDivider = !!col.querySelector(".readline");
-  const hadDivider = anchorLive && domHadDivider;
+  const beforeTop = anchorLive ? log.scrollTop : 0;
+  const beforeColH = anchorLive ? col.offsetHeight : 0;
+  const hadDivider = anchorLive && !!col.querySelector(".readline");
   const snap = live ? beginShift(col) : null;
   const holdSplits = opts.holdSplits || (!opts.noHoldSplits && hadDivider && rawUnreadCount(active) === 0 && snap && snap.holdSplits && snap.holdSplits.size ? snap.holdSplits : null);
-  animTrace("rerender-before", {
-    created, live: !!live, structural: !live, domHadDivider, hadDivider, unread: rawUnreadCount(active),
-    snap: !!snap, snapSplits: snap ? splitCount(snap.holdSplits) : 0,
-    holdSplits: splitCount(holdSplits), joinHeldSplits: !!opts.joinHeldSplits,
-    noHoldSplits: !!opts.noHoldSplits, stick,
-  });
   renderSession(col, model.turns(active), readThrough[active], abortActive, sessionContextHint(active), holdSplits, !!opts.joinHeldSplits);
   watchInlineImages(col);
   if(moreFor[active]){ // older history exists → a "load earlier" button at the top
@@ -296,16 +257,13 @@ function rerender(created, live, opts){
       delete unreadJump[active];
     }
   } else if(dividerGone){
-    // Do not stick/scroll-compensate immediately: playShift holds the old visual positions while
-    // the divider ghost fades, then starts the collapse. Scrolling here would collapse early.
+    // At the bottom, playShift owns the visible sequence: line fades, blocks collapse, split bubbles
+    // join. Away from the bottom (or with reduced motion), preserve the reader's viewport instead:
+    // the divider may be off-screen, so moving visible content for it is a regression.
+    if(!stick || !snap) log.scrollTop = Math.max(0, beforeTop + (col.offsetHeight - beforeColH));
   } else if(stick) stickToBottom();
   toggleToBottom();
   const motionMS = snap ? playShift(col, snap) : 0; // after scroll decisions: deltas = exact visual shifts
-  animTrace("rerender-after", {
-    created, live: !!live, dividerGone, motionMS,
-    mergeHeldSplits: !!(dividerGone && holdSplits),
-    holdSplits: splitCount(holdSplits), stickAfter: !!(dividerGone && stick && motionMS),
-  });
   return {
     motionMS,
     mergeHeldSplits: !!(dividerGone && holdSplits),
@@ -314,8 +272,8 @@ function rerender(created, live, opts){
   };
 }
 
-function rerenderStructural(created, reason, force){
-  return rerender(created, false, { structuralReason: reason, forceStructural: !!force });
+function rerenderStructural(created, force){
+  return rerender(created, false, { forceStructural: !!force });
 }
 
 // scheduleLiveRerender funnels every live content update through the serialization gate.
@@ -325,10 +283,9 @@ function rerenderStructural(created, reason, force){
 // already patched before we got here, so nothing waits on the DOM — only the animation does.
 function scheduleLiveRerender(created){
   if(created !== active) return;
-  if(liveBusy){ liveDirty = true; animTrace("schedule-dirty", { created }); return; } // an animation is in flight — accumulate, don't stack
+  if(liveBusy){ liveDirty = true; return; } // an animation is in flight — accumulate, don't stack
   liveRenderCreated = created;
   if(liveRenderRAF) return;
-  animTrace("schedule-live", { created });
   liveRenderRAF = requestAnimationFrame(() => {
     const c = liveRenderCreated;
     liveRenderRAF = 0;
@@ -343,22 +300,18 @@ function scheduleLiveRerender(created){
 function commitLive(created){
   liveBusy = true;
   liveDirty = false;
-  animTrace("commit-start", { created });
   const first = rerender(created, true);
   if(liveGateTimer) clearTimeout(liveGateTimer);
   const openGate = () => {
     liveGateTimer = 0;
     liveBusy = false;
-    animTrace("commit-open", { created, liveDirty });
     if(liveDirty && active) scheduleLiveRerender(active);
   };
   liveGateTimer = setTimeout(() => {
     if(first.mergeHeldSplits && active === created){
-      animTrace("merge-join", { created, holdSplits: splitCount(first.holdSplits) });
       const joined = rerender(created, true, { holdSplits: first.holdSplits, joinHeldSplits: true });
       const joinWait = Math.max(MERGE_JOIN_MS, joined.motionMS || 0);
       liveGateTimer = setTimeout(() => {
-        animTrace("merge-final", { created });
         const merged = rerender(created, true, { noHoldSplits: true });
         if(first.stickAfter && active === created && stick) stickToBottom();
         liveGateTimer = setTimeout(openGate, Math.max(COMMIT_MS, merged.motionMS || 0));
@@ -406,7 +359,7 @@ async function loadTranscript(created){
       else { markRead(created); stick = true; }
       renderTabs(active);
     }
-    rerenderStructural(created, "loadTranscript", true);
+    rerenderStructural(created, true);
     // (No explicit capWindow here: positioning above fires a scroll event that re-caps once the DOM
     // is real; capWindow's fits-the-viewport guard needs that real geometry to avoid dropping visible
     // rows on a fresh/short load.)
@@ -433,7 +386,7 @@ async function loadOlder(created, showTop){
     moreFor[created] = !!data.more;
     if(created === active){
       const prev = stick; stick = false; // never snap to the bottom after loading old history
-      rerenderStructural(created, "loadOlder", true);
+      rerenderStructural(created, true);
       stick = prev;
       if(log){
         if(showTop) log.scrollTop = 0;                   // button: show the older rows just loaded (not off-screen above)
@@ -581,7 +534,7 @@ async function selectSession(created){
     else markRead(created);
     stick = !hadUnread;
     renderTabs(active);
-    rerenderStructural(created, "selectSession", true);
+    rerenderStructural(created, true);
     if(!hadUnread) restoreScroll(created);
   }
   focusComposer();
@@ -781,12 +734,12 @@ function start(){
         const capped = capWindow(active) > 0; // back at the bottom → evict the older rows scrolled up to read (they reload on the next scroll up)
         if(read || advanced || capped){
           renderTabs(active);
-          if(capped) rerenderStructural(active, "scroll-capped"); // structural when we evicted: drop the off-screen DOM cleanly
+          if(capped) rerenderStructural(active); // structural when we evicted: drop the off-screen DOM cleanly
           else commitLive(active); // animate divider collapse and finish any split-bubble merge
         }
       } else if(advanced){
         renderTabs(active);
-        rerenderStructural(active, "scroll-advanced");
+        rerenderStructural(active);
         log.scrollTop = oldTop + (log.scrollHeight - oldHeight);
         scrollTopFor[active] = log.scrollTop;
       }
@@ -811,7 +764,7 @@ function start(){
   const th = document.getElementById("theme");
   if(th) th.addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
   const tb = document.getElementById("tobottom");
-  if(tb) tb.addEventListener("click", () => { stick = true; markRead(active, true); renderTabs(active); rerenderStructural(active, "to-bottom"); }); // rerender's stickToBottom fires a scroll event → scroll handler re-caps with a current DOM
+  if(tb) tb.addEventListener("click", () => { stick = true; markRead(active, true); renderTabs(active); rerenderStructural(active); }); // rerender's stickToBottom fires a scroll event → scroll handler re-caps with a current DOM
   window.addEventListener("hashchange", () => { const w = parseInt(location.hash.slice(1), 10); if(w && w !== active && sessionList.some(s => s.created === w)) selectSession(w); });
   document.addEventListener("keydown", e => {
     if(["ArrowDown","PageDown","End"," "].includes(e.key)) allowReadOnScroll();
@@ -831,7 +784,7 @@ function start(){
         } else {
           markRead(active);
         }
-        rerenderStructural(active, "visibility");
+        rerenderStructural(active);
       }
     }
   });
