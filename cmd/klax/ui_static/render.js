@@ -426,7 +426,7 @@ export function playShift(col, snap){
   // only then does the gap collapse. A transition-delay equal to the fade holds every shifted
   // block at its old position while the line fades, then slides it up. A plain reflow (no
   // divider gone) has zero delay and collapses immediately, exactly as before.
-  const dividerGone = snap.divider && !col.querySelector(".readline");
+  const dividerGone = snap.divider && (snap.dividerChanged || !col.querySelector(".readline"));
   const collapseDelay = dividerGone ? DIVIDER_FADE_MS : 0;
   if(shifts.length){
     void col.offsetHeight; // commit the start positions before transitioning
