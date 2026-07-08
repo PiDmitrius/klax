@@ -4,7 +4,7 @@
 // insertAnswer/breakMerge) is gone — a turn's truth is model turn.state.
 
 import { TurnModel } from "./model.js";
-import { renderSession, beginShift, playShift, clearShiftGhosts, pos, parsePos, decodePos } from "./render.js";
+import { renderSession, beginShift, playShift, fadeOutDivider, DIVIDER_FADE_MS, pos, parsePos, decodePos } from "./render.js";
 import { tailLoop } from "./events.js";
 import { api, getToken, setToken } from "./base.js";
 import { selectionInLog } from "./scroll.js";
@@ -231,7 +231,6 @@ function rerender(created, live, opts){
   const col = logcol();
   if(!col) return noMotion();
   if(selectionInLog(col)){ pendingRender = true; return noMotion(); } // don't collapse a live selection
-  if(!live) clearShiftGhosts(); // a structural render must not inherit a fading divider
   const log = document.getElementById("log");
   const anchorLive = !!(live && log);
   const beforeTop = anchorLive ? log.scrollTop : 0;
@@ -298,29 +297,42 @@ function scheduleLiveRerender(created){
 // during that window sets liveDirty and is flushed as a single further animation when the
 // gate reopens — so a burst of streamed blocks queues into clean, non-overlapping grows.
 function commitLive(created){
+  if(liveBusy){ liveDirty = true; return; } // an animation is in flight — accumulate; openGate flushes it as one further animation
   liveBusy = true;
   liveDirty = false;
-  const first = rerender(created, true);
   if(liveGateTimer) clearTimeout(liveGateTimer);
   const openGate = () => {
     liveGateTimer = 0;
     liveBusy = false;
     if(liveDirty && active) scheduleLiveRerender(active);
   };
-  liveGateTimer = setTimeout(() => {
-    if(first.mergeHeldSplits && active === created){
-      const joined = rerender(created, true, { holdSplits: first.holdSplits, joinHeldSplits: true });
-      const joinWait = Math.max(MERGE_JOIN_MS, joined.motionMS || 0);
-      liveGateTimer = setTimeout(() => {
-        const merged = rerender(created, true, { noHoldSplits: true });
-        if(first.stickAfter && active === created && stick) stickToBottom();
-        liveGateTimer = setTimeout(openGate, Math.max(COMMIT_MS, merged.motionMS || 0));
-      }, joinWait);
-      return;
-    }
-    if(first.stickAfter && active === created && stick) stickToBottom();
-    openGate();
-  }, Math.max(COMMIT_MS, first.motionMS || 0));
+  // Phase 2+: remove the (now-faded) unread line, collapse the gap, then merge any bubble the line split.
+  const collapseAndMerge = () => {
+    const first = rerender(created, true);
+    liveGateTimer = setTimeout(() => {
+      if(first.mergeHeldSplits && active === created){
+        const joined = rerender(created, true, { holdSplits: first.holdSplits, joinHeldSplits: true });
+        const joinWait = Math.max(MERGE_JOIN_MS, joined.motionMS || 0);
+        liveGateTimer = setTimeout(() => {
+          const merged = rerender(created, true, { noHoldSplits: true });
+          if(first.stickAfter && active === created && stick) stickToBottom();
+          liveGateTimer = setTimeout(openGate, Math.max(COMMIT_MS, merged.motionMS || 0));
+        }, joinWait);
+        return;
+      }
+      if(first.stickAfter && active === created && stick) stickToBottom();
+      openGate();
+    }, Math.max(COMMIT_MS, first.motionMS || 0));
+  };
+  // Phase 1 — ONLY when the read line is being dismissed (nothing left unread but the line is still in
+  // the DOM): the real in-flow .readline fades out in place where it sits (scrolls with the messages,
+  // no ghost). The collapse waits DIVIDER_FADE_MS so the messages never slide through a visible line.
+  const col = logcol();
+  if(col && rawUnreadCount(created) === 0 && fadeOutDivider(col)){
+    liveGateTimer = setTimeout(collapseAndMerge, DIVIDER_FADE_MS);
+    return;
+  }
+  collapseAndMerge();
 }
 
 function abortActive(){

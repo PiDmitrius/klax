@@ -116,14 +116,13 @@
   .readline { display: flex; align-items: center; gap: 8px; align-self: stretch; color: var(--accent); font-size: 11px; opacity: .9; }
   .readline::before, .readline::after { content: ""; flex: 1; height: 1px; background: var(--accent); opacity: .45; }
   /* Live-update motion: genuinely new messages slide in briefly; moved nodes get inline
-     FLIP transforms from render.js; a vanished unread line fades out in place (a ghost
-     pinned inside #logwrap) while the messages below close the gap. */
+     FLIP transforms from render.js; a dismissed unread line fades out in place (the real
+     in-flow node, class .leaving) and only then does the follow-up render collapse the gap. */
   .turn.enter, .msg.enter { animation: msgin .18s ease-out both; }
   @keyframes msgin { from { opacity: 0; transform: translateY(10px); } }
-  .readline.ghost { position: absolute; z-index: 3; pointer-events: none;
-                    animation: lineout .3s ease-in forwards; }
+  .readline.leaving { pointer-events: none; animation: lineout .3s ease-in forwards; }
   @keyframes lineout { to { opacity: 0; } }
-  @media (prefers-reduced-motion: reduce) { .turn.enter, .msg.enter, .readline.ghost { animation: none; } }
+  @media (prefers-reduced-motion: reduce) { .turn.enter, .msg.enter, .readline.leaving { animation: none; } }
   /* klax-side blocks fill the column for a consistent width — only the colour
      differs between text, tool, error and command output. */
   .msg.assistant, .msg.tool, .msg.error, .msg.notice { align-self: stretch; }

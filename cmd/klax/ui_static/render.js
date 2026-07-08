@@ -269,7 +269,7 @@ function buildTurn(it, onAbort, old){
   put("u", userSig, () => bubble("user", userHTML, it.time, undefined, it.text),
     patchBubble("user", userHTML, it.time, undefined, it.text));
   for(const g of it.groups){
-    if(g.divider){ turn.appendChild(divider()); continue; } // divider: cheap + tracked via snap.divider, not a reuse unit
+    if(g.divider){ turn.appendChild(divider()); continue; } // a fresh in-flow node; dismissal fades it via fadeOutDivider, then the next render drops it
     const fk = "g:" + g.startPos;
     const cls = g.cls + (g.joinPrev ? " join-prev" : "") + (g.joinNext ? " join-next" : "");
     const sig = childSig("g", { cls: g.cls, tool: g.tool, time: g.time, maxPos: g.maxPos, joinPrev: !!g.joinPrev, joinNext: !!g.joinNext,
@@ -330,15 +330,16 @@ export function renderSession(col, turns, unreadAfter, onAbort, contextHint, hol
 }
 
 // --- smooth live updates (FLIP) ---
-// beginShift snapshots visual positions before a LIVE re-render; playShift then slides
-// every surviving unit from its old position to the new one, fades a ghost of a vanished
-// unread divider in place while the messages below close the gap, and gives genuinely new
-// nodes a short entry animation. A FLIP *unit* is what actually moves: a standalone keyed
-// bubble, or a CHILD of a .turn (user bubble / answer group / indicator, keyed
-// turnKey|data-flip) — the .turn container itself is never transformed, so parent and
-// child shifts cannot compound, and an in-turn divider collapse animates block-level.
-// Transforms only — layout and all scroll maths stay exact. Reduced motion disables it.
-const SHIFT_MS = 180, SHIFT_CAP = 800, DIVIDER_FADE_MS = 300; // DIVIDER_FADE_MS matches .readline.ghost lineout in app.css
+// beginShift snapshots visual positions before a LIVE re-render; playShift then slides every
+// surviving unit from its old position to the new one and gives genuinely new nodes a short entry
+// animation. A FLIP *unit* is what actually moves: a standalone keyed bubble, or a CHILD of a .turn
+// (user bubble / answer group / indicator, keyed turnKey|data-flip) — the .turn container itself is
+// never transformed, so parent and child shifts cannot compound, and an in-turn divider collapse
+// animates block-level. Transforms only — layout and all scroll maths stay exact. Reduced motion
+// disables it. Dismissing the unread line is a SEPARATE first phase (fadeOutDivider): the line fades
+// in place, THEN a follow-up render removes it and this FLIP collapses the gap.
+export const DIVIDER_FADE_MS = 300; // .readline.leaving lineout duration in app.css
+const SHIFT_MS = 180, SHIFT_CAP = 800;
 
 function reducedMotion(){
   return typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -379,8 +380,7 @@ export function beginShift(col){
     }
   });
   col.querySelectorAll(".enter").forEach(n => n.classList.remove("enter"));
-  const dv = col.querySelector(".readline");
-  return { units, keys, holdSplits, divider: dv ? dv.getBoundingClientRect() : null, hadAny: col.children.length > 0 };
+  return { units, keys, holdSplits, hadAny: col.children.length > 0 };
 }
 
 export function playShift(col, snap){
@@ -420,49 +420,25 @@ export function playShift(col, snap){
     el.classList.add("enter");
     el.addEventListener("animationend", () => el.classList.remove("enter"), { once: true });
   });
-  // When the "непрочитанные сообщения" line vanishes, split the motion into two phases so
-  // the sliding blocks never cross the still-visible line: the ghost fades out FIRST, and
-  // only then does the gap collapse. A transition-delay equal to the fade holds every shifted
-  // block at its old position while the line fades, then slides it up. A plain reflow (no
-  // divider gone) has zero delay and collapses immediately, exactly as before.
-  const dividerGone = snap.divider && !col.querySelector(".readline");
-  const collapseDelay = dividerGone ? DIVIDER_FADE_MS : 0;
   if(shifts.length){
     void col.offsetHeight; // commit the start positions before transitioning
     shifts.forEach(([el]) => {
-      el.style.transition = "transform " + SHIFT_MS + "ms ease-out" + (collapseDelay ? " " + collapseDelay + "ms" : "");
+      el.style.transition = "transform " + SHIFT_MS + "ms ease-out";
       el.style.transform = "";
       el.addEventListener("transitionend", () => { el.style.transition = ""; }, { once: true });
     });
   }
-  if(dividerGone) fadeDividerGhost(snap.divider);
-  if(dividerGone) return DIVIDER_FADE_MS + (shifts.length ? SHIFT_MS : 0);
   return (shifts.length || fresh.length) ? SHIFT_MS : 0;
 }
 
-// clearShiftGhosts removes any fading divider ghost — structural renders (tab switch,
-// transcript reload, pagination) must not inherit a ghost from the previous view.
-export function clearShiftGhosts(){
-  const wrap = document.getElementById("logwrap");
-  if(wrap) wrap.querySelectorAll(".readline.ghost").forEach(n => n.remove());
-}
-
-// The removed "непрочитанные сообщения" line fades out exactly where it stood (an
-// absolutely positioned ghost in #logwrap) while the FLIP above collapses the gap.
-function fadeDividerGhost(rect){
-  const wrap = document.getElementById("logwrap");
-  if(!wrap) return;
-  const w = wrap.getBoundingClientRect();
-  if(rect.bottom < w.top - 40 || rect.top > w.bottom + 40) return; // was offscreen anyway
-  const old = wrap.querySelector(".readline.ghost");
-  if(old) old.remove();
-  const g = divider();
-  g.className = "readline ghost";
-  g.style.top = (rect.top - w.top) + "px";
-  g.style.left = (rect.left - w.left) + "px";
-  g.style.width = rect.width + "px";
-  wrap.appendChild(g);
-  const drop = () => g.remove();
-  g.addEventListener("animationend", drop, { once: true });
-  setTimeout(drop, 500);
+// fadeOutDivider dismisses the unread line as its FIRST phase: the real in-flow .readline node fades
+// in place (opacity → 0) exactly where it sits, so it scrolls with the messages and needs no ghost or
+// coordinates. commitLive waits DIVIDER_FADE_MS, then a normal render removes it and playShift
+// collapses the gap. Returns false (no node / reduced motion) so the caller collapses immediately.
+export function fadeOutDivider(col){
+  if(!col || reducedMotion()) return false;
+  const dv = col.querySelector(".readline");
+  if(!dv) return false;
+  dv.classList.add("leaving");
+  return true;
 }
