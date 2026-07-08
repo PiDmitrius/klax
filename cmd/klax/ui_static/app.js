@@ -72,6 +72,7 @@ function initAnimTrace(){
     console.table(rows);
     return rows;
   };
+  console.info("[klax-anim] loaded", ANIM_TRACE_BUILD);
 }
 
 function animTrace(event, data){
