@@ -7,7 +7,7 @@ import { api } from "./base.js";
 import { esc } from "./markdown.js";
 import { uiConfirm } from "./modal.js";
 
-let sessions = [], deps = {}, settingsFor = 0, settingsIsNew = false;
+let sessions = [], deps = {}, settingsFor = 0, settingsIsNew = false, settingsAutofocused = false;
 // The shell's <title> (product name, server-injected) — the base for the unread prefix.
 const BASE_TITLE = (typeof document !== "undefined" && document.title) || "klax";
 function sameSession(a, b){ return String(a) === String(b); }
@@ -113,7 +113,7 @@ function fetchSettings(created){ return api("/api/settings?session=" + created).
 function ctxClass(pct){ return pct >= 90 ? "crit" : pct >= 70 ? "hot" : ""; } // matches .sctx-fill.hot/.crit
 
 export function openSettings(created, title, isNew){
-  settingsFor = created; settingsIsNew = !!isNew;
+  settingsFor = created; settingsIsNew = !!isNew; settingsAutofocused = false;
   const tt = document.querySelector(".smodal-title"); if(tt) tt.textContent = title || "Настройки сессии";
   document.getElementById("smodal").classList.remove("hidden");
   document.getElementById("sbody").innerHTML = '<div class="shint">Загрузка…</div>';
@@ -121,7 +121,7 @@ export function openSettings(created, title, isNew){
     .catch(() => { if(settingsFor === created) document.getElementById("sbody").innerHTML = '<div class="shint">Не удалось загрузить настройки</div>'; });
 }
 function closeSettings(){
-  settingsFor = 0; settingsIsNew = false;
+  settingsFor = 0; settingsIsNew = false; settingsAutofocused = false;
   document.getElementById("smodal").classList.add("hidden");
   // Dismissing settings (notably the "Новая сессия" dialog that auto-opens on create and
   // grabs the name field) hands focus back to the composer so you can type straight away.
@@ -162,7 +162,11 @@ function renderSettings(d){
   const applyName = () => { const v = nameInput.value.trim(); if(v && v !== d.name) patchSettings(d.created, { name: v }); };
   nameInput.addEventListener("keydown", e => { if(e.key !== "Enter") return; e.preventDefault(); nameInput.blur(); if(settingsIsNew) closeSettings(); });
   nameInput.addEventListener("blur", applyName);
-  if(settingsIsNew && settingsFor === d.created){ nameInput.focus(); nameInput.select(); }
+  if(settingsIsNew && settingsFor === d.created && !settingsAutofocused){
+    settingsAutofocused = true;
+    nameInput.focus();
+    nameInput.select();
+  }
   const wire = (sel, fn) => { const el = b.querySelector(sel); if(el) el.onchange = fn; };
   wire("#s-backend", e => patchSettings(d.created, { backend: e.target.value }));
   wire("#s-model",   e => patchSettings(d.created, { model: e.target.value }));
@@ -192,6 +196,6 @@ function patchSettings(created, patch){
 function maybeRefreshSettings(){
   if(!settingsFor) return;
   const ae = document.activeElement, body = document.getElementById("sbody");
-  if(ae && body && body.contains(ae) && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return;
+  if(ae && body && body.contains(ae) && ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(ae.tagName)) return;
   fetchSettings(settingsFor).then(d => { if(settingsFor === d.created) renderSettings(d); }).catch(()=>{});
 }
