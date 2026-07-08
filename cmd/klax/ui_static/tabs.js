@@ -196,6 +196,6 @@ function patchSettings(created, patch){
 function maybeRefreshSettings(){
   if(!settingsFor) return;
   const ae = document.activeElement, body = document.getElementById("sbody");
-  if(ae && body && body.contains(ae) && ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(ae.tagName)) return;
+  if(ae && body && body.contains(ae)) return;
   fetchSettings(settingsFor).then(d => { if(settingsFor === d.created) renderSettings(d); }).catch(()=>{});
 }
