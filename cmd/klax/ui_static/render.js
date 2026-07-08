@@ -36,7 +36,7 @@ export function decodePos(p){ p = p || 0; return { turn: Math.floor(p / POS_MULT
 
 // renderModel computes the ordered render items for one session. PURE and unit-testable.
 // The unread divider stays turn-aware: user bubbles are the human's own messages and do not count
-// as unread; standalone cosmetic rows (compact/notice) are not counted and just flow to the right
+// as unread; standalone non-durable rows are not counted and just flow to the right
 // side of the divider by document order; unread answer blocks land inside the turn at the exact
 // block boundary. `watermark` is the encoded read position (pos()); undefined ⇒ no divider.
 // `contextHint` is the current session-level usage snapshot, used only as a live fallback while
@@ -53,9 +53,8 @@ export function renderModel(turns, watermark, contextHint, holdSplits, joinHeldS
     if(t.role !== "user"){
       // `key` is the standalone's live eventSeq (render-key stability only); it carries no data-pos
       // so it never drives read-advance, and it is not counted as unread.
-      if(t.kind === "compact") items.push({ kind: "bubble", cls: "system", text: "🗜 контекст свёрнут", md: false, time: t.time, key: t.eventSeq });
-      else if(t.role === "notice") items.push({ kind: "bubble", cls: "notice", text: t.text || "", md: false, time: t.time, key: t.eventSeq });
-      else items.push({ kind: "bubble", cls: (t.kind === "error" || t.role === "error") ? "error" : t.role === "system" ? "system" : "assistant", text: t.text || "", md: true, time: t.time, key: t.eventSeq });
+      if(t.role === "notice") items.push({ kind: "bubble", cls: "notice", text: t.text || "", md: false, time: t.time, key: t.eventSeq });
+      else items.push({ kind: "bubble", cls: (t.kind === "error" || t.role === "error") ? "error" : t.role === "system" ? "system" : t.role === "tool" ? "tool" : "assistant", text: t.text || "", md: t.role !== "tool", time: t.time, key: t.eventSeq });
       continue;
     }
     const blocks_ = t.blocks || [];

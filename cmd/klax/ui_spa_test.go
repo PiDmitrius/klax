@@ -132,6 +132,9 @@ assert(!mixedJoined.some(g => g.joinPrev || g.joinNext), "mixed-role held split 
 const oldTool = renderModel([{ ...base, state: "done", blocks: [{ id: "old", role: "tool", text: "old label" }] }], undefined)[0].groups[0];
 const newTool = renderModel([{ ...base, state: "done", blocks: [{ id: "new", role: "tool", text: "new label" }] }], undefined)[0].groups[0];
 assert(oldTool.startPos === newTool.startPos, "tool text/id changes must keep position key stable");
+
+const standaloneTool = renderModel([{ role: "tool", text: "🗜 Compaction: Summary" }], undefined)[0];
+assert(standaloneTool.kind === "bubble" && standaloneTool.cls === "tool" && standaloneTool.md === false, "standalone tool rows must render as tool bubbles");
 `
 	scriptPath := filepath.Join(dir, "render_model_test.mjs")
 	if err := os.WriteFile(scriptPath, []byte(script), 0600); err != nil {

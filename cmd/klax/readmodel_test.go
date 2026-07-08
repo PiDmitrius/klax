@@ -89,6 +89,34 @@ func TestReadModelRunningVsStale(t *testing.T) {
 	}
 }
 
+func TestReadModelRunningKeepsToolProgressVisible(t *testing.T) {
+	d, created := newReadModelDaemon(t)
+	sr := d.getRunner("user:claw", created)
+	seq, marker, _, _, err := sr.store.Enqueue("ui:claw", "", "n", "go", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sr.store.MarkRun(seq); err != nil {
+		t.Fatal(err)
+	}
+	items := []history.Item{
+		{Role: "user", Text: "go", Marker: marker},
+		{Role: "assistant", Text: "settled"},
+		{Role: "tool", Text: "🗜 Compaction: context compacted"},
+	}
+
+	turns := testRM(d, created, items, true, true)
+	if len(turns) != 1 || turns[0].State != "run" {
+		t.Fatalf("busy newest run should be run: %+v", turns)
+	}
+	if len(turns[0].Blocks) != 2 {
+		t.Fatalf("running turn must keep tool progress visible: %+v", turns[0].Blocks)
+	}
+	if turns[0].Blocks[1].Role != "tool" || turns[0].Blocks[1].Text != "🗜 Compaction: context compacted" {
+		t.Fatalf("last tool block was not preserved: %+v", turns[0].Blocks)
+	}
+}
+
 // A markerless transcript turn (legacy, pre-durable-queue) renders done with a stable
 // negative synthetic id that can never collide with a real durable seq (>= 1).
 func TestReadModelLegacyMarkerless(t *testing.T) {
@@ -148,21 +176,22 @@ func TestBlockIDStable(t *testing.T) {
 	}
 }
 
-// groupTurns nests answer blocks under their user turn and keeps a standalone system /
-// compact notice as its own top-level unit.
+// groupTurns nests answer/tool blocks under their user turn and keeps non-answer
+// system notices as their own top-level unit.
 func TestGroupTurns(t *testing.T) {
 	g := groupTurns([]history.Item{
 		{Role: "user", Text: "u1"},
 		{Role: "assistant", Text: "a1"},
 		{Role: "tool", Text: "t1"},
-		{Role: "system", Kind: "compact"},
+		{Role: "tool", Text: "compact"},
+		{Role: "system", Kind: "error"},
 		{Role: "user", Text: "u2"},
 	})
 	if len(g) != 3 {
 		t.Fatalf("want 3 units (turn, notice, turn), got %d", len(g))
 	}
-	if g[0].lead.Role != "user" || len(g[0].blocks) != 2 {
-		t.Fatalf("first unit should be a user turn with 2 blocks: %+v", g[0])
+	if g[0].lead.Role != "user" || len(g[0].blocks) != 3 {
+		t.Fatalf("first unit should be a user turn with 3 blocks: %+v", g[0])
 	}
 	if g[1].lead.Role != "system" || len(g[1].blocks) != 0 {
 		t.Fatalf("second unit should be a standalone notice: %+v", g[1])

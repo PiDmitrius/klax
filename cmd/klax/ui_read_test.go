@@ -34,7 +34,7 @@ func TestRaiseReadThroughIsMonotonic(t *testing.T) {
 
 // TestUnreadAfterCountsBlocksPastWatermark locks the badge count (DURABLE_CURSOR_PLAN.md S2):
 // answer blocks (a turn's actions) strictly after (turn,block) count, a never-read (0,0) session is
-// fully unread, user bubbles and standalone cosmetic rows never count, and it drains to 0 as the
+// fully unread, user bubbles and standalone non-durable rows never count, and it drains to 0 as the
 // watermark advances — so it is >0 exactly when a divider would show.
 func TestUnreadAfterCountsBlocksPastWatermark(t *testing.T) {
 	mkturn := func(seq int64, blocks int) uiTurn {
@@ -44,8 +44,8 @@ func TestUnreadAfterCountsBlocksPastWatermark(t *testing.T) {
 		}
 		return u
 	}
-	// turn 1 (2 actions), a cosmetic compact row (Seq 0), turn 2 (3 actions).
-	page := []uiTurn{mkturn(1, 2), {Role: "system", Kind: "compact"}, mkturn(2, 3)}
+	// turn 1 (2 actions), a standalone tool row (Seq 0), turn 2 (3 actions).
+	page := []uiTurn{mkturn(1, 2), {Role: "tool", Text: "compact"}, mkturn(2, 3)}
 
 	cases := []struct {
 		name        string
@@ -77,9 +77,9 @@ func TestTailFromSlicesPastCursor(t *testing.T) {
 		}
 		return u
 	}
-	// turn 1 (2 blocks), a cosmetic compact row, turn 2 (1 block). mkturn leaves State "" (code "e"),
+	// turn 1 (2 blocks), a standalone tool row, turn 2 (1 block). mkturn leaves State "" (code "e"),
 	// so passing "e" keeps the state check neutral and exercises the block/new-turn logic.
-	page := []uiTurn{mkturn(1, 2), {Role: "system", Kind: "compact"}, mkturn(2, 1)}
+	page := []uiTurn{mkturn(1, 2), {Role: "tool", Text: "compact"}, mkturn(2, 1)}
 
 	if got := tailFrom(page, 1, 0, "e", 0, 1); len(got) != 3 || got[0].Seq != 1 {
 		t.Fatalf("boundary turn grew: got %d rows (want 3 from turn 1)", len(got))
@@ -109,9 +109,9 @@ func TestTailFromSlicesPastCursor(t *testing.T) {
 		t.Fatalf("already-acked run state must hold (no spin): got %d rows, want nil", len(got))
 	}
 
-	// A standalone (compact/system) appended AFTER the last durable turn has no durable position of its
+	// A standalone non-durable row appended AFTER the last durable turn has no durable position of its
 	// own — the trail count (cursor 4th field, 0→1) delivers it once from the boundary, then holds.
-	trailing := []uiTurn{mkturn(4, 1), {Role: "system", Kind: "compact"}}
+	trailing := []uiTurn{mkturn(4, 1), {Role: "tool", Text: "compact"}}
 	if got := tailFrom(trailing, 4, 0, "e", 0, 4); len(got) != 2 || got[0].Seq != 4 {
 		t.Fatalf("trailing standalone must deliver once from the boundary: got %d rows, want 2 from turn 4", len(got))
 	}
@@ -152,7 +152,7 @@ func TestBlockCursorRoundTrips(t *testing.T) {
 		t.Fatalf("parseBlockCursor(%q) = (%d,%d,%q,%d,%d), want (7,-1,r,0,7)", cur, turn, block, state, trail, head)
 	}
 	// two answer blocks (done) + one trailing standalone → block 1, trail 1 (all settled ⇒ 4-segment)
-	if cur := tailCursor([]uiTurn{{Seq: 3, Role: "user", State: "done", Blocks: []uiBlock{{}, {}}}, {Role: "system", Kind: "compact"}}); cur != "3.1.d.1" {
+	if cur := tailCursor([]uiTurn{{Seq: 3, Role: "user", State: "done", Blocks: []uiBlock{{}, {}}}, {Role: "tool", Text: "compact"}}); cur != "3.1.d.1" {
 		t.Fatalf("tailCursor(done, 2 blocks, 1 trailing) = %q, want 3.1.d.1", cur)
 	}
 	// QUEUE: a RUNNING turn 1 (1 block) behind an ENQUEUED turn 2 → 5-segment cursor anchored on the

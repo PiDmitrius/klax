@@ -30,13 +30,17 @@ func toolCall(name, input string) ToolCall {
 	return ToolCall{Name: name, Label: runner.ToolUse{Name: name, Input: input}.Preview(runner.UIToolPreviewLimit)}
 }
 
+func compactToolText(trigger string, preTokens, postTokens int) string {
+	return runner.CompactToolUse(trigger, preTokens, postTokens, "").Preview(runner.UIToolPreviewLimit)
+}
+
 // Item is one entry in a rendered transcript.
 type Item struct {
-	Role      string     `json:"role"`             // "user" | "assistant" | "system"
+	Role      string     `json:"role"`             // "user" | "assistant" | "system" | "tool"
 	Text      string     `json:"text,omitempty"`   // message text (Markdown)
 	Marker    string     `json:"marker,omitempty"` // user turns: the klax-turn correlation token
 	Tools     []ToolCall `json:"tools,omitempty"`
-	Kind      string     `json:"kind,omitempty"` // "" | "compact" | "error"
+	Kind      string     `json:"kind,omitempty"` // "" | "error"
 	Time      string     `json:"time,omitempty"` // RFC3339, empty when unknown
 	CtxUsed   int        `json:"ctx_used,omitempty"`
 	CtxWindow int        `json:"ctx_window,omitempty"`
@@ -146,7 +150,7 @@ func readClaude(path string) ([]Item, error) {
 		}
 		ts := timeOrEmpty(line.Time)
 		if line.Compact != nil {
-			items = append(items, Item{Role: "system", Kind: "compact", Time: ts})
+			items = append(items, Item{Role: "tool", Text: compactToolText(line.Compact.Trigger, line.Compact.PreTokens, line.Compact.PostTokens), Time: ts})
 			continue
 		}
 		if line.IsAPIError {
@@ -156,6 +160,15 @@ func readClaude(path string) ([]Item, error) {
 		switch line.Type {
 		case "user":
 			if text, marker := claudeUserText(line.Raw); text != "" {
+				if marker == "" {
+					if compactText, ok := claudeCompactContinuationToolText(text); ok {
+						items = append(items, Item{Role: "tool", Text: compactText, Time: ts})
+						continue
+					}
+					if claudeInternalCompactNoise(text) {
+						continue
+					}
+				}
 				items = append(items, Item{Role: "user", Text: text, Marker: marker, Time: ts})
 			}
 		case "assistant":
@@ -197,6 +210,34 @@ func claudeUserText(raw json.RawMessage) (clean, marker string) {
 		}
 	}
 	return StripTurnMarker(sb.String())
+}
+
+// Claude writes its own compaction/resume summary as a role=user transcript
+// row. It is internal mechanics, not human input, but it is still useful
+// timeline data, so render it as a tool-style agent event.
+func claudeCompactContinuationToolText(text string) (string, bool) {
+	text = strings.TrimSpace(text)
+	if strings.HasPrefix(text, "This session is being continued from a previous conversation that ran out of context.") &&
+		(strings.Contains(text, "\n\nSummary:") || strings.Contains(text, "\nSummary:")) {
+		return runner.CompactToolUse("", 0, 0, text).Preview(runner.UIToolPreviewLimit), true
+	}
+	return "", false
+}
+
+// Manual /compact also writes command bookkeeping rows as role=user. Those are
+// transport noise around the compact boundary and summary, not user messages.
+func claudeInternalCompactNoise(text string) bool {
+	text = strings.TrimSpace(text)
+	if strings.HasPrefix(text, "<local-command-caveat>") && strings.Contains(text, "</local-command-caveat>") {
+		return true
+	}
+	if strings.HasPrefix(text, "<command-name>/compact</command-name>") && strings.Contains(text, "<command-message>compact</command-message>") {
+		return true
+	}
+	if strings.HasPrefix(text, "<local-command-stdout>") && strings.Contains(text, "Compacted (") {
+		return true
+	}
+	return false
 }
 
 func claudeAssistant(raw json.RawMessage) (string, []ToolCall, int) {
@@ -256,9 +297,13 @@ func readCodex(path string) ([]Item, error) {
 	}
 	var items []Item
 	lastAssistant := -1
+	lastWasCompacted := false
+	lastCompacted := -1
 	appendAssistant := func(it Item) {
 		items = append(items, it)
 		lastAssistant = len(items) - 1
+		lastWasCompacted = false
+		lastCompacted = -1
 	}
 	for _, raw := range bytes.Split(data, []byte("\n")) {
 		raw = bytes.TrimSpace(raw)
@@ -274,7 +319,7 @@ func readCodex(path string) ([]Item, error) {
 		if json.Unmarshal(raw, &entry) != nil {
 			continue
 		}
-		if entry.Type != "event_msg" && entry.Type != "response_item" && !strings.HasPrefix(entry.Type, "item.") {
+		if entry.Type != "event_msg" && entry.Type != "response_item" && entry.Type != "compacted" && !strings.HasPrefix(entry.Type, "item.") {
 			continue
 		}
 		var p struct {
@@ -295,15 +340,31 @@ func readCodex(path string) ([]Item, error) {
 		_ = json.Unmarshal(entry.Payload, &p)
 		ts := normalizeTime(entry.Timestamp)
 		switch {
+		case entry.Type == "compacted":
+			items = append(items, Item{Role: "tool", Text: compactToolText("", 0, 0), Time: ts})
+			lastAssistant = -1
+			lastWasCompacted = true
+			lastCompacted = len(items) - 1
 		case entry.Type == "event_msg" && p.Type == "user_message":
 			if t, marker := StripTurnMarker(p.Message); t != "" {
 				items = append(items, Item{Role: "user", Text: t, Marker: marker, Time: ts})
 				lastAssistant = -1
 			}
+			lastWasCompacted = false
+			lastCompacted = -1
 		case entry.Type == "event_msg" && p.Type == "agent_message":
 			if t := strings.TrimSpace(p.Message); t != "" {
 				appendAssistant(Item{Role: "assistant", Text: t, Time: ts})
 			}
+		case entry.Type == "event_msg" && p.Type == "context_compacted":
+			if !lastWasCompacted {
+				items = append(items, Item{Role: "tool", Text: compactToolText("", 0, 0), Time: ts})
+				lastCompacted = len(items) - 1
+			} else if lastCompacted >= 0 && items[lastCompacted].Time == "" {
+				items[lastCompacted].Time = ts
+			}
+			lastAssistant = -1
+			lastWasCompacted = true
 		case entry.Type == "event_msg" && p.Type == "token_count" && lastAssistant >= 0:
 			if p.Info != nil && p.Info.LastTokenUsage != nil {
 				items[lastAssistant].CtxUsed = p.Info.LastTokenUsage.InputTokens

@@ -250,6 +250,28 @@ func (t ToolUse) Preview(limit int) string {
 			return "🔌 MCP"
 		}
 		return fmt.Sprintf("🔌 MCP: %s", label)
+	case "Compaction":
+		var inp struct {
+			Trigger    string `json:"trigger"`
+			PreTokens  int    `json:"pre_tokens"`
+			PostTokens int    `json:"post_tokens"`
+			Detail     string `json:"detail"`
+		}
+		json.Unmarshal([]byte(t.Input), &inp)
+		var parts []string
+		if inp.PreTokens > 0 || inp.PostTokens > 0 {
+			parts = append(parts, fmt.Sprintf("%s→%s tokens", humanTokens(inp.PreTokens), humanTokens(inp.PostTokens)))
+		}
+		if inp.Trigger != "" {
+			parts = append(parts, inp.Trigger)
+		}
+		if inp.Detail != "" {
+			parts = append(parts, inp.Detail)
+		}
+		if len(parts) == 0 {
+			parts = append(parts, "context compacted")
+		}
+		return "🗜 Compaction: " + truncate(oneLinePreview(strings.Join(parts, " · ")), limit)
 	default:
 		return fmt.Sprintf("🔧 %s", t.Name)
 	}
@@ -263,13 +285,25 @@ func humanTokens(n int) string {
 	return fmt.Sprintf("%d", n)
 }
 
-// formatCompact renders a context-compaction boundary for the chat log.
-func formatCompact(c *CompactInfo) string {
-	trigger := c.Trigger
-	if trigger == "" {
+// CompactToolUse returns the ordinary tool-label representation of a context
+// compaction event. Backends and history readers use it so live and reload render
+// the same thing at their respective preview widths.
+func CompactToolUse(trigger string, preTokens, postTokens int, detail string) ToolUse {
+	if trigger == "" && (preTokens > 0 || postTokens > 0) {
 		trigger = "auto"
 	}
-	return fmt.Sprintf("🗜 Контекст свёрнут: %s→%s токенов (%s)", humanTokens(c.PreTokens), humanTokens(c.PostTokens), trigger)
+	b, _ := json.Marshal(struct {
+		Trigger    string `json:"trigger,omitempty"`
+		PreTokens  int    `json:"pre_tokens,omitempty"`
+		PostTokens int    `json:"post_tokens,omitempty"`
+		Detail     string `json:"detail,omitempty"`
+	}{
+		Trigger:    trigger,
+		PreTokens:  preTokens,
+		PostTokens: postTokens,
+		Detail:     detail,
+	})
+	return ToolUse{Name: "Compaction", Input: string(b)}
 }
 
 func formatRateLimit(rl *RateLimitInfo) string {
@@ -381,8 +415,8 @@ type ProgressEvent struct {
 	Kind ProgressKind
 	Text string
 	// Tool is the structured tool invocation behind a ProgressKindTool event
-	// whose label came from a real ToolUse. It is nil for synthesized
-	// tool-kind events (rate-limit, unknown, error, compact) and for narration.
+	// whose label came from a ToolUse. It is nil for unstructured synthesized
+	// tool-kind events (rate-limit, unknown, error) and for narration.
 	// Text already holds the default-width label (ToolUse.String); a frontend
 	// with more room than Telegram re-renders this via ToolUse.Preview at a
 	// wider limit instead of consuming the clipped Text.
@@ -959,7 +993,8 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 					if !opts.SuppressNarrationProgress {
 						buf.demote()
 					}
-					buf.emitTool(ProgressEvent{Kind: ProgressKindTool, Text: formatCompact(ev.Compact)})
+					tool := CompactToolUse(ev.Compact.Trigger, ev.Compact.PreTokens, ev.Compact.PostTokens, "")
+					buf.emitTool(ProgressEvent{Kind: ProgressKindTool, Text: tool.String(), Tool: &tool})
 				}
 
 			case EventResult:

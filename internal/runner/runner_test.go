@@ -217,6 +217,22 @@ func TestToolPreviewLimit(t *testing.T) {
 	}
 }
 
+func TestCompactionToolPreview(t *testing.T) {
+	tool := CompactToolUse("manual", 200000, 8000, strings.Repeat("summary ", 80))
+
+	narrow := tool.String()
+	if !strings.HasPrefix(narrow, "🗜 Compaction: 200k→8k tokens · manual · summary ") || !strings.Contains(narrow, "…") {
+		t.Fatalf("narrow compaction preview = %q", narrow)
+	}
+	wide := tool.Preview(UIToolPreviewLimit)
+	if utf8.RuneCountInString(wide) <= utf8.RuneCountInString(narrow) {
+		t.Fatalf("wide compaction preview not wider: narrow=%q wide=%q", narrow, wide)
+	}
+	if !strings.HasPrefix(CompactToolUse("", 0, 0, "").String(), "🗜 Compaction: context compacted") {
+		t.Fatalf("empty compaction preview = %q", CompactToolUse("", 0, 0, "").String())
+	}
+}
+
 func TestClaudePlanInput_Normalize(t *testing.T) {
 	cases := []struct {
 		name string
@@ -1390,6 +1406,18 @@ func TestSuppressedNarrationKeepsReplyAcrossCompactEvent(t *testing.T) {
 	}
 	if narr := rec.narrationTexts(); len(narr) != 0 {
 		t.Fatalf("suppressed narration must not emit progress narration, got %v", narr)
+	}
+	var sawCompact bool
+	for _, ev := range rec.events {
+		if ev.Kind == ProgressKindTool && ev.Tool != nil && ev.Tool.Name == "Compaction" {
+			sawCompact = true
+			if ev.Text != "🗜 Compaction: 180k→9k tokens · auto" {
+				t.Fatalf("compact progress text = %q", ev.Text)
+			}
+		}
+	}
+	if !sawCompact {
+		t.Fatalf("compact progress did not surface as a structured tool: %+v", rec.events)
 	}
 	if res.Text != body {
 		t.Fatalf("final text must survive a compact progress event, got %q", res.Text)
