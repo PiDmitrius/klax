@@ -10,7 +10,7 @@ import (
 // An aborted queued turn (enq -> err:aborted, never run) must NOT replay.
 func TestAbortedTurnDoesNotReplay(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
-	s := Open("user:claw", 9)
+	s := Open("user:alice", 9)
 	a, _, _, _, _ := s.Enqueue("tg:1", "", "a", "A", nil)
 	b, _, _, _, _ := s.Enqueue("tg:1", "", "b", "B", nil)
 	if err := s.MarkErr(a, "aborted"); err != nil {
@@ -19,7 +19,7 @@ func TestAbortedTurnDoesNotReplay(t *testing.T) {
 	if err := s.MarkErr(b, "aborted"); err != nil {
 		t.Fatal(err)
 	}
-	reenq, recovered, err := Open("user:claw", 9).Replay()
+	reenq, recovered, err := Open("user:alice", 9).Replay()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +31,7 @@ func TestAbortedTurnDoesNotReplay(t *testing.T) {
 // After Remove, a late Mark*/Enqueue returns ErrRemoved and does NOT recreate the dir.
 func TestRemovedStoreNotResurrected(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
-	s := Open("user:claw", 11)
+	s := Open("user:alice", 11)
 	seq, _, _, _, _ := s.Enqueue("tg:1", "", "n", "hi", nil)
 	if err := s.Remove(); err != nil {
 		t.Fatal(err)
@@ -57,12 +57,12 @@ func nr(name, data string) NamedReader { return NamedReader{Name: name, R: strin
 // reading the same log) — continuing from the log, not from 1.
 func TestEnqueueAllocatesAndSurvivesRestart(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
-	s := Open("user:claw", 100)
-	seq1, m1, f1, _, err := s.Enqueue("ui:claw", "", "n1", "hi", []NamedReader{nr("a.png", "AA")})
+	s := Open("user:alice", 100)
+	seq1, m1, f1, _, err := s.Enqueue("ui:alice", "", "n1", "hi", []NamedReader{nr("a.png", "AA")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	seq2, m2, _, _, _ := s.Enqueue("ui:claw", "", "n2", "yo", nil) // text-only turn is fine
+	seq2, m2, _, _, _ := s.Enqueue("ui:alice", "", "n2", "yo", nil) // text-only turn is fine
 	if seq1 != 1 || seq2 != 2 {
 		t.Fatalf("seqs = %d,%d want 1,2", seq1, seq2)
 	}
@@ -76,15 +76,15 @@ func TestEnqueueAllocatesAndSurvivesRestart(t *testing.T) {
 		t.Fatalf("file bytes = %q want AA", b)
 	}
 	// Restart: a fresh Store reads the durable log and continues the sequence.
-	s2 := Open("user:claw", 100)
+	s2 := Open("user:alice", 100)
 	log, err := s2.InboundLog()
 	if err != nil || len(log) != 2 {
 		t.Fatalf("InboundLog after restart = %d turns (err %v) want 2", len(log), err)
 	}
-	if log[0].Text != "hi" || log[0].Marker != m1 || len(log[0].Files) != 1 || log[0].ChatID != "ui:claw" {
+	if log[0].Text != "hi" || log[0].Marker != m1 || len(log[0].Files) != 1 || log[0].ChatID != "ui:alice" {
 		t.Fatalf("turn1 reload mismatch: %+v", log[0])
 	}
-	seq3, _, _, _, _ := s2.Enqueue("ui:claw", "", "n3", "again", nil)
+	seq3, _, _, _, _ := s2.Enqueue("ui:alice", "", "n3", "again", nil)
 	if seq3 != 3 {
 		t.Fatalf("seq after restart = %d want 3", seq3)
 	}
@@ -92,12 +92,12 @@ func TestEnqueueAllocatesAndSurvivesRestart(t *testing.T) {
 
 func TestEnqueueDedupeByNonce(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
-	s := Open("user:claw", 101)
-	seq1, marker1, files1, dup1, err := s.Enqueue("ui:claw", "", "nonce-1", "first", []NamedReader{nr("a.png", "AA")})
+	s := Open("user:alice", 101)
+	seq1, marker1, files1, dup1, err := s.Enqueue("ui:alice", "", "nonce-1", "first", []NamedReader{nr("a.png", "AA")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	seq2, marker2, files2, dup2, err := s.Enqueue("ui:claw", "", "nonce-1", "retry", []NamedReader{nr("b.png", "BB")})
+	seq2, marker2, files2, dup2, err := s.Enqueue("ui:alice", "", "nonce-1", "retry", []NamedReader{nr("b.png", "BB")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestEnqueueDedupeByNonce(t *testing.T) {
 // → recover; done → skipped. Survives a fresh Store.
 func TestReplayClassifies(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
-	s := Open("user:claw", 7)
+	s := Open("user:alice", 7)
 	sA, _, _, _, _ := s.Enqueue("tg:1", "", "a", "A", nil)
 	s.MarkRun(sA)
 	s.MarkDone(sA)                       // A: complete → skipped
@@ -131,7 +131,7 @@ func TestReplayClassifies(t *testing.T) {
 	sC, _, _, _, _ := s.Enqueue("tg:1", "", "c", "C", nil)
 	s.MarkRun(sC) // C: run, no terminal → recover
 
-	reenq, recover, err := Open("user:claw", 7).Replay()
+	reenq, recover, err := Open("user:alice", 7).Replay()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,14 +146,14 @@ func TestReplayClassifies(t *testing.T) {
 // A torn trailing line (crash mid-append) is skipped; valid turns survive.
 func TestTornTrailingLineSkipped(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
-	s := Open("user:claw", 1)
+	s := Open("user:alice", 1)
 	s.Enqueue("tg:1", "", "n", "good", nil)
 	// Simulate a crash mid-append: a partial JSON line with no newline.
 	f, _ := os.OpenFile(s.queuePath(), os.O_APPEND|os.O_WRONLY, 0600)
 	f.WriteString(`{"ev":"enq","seq":2,"text":"tor`)
 	f.Close()
 
-	log, err := Open("user:claw", 1).InboundLog()
+	log, err := Open("user:alice", 1).InboundLog()
 	if err != nil {
 		t.Fatal(err)
 	}

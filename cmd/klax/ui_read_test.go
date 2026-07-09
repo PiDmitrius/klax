@@ -6,8 +6,8 @@ import (
 	"github.com/PiDmitrius/klax/internal/session"
 )
 
-// TestRaiseReadThroughIsMonotonic locks the durable read-watermark ingest (DURABLE_CURSOR_PLAN.md
-// S2): a report only ever moves the watermark forward — a later turn, or the same turn with a
+// TestRaiseReadThroughIsMonotonic locks the durable read-watermark ingest: a report only ever
+// moves the watermark forward — a later turn, or the same turn with a
 // further block — and a stale/duplicate/out-of-order report is a no-op, so nothing can un-read.
 func TestRaiseReadThroughIsMonotonic(t *testing.T) {
 	s := &session.Session{}
@@ -32,7 +32,7 @@ func TestRaiseReadThroughIsMonotonic(t *testing.T) {
 	}
 }
 
-// TestUnreadAfterCountsBlocksPastWatermark locks the badge count (DURABLE_CURSOR_PLAN.md S2):
+// TestUnreadAfterCountsBlocksPastWatermark locks the badge count:
 // answer blocks (a turn's actions) strictly after (turn,block) count, a never-read (0,0) session is
 // fully unread, user bubbles and standalone non-durable rows never count, and it drains to 0 as the
 // watermark advances — so it is >0 exactly when a divider would show.
@@ -65,7 +65,7 @@ func TestUnreadAfterCountsBlocksPastWatermark(t *testing.T) {
 	}
 }
 
-// TestTailFromSlicesPastCursor locks the live-tail slice (DURABLE_CURSOR_PLAN.md S3): a grown
+// TestTailFromSlicesPastCursor locks the live-tail slice: a grown
 // boundary turn, a state-changed boundary turn, or any turn past `head` yields the tail from the
 // boundary turn (standalones ride along); an unchanged / fully-past cursor yields nil so the
 // long-poll keeps holding; a stale/zero cursor resends the whole model.

@@ -35,8 +35,8 @@ type Session struct {
 	Messages      int    `json:"messages"` // user message count
 	// UI read-through watermark — the durable per-session unread cursor: the highest
 	// (turn_seq, block index) the user has read. Absent on legacy stores ⇒ 0 ("nothing read
-	// yet"). Consumed from S2 of DURABLE_CURSOR_PLAN.md so the unread divider/badge/title
-	// survive a page reload and a daemon restart instead of re-baselining to "all read".
+	// yet"). Consumed by the UI so the unread divider/badge/title survive a page reload
+	// and a daemon restart instead of re-baselining to "all read".
 	ReadThroughTurn    int64  `json:"read_through_turn,omitempty"`
 	ReadThroughBlock   int    `json:"read_through_block,omitempty"`
 	AppendSystemPrompt string `json:"append_system_prompt,omitempty"`

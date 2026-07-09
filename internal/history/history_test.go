@@ -218,8 +218,8 @@ func TestReadCodexHistoryToolLabels(t *testing.T) {
 }
 
 func TestEncodeProjectDir(t *testing.T) {
-	if got := encodeProjectDir("/home/claw"); got != "-home-claw" {
-		t.Fatalf("encodeProjectDir = %q, want -home-claw", got)
+	if got := encodeProjectDir("/home/alice"); got != "-home-alice" {
+		t.Fatalf("encodeProjectDir = %q, want -home-alice", got)
 	}
 }
 

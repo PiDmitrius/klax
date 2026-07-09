@@ -12,29 +12,29 @@ func newReadModelDaemon(t *testing.T) (*daemon, int64) {
 	t.Helper()
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	d := newTestDeliveryDaemon(&fakeTransport{})
-	d.store = newStoreWithChat("user:claw", "one")
+	d.store = newStoreWithChat("user:alice", "one")
 	d.runners = make(map[runnerKey]*sessionRunner)
 	s, err := sealref.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	d.sealer = s
-	created := d.store.SessionsFor("user:claw")[0].Created
-	d.getRunner("user:claw", created) // bind the runner-owned durable store
+	created := d.store.SessionsFor("user:alice")[0].Created
+	d.getRunner("user:alice", created) // bind the runner-owned durable store
 	return d, created
 }
 
 func testRM(d *daemon, created int64, items []history.Item, busy, latest bool) []uiTurn {
-	q, _ := d.sessionStore("user:claw", created).InboundLog()
-	return d.buildReadModel("user:claw", created, groupTurns(items), q, busy, 0, latest, 1_000_000)
+	q, _ := d.sessionStore("user:alice", created).InboundLog()
+	return d.buildReadModel("user:alice", created, groupTurns(items), q, busy, 0, latest, 1_000_000)
 }
 
 // A turn still queued (enq, never run) is surfaced on the latest page as state "enq" with
 // its durable seq + text, and is NOT appended on an older (paginated) page.
 func TestReadModelQueuedSurfaced(t *testing.T) {
 	d, created := newReadModelDaemon(t)
-	sr := d.getRunner("user:claw", created)
-	if _, _, _, _, err := sr.store.Enqueue("ui:claw", "", "n", "hello", nil); err != nil {
+	sr := d.getRunner("user:alice", created)
+	if _, _, _, _, err := sr.store.Enqueue("ui:alice", "", "n", "hello", nil); err != nil {
 		t.Fatal(err)
 	}
 	turns := testRM(d, created, nil, false, true)
@@ -55,8 +55,8 @@ func TestReadModelQueuedSurfaced(t *testing.T) {
 // shows as a settled bubble under the dots; the final block is revealed only at done.
 func TestReadModelRunningVsStale(t *testing.T) {
 	d, created := newReadModelDaemon(t)
-	sr := d.getRunner("user:claw", created)
-	seq, marker, _, _, err := sr.store.Enqueue("ui:claw", "", "n", "go", nil)
+	sr := d.getRunner("user:alice", created)
+	seq, marker, _, _, err := sr.store.Enqueue("ui:alice", "", "n", "go", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,8 +91,8 @@ func TestReadModelRunningVsStale(t *testing.T) {
 
 func TestReadModelRunningKeepsToolProgressVisible(t *testing.T) {
 	d, created := newReadModelDaemon(t)
-	sr := d.getRunner("user:claw", created)
-	seq, marker, _, _, err := sr.store.Enqueue("ui:claw", "", "n", "go", nil)
+	sr := d.getRunner("user:alice", created)
+	seq, marker, _, _, err := sr.store.Enqueue("ui:alice", "", "n", "go", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,8 +205,8 @@ func TestGroupTurns(t *testing.T) {
 // block — shown as stopped, not silently dropped or frozen.
 func TestReadModelAbortedSurfaced(t *testing.T) {
 	d, created := newReadModelDaemon(t)
-	sr := d.getRunner("user:claw", created)
-	seq, _, _, _, err := sr.store.Enqueue("ui:claw", "", "n", "doomed", nil)
+	sr := d.getRunner("user:alice", created)
+	seq, _, _, _, err := sr.store.Enqueue("ui:alice", "", "n", "doomed", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,16 +248,16 @@ func TestErrBlockCanonicalReasons(t *testing.T) {
 
 func TestReadModelAbortedKeepsTurnOrder(t *testing.T) {
 	d, created := newReadModelDaemon(t)
-	sr := d.getRunner("user:claw", created)
-	seq1, marker1, _, _, err := sr.store.Enqueue("ui:claw", "", "n1", "first", nil)
+	sr := d.getRunner("user:alice", created)
+	seq1, marker1, _, _, err := sr.store.Enqueue("ui:alice", "", "n1", "first", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	seq2, _, _, _, err := sr.store.Enqueue("ui:claw", "", "n2", "aborted", nil)
+	seq2, _, _, _, err := sr.store.Enqueue("ui:alice", "", "n2", "aborted", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	seq3, marker3, _, _, err := sr.store.Enqueue("ui:claw", "", "n3", "third", nil)
+	seq3, marker3, _, _, err := sr.store.Enqueue("ui:alice", "", "n3", "third", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

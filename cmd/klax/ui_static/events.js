@@ -7,7 +7,7 @@ import { api } from "./base.js";
 
 const POLL_ABORT_MS = 30000; // > server hold (~25s); bounds a wedged request
 
-// tailLoop is the durable-tail live channel (DURABLE_CURSOR_PLAN.md S4): it POSTs the client's
+// tailLoop is the durable-tail live channel: it POSTs the client's
 // per-session (turn,block,state,trail[,head]) cursors to /api/tail, MERGES the returned read-model
 // rows into the model (model.replaceTail — the same rows a reload uses, so live and reload can't
 // disagree), advances each cursor, applies the session strip + notices, and detects a restart via

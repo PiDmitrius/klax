@@ -22,8 +22,8 @@ import (
 )
 
 // uiPrefix is the chatID/transport prefix for the web UI. A request authenticated
-// as canonical user "claw" is handled as chatID "ui:claw", and sessionKey maps
-// that to "user:claw" — the same key tg/mx DMs for claw resolve to, so the UI
+// as canonical user "alice" is handled as chatID "ui:alice", and sessionKey maps
+// that to "user:alice" — the same key tg/mx DMs for alice resolve to, so the UI
 // shares sessions with the messengers (cross-channel continuity).
 const uiPrefix = "ui"
 
@@ -59,7 +59,7 @@ type uiSessionInfo struct {
 	Messages  int    `json:"messages"`
 	CtxUsed   int    `json:"ctx_used"`
 	CtxWindow int    `json:"ctx_window"`
-	// Durable unread state (DURABLE_CURSOR_PLAN.md S2). ReadThrough is the "<turn>.<block>"
+	// Durable unread state. ReadThrough is the "<turn>.<block>"
 	// watermark the client seeds its divider from; Unread is the exchange count the badge shows
 	// for a tab the client has not loaded (a loaded tab counts precisely client-side).
 	ReadThrough string `json:"read_through,omitempty"`
@@ -689,7 +689,7 @@ func (s *uiServer) cursorString(seq uint64) string {
 	return strconv.FormatInt(s.d.uiHub.epoch, 10) + "-" + strconv.FormatUint(seq, 10)
 }
 
-// --- durable-tail poll (DURABLE_CURSOR_PLAN.md S4) ---
+// --- durable-tail poll ---
 // The live channel as a tail of the durable log: the client sends a per-session
 // "<turn>.<block>.<state>.<trail>[.<head>]" cursor, the server returns the read-model rows past it
 // (built by the SAME buildReadModel as a reload, so live and reload converge). No epoch/ring/reload
@@ -990,7 +990,7 @@ func (s *uiServer) handleAbort(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRead persists the durable per-session read-through watermark — the (turn_seq, block index)
-// the client reports as it reads down (DURABLE_CURSOR_PLAN.md S2, decision 3). The client pushes
+// the client reports as it reads down. The client pushes
 // it PROACTIVELY (on read-settle and on tab-hide), so the read state is durable before the tab can
 // go away and thus survives reload + daemon restart. The watermark only ever RAISES (monotonic),
 // so a stale or out-of-order report can never un-read messages. Persists only when it actually
@@ -1165,7 +1165,7 @@ func (s *uiServer) handleTranscript(w http.ResponseWriter, r *http.Request) {
 	// Watermark = hub head BEFORE reading the transcript: every event with seq ≤ watermark
 	// has flushed its content into the transcript (klax flushes before it emits), so the
 	// client resumes its poll cursor here and applies only seq > watermark; any reload-
-	// read/poll overlap is deduped by Block.id (REFACTOR_PLAN §A3).
+	// read/poll overlap is deduped by Block.id.
 	watermark := s.cursorString(s.d.uiHub.head())
 
 	items, err := history.Load(backend, sess.ID, sess.CWD)

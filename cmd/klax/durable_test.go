@@ -120,18 +120,18 @@ func TestEnqueueToSessionDuplicateNonceDoesNotRequeue(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	tp := &fakeTransport{}
 	d := newTestDeliveryDaemon(tp)
-	d.store = newStoreWithChat("user:claw", "one")
+	d.store = newStoreWithChat("user:alice", "one")
 	d.runners = make(map[runnerKey]*sessionRunner)
 	d.uiHub = newUIHub()
 
-	created := d.store.SessionsFor("user:claw")[0].Created
-	sr := d.getRunner("user:claw", created)
+	created := d.store.SessionsFor("user:alice")[0].Created
+	sr := d.getRunner("user:alice", created)
 	sr.processing = true
 
-	if ok := d.enqueueToSession("user:claw", "100", "one", nil, created, "nonce-1"); !ok {
+	if ok := d.enqueueToSession("user:alice", "100", "one", nil, created, "nonce-1"); !ok {
 		t.Fatal("first enqueueToSession returned false")
 	}
-	if ok := d.enqueueToSession("user:claw", "101", "retry", nil, created, "nonce-1"); !ok {
+	if ok := d.enqueueToSession("user:alice", "101", "retry", nil, created, "nonce-1"); !ok {
 		t.Fatal("duplicate enqueueToSession returned false")
 	}
 

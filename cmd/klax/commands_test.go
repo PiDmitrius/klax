@@ -127,13 +127,13 @@ func TestCreateSessionUsesUserDefaultCWD(t *testing.T) {
 		cfg: &config.Config{
 			DefaultCWD: "/tmp/global",
 			Users: []config.UserIdentity{
-				{ID: "claw", CWD: userCWD},
+				{ID: "alice", CWD: userCWD},
 			},
 		},
 		store: st,
 	}
 
-	sess, _ := d.createSession("ui:claw", "user:claw", "main")
+	sess, _ := d.createSession("ui:alice", "user:alice", "main")
 
 	if sess.CWD != userCWD {
 		t.Fatalf("session cwd = %q, want user default", sess.CWD)
@@ -150,13 +150,13 @@ func TestCreateSessionFallsBackWhenUserDefaultCWDIsInvalid(t *testing.T) {
 		cfg: &config.Config{
 			DefaultCWD: globalCWD,
 			Users: []config.UserIdentity{
-				{ID: "claw", CWD: "/no/such/klax/cwd"},
+				{ID: "alice", CWD: "/no/such/klax/cwd"},
 			},
 		},
 		store: st,
 	}
 
-	sess, _ := d.createSession("ui:claw", "user:claw", "main")
+	sess, _ := d.createSession("ui:alice", "user:alice", "main")
 
 	if sess.CWD != globalCWD {
 		t.Fatalf("session cwd = %q, want global fallback", sess.CWD)
@@ -174,23 +174,23 @@ func TestEnsureSessionUsesUserDefaultOnlyForNewSession(t *testing.T) {
 		cfg: &config.Config{
 			DefaultCWD: "/tmp/global",
 			Users: []config.UserIdentity{
-				{ID: "claw", CWD: userCWD},
+				{ID: "alice", CWD: userCWD},
 			},
 		},
 		store: st,
 	}
 
-	d.ensureSessionWithCWD("user:claw", "")
-	sess := st.Active("user:claw")
+	d.ensureSessionWithCWD("user:alice", "")
+	sess := st.Active("user:alice")
 	if sess == nil || sess.CWD != userCWD {
 		t.Fatalf("new session = %+v, want user cwd", sess)
 	}
 
-	st.UpdateActive("user:claw", func(sess *session.Session) {
+	st.UpdateActive("user:alice", func(sess *session.Session) {
 		sess.CWD = "/tmp/custom-session"
 	})
-	d.ensureSessionWithCWD("user:claw", "")
-	sess = st.Active("user:claw")
+	d.ensureSessionWithCWD("user:alice", "")
+	sess = st.Active("user:alice")
 	if sess.CWD != "/tmp/custom-session" {
 		t.Fatalf("existing session cwd = %q, want preserved custom cwd", sess.CWD)
 	}
