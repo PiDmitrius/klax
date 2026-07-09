@@ -181,7 +181,7 @@ func (s *Store) WriteTurn(turnSeq int64, blobs []Blob) ([]string, error) {
 	return out, nil
 }
 
-var storedPrefix = regexp.MustCompile(`^\d+-\d+-`)
+var storedPrefix = regexp.MustCompile(`^(?:\d+-\d+-|out-[0-9a-f]{32}-)`)
 
 func stripPrefix(name string) string { return storedPrefix.ReplaceAllString(name, "") }
 

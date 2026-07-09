@@ -146,6 +146,9 @@ func TestEnqueueToSessionRendersInboundImageAsMarkdown(t *testing.T) {
 		if strings.Contains(ut.Text, "📎") {
 			t.Fatalf("image attachment rendered as file fallback: %q", ut.Text)
 		}
+		if strings.Contains(ut.Text, "KiB") || strings.Contains(ut.Text, " MiB") {
+			t.Fatalf("image attachment must not show a file size: %q", ut.Text)
+		}
 		if strings.Contains(ut.Text, "![image.png](/api/file?ref=") && strings.Contains(ut.Text, "&w=2&h=1)") {
 			found = true
 		}
