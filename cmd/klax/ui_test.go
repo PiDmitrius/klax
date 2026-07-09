@@ -38,10 +38,10 @@ func TestQueuedCountExcludesFirstIdleQueuedMessage(t *testing.T) {
 func TestUIHubCollect(t *testing.T) {
 	h := newUIHub()
 	for i := 0; i < 5; i++ {
-		h.broadcast("claw", uiEvent{Type: "notice", Text: "x"})
+		h.broadcast("alice", uiEvent{Type: "notice", Text: "x"})
 	}
 	// From cursor 0: all 5, head 5, no reload.
-	ev, head, reload := h.collect("claw", h.epoch, 0)
+	ev, head, reload := h.collect("alice", h.epoch, 0)
 	if reload || head != 5 || len(ev) != 5 {
 		t.Fatalf("collect(0): n=%d head=%d reload=%v, want 5/5/false", len(ev), head, reload)
 	}
@@ -49,15 +49,15 @@ func TestUIHubCollect(t *testing.T) {
 		t.Fatalf("first seq=%d, want 1", first.Seq)
 	}
 	// From cursor 2: exactly 3,4,5.
-	if ev, _, _ := h.collect("claw", h.epoch, 2); len(ev) != 3 || decodeEvent(t, ev[0]).Seq != 3 {
+	if ev, _, _ := h.collect("alice", h.epoch, 2); len(ev) != 3 || decodeEvent(t, ev[0]).Seq != 3 {
 		t.Fatalf("collect(2): n=%d first=%d, want 3 starting at seq 3", len(ev), decodeEvent(t, ev[0]).Seq)
 	}
 	// Up to date: nothing, no reload.
-	if ev, _, reload := h.collect("claw", h.epoch, 5); reload || len(ev) != 0 {
+	if ev, _, reload := h.collect("alice", h.epoch, 5); reload || len(ev) != 0 {
 		t.Fatalf("collect(5): n=%d reload=%v, want 0/false", len(ev), reload)
 	}
 	// Stale epoch (daemon restart) -> reload.
-	if _, _, reload := h.collect("claw", h.epoch+1, 2); !reload {
+	if _, _, reload := h.collect("alice", h.epoch+1, 2); !reload {
 		t.Fatal("a stale-epoch cursor must report reload")
 	}
 }
@@ -66,9 +66,9 @@ func TestUIHubCollect(t *testing.T) {
 func TestUIHubCollectGapOnOverflow(t *testing.T) {
 	h := newUIHub()
 	for i := 0; i < uiRingMaxItems+50; i++ {
-		h.broadcast("claw", uiEvent{Type: "notice", Text: "x"})
+		h.broadcast("alice", uiEvent{Type: "notice", Text: "x"})
 	}
-	if _, _, reload := h.collect("claw", h.epoch, 1); !reload {
+	if _, _, reload := h.collect("alice", h.epoch, 1); !reload {
 		t.Fatal("a cursor predating the ring must report reload")
 	}
 }
@@ -93,13 +93,13 @@ func TestUIHubIsolatesUsers(t *testing.T) {
 // that user closes the channel it holds (lost-wakeup-safe).
 func TestUIHubWakeOnEmit(t *testing.T) {
 	h := newUIHub()
-	ch := h.waitChan("claw")
+	ch := h.waitChan("alice")
 	select {
 	case <-ch:
 		t.Fatal("wake channel fired before any emit")
 	default:
 	}
-	h.broadcast("claw", uiEvent{Type: "progress", Text: "x"})
+	h.broadcast("alice", uiEvent{Type: "progress", Text: "x"})
 	select {
 	case <-ch: // emit closed the channel we were holding
 	default:
@@ -109,15 +109,15 @@ func TestUIHubWakeOnEmit(t *testing.T) {
 
 // bumpSessions advances the per-user strip revision AND wakes held polls, so handleTail can return
 // a sessions-only change (rename/create/close/cross-tab read) immediately instead of holding to
-// the timeout — the durable-tail regression pico-codex flagged.
+// the timeout.
 func TestBumpSessionsAdvancesRevAndWakes(t *testing.T) {
 	h := newUIHub()
-	if h.sessionsRev("claw") != 0 {
-		t.Fatalf("fresh rev = %d, want 0", h.sessionsRev("claw"))
+	if h.sessionsRev("alice") != 0 {
+		t.Fatalf("fresh rev = %d, want 0", h.sessionsRev("alice"))
 	}
-	ch := h.waitChan("claw")
-	h.bumpSessions("claw")
-	if got := h.sessionsRev("claw"); got != 1 {
+	ch := h.waitChan("alice")
+	h.bumpSessions("alice")
+	if got := h.sessionsRev("alice"); got != 1 {
 		t.Fatalf("rev after bump = %d, want 1", got)
 	}
 	select {
@@ -132,10 +132,10 @@ func TestBumpSessionsAdvancesRevAndWakes(t *testing.T) {
 // silently dropped for an open UI.
 func TestBroadcastAllReachesKnownUserBetweenPolls(t *testing.T) {
 	h := newUIHub()
-	h.enterPoll("claw") // marks the user known
-	h.leavePoll("claw") // now: not inflight, no ring entry
+	h.enterPoll("alice") // marks the user known
+	h.leavePoll("alice") // now: not inflight, no ring entry
 	h.broadcastAll(uiEvent{Type: "notice", Text: "restart"})
-	if ev, _, _ := h.collect("claw", h.epoch, 0); len(ev) != 1 {
+	if ev, _, _ := h.collect("alice", h.epoch, 0); len(ev) != 1 {
 		t.Fatalf("known user between polls missed the notice: got %d events, want 1", len(ev))
 	}
 }
@@ -145,29 +145,29 @@ func TestBroadcastAllReachesKnownUserBetweenPolls(t *testing.T) {
 func TestUIHubInflightCap(t *testing.T) {
 	h := newUIHub()
 	for i := 0; i < uiMaxInflightPerUser; i++ {
-		if !h.enterPoll("claw") {
+		if !h.enterPoll("alice") {
 			t.Fatalf("enterPoll refused at %d, under the cap", i)
 		}
 	}
-	if h.enterPoll("claw") {
+	if h.enterPoll("alice") {
 		t.Fatal("enterPoll must refuse past the cap")
 	}
-	h.leavePoll("claw")
-	if !h.enterPoll("claw") {
+	h.leavePoll("alice")
+	if !h.enterPoll("alice") {
 		t.Fatal("a freed slot must allow a new poll")
 	}
 }
 
 func TestBuildUITokens(t *testing.T) {
 	tokens, err := buildUITokens([]config.UserIdentity{
-		{ID: "claw", UIToken: "secret1"},
+		{ID: "alice", UIToken: "secret1"},
 		{ID: "bob", UIToken: "secret2"},
 		{ID: "noui"}, // no token — skipped, not an error
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(tokens) != 2 || tokens["secret1"] != "claw" || tokens["secret2"] != "bob" {
+	if len(tokens) != 2 || tokens["secret1"] != "alice" || tokens["secret2"] != "bob" {
 		t.Fatalf("bad token map: %v", tokens)
 	}
 	if _, err := buildUITokens([]config.UserIdentity{{ID: "a", UIToken: "dup"}, {ID: "b", UIToken: "dup"}}); err == nil {
@@ -179,11 +179,11 @@ func TestBuildUITokens(t *testing.T) {
 }
 
 func TestUIServerAuth(t *testing.T) {
-	s := &uiServer{tokens: map[string]string{"secret": "claw"}}
+	s := &uiServer{tokens: map[string]string{"secret": "alice"}}
 
 	bearer := httptest.NewRequest("GET", "/api/sessions", nil)
 	bearer.Header.Set("Authorization", "Bearer secret")
-	if u, ok := s.auth(bearer); !ok || u != "claw" {
+	if u, ok := s.auth(bearer); !ok || u != "alice" {
 		t.Fatalf("bearer auth: got %q ok=%v", u, ok)
 	}
 
@@ -209,18 +209,18 @@ func TestUIServerAuth(t *testing.T) {
 // The UI shares the session list with messenger DMs for the same person: a
 // ui:<id> chat and a mapped tg DM both resolve to user:<id>.
 func TestSessionKeyUISharesIdentity(t *testing.T) {
-	d := &daemon{identities: map[int64]string{42: "claw"}}
-	if got := d.sessionKey("ui:claw"); got != "user:claw" {
-		t.Fatalf("ui sessionKey = %q, want user:claw", got)
+	d := &daemon{identities: map[int64]string{42: "alice"}}
+	if got := d.sessionKey("ui:alice"); got != "user:alice" {
+		t.Fatalf("ui sessionKey = %q, want user:alice", got)
 	}
-	if got := d.sessionKey("tg:42"); got != "user:claw" {
-		t.Fatalf("tg sessionKey = %q, want user:claw (shared identity)", got)
+	if got := d.sessionKey("tg:42"); got != "user:alice" {
+		t.Fatalf("tg sessionKey = %q, want user:alice (shared identity)", got)
 	}
 }
 
 func TestDeliveryForRoutesUIChat(t *testing.T) {
 	d := &daemon{uiHub: newUIHub()}
-	del := d.deliveryFor(context.Background(), queuedMsg{chatID: "ui:claw", sessCreated: 5}, true)
+	del := d.deliveryFor(context.Background(), queuedMsg{chatID: "ui:alice", sessCreated: 5}, true)
 	if _, ok := del.(*uiDelivery); !ok {
 		t.Fatalf("ui chat must get *uiDelivery, got %T", del)
 	}
@@ -234,8 +234,8 @@ func TestDeliveryForMirrorsMessengerToUI(t *testing.T) {
 	d := newTestDeliveryDaemon(&fakeTransport{})
 	d.uiHub = newUIHub()
 
-	canon := d.uiHub.waitChan("claw")
-	del := d.deliveryFor(context.Background(), queuedMsg{chatID: "tg:1", sessKey: "user:claw", sessCreated: 7}, true)
+	canon := d.uiHub.waitChan("alice")
+	del := d.deliveryFor(context.Background(), queuedMsg{chatID: "tg:1", sessKey: "user:alice", sessCreated: 7}, true)
 	if _, ok := del.(teeDelivery); !ok {
 		t.Fatalf("canonical messenger session must mirror to UI (teeDelivery), got %T", del)
 	}
@@ -259,13 +259,13 @@ func TestDeliveryForMirrorsMessengerToUI(t *testing.T) {
 	}
 }
 
-// newUIDelivery pokes the CANONICAL user's tail (user:claw -> "claw"), never the raw messenger id.
+// newUIDelivery pokes the CANONICAL user's tail (user:alice -> "alice"), never the raw messenger id.
 func TestUIDeliveryUsesCanonicalSessionUser(t *testing.T) {
 	h := newUIHub()
 	d := &daemon{uiHub: h}
-	canon := h.waitChan("claw")
+	canon := h.waitChan("alice")
 	raw := h.waitChan("42")
-	d.newUIDelivery(context.Background(), queuedMsg{chatID: "tg:42", sessKey: "user:claw", sessCreated: 7})
+	d.newUIDelivery(context.Background(), queuedMsg{chatID: "tg:42", sessKey: "user:alice", sessCreated: 7})
 
 	select {
 	case <-canon: // poked the canonical user
@@ -281,12 +281,12 @@ func TestUIDeliveryUsesCanonicalSessionUser(t *testing.T) {
 
 func TestUITransportUsesCanonicalSessionUser(t *testing.T) {
 	h := newUIHub()
-	d := &daemon{uiHub: h, identities: map[int64]string{42: "claw"}}
+	d := &daemon{uiHub: h, identities: map[int64]string{42: "alice"}}
 	if err := (&uiTransport{d: d}).SendMessage("tg:42", "status", "", ""); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
-	ev, _, _ := h.collect("claw", h.epoch, 0)
+	ev, _, _ := h.collect("alice", h.epoch, 0)
 	if len(ev) != 1 {
 		t.Fatalf("canonical user got %d events, want 1 notice", len(ev))
 	}
@@ -303,11 +303,11 @@ func TestUITransportUsesCanonicalSessionUser(t *testing.T) {
 func TestUIServerRoutes(t *testing.T) {
 	d := &daemon{
 		cfg:     &config.Config{},
-		store:   newStoreWithChat("user:claw", "one"),
+		store:   newStoreWithChat("user:alice", "one"),
 		uiHub:   newUIHub(),
 		runners: make(map[runnerKey]*sessionRunner),
 	}
-	h := (&uiServer{d: d, tokens: map[string]string{"sec": "claw"}}).routes()
+	h := (&uiServer{d: d, tokens: map[string]string{"sec": "alice"}}).routes()
 
 	spa := httptest.NewRecorder()
 	h.ServeHTTP(spa, httptest.NewRequest("GET", "/", nil))
@@ -351,9 +351,9 @@ func TestUIServerRoutes(t *testing.T) {
 }
 
 func TestUISendRequiresSession(t *testing.T) {
-	d := &daemon{cfg: &config.Config{}, store: newStoreWithChat("user:claw", "one"),
+	d := &daemon{cfg: &config.Config{}, store: newStoreWithChat("user:alice", "one"),
 		uiHub: newUIHub(), runners: make(map[runnerKey]*sessionRunner)}
-	h := (&uiServer{d: d, tokens: map[string]string{"sec": "claw"}}).routes()
+	h := (&uiServer{d: d, tokens: map[string]string{"sec": "alice"}}).routes()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/send", strings.NewReader(`{"text":"hi"}`))
 	req.Header.Set("Authorization", "Bearer sec")
@@ -365,8 +365,8 @@ func TestUISendRequiresSession(t *testing.T) {
 }
 
 func TestUIAbortValidatesSession(t *testing.T) {
-	d := &daemon{store: newStoreWithChat("user:claw", "one"), runners: make(map[runnerKey]*sessionRunner)}
-	h := (&uiServer{d: d, tokens: map[string]string{"sec": "claw"}}).routes()
+	d := &daemon{store: newStoreWithChat("user:alice", "one"), runners: make(map[runnerKey]*sessionRunner)}
+	h := (&uiServer{d: d, tokens: map[string]string{"sec": "alice"}}).routes()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/abort", strings.NewReader(`{"session":99999}`))
 	req.Header.Set("Authorization", "Bearer sec")

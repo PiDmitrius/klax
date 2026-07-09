@@ -12,7 +12,7 @@ func TestLoadStoreMigratesLegacyEffortOverrideAndScopeDefaults(t *testing.T) {
 
 	data := `{
   "chats": {
-    "user:claw": {
+    "user:alice": {
       "sessions": [
         {
           "name": "main",
@@ -36,7 +36,7 @@ func TestLoadStoreMigratesLegacyEffortOverrideAndScopeDefaults(t *testing.T) {
 		t.Fatalf("LoadStore: %v", err)
 	}
 
-	sess := store.Active("user:claw")
+	sess := store.Active("user:alice")
 	if sess == nil {
 		t.Fatal("expected active session")
 	}
@@ -44,7 +44,7 @@ func TestLoadStoreMigratesLegacyEffortOverrideAndScopeDefaults(t *testing.T) {
 		t.Fatalf("ThinkOverride = %q, want high", sess.ThinkOverride)
 	}
 
-	def := store.ScopeDefaults("user:claw")
+	def := store.ScopeDefaults("user:alice")
 	if def == nil {
 		t.Fatal("expected scope defaults")
 	}
@@ -65,7 +65,7 @@ func TestLoadStorePinsLegacyUsedSessionsToClaude(t *testing.T) {
 
 	data := `{
   "chats": {
-    "user:claw": {
+    "user:alice": {
       "sessions": [
         {
           "name": "legacy-used",
@@ -77,7 +77,7 @@ func TestLoadStorePinsLegacyUsedSessionsToClaude(t *testing.T) {
     }
   },
   "scope_defaults": {
-    "user:claw": {
+    "user:alice": {
       "backend": "codex"
     }
   }
@@ -91,7 +91,7 @@ func TestLoadStorePinsLegacyUsedSessionsToClaude(t *testing.T) {
 		t.Fatalf("LoadStore: %v", err)
 	}
 
-	sess := store.Active("user:claw")
+	sess := store.Active("user:alice")
 	if sess == nil {
 		t.Fatal("expected active session")
 	}
@@ -133,8 +133,8 @@ func TestLoadStoreSupportsLegacyFlatFormat(t *testing.T) {
 	}
 }
 
-// TestReadThroughWatermarkRoundTrips locks the durable unread cursor (DURABLE_CURSOR_PLAN.md
-// S1): it loads from a store, defaults to the zero watermark on a legacy store that omits the
+// TestReadThroughWatermarkRoundTrips locks the durable unread cursor: it loads from a store,
+// defaults to the zero watermark on a legacy store that omits the
 // fields, and survives a Save→reload — including a 0 block index under `omitempty`.
 func TestReadThroughWatermarkRoundTrips(t *testing.T) {
 	tmp := t.TempDir()
@@ -143,7 +143,7 @@ func TestReadThroughWatermarkRoundTrips(t *testing.T) {
 	// First session carries a watermark; the second (legacy) omits the fields entirely.
 	data := `{
   "chats": {
-    "user:claw": {
+    "user:alice": {
       "sessions": [
         {"name": "with-mark", "cwd": "/tmp/p", "active": true, "created": 1000, "messages": 2,
          "read_through_turn": 5, "read_through_block": 3},
@@ -160,7 +160,7 @@ func TestReadThroughWatermarkRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadStore: %v", err)
 	}
-	sessions := store.SessionsFor("user:claw")
+	sessions := store.SessionsFor("user:alice")
 	if len(sessions) != 2 {
 		t.Fatalf("len(sessions) = %d, want 2", len(sessions))
 	}
@@ -174,7 +174,7 @@ func TestReadThroughWatermarkRoundTrips(t *testing.T) {
 
 	// Serialization round-trip: raise the watermark, persist, reload — it survives, and a 0 block
 	// index (dropped by omitempty) still reloads as 0 rather than corrupting the turn.
-	store.UpdateSession("user:claw", 1000, func(cur *Session) {
+	store.UpdateSession("user:alice", 1000, func(cur *Session) {
 		cur.ReadThroughTurn = 9
 		cur.ReadThroughBlock = 0
 	})
@@ -185,7 +185,7 @@ func TestReadThroughWatermarkRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadStore (reload): %v", err)
 	}
-	got := reloaded.Get("user:claw", 1000)
+	got := reloaded.Get("user:alice", 1000)
 	if got == nil {
 		t.Fatal("expected session created=1000 after reload")
 	}
@@ -200,11 +200,11 @@ func TestNewSnapshotsScopeDefaults(t *testing.T) {
 		Scope: make(map[string]*ScopeDefaults),
 	}
 
-	def := store.EnsureScopeDefaults("user:claw", ScopeDefaults{Backend: "claude"})
+	def := store.EnsureScopeDefaults("user:alice", ScopeDefaults{Backend: "claude"})
 	if def.Backend != "claude" {
 		t.Fatalf("defaults backend = %q, want claude", def.Backend)
 	}
-	store.UpdateScopeDefaults("user:claw", func(def *ScopeDefaults) {
+	store.UpdateScopeDefaults("user:alice", func(def *ScopeDefaults) {
 		def.Backend = "codex"
 		def.Model = "gpt-5.4"
 		def.Think = "high"
@@ -212,7 +212,7 @@ func TestNewSnapshotsScopeDefaults(t *testing.T) {
 		def.ClaudeTTY = true
 	})
 
-	sess := store.New("user:claw", "main", "/tmp/project", *store.ScopeDefaults("user:claw"))
+	sess := store.New("user:alice", "main", "/tmp/project", *store.ScopeDefaults("user:alice"))
 	if sess.Backend != "codex" {
 		t.Fatalf("backend = %q, want codex", sess.Backend)
 	}
@@ -229,7 +229,7 @@ func TestNewSnapshotsScopeDefaults(t *testing.T) {
 		t.Fatal("claude tty default was not copied to new session")
 	}
 
-	store.UpdateScopeDefaults("user:claw", func(def *ScopeDefaults) {
+	store.UpdateScopeDefaults("user:alice", func(def *ScopeDefaults) {
 		def.Backend = "claude"
 		def.Model = "sonnet"
 		def.Think = "medium"
@@ -237,7 +237,7 @@ func TestNewSnapshotsScopeDefaults(t *testing.T) {
 		def.ClaudeTTY = false
 	})
 
-	sess = store.Active("user:claw")
+	sess = store.Active("user:alice")
 	if sess == nil {
 		t.Fatal("expected active session")
 	}
@@ -268,7 +268,7 @@ func TestNewAssignsUniqueCreatedAcrossRapidCalls(t *testing.T) {
 	const n = 5
 	seen := make(map[int64]bool, n)
 	for i := 0; i < n; i++ {
-		sess := store.New("user:claw", "s", "/tmp", defaults)
+		sess := store.New("user:alice", "s", "/tmp", defaults)
 		if seen[sess.Created] {
 			t.Fatalf("duplicate Created %d on iteration %d", sess.Created, i)
 		}
@@ -281,9 +281,9 @@ func TestGetReturnsCloneByCreated(t *testing.T) {
 		Chats: make(map[string]*ChatSessions),
 		Scope: make(map[string]*ScopeDefaults),
 	}
-	sess := store.New("user:claw", "main", "/tmp", ScopeDefaults{Backend: "claude"})
+	sess := store.New("user:alice", "main", "/tmp", ScopeDefaults{Backend: "claude"})
 
-	got := store.Get("user:claw", sess.Created)
+	got := store.Get("user:alice", sess.Created)
 	if got == nil {
 		t.Fatal("Get returned nil for existing session")
 	}
@@ -292,12 +292,12 @@ func TestGetReturnsCloneByCreated(t *testing.T) {
 	}
 
 	got.Name = "mutated"
-	again := store.Get("user:claw", sess.Created)
+	again := store.Get("user:alice", sess.Created)
 	if again.Name != "main" {
 		t.Fatalf("Get must return a clone, got mutation leak: %q", again.Name)
 	}
 
-	if store.Get("user:claw", sess.Created+999) != nil {
+	if store.Get("user:alice", sess.Created+999) != nil {
 		t.Fatal("Get must return nil for unknown Created")
 	}
 }
@@ -308,7 +308,7 @@ func TestLoadStoreKeepsEmptyScopeDefaultsAsExplicitDefault(t *testing.T) {
 
 	data := `{
   "chats": {
-    "user:claw": {
+    "user:alice": {
       "sessions": [
         {
           "name": "main",
@@ -323,7 +323,7 @@ func TestLoadStoreKeepsEmptyScopeDefaultsAsExplicitDefault(t *testing.T) {
     }
   },
   "scope_defaults": {
-    "user:claw": {
+    "user:alice": {
       "backend": "codex",
       "model": "",
       "think": ""
@@ -339,7 +339,7 @@ func TestLoadStoreKeepsEmptyScopeDefaultsAsExplicitDefault(t *testing.T) {
 		t.Fatalf("LoadStore: %v", err)
 	}
 
-	def := store.ScopeDefaults("user:claw")
+	def := store.ScopeDefaults("user:alice")
 	if def == nil {
 		t.Fatal("expected scope defaults")
 	}

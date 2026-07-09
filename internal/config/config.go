@@ -9,7 +9,7 @@ import (
 // UserIdentity maps platform-specific IDs to a canonical user.
 // Sessions in DMs are shared across platforms for the same user.
 type UserIdentity struct {
-	ID         string `json:"id"`                 // canonical user ID (e.g. "claw")
+	ID         string `json:"id"`                 // canonical user ID (e.g. "alice")
 	TelegramID int64  `json:"tg_id,omitempty"`    // Telegram user ID
 	MaxID      int64  `json:"mx_id,omitempty"`    // MAX user ID
 	VKID       int64  `json:"vk_id,omitempty"`    // VK user ID

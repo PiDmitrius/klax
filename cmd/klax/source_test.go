@@ -88,21 +88,21 @@ func TestEnqueueToSessionRendersMessengerDMInReadModel(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	tp := &fakeTransport{}
 	d := newTestDeliveryDaemon(tp)
-	d.identities = map[int64]string{1: "claw"} // tg:1 -> user:claw (a mapped DM)
-	d.store = newStoreWithChat("user:claw", "one")
+	d.identities = map[int64]string{1: "alice"} // tg:1 -> user:alice (a mapped DM)
+	d.store = newStoreWithChat("user:alice", "one")
 	d.runners = make(map[runnerKey]*sessionRunner)
 	d.uiHub = newUIHub()
 
-	sess := d.store.SessionsFor("user:claw")[0]
+	sess := d.store.SessionsFor("user:alice")[0]
 	created := sess.Created
 	// Pre-seed the runner as processing so the spawned queue pump returns at its
 	// guard and no real backend runs.
-	d.runners[runnerKey{sk: "user:claw", created: created}] = &sessionRunner{runner: runner.New(), processing: true}
+	d.runners[runnerKey{sk: "user:alice", created: created}] = &sessionRunner{runner: runner.New(), processing: true}
 
 	d.enqueueToSession("tg:1", "100", "hi there", nil, created, "") // mapped messenger DM: no nonce
 
 	found := false
-	for _, ut := range d.readModel("user:claw", sess) {
+	for _, ut := range d.readModel("user:alice", sess) {
 		if ut.Role == "user" && ut.Text == "hi there" {
 			found = true
 		}
@@ -118,8 +118,8 @@ func TestEnqueueToSessionRendersInboundImageAsMarkdown(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	tp := &fakeTransport{}
 	d := newTestDeliveryDaemon(tp)
-	d.identities = map[int64]string{1: "claw"} // tg:1 -> user:claw (a mapped DM)
-	d.store = newStoreWithChat("user:claw", "one")
+	d.identities = map[int64]string{1: "alice"} // tg:1 -> user:alice (a mapped DM)
+	d.store = newStoreWithChat("user:alice", "one")
 	d.runners = make(map[runnerKey]*sessionRunner)
 	d.uiHub = newUIHub()
 	var err error
@@ -128,9 +128,9 @@ func TestEnqueueToSessionRendersInboundImageAsMarkdown(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sess := d.store.SessionsFor("user:claw")[0]
+	sess := d.store.SessionsFor("user:alice")[0]
 	created := sess.Created
-	d.runners[runnerKey{sk: "user:claw", created: created}] = &sessionRunner{runner: runner.New(), processing: true}
+	d.runners[runnerKey{sk: "user:alice", created: created}] = &sessionRunner{runner: runner.New(), processing: true}
 
 	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAIAAAB7QOjdAAAAD0lEQVR4nGP8z8DAwMAAAAYIAQHLR3Z1AAAAAElFTkSuQmCC")
 	if err != nil {
@@ -139,7 +139,7 @@ func TestEnqueueToSessionRendersInboundImageAsMarkdown(t *testing.T) {
 	d.enqueueToSession("tg:1", "100", "", []attachment{{filename: "image.png", data: png}}, created, "")
 
 	found := false
-	for _, ut := range d.readModel("user:claw", sess) {
+	for _, ut := range d.readModel("user:alice", sess) {
 		if ut.Role != "user" {
 			continue
 		}
@@ -161,23 +161,23 @@ func TestAbortSessionMarksQueuedTurnsErrInReadModel(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	tp := &fakeTransport{}
 	d := newTestDeliveryDaemon(tp)
-	d.identities = map[int64]string{1: "claw"} // tg:1 -> user:claw (a mapped DM)
-	d.store = newStoreWithChat("user:claw", "one")
+	d.identities = map[int64]string{1: "alice"} // tg:1 -> user:alice (a mapped DM)
+	d.store = newStoreWithChat("user:alice", "one")
 	d.runners = make(map[runnerKey]*sessionRunner)
 	d.uiHub = newUIHub()
 
-	sess := d.store.SessionsFor("user:claw")[0]
+	sess := d.store.SessionsFor("user:alice")[0]
 	created := sess.Created
-	d.runners[runnerKey{sk: "user:claw", created: created}] = &sessionRunner{runner: runner.New(), processing: true}
+	d.runners[runnerKey{sk: "user:alice", created: created}] = &sessionRunner{runner: runner.New(), processing: true}
 	d.enqueueToSession("tg:1", "100", "one", nil, created, "")
 	d.enqueueToSession("tg:1", "101", "two", nil, created, "")
 
-	if !d.abortSession("user:claw", created, false) {
+	if !d.abortSession("user:alice", created, false) {
 		t.Fatal("abortSession returned false for queued turns")
 	}
 
 	errs := 0
-	for _, ut := range d.readModel("user:claw", sess) {
+	for _, ut := range d.readModel("user:alice", sess) {
 		if ut.State == "err" {
 			errs++
 		}

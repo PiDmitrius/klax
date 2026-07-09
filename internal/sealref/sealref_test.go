@@ -11,7 +11,7 @@ func TestSealRoundTripTamperExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Unix(1_700_000_000, 0)
-	p := Payload{SessionKey: "user:claw", Created: 42, Path: "/x/a.png", ContentType: "image/png", Exp: now.Add(time.Hour).Unix()}
+	p := Payload{SessionKey: "user:alice", Created: 42, Path: "/x/a.png", ContentType: "image/png", Exp: now.Add(time.Hour).Unix()}
 	ref, err := s.Seal(p)
 	if err != nil {
 		t.Fatal(err)
@@ -22,7 +22,7 @@ func TestSealRoundTripTamperExpiry(t *testing.T) {
 		t.Fatalf("round-trip = %+v, %v; want %+v", got, err, p)
 	}
 	// No path is exposed in the ref text (it is sealed, not just signed).
-	if len(ref) == 0 || containsSub(ref, "a.png") || containsSub(ref, "user:claw") {
+	if len(ref) == 0 || containsSub(ref, "a.png") || containsSub(ref, "user:alice") {
 		t.Fatalf("ref leaks plaintext: %q", ref)
 	}
 	// Tampered ref fails.

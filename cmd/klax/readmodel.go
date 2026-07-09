@@ -13,7 +13,7 @@ import (
 // uiBlock is one answer block (assistant narration / tool call / system note) under a
 // user turn. ID is a STABLE content-derived dedup key (blockID): the same block hashes
 // identically whether it arrives in a reload's transcript or a live poll event, so the
-// client can drop the duplicate across the reload-read/poll race (REFACTOR_PLAN §A3).
+// client can drop the duplicate across the reload-read/poll race.
 // EventSeq is filled by the client on live apply (= the event's seq); absent on reload.
 type uiBlock struct {
 	ID    string             `json:"id"`
@@ -309,7 +309,7 @@ func stateCode(state string) string {
 // when a turn is still RUNNING behind a newer QUEUED one, the boundary anchors on the running turn
 // (so its later blocks + completion are delivered) while `head` stays on the newest turn — so the
 // already-seen queued turn is NOT re-flagged as "new" on every poll (which would busy-loop the
-// long-poll). A whole new turn is one past `head`, not past the boundary. [DURABLE_CURSOR_PLAN S3]
+// long-poll). A whole new turn is one past `head`, not past the boundary.
 func tailFrom(turns []uiTurn, throughTurn int64, throughBlock int, throughState string, throughTrail int, head int64) []uiTurn {
 	boundary := -1
 	fresh := false

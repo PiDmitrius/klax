@@ -53,7 +53,7 @@ export class TurnModel {
   // onward. It drops the existing tail from that turn (with any trailing standalone rows) and
   // appends the fresh rows, so a grown last turn and brand-new turns re-sync in ONE step — the SAME
   // buildReadModel rows a reload uses, so live and reload can't disagree. Empty rows are a no-op.
-  // [DURABLE_CURSOR_PLAN.md S4 — client merges rows, not events]
+  // Client merges durable read-model rows, not transient events.
   replaceTail(created, rows){
     rows = (rows || []).map(normTurn);
     if(!rows.length) return;
