@@ -3,7 +3,7 @@
   :root {
     --bg:#ffffff; --panel:#f5f6f8; --chat:#e6e8ec; --fg:#1f2328; --muted:#6b7280; --border:#e3e5ea;
     --bubble-user:#dcf3dc; --bubble-assistant:#ffffff; --tool-bg:#eef0f3; --tool-fg:#4b5563;
-    --code-bg:#eceef1; --error-bg:#fdecea; --error-fg:#b3261e; --accent:#008e00;
+    --code-bg:#eceef1; --error-bg:#fdecea; --error-fg:#b3261e; --accent:#008e00; --copy-flash:rgba(30,194,30,.32);
     --dot:#9fb6a6; --dot-work:#eaa800; --dot-new:#1ec21e; --unread-bg:#e2f6e2; --unread-work-bg:#fff3cf; --warn:#d9a441;
     --badge-new-top:#1ec21e; --badge-new-mid:#00b500; --badge-new-bottom:#008e00;
     --badge-new-stroke:#006400;
@@ -15,7 +15,7 @@
   html[data-theme="dark"] {
     --bg:#15171c; --panel:#1a1d23; --chat:#15171c; --fg:#d8dee9; --muted:#8b92a0; --border:#2a2e37;
     --bubble-user:#24382a; --bubble-assistant:#232730; --tool-bg:#1c1f26; --tool-fg:#9aa4b6;
-    --code-bg:#14161b; --error-bg:#3a2326; --error-fg:#f0b3b3; --accent:#33c558;
+    --code-bg:#14161b; --error-bg:#3a2326; --error-fg:#f0b3b3; --accent:#33c558; --copy-flash:rgba(51,197,88,.28);
     --dot:#49584d; --dot-work:#f4c948; --dot-new:#2bd02b; --unread-bg:#1f3324; --unread-work-bg:#302819; --warn:#d9a441;
     --badge-new-top:#2bd02b; --badge-new-mid:#13b813; --badge-new-bottom:#0c8f0c;
     --badge-new-stroke:#197b19;
@@ -122,6 +122,7 @@
   @keyframes msgin { from { opacity: 0; transform: translateY(10px); } }
   .readline.leaving { pointer-events: none; animation: lineout .3s ease-in forwards; }
   @keyframes lineout { to { opacity: 0; } }
+  @keyframes copyflash { 0%, 25% { box-shadow: inset 0 0 0 9999px var(--copy-flash); } 100% { box-shadow: inset 0 0 0 9999px transparent; } }
   @media (prefers-reduced-motion: reduce) { .turn.enter, .msg.enter, .readline.leaving { animation: none; } }
   /* klax-side blocks fill the column for a consistent width — only the colour
      differs between text, tool, error and command output. */
@@ -169,9 +170,9 @@
                     cursor: pointer; opacity: 0; transition: opacity .12s; user-select: none; }
   .body pre:hover .copy { opacity: .7; }
   .body pre .copy:hover { opacity: 1; color: var(--fg); }
-  .body pre .copy.done { opacity: 1; color: #fff; background: var(--accent); border-color: var(--accent); }
-  .body code { background: var(--code-bg); padding: 1px 4px; border-radius: 4px; }
-  .body pre code { background: none; padding: 0; }
+  .body code { background: var(--code-bg); padding: 1px 4px; border-radius: 4px; cursor: pointer; }
+  .body pre code { background: none; padding: 0; cursor: text; }
+  .copyflash { animation: copyflash .38s ease-out; }
   /* Whole-message copy — same affordance as the fence button, at the bubble's own corner
      (fence buttons sit inset inside their pre, so the two never coincide). */
   .msg > .mcopy { position: absolute; top: 6px; right: 6px; padding: 2px 7px; font-size: 12px; line-height: 1;
@@ -179,7 +180,6 @@
                   cursor: pointer; opacity: 0; transition: opacity .12s; user-select: none; z-index: 2; }
   .msg:hover > .mcopy { opacity: .7; }
   .msg > .mcopy:hover { opacity: 1; color: var(--fg); }
-  .msg > .mcopy.done { opacity: 1; color: #fff; background: var(--accent); border-color: var(--accent); }
   @media (hover: none) { .msg > .mcopy, .body pre .copy { opacity: .45; } }
   /* GitHub-markdown reading font for conversation prose (assistant + user only) —
      tabs, composer, tool labels and notices keep the compact UI font. */

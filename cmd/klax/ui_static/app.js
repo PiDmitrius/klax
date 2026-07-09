@@ -635,6 +635,17 @@ function fallbackCopy(text, ok){
     if(ok) ok();
   } catch(e){}
 }
+function copyText(text, ok){
+  if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(ok).catch(() => fallbackCopy(text, ok));
+  else fallbackCopy(text, ok);
+}
+function flashCopied(el){
+  if(!el) return;
+  el.classList.remove("copyflash");
+  void el.offsetWidth;
+  el.classList.add("copyflash");
+  el.addEventListener("animationend", () => el.classList.remove("copyflash"), { once: true });
+}
 
 // setDegraded turns the top-left logo amber while the live channel is down (the poll loop
 // is failing and backing off) and restores it on the next good poll — an explicit,
@@ -701,25 +712,30 @@ function start(){
     onAfterSend: () => { stick = true; markRead(active, true); renderTabs(active); stickToBottom(); },
   });
   initTabs({ select: selectSession, onNew: onNewSession, afterClose, notice: showNotice, unread: badgeCount, focus: focusComposer });
-  // Delegated copy buttons: a fence's .copy copies its code, a bubble's .mcopy copies the
-  // whole message's PRIMARY text (the model text render.js stashed on the node — raw
-  // markdown source, never the rendered HTML).
+  // Delegated copy affordances: the copied object flashes, not the button.
   const lw = document.getElementById("log");
   if(lw) lw.addEventListener("click", e => {
-    const btn = e.target.closest && e.target.closest(".copy, .mcopy");
-    if(!btn) return;
-    let text;
-    if(btn.classList.contains("mcopy")){
-      const msg = btn.closest(".msg");
+    const target = e.target.closest && e.target.closest(".copy, .mcopy, .body code");
+    if(!target) return;
+    let text, flash;
+    if(target.classList.contains("mcopy")){
+      const msg = target.closest(".msg");
       if(msg) text = msg._raw;
-    } else {
-      const code = btn.closest("pre") && btn.closest("pre").querySelector("code");
+      flash = msg;
+    } else if(target.classList.contains("copy")){
+      const pre = target.closest("pre");
+      const code = pre && pre.querySelector("code");
       if(code) text = code.textContent || "";
+      flash = pre;
+    } else {
+      if(target.closest("pre")) return;
+      const sel = window.getSelection && window.getSelection();
+      if(sel && !sel.isCollapsed) return;
+      text = target.textContent || "";
+      flash = target;
     }
     if(text === undefined) return;
-    const done = () => { btn.classList.add("done"); btn.textContent = "✓"; setTimeout(() => { btn.classList.remove("done"); btn.textContent = "⧉"; }, 1200); };
-    if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
-    else fallbackCopy(text, done);
+    copyText(text, () => flashCopied(flash));
   });
   document.addEventListener("selectionchange", () => { if(pendingRender && !selectionInLog(logcol())){ pendingRender = false; commitLive(active); } });
   const log = document.getElementById("log");
