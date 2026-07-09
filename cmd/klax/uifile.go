@@ -36,16 +36,44 @@ func (d *daemon) inboundText(store *sessfiles.Store, t sessfiles.Turn, sk string
 		}
 		u := "/api/file?ref=" + url.QueryEscape(ref)
 		label := safeMarkdownLabel(sessfiles.DisplayName(name))
+		size := formatFileSize(store.Path(name))
 		if strings.HasPrefix(ct, "image/") {
 			if w, h := imageDimensions(store.Path(name)); w > 0 && h > 0 {
 				u += "&w=" + strconv.Itoa(w) + "&h=" + strconv.Itoa(h)
 			}
 			parts = append(parts, "!["+label+"]("+u+")")
 		} else {
-			parts = append(parts, "["+label+"]("+u+")")
+			parts = append(parts, withSize("["+label+"]("+u+")", size))
 		}
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+func withSize(markdown, size string) string {
+	if size == "" {
+		return markdown
+	}
+	return markdown + " (" + size + ")"
+}
+
+func formatFileSize(path string) string {
+	st, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	n := st.Size()
+	if n < 1024 {
+		return strconv.FormatInt(n, 10) + " B"
+	}
+	units := []string{"KiB", "MiB", "GiB", "TiB"}
+	v := float64(n)
+	for _, unit := range units {
+		v /= 1024
+		if v < 1024 {
+			return strconv.FormatFloat(v, 'f', 1, 64) + " " + unit
+		}
+	}
+	return strconv.FormatFloat(v, 'f', 1, 64) + " PiB"
 }
 
 func imageDimensions(path string) (int, int) {
@@ -147,8 +175,9 @@ func (s *uiServer) handleFile(w http.ResponseWriter, r *http.Request) {
 	if inlineImageTypes[mt] {
 		w.Header().Set("Content-Type", mt)
 	} else {
+		name := sessfiles.DisplayName(filepath.Base(p.Path))
 		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(filepath.Base(p.Path)))
+		w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(name))
 	}
 	http.ServeContent(w, r, filepath.Base(p.Path), fi.ModTime(), f)
 }

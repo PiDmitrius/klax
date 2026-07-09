@@ -115,3 +115,15 @@ func TestSanitizeTraversalAndControl(t *testing.T) {
 		}
 	}
 }
+
+func TestDisplayNameStripsDurablePrefixes(t *testing.T) {
+	for in, want := range map[string]string{
+		"000042-01-photo.png":                          "photo.png",
+		"out-c4b7c07d01f151fbfc0e52d9bedbf2c8-plan.md": "plan.md",
+		"plain.txt": "plain.txt",
+	} {
+		if got := DisplayName(in); got != want {
+			t.Errorf("DisplayName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
