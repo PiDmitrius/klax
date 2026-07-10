@@ -105,7 +105,7 @@ function startReadGrace(created){
     delete readGraceTimer[created];
     if(inReadGrace(created)) return;
     clearReadGrace(created);
-    if(active === created && documentVisible() && stick && rawUnreadCount(created) > 0){
+    if(active === created && documentVisible() && atBottom() && rawUnreadCount(created) > 0){
       markRead(created, true);
       renderTabs(active);
       commitLive(created); // the unread line fades out, messages close the gap, then split bubbles merge.
@@ -171,6 +171,12 @@ function settledDistance(log){
   const h = col ? col.offsetHeight : log.scrollHeight;
   return h - log.scrollTop - log.clientHeight;
 }
+// atBottom is the TRUE "is the settled bottom in view" test, read live from geometry — unlike
+// the `stick` flag, which is force-cleared to pin the unread divider on entry and, for a
+// conversation that fully fits the viewport, is never recomputed (no scroll event can fire).
+// Gating read-advance and the jump button on `stick` then strands a fully-visible session as
+// permanently-unread with the button showing; geometry cannot latch that way.
+function atBottom(){ const log = document.getElementById("log"); return !log || settledDistance(log) < 80; }
 function stickToBottom(){
   const sc = document.getElementById("log");
   const col = logcol();
@@ -238,7 +244,7 @@ function rerender(created, live, opts){
   const hadDivider = anchorLive && !!col.querySelector(".readline");
   const snap = live ? beginShift(col) : null;
   const holdSplits = opts.holdSplits || (!opts.noHoldSplits && hadDivider && rawUnreadCount(active) === 0 && snap && snap.holdSplits && snap.holdSplits.size ? snap.holdSplits : null);
-  renderSession(col, model.turns(active), readThrough[active], abortActive, sessionContextHint(active), holdSplits, !!opts.joinHeldSplits);
+  renderSession(col, model.turns(active), readThrough[active], abortActive, holdSplits, !!opts.joinHeldSplits);
   watchInlineImages(col);
   if(moreFor[active]){ // older history exists → a "load earlier" button at the top
     const m = document.createElement("button");
@@ -623,7 +629,7 @@ function onNoticeEvent(text){
 }
 
 // toggleToBottom shows the down-arrow affordance only when the user has scrolled up.
-function toggleToBottom(){ const b = document.getElementById("tobottom"); if(b) b.classList.toggle("hidden", stick); }
+function toggleToBottom(){ const b = document.getElementById("tobottom"); if(b) b.classList.toggle("hidden", atBottom()); }
 
 // fallbackCopy uses the legacy execCommand path for insecure/plain-HTTP origins where
 // navigator.clipboard is unavailable.

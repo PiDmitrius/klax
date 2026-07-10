@@ -7,7 +7,7 @@ import { api } from "./base.js";
 import { esc } from "./markdown.js";
 import { uiConfirm } from "./modal.js";
 
-let sessions = [], deps = {}, settingsFor = 0, settingsIsNew = false, settingsAutofocused = false;
+let sessions = [], deps = {}, settingsFor = 0, settingsAutofocused = false;
 // The shell's <title> (product name, server-injected) — the base for the unread prefix.
 const BASE_TITLE = (typeof document !== "undefined" && document.title) || "klax";
 function sameSession(a, b){ return String(a) === String(b); }
@@ -80,7 +80,7 @@ function createTab(){
     if(e.target.classList.contains("tx")) return;
     e.preventDefault();
     const created = parseInt(t.dataset.created, 10);
-    if(created) openSettings(created, "Настройки сессии", false);
+    if(created) openSettings(created, "Настройки сессии");
   }); // settings via double-click (no per-tab gear)
   t.querySelector(".tx").addEventListener("click", e => {
     e.stopPropagation();
@@ -97,7 +97,7 @@ async function newSession(){
     const r = await api("/api/new", { method: "POST" });
     if(!r.ok){ notice("не удалось создать сессию"); return; }
     const d = await r.json();
-    if(d.created){ if(deps.onNew) await deps.onNew(d.created); openSettings(d.created, "Новая сессия", true); }
+    if(d.created){ if(deps.onNew) await deps.onNew(d.created); openSettings(d.created, "Новая сессия"); }
   } catch(e){ notice("не удалось создать сессию"); }
 }
 
@@ -152,8 +152,8 @@ function wireSelect(id, onPick){
   }));
 }
 
-export function openSettings(created, title, isNew){
-  settingsFor = created; settingsIsNew = !!isNew; settingsAutofocused = false;
+export function openSettings(created, title){
+  settingsFor = created; settingsAutofocused = false;
   const tt = document.querySelector(".smodal-title"); if(tt) tt.textContent = title || "Настройки сессии";
   document.getElementById("smodal").classList.remove("hidden");
   document.getElementById("sbody").innerHTML = '<div class="shint">Загрузка…</div>';
@@ -161,7 +161,7 @@ export function openSettings(created, title, isNew){
     .catch(() => { if(settingsFor === created) document.getElementById("sbody").innerHTML = '<div class="shint">Не удалось загрузить настройки</div>'; });
 }
 function closeSettings(){
-  settingsFor = 0; settingsIsNew = false; settingsAutofocused = false;
+  settingsFor = 0; settingsAutofocused = false;
   document.getElementById("smodal").classList.add("hidden");
   // Dismissing settings (notably the "Новая сессия" dialog that auto-opens on create and
   // grabs the name field) hands focus back to the composer so you can type straight away.
@@ -195,9 +195,11 @@ function renderSettings(d){
 
   const nameInput = b.querySelector(".sname");
   const applyName = () => { const v = nameInput.value.trim(); if(v && v !== d.name) patchSettings(d.created, { name: v }); };
-  nameInput.addEventListener("keydown", e => { if(e.key !== "Enter") return; e.preventDefault(); nameInput.blur(); if(settingsIsNew) closeSettings(); });
+  nameInput.addEventListener("keydown", e => { if(e.key !== "Enter") return; e.preventDefault(); nameInput.blur(); closeSettings(); });
   nameInput.addEventListener("blur", applyName);
-  if(settingsIsNew && settingsFor === d.created && !settingsAutofocused){
+  // Grab the name field on every open (create AND double-click) so it can be edited and
+  // committed with Enter straight away; the guard fires it once per open, not on each refresh.
+  if(settingsFor === d.created && !settingsAutofocused){
     settingsAutofocused = true;
     nameInput.focus();
     nameInput.select();

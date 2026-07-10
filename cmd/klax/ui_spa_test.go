@@ -89,16 +89,19 @@ import { renderModel, pos } from "./render.js";
 function assert(cond, msg){
   if(!cond) throw new Error(msg);
 }
-function ctx(turn, hint){
-  return renderModel([turn], undefined, hint)[0].ctxLine;
-}
-
 const base = { seq: 2, role: "user", text: "u", time: "2026-01-01T00:00:00Z", blocks: [] };
-assert(ctx({ ...base, state: "run" }, { used: 50000, window: 200000 }) === "📊 Контекст: 25% (50k/200k)", "running turn must show session fallback");
-assert(ctx({ ...base, state: "run", ctx_used: 120000, ctx_window: 200000 }, { used: 50000, window: 200000 }) === "📊 Контекст: 60% (120k/200k)", "turn-local context must win");
-assert(ctx({ ...base, state: "done" }, { used: 50000, window: 200000 }) === "", "done turn must not use session fallback");
-assert(ctx({ ...base, state: "enq" }, { used: 50000, window: 200000 }) === "", "queued turn must not show context fallback");
-assert(ctx({ ...base, state: "run" }, { used: 50000, window: 0 }) === "📊 Контекст: 50k", "used-only fallback must render count");
+// A running turn carries the PREVIOUS turn's own measured context (one source, not a snapshot).
+const prev = (used, window) => ({ seq: 1, role: "user", text: "p", time: "2026-01-01T00:00:00Z", blocks: [], state: "done", ctx_used: used, ctx_window: window });
+function runCtx(turn, prevUsed, prevWindow){
+  const items = renderModel([prev(prevUsed, prevWindow), turn]);
+  return items[items.length - 1].ctxLine;
+}
+assert(runCtx({ ...base, state: "run" }, 50000, 200000) === "📊 Контекст: 25% (50k/200k)", "running turn must carry the previous turn's context");
+assert(runCtx({ ...base, state: "run", ctx_used: 120000, ctx_window: 200000 }, 50000, 200000) === "📊 Контекст: 60% (120k/200k)", "turn-local context must win");
+assert(runCtx({ ...base, state: "done" }, 50000, 200000) === "", "done turn without its own tokens must not carry a fallback");
+assert(runCtx({ ...base, state: "enq" }, 50000, 200000) === "", "queued turn must not show context fallback");
+assert(runCtx({ ...base, state: "run" }, 50000, 0) === "📊 Контекст: 50k", "used-only fallback must render count");
+assert(renderModel([{ ...base, state: "run" }])[0].ctxLine === "", "a lone running turn has nothing to carry");
 
 const tools = [
   { id: "a", role: "tool", text: "one" },
@@ -115,18 +118,18 @@ assert(merged.length === 1, "read groups must merge");
 assert(merged[0].startPos === pos(2, 0), "merged group must inherit leading startPos");
 
 const held = new Map([[2, new Set([pos(2, 2)])]]);
-const heldGroups = renderModel([{ ...base, state: "done", blocks: tools }], pos(2, 3), null, held)[0].groups;
+const heldGroups = renderModel([{ ...base, state: "done", blocks: tools }], pos(2, 3), held)[0].groups;
 assert(heldGroups.length === 2, "held split must keep two groups after divider removal");
 assert(!heldGroups.some(g => g.divider), "held split must not keep the unread divider");
 assert(heldGroups[0].startPos === pos(2, 0) && heldGroups[1].startPos === pos(2, 2), "held split positions");
-const joinedGroups = renderModel([{ ...base, state: "done", blocks: tools }], pos(2, 3), null, held, true)[0].groups;
+const joinedGroups = renderModel([{ ...base, state: "done", blocks: tools }], pos(2, 3), held, true)[0].groups;
 assert(joinedGroups[0].joinNext === true && joinedGroups[1].joinPrev === true, "held split join flags");
 
 const mixed = [
   { id: "m1", role: "assistant", text: "message" },
   { id: "m2", role: "tool", text: "tool" },
 ];
-const mixedJoined = renderModel([{ ...base, state: "done", blocks: mixed }], pos(2, 2), null, new Map([[2, new Set([pos(2, 1)])]]), true)[0].groups;
+const mixedJoined = renderModel([{ ...base, state: "done", blocks: mixed }], pos(2, 2), new Map([[2, new Set([pos(2, 1)])]]), true)[0].groups;
 assert(!mixedJoined.some(g => g.joinPrev || g.joinNext), "mixed-role held split must not join");
 
 const oldTool = renderModel([{ ...base, state: "done", blocks: [{ id: "old", role: "tool", text: "old label" }] }], undefined)[0].groups[0];
