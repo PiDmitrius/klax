@@ -397,13 +397,17 @@ func readCodex(path string) ([]Item, error) {
 			appendAssistant(Item{Role: "assistant", Tools: []ToolCall{toolCall("WebSearch", jsonObject("query", entry.Item.Query))}, Time: ts})
 		case entry.Type == "response_item" && p.Type == "custom_tool_call" && p.Name == "exec":
 			// New Codex orchestration wrapper: its JavaScript `input` invokes one or more
-			// tools.<name>(...) actions. Decode them into real tool rows (Exec, Write, …)
-			// instead of the opaque 🔧 exec fallback; keep the fallback only if nothing decodes,
-			// so a row is never silently dropped.
-			if tools := decodeCodexExecTools(rawJSONArgument(p.Input)); len(tools) > 0 {
+			// tools.<name>(...) actions. Decode them into real tool rows (Exec, Write, …).
+			// If nothing decodes, fall back to showing the RAW orchestration source as an Exec
+			// row (truncated by the preview) so the user still sees what Codex ran, rather than
+			// an opaque 🔧 exec; a row is never silently dropped.
+			src := rawJSONArgument(p.Input)
+			if tools := decodeCodexExecTools(src); len(tools) > 0 {
 				for _, tc := range tools {
 					appendAssistant(Item{Role: "assistant", Tools: []ToolCall{tc}, Time: ts})
 				}
+			} else if src != "" {
+				appendAssistant(Item{Role: "assistant", Tools: []ToolCall{toolCall("Exec", jsonObject("command", src))}, Time: ts})
 			} else {
 				appendAssistant(Item{Role: "assistant", Tools: []ToolCall{{Name: "exec", Label: "🔧 exec"}}, Time: ts})
 			}

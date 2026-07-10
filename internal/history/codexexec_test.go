@@ -105,8 +105,9 @@ func TestReadCodexDecodesExecWrapper(t *testing.T) {
 	}
 }
 
-// A malformed wrapper keeps a visible fallback row rather than dropping the action.
-func TestReadCodexExecFallbackWhenUndecodable(t *testing.T) {
+// An undecodable wrapper shows the raw orchestration source as an Exec row (never dropped,
+// never opaque) so the user still sees what Codex ran.
+func TestReadCodexExecFallbackShowsRawAsExec(t *testing.T) {
 	path := writeLines(t, []string{
 		`{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"yield_control();"}}`,
 	})
@@ -114,7 +115,10 @@ func TestReadCodexExecFallbackWhenUndecodable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 1 || len(items[0].Tools) != 1 || items[0].Tools[0].Label != "🔧 exec" {
-		t.Fatalf("want single 🔧 exec fallback row, got %+v", items)
+	if len(items) != 1 || len(items[0].Tools) != 1 {
+		t.Fatalf("want single fallback row, got %+v", items)
+	}
+	if tc := items[0].Tools[0]; tc.Name != "Exec" || !strings.Contains(tc.Label, "yield_control") {
+		t.Fatalf("want raw source shown as Exec, got %+v", tc)
 	}
 }
