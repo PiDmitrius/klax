@@ -49,7 +49,7 @@ func codexExecChildTool(src, name, arg string) ToolCall {
 			return codexResponseToolCall("", "exec_command", jsonObject("cmd", cmd))
 		}
 	case "view_image":
-		if path := jsObjectString(arg, "path"); path != "" {
+		if path := capCodexPath(jsObjectString(arg, "path")); path != "" {
 			return codexResponseToolCall("", "view_image", jsonObject("path", path))
 		}
 	case "apply_patch":
@@ -60,27 +60,67 @@ func codexExecChildTool(src, name, arg string) ToolCall {
 	return codexResponseToolCall("", name, "")
 }
 
+const maxCodexPathLabel = 512 // rune cap on a decoded path before it reaches a UI label
+
+// skipCodexComment returns the index just past a // or /* */ comment starting at i (an
+// unterminated block comment runs to EOF), or i if src[i] does not begin a comment. Shared
+// by every scan so a tools.* call, field, or const sitting inside a comment is never read
+// as code.
+func skipCodexComment(src string, i int) int {
+	if i+1 >= len(src) || src[i] != '/' {
+		return i
+	}
+	switch src[i+1] {
+	case '/':
+		j := i + 2
+		for j < len(src) && src[j] != '\n' {
+			j++
+		}
+		return j
+	case '*':
+		j := i + 2
+		for j+1 < len(src) && !(src[j] == '*' && src[j+1] == '/') {
+			j++
+		}
+		if j+1 < len(src) {
+			return j + 2
+		}
+		return len(src)
+	}
+	return i
+}
+
+// codexToolBoundary reports whether `tools.` at i begins a real namespace call rather than a
+// member access on another object (`other.tools.x`, `xtools.x`): reject a preceding
+// identifier byte or '.'.
+func codexToolBoundary(src string, i int) bool {
+	return i == 0 || (!isIdentByte(src[i-1]) && src[i-1] != '.')
+}
+
+// capCodexPath rune-caps a decoded path so an adversarial wrapper cannot push huge source
+// into a (deliberately untruncated) file-path label.
+func capCodexPath(s string) string {
+	if r := []rune(s); len(r) > maxCodexPathLabel {
+		return string(r[:maxCodexPathLabel])
+	}
+	return s
+}
+
 // scanCodexToolCalls finds top-level `tools.<ident>(...)` calls, skipping string/template
 // literals and comments so identifiers inside a command or patch are never matched.
 func scanCodexToolCalls(src string) []codexToolCall {
 	var out []codexToolCall
 	i, n := 0, len(src)
 	for i < n && len(out) < maxExecCalls {
+		if j := skipCodexComment(src, i); j != i {
+			i = j
+			continue
+		}
 		c := src[i]
 		switch {
 		case c == '"' || c == '\'' || c == '`':
 			i = skipCodexString(src, i)
-		case c == '/' && i+1 < n && src[i+1] == '/':
-			for i < n && src[i] != '\n' {
-				i++
-			}
-		case c == '/' && i+1 < n && src[i+1] == '*':
-			i += 2
-			for i+1 < n && !(src[i] == '*' && src[i+1] == '/') {
-				i++
-			}
-			i += 2
-		case strings.HasPrefix(src[i:], "tools."):
+		case strings.HasPrefix(src[i:], "tools.") && codexToolBoundary(src, i):
 			j := i + len("tools.")
 			k := j
 			for k < n && isIdentByte(src[k]) {
@@ -110,6 +150,10 @@ func balancedParens(src string, open int) (string, int) {
 	depth, i, n := 0, open, len(src)
 	start := open + 1
 	for i < n {
+		if j := skipCodexComment(src, i); j != i {
+			i = j
+			continue
+		}
 		switch c := src[i]; {
 		case c == '"' || c == '\'' || c == '`':
 			i = skipCodexString(src, i)
@@ -133,6 +177,10 @@ func jsObjectString(obj string, keys ...string) string {
 	i, n := 0, len(obj)
 	depth := 0
 	for i < n {
+		if j := skipCodexComment(obj, i); j != i {
+			i = j
+			continue
+		}
 		c := obj[i]
 		switch {
 		case c == '"' || c == '\'' || c == '`':
@@ -197,6 +245,10 @@ func resolveCodexPatch(src, arg string) string {
 func resolveCodexConst(src, name string) string {
 	i, n := 0, len(src)
 	for i < n {
+		if j := skipCodexComment(src, i); j != i {
+			i = j
+			continue
+		}
 		c := src[i]
 		if c == '"' || c == '\'' || c == '`' {
 			i = skipCodexString(src, i)
