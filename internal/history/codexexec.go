@@ -2,13 +2,20 @@ package history
 
 import "strings"
 
-// Codex's new `custom_tool_call(name="exec")` wrapper carries free-form JavaScript in
-// its `input` that orchestrates one or more `tools.<name>(...)` actions. klax NEVER
-// executes that source; it does a bounded, string-literal-aware scan to recover the
-// invoked actions and their previews, then maps each through the SAME
-// codexResponseToolCall used for structured function calls (one canonical name→action
-// mapping, not a parallel one). A shell command or a patch routinely contains text like
-// "tools.exec_command", so matching MUST skip string/template literals and comments.
+// Codex's `custom_tool_call(name="exec")` wrapper carries a small JavaScript snippet in its
+// `input` that orchestrates one or more `tools.<name>(...)` actions, e.g.
+//
+//	const r = await tools.exec_command({cmd:"..."}); text(r.output);
+//
+// klax NEVER executes that source. This is a deliberately small, best-effort decoder for the
+// finite shapes Codex actually emits — NOT a general JavaScript parser. It does a
+// string-literal-aware scan for `tools.<name>(...)` calls (a shell command or patch routinely
+// contains text like "tools.exec_command", so string skipping is required to not match it) and
+// maps each through the SAME codexResponseToolCall used for structured function calls. Anything
+// it cannot confidently decode falls back to a visible `🔧 exec` / `🔧 <name>` row — never an
+// executed action, never a silent drop. We do not pre-harden against JavaScript constructs this
+// format does not contain (comments, regex, …); if a genuinely new shape ever shows up in real
+// transcripts, extend the decoder for that shape then.
 
 const (
 	maxExecInput = 128 * 1024 // cap the wrapper source we scan
@@ -20,9 +27,9 @@ type codexToolCall struct {
 	arg  string // raw text between the call's outer ( )
 }
 
-// decodeCodexExecTools decodes an exec wrapper's JS `input` into tool rows. It returns nil
-// when no `tools.*` call is found, so the caller keeps the visible `🔧 exec` fallback
-// rather than dropping the action. Unknown nested tools stay visible as `🔧 <name>`.
+// decodeCodexExecTools decodes an exec wrapper's JS `input` into tool rows. It returns nil when
+// no `tools.*` call is found, so the caller keeps the visible `🔧 exec` fallback rather than
+// dropping the action. Unknown nested tools stay visible as `🔧 <name>`.
 func decodeCodexExecTools(src string) []ToolCall {
 	if len(src) > maxExecInput {
 		src = src[:maxExecInput]
@@ -38,10 +45,9 @@ func decodeCodexExecTools(src string) []ToolCall {
 	return out
 }
 
-// codexExecChildTool maps one decoded `tools.<name>(<arg>)` to a ToolCall, extracting only
-// the field each canonical action needs and delegating the actual labelling to
-// codexResponseToolCall. Unresolved/unknown names route through with no args, so they show
-// as a visible generic row and never leak raw source.
+// codexExecChildTool maps one decoded `tools.<name>(<arg>)` to a ToolCall, extracting only the
+// field each canonical action needs and delegating the labelling to codexResponseToolCall.
+// Unresolved/unknown names route through with no args, so they show as a visible generic row.
 func codexExecChildTool(src, name, arg string) ToolCall {
 	switch name {
 	case "exec_command":
@@ -49,7 +55,7 @@ func codexExecChildTool(src, name, arg string) ToolCall {
 			return codexResponseToolCall("", "exec_command", jsonObject("cmd", cmd))
 		}
 	case "view_image":
-		if path := capCodexPath(jsObjectString(arg, "path")); path != "" {
+		if path := jsObjectString(arg, "path"); path != "" {
 			return codexResponseToolCall("", "view_image", jsonObject("path", path))
 		}
 	case "apply_patch":
@@ -60,67 +66,17 @@ func codexExecChildTool(src, name, arg string) ToolCall {
 	return codexResponseToolCall("", name, "")
 }
 
-const maxCodexPathLabel = 512 // rune cap on a decoded path before it reaches a UI label
-
-// skipCodexComment returns the index just past a // or /* */ comment starting at i (an
-// unterminated block comment runs to EOF), or i if src[i] does not begin a comment. Shared
-// by every scan so a tools.* call, field, or const sitting inside a comment is never read
-// as code.
-func skipCodexComment(src string, i int) int {
-	if i+1 >= len(src) || src[i] != '/' {
-		return i
-	}
-	switch src[i+1] {
-	case '/':
-		j := i + 2
-		for j < len(src) && src[j] != '\n' {
-			j++
-		}
-		return j
-	case '*':
-		j := i + 2
-		for j+1 < len(src) && !(src[j] == '*' && src[j+1] == '/') {
-			j++
-		}
-		if j+1 < len(src) {
-			return j + 2
-		}
-		return len(src)
-	}
-	return i
-}
-
-// codexToolBoundary reports whether `tools.` at i begins a real namespace call rather than a
-// member access on another object (`other.tools.x`, `xtools.x`): reject a preceding
-// identifier byte or '.'.
-func codexToolBoundary(src string, i int) bool {
-	return i == 0 || (!isIdentByte(src[i-1]) && src[i-1] != '.')
-}
-
-// capCodexPath rune-caps a decoded path so an adversarial wrapper cannot push huge source
-// into a (deliberately untruncated) file-path label.
-func capCodexPath(s string) string {
-	if r := []rune(s); len(r) > maxCodexPathLabel {
-		return string(r[:maxCodexPathLabel])
-	}
-	return s
-}
-
-// scanCodexToolCalls finds top-level `tools.<ident>(...)` calls, skipping string/template
-// literals and comments so identifiers inside a command or patch are never matched.
+// scanCodexToolCalls finds `tools.<ident>(...)` calls, skipping string/template literals so an
+// identifier inside a command or patch string is never matched.
 func scanCodexToolCalls(src string) []codexToolCall {
 	var out []codexToolCall
 	i, n := 0, len(src)
 	for i < n && len(out) < maxExecCalls {
-		if j := skipCodexComment(src, i); j != i {
-			i = j
-			continue
-		}
 		c := src[i]
 		switch {
 		case c == '"' || c == '\'' || c == '`':
 			i = skipCodexString(src, i)
-		case strings.HasPrefix(src[i:], "tools.") && codexToolBoundary(src, i):
+		case strings.HasPrefix(src[i:], "tools."):
 			j := i + len("tools.")
 			k := j
 			for k < n && isIdentByte(src[k]) {
@@ -144,16 +100,12 @@ func scanCodexToolCalls(src string) []codexToolCall {
 	return out
 }
 
-// balancedParens returns the text inside the parenthesis group opened at `open` and the
-// index just past its close, balancing nested (){}[] and skipping string literals.
+// balancedParens returns the text inside the parenthesis group opened at `open` and the index
+// just past its close, balancing nested (){}[] and skipping string literals.
 func balancedParens(src string, open int) (string, int) {
 	depth, i, n := 0, open, len(src)
 	start := open + 1
 	for i < n {
-		if j := skipCodexComment(src, i); j != i {
-			i = j
-			continue
-		}
 		switch c := src[i]; {
 		case c == '"' || c == '\'' || c == '`':
 			i = skipCodexString(src, i)
@@ -177,10 +129,6 @@ func jsObjectString(obj string, keys ...string) string {
 	i, n := 0, len(obj)
 	depth := 0
 	for i < n {
-		if j := skipCodexComment(obj, i); j != i {
-			i = j
-			continue
-		}
 		c := obj[i]
 		switch {
 		case c == '"' || c == '\'' || c == '`':
@@ -220,9 +168,9 @@ func jsObjectString(obj string, keys ...string) string {
 	return ""
 }
 
-// resolveCodexPatch recovers apply_patch's patch text from its argument: an inline string,
-// an object `{input|patch: "..."}`, or a bare identifier assigned earlier via
-// `const/let/var name = "..."` (the observed form: `const patch = "*** Begin Patch..."`).
+// resolveCodexPatch recovers apply_patch's patch text from its argument: an inline string, an
+// object `{input|patch: "..."}`, or a bare identifier assigned earlier via `const/let/var name
+// = "..."` (the observed form: `const patch = "*** Begin Patch..."`).
 func resolveCodexPatch(src, arg string) string {
 	arg = strings.TrimSpace(arg)
 	if arg == "" {
@@ -245,10 +193,6 @@ func resolveCodexPatch(src, arg string) string {
 func resolveCodexConst(src, name string) string {
 	i, n := 0, len(src)
 	for i < n {
-		if j := skipCodexComment(src, i); j != i {
-			i = j
-			continue
-		}
 		c := src[i]
 		if c == '"' || c == '\'' || c == '`' {
 			i = skipCodexString(src, i)
@@ -278,8 +222,8 @@ func resolveCodexConst(src, name string) string {
 	return ""
 }
 
-// readStringValue skips whitespace then reads a following string literal (unescaped); "" if
-// the value is not a string.
+// readStringValue skips whitespace then reads a following string literal (unescaped); "" if the
+// value is not a string.
 func readStringValue(src string, i int) string {
 	i = skipSpaceIdx(src, i)
 	if i < len(src) && (src[i] == '"' || src[i] == '\'' || src[i] == '`') {

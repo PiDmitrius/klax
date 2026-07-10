@@ -65,29 +65,6 @@ func TestDecodeCodexExecTools(t *testing.T) {
 			input:    `text("just a message"); notify("done");`,
 			wantName: "",
 		},
-		{
-			name:      "block comment inside args must not spawn a fake nested call",
-			input:     `const r = await tools.exec_command({cmd:"ok"} /* ) tools.view_image({path:"fake"}) */); text(r.output);`,
-			wantName:  "Exec",
-			wantLabel: "ok",
-		},
-		{
-			name:      "commented-out field is ignored",
-			input:     `const r = await tools.exec_command({/* cmd:"nope" */ cmd:"real"}); text(r.output);`,
-			wantName:  "Exec",
-			wantLabel: "real",
-		},
-		{
-			name:     "member call on another object is not the tool namespace",
-			input:    `const r = await other.tools.exec_command({cmd:"x"}); text(r.output);`,
-			wantName: "",
-		},
-		{
-			name:      "apply_patch alias hidden in a comment does not resolve",
-			input:     "/* const patch = \"*** Begin Patch\\n*** Add File: /a\\n+x\\n*** End Patch\"; */ const r = await tools.apply_patch(patch); text(r.output);",
-			wantName:  "apply_patch",
-			wantLabel: "🔧 apply_patch",
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -108,17 +85,6 @@ func TestDecodeCodexExecTools(t *testing.T) {
 				t.Fatalf("label %q must contain %q", got[0].Label, tc.wantLabel)
 			}
 		})
-	}
-}
-
-// A decoded path cannot flow unbounded into a (deliberately untruncated) file-path label.
-func TestDecodeCodexExecCapsPathLabel(t *testing.T) {
-	got := decodeCodexExecTools(`const a = await tools.view_image({path:"/` + strings.Repeat("a", 4000) + `.png"});`)
-	if len(got) != 1 {
-		t.Fatalf("want 1 tool, got %+v", got)
-	}
-	if r := []rune(got[0].Label); len(r) > maxCodexPathLabel+40 {
-		t.Fatalf("path label not capped: %d runes", len(r))
 	}
 }
 

@@ -507,7 +507,7 @@ func codexResponseToolCall(namespace, name, input string) ToolCall {
 			if len(paths) == 1 && strings.HasPrefix(input, "*** Begin Patch\n*** Add File: ") {
 				name = "Write"
 			}
-			return toolCall(name, jsonObject("file_path", capCodexPath(strings.Join(paths, ", "))))
+			return toolCall(name, jsonObject("file_path", strings.Join(paths, ", ")))
 		}
 	case "update_plan":
 		if plan := codexPlanFromFunctionArgs(input); plan != "" {
