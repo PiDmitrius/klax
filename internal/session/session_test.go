@@ -19,7 +19,7 @@ func TestLoadStoreMigratesLegacyEffortOverrideAndScopeDefaults(t *testing.T) {
           "cwd": "/tmp/project",
           "active": true,
           "backend": "codex",
-          "model_override": "gpt-5.4",
+          "model_override": "gpt-5.6-sol",
           "effort_override": "high",
           "messages": 1
         }
@@ -206,7 +206,7 @@ func TestNewSnapshotsScopeDefaults(t *testing.T) {
 	}
 	store.UpdateScopeDefaults("user:alice", func(def *ScopeDefaults) {
 		def.Backend = "codex"
-		def.Model = "gpt-5.4"
+		def.Model = "gpt-5.6-sol"
 		def.Think = "high"
 		def.Sandbox = "on"
 		def.ClaudeTTY = true
@@ -216,8 +216,8 @@ func TestNewSnapshotsScopeDefaults(t *testing.T) {
 	if sess.Backend != "codex" {
 		t.Fatalf("backend = %q, want codex", sess.Backend)
 	}
-	if sess.ModelOverride != "gpt-5.4" {
-		t.Fatalf("model = %q, want gpt-5.4", sess.ModelOverride)
+	if sess.ModelOverride != "gpt-5.6-sol" {
+		t.Fatalf("model = %q, want gpt-5.6-sol", sess.ModelOverride)
 	}
 	if sess.ThinkOverride != "high" {
 		t.Fatalf("think = %q, want high", sess.ThinkOverride)
@@ -244,7 +244,7 @@ func TestNewSnapshotsScopeDefaults(t *testing.T) {
 	if sess.Backend != "codex" {
 		t.Fatalf("snapshot backend changed to %q", sess.Backend)
 	}
-	if sess.ModelOverride != "gpt-5.4" {
+	if sess.ModelOverride != "gpt-5.6-sol" {
 		t.Fatalf("snapshot model changed to %q", sess.ModelOverride)
 	}
 	if sess.ThinkOverride != "high" {
@@ -315,7 +315,7 @@ func TestLoadStoreKeepsEmptyScopeDefaultsAsExplicitDefault(t *testing.T) {
           "cwd": "/tmp/project",
           "active": true,
           "backend": "codex",
-          "model_override": "gpt-5.4-mini",
+          "model_override": "gpt-5.5",
           "think_override": "high",
           "messages": 1
         }

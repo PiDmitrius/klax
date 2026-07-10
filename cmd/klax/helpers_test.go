@@ -24,12 +24,12 @@ func TestModelTextHighlightsSelectedModelWithoutDefaultSuffix(t *testing.T) {
 	chatID := "tg:test"
 	d.store.UpdateScopeDefaults(chatID, func(def *session.ScopeDefaults) {
 		def.Backend = "codex"
-		def.Model = "gpt-5.4"
+		def.Model = "gpt-5.6-sol"
 	})
 
-	text := d.modelText(chatID, &session.Session{ModelOverride: "gpt-5.4"})
+	text := d.modelText(chatID, &session.Session{ModelOverride: "gpt-5.6-sol"})
 
-	if !strings.Contains(text, "<b>/m_54 GPT-5.4 ✅</b>") {
+	if !strings.Contains(text, "<b>/m_sol GPT-5.6 Sol ✅</b>") {
 		t.Fatalf("selected model is not highlighted: %q", text)
 	}
 	if strings.Contains(text, "По умолчанию (") {
@@ -140,13 +140,13 @@ func TestSettingsTextContainsBackendModelAndThinkSections(t *testing.T) {
 	chatID := "tg:test"
 	d.store.UpdateScopeDefaults(chatID, func(def *session.ScopeDefaults) {
 		def.Backend = "codex"
-		def.Model = "gpt-5.4"
+		def.Model = "gpt-5.6-sol"
 		def.Think = "high"
 	})
 
 	text := d.settingsText(chatID, chatID, &session.Session{
 		Backend:       "codex",
-		ModelOverride: "gpt-5.4",
+		ModelOverride: "gpt-5.6-sol",
 		ThinkOverride: "high",
 		Sandbox:       "on",
 	})
@@ -157,7 +157,7 @@ func TestSettingsTextContainsBackendModelAndThinkSections(t *testing.T) {
 		"🧠 Мышление:",
 		"🔒 Sandbox:",
 		"<b>/backend_codex ✅</b>",
-		"<b>/m_54 GPT-5.4 ✅</b>",
+		"<b>/m_sol GPT-5.6 Sol ✅</b>",
 		"<b>/t_high High ✅</b>",
 		"<b>/sandbox_on ✅</b>",
 	} {
@@ -187,13 +187,13 @@ func TestSettingsTextShowsGroupModeSectionInGroupChat(t *testing.T) {
 	d.groupChats[chatID] = "/tmp/groups/tg_-1001"
 	d.store.UpdateScopeDefaults(chatID, func(def *session.ScopeDefaults) {
 		def.Backend = "codex"
-		def.Model = "gpt-5.4"
+		def.Model = "gpt-5.6-sol"
 		def.Think = "high"
 	})
 
 	text := d.settingsText(chatID, chatID, &session.Session{
 		Backend:       "codex",
-		ModelOverride: "gpt-5.4",
+		ModelOverride: "gpt-5.6-sol",
 		ThinkOverride: "high",
 		Sandbox:       "off",
 	})
@@ -245,7 +245,7 @@ func TestSessionCreatedTextIncludesSettingsHint(t *testing.T) {
 			Name:          "session",
 			CWD:           home + "/work",
 			Backend:       "codex",
-			ModelOverride: "gpt-5.4",
+			ModelOverride: "gpt-5.6-sol",
 			ThinkOverride: "high",
 			Sandbox:       "off",
 		},

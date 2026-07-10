@@ -55,6 +55,74 @@ func TestReadClaude(t *testing.T) {
 	}
 }
 
+func TestLatestContextUsesLastAssistantUsage(t *testing.T) {
+	// The one canonical context source: the transcript's LAST assistant message that
+	// reported usage (input+cache_read+cache_creation). Earlier messages must not win.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := "/tmp/proj"
+	dir := filepath.Join(home, ".claude", "projects", encodeProjectDir(cwd))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := `{"type":"assistant","message":{"content":[{"type":"text","text":"a1"}],"usage":{"input_tokens":10,"cache_read_input_tokens":100,"cache_creation_input_tokens":5}}}` + "\n" +
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"a2"}],"usage":{"input_tokens":20,"cache_read_input_tokens":180,"cache_creation_input_tokens":8}}}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "sess-1.jsonl"), []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	used, window := LatestContext("claude", "sess-1", cwd)
+	if used != 208 || window != 0 { // 20+180+8; Claude transcript carries no window
+		t.Fatalf("LatestContext = %d/%d, want 208/0", used, window)
+	}
+}
+
+func TestReadClaudeNormalizesToolsLikeLive(t *testing.T) {
+	// Reload must canonicalize Claude tools identically to the live stream (one
+	// NormalizeClaudeToolUse): Bash→Exec, TodoWrite→Plan with the plan-progress preview.
+	path := writeLines(t, []string{
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls /tmp"}}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"TodoWrite","input":{"todos":[{"content":"first","status":"completed","activeForm":"Firsting"},{"content":"second","status":"in_progress","activeForm":"Doing second"}]}}]}}`,
+	})
+	items, err := readClaude(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("want 2 items, got %d: %+v", len(items), items)
+	}
+	if tc := items[0].Tools[0]; tc.Name != "Exec" || !strings.Contains(tc.Label, "⚙️ Exec") {
+		t.Fatalf("Bash not normalized to Exec: %+v", tc)
+	}
+	if tc := items[1].Tools[0]; tc.Name != "Plan" || !strings.Contains(tc.Label, "Doing second") || !strings.Contains(tc.Label, "1/2") {
+		t.Fatalf("TodoWrite not normalized to Plan on reload: %+v", tc)
+	}
+}
+
+func TestReadClaudeSkipsMetaRows(t *testing.T) {
+	// The SDK writes the image-view annotation as a role=user row flagged isMeta:true.
+	// It is internal, not human input, and must never render as a user message.
+	path := writeLines(t, []string{
+		`{"type":"user","message":{"content":"real message"},"timestamp":"2026-07-10T10:00:00Z"}`,
+		`{"type":"user","isMeta":true,"message":{"role":"user","content":"[Image: original 2150x1204, displayed at 2000x1120. Multiply coordinates by 1.07 to map to original image.]"}}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}`,
+	})
+	items, err := readClaude(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("want 2 items (meta row dropped), got %d: %+v", len(items), items)
+	}
+	for _, it := range items {
+		if strings.Contains(it.Text, "Multiply coordinates") {
+			t.Fatalf("meta image annotation leaked as a message: %+v", it)
+		}
+	}
+	if items[0].Role != "user" || items[0].Text != "real message" {
+		t.Fatalf("item0 = %+v", items[0])
+	}
+}
+
 func TestReadClaudeRendersCompactContinuationAsTool(t *testing.T) {
 	path := writeLines(t, []string{
 		`{"type":"user","message":{"content":"before <!-- klax-turn:1111111111111111 -->"}}`,
@@ -105,10 +173,10 @@ func TestReadCodex(t *testing.T) {
 	if items[0].Role != "user" || items[0].Text != "do X" {
 		t.Fatalf("item0 = %+v", items[0])
 	}
-	if items[1].Role != "assistant" || len(items[1].Tools) != 1 || items[1].Tools[0].Name != "Bash" {
+	if items[1].Role != "assistant" || len(items[1].Tools) != 1 || items[1].Tools[0].Name != "Exec" {
 		t.Fatalf("item1 = %+v", items[1])
 	}
-	if tc := items[1].Tools[0]; !strings.Contains(tc.Label, "Bash") || !strings.Contains(tc.Label, "echo hello") {
+	if tc := items[1].Tools[0]; !strings.Contains(tc.Label, "Exec") || !strings.Contains(tc.Label, "echo hello") {
 		t.Fatalf("codex tool label not enriched: %+v", tc)
 	}
 	if items[2].Role != "assistant" || items[2].Text != "doing X" {
@@ -209,7 +277,7 @@ func TestReadCodexHistoryToolLabels(t *testing.T) {
 	if tc := items[7].Tools[0]; tc.Name != "WebSearch" || !strings.Contains(tc.Label, "fallback query") {
 		t.Fatalf("web search queries fallback label = %+v", tc)
 	}
-	if tc := items[8].Tools[0]; tc.Name != "Bash" || !strings.Contains(tc.Label, "pwd") {
+	if tc := items[8].Tools[0]; tc.Name != "Exec" || !strings.Contains(tc.Label, "pwd") {
 		t.Fatalf("item.started command label = %+v", tc)
 	}
 	if tc := items[9].Tools[0]; tc.Name != "MCP" || !strings.Contains(tc.Label, "codex_apps.github_get_profile") {

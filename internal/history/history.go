@@ -88,6 +88,22 @@ func Load(backend, sessionID, cwd string) ([]Item, error) {
 	return readClaude(path)
 }
 
+// LatestContext returns a session's current context (used tokens, window) from the
+// ONE canonical place: the transcript's last assistant message that reported usage —
+// the exact value the read model draws on the timeline. The session strip, the
+// settings modal, and the messenger all take their context from here (via the stored
+// snapshot), so the number is identical on every surface. window is 0 for Claude (its
+// transcript carries none); the caller falls back to the stream-reported window.
+func LatestContext(backend, sessionID, cwd string) (used, window int) {
+	items, _ := Load(backend, sessionID, cwd)
+	for _, it := range items {
+		if it.Role == "assistant" && it.CtxUsed > 0 {
+			used, window = it.CtxUsed, it.CtxWindow
+		}
+	}
+	return used, window
+}
+
 // Stat returns the transcript file's mod time and size (zero values + ok=false when the session
 // has no file yet). It is a cheap change-detector: a caller that caches something derived from the
 // transcript (e.g. the UI unread-block count) can stat first and skip re-reading an unchanged file.
@@ -147,6 +163,9 @@ func readClaude(path string) ([]Item, error) {
 		line, ok := transcript.Parse(raw) // skips blanks and sidechains
 		if !ok {
 			continue
+		}
+		if line.IsMeta {
+			continue // SDK-injected internal row (e.g. image-view annotation), never a real message
 		}
 		ts := timeOrEmpty(line.Time)
 		if line.Compact != nil {
@@ -266,7 +285,7 @@ func claudeAssistant(raw json.RawMessage) (string, []ToolCall, int) {
 		case "text":
 			sb.WriteString(b.Text)
 		case "tool_use":
-			tools = append(tools, toolCall(b.Name, string(b.Input)))
+			tools = append(tools, toolCall(runner.NormalizeClaudeToolUse(b.Name, b.Input)))
 		}
 	}
 	ctxUsed := 0
@@ -376,6 +395,18 @@ func readCodex(path string) ([]Item, error) {
 			}
 		case entry.Type == "item.completed" && entry.Item != nil && entry.Item.Type == "web_search" && entry.Item.Query != "":
 			appendAssistant(Item{Role: "assistant", Tools: []ToolCall{toolCall("WebSearch", jsonObject("query", entry.Item.Query))}, Time: ts})
+		case entry.Type == "response_item" && p.Type == "custom_tool_call" && p.Name == "exec":
+			// New Codex orchestration wrapper: its JavaScript `input` invokes one or more
+			// tools.<name>(...) actions. Decode them into real tool rows (Exec, Write, …)
+			// instead of the opaque 🔧 exec fallback; keep the fallback only if nothing decodes,
+			// so a row is never silently dropped.
+			if tools := decodeCodexExecTools(rawJSONArgument(p.Input)); len(tools) > 0 {
+				for _, tc := range tools {
+					appendAssistant(Item{Role: "assistant", Tools: []ToolCall{tc}, Time: ts})
+				}
+			} else {
+				appendAssistant(Item{Role: "assistant", Tools: []ToolCall{{Name: "exec", Label: "🔧 exec"}}, Time: ts})
+			}
 		case entry.Type == "response_item" && (p.Type == "function_call" || p.Type == "custom_tool_call"):
 			if p.Name != "" {
 				args := rawJSONArgument(p.Arguments)
@@ -424,7 +455,7 @@ func codexHistoryItemTool(item *codexHistoryItem) (ToolCall, bool) {
 	}
 	switch item.Type {
 	case "command_execution":
-		return toolCall("Bash", jsonObject("command", item.Command)), true
+		return toolCall("Exec", jsonObject("command", item.Command)), true
 	case "web_search":
 		if item.Query != "" {
 			return toolCall("WebSearch", jsonObject("query", item.Query)), true
@@ -452,7 +483,7 @@ func codexResponseToolCall(namespace, name, input string) ToolCall {
 	switch name {
 	case "exec_command":
 		if cmd := jsonStringField(input, "cmd", "command"); cmd != "" {
-			return toolCall("Bash", jsonObject("command", cmd))
+			return toolCall("Exec", jsonObject("command", cmd))
 		}
 	case "write_stdin":
 		var inp struct {
@@ -464,7 +495,7 @@ func codexResponseToolCall(namespace, name, input string) ToolCall {
 			if inp.Chars != "" {
 				action = "write to command session"
 			}
-			return toolCall("Bash", jsonObject("command", action+" "+itoa(inp.SessionID)))
+			return toolCall("Exec", jsonObject("command", action+" "+itoa(inp.SessionID)))
 		}
 	case "view_image":
 		if path := jsonStringField(input, "path"); path != "" {
@@ -482,6 +513,8 @@ func codexResponseToolCall(namespace, name, input string) ToolCall {
 		if plan := codexPlanFromFunctionArgs(input); plan != "" {
 			return toolCall("Plan", plan)
 		}
+	case "web__run", "web_search", "web_fetch":
+		return ToolCall{Name: "Web", Label: "🌐 Web"}
 	}
 	if namespace != "" {
 		if server, ok := codexMCPNamespace(namespace); ok {

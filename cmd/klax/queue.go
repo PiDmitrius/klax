@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PiDmitrius/klax/internal/history"
 	"github.com/PiDmitrius/klax/internal/runner"
 	"github.com/PiDmitrius/klax/internal/sessfiles"
 	"github.com/PiDmitrius/klax/internal/session"
@@ -502,6 +503,22 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		log.Printf("durable terminal mark (%s/%d): %v", sk, sess.Created, termErr)
 	}
 
+	// The context snapshot comes from the SAME source the timeline draws — the transcript's
+	// last assistant usage (history.LatestContext) — so the number is identical on the strip,
+	// the settings modal and the messenger, never a second parallel count off the stream. The
+	// stream's window is kept only as the window (Claude's transcript carries none) and fallback.
+	var ctxUsed, ctxWindow int
+	if result.Error == nil {
+		effID := result.SessionID
+		if effID == "" {
+			effID = sess.ID
+		}
+		ctxUsed, ctxWindow = history.LatestContext(backend.Name(), effID, sess.CWD)
+		if ctxWindow == 0 {
+			ctxWindow = result.Usage.ContextWindow
+		}
+	}
+
 	// Persist changes onto the same session record that started the run.
 	d.store.UpdateSession(sk, sess.Created, func(current *session.Session) {
 		current.Messages++
@@ -515,11 +532,11 @@ func (d *daemon) runBackend(msg queuedMsg) {
 			if result.Usage.Model != "" {
 				current.Model = result.Usage.Model
 			}
-			if result.Usage.ContextWindow > 0 {
-				current.ContextWindow = result.Usage.ContextWindow
+			if ctxWindow > 0 {
+				current.ContextWindow = ctxWindow
 			}
-			if result.Usage.ContextUsed > 0 {
-				current.ContextUsed = result.Usage.ContextUsed
+			if ctxUsed > 0 {
+				current.ContextUsed = ctxUsed
 			}
 		}
 	})

@@ -223,21 +223,24 @@ type modelEntry struct {
 	label string
 }
 
+// Claude models are launched by their bare CLI alias — the alias resolves to the
+// current model on its own (fable→claude-fable-5, opus→claude-opus-4-8, …), so
+// klax carries no window markers or per-model logic.
 var claudeModels = []modelEntry{
-	{"fable", "fable[1m]", "Claude Fable 1M"},
-	{"opus1m", "opus[1m]", "Claude Opus 1M"},
-	{"opus", "opus", "Claude Opus 200k"},
-	{"sonnet1m", "sonnet[1m]", "Claude Sonnet 1M"},
-	{"sonnet", "sonnet", "Claude Sonnet 200k"},
-	{"haiku", "haiku", "Claude Haiku 200k"},
+	{"fable", "fable", "Fable"},
+	{"opus", "opus", "Opus"},
+	{"sonnet", "sonnet", "Sonnet"},
+	{"haiku", "haiku", "Haiku"},
 }
 
+// Codex: the three GPT-5.6 variants (most-capable first) plus GPT-5.5 as an
+// explicit fallback. "По умолчанию" (empty) covers "let Codex decide". Bare
+// gpt-5.6 is intentionally absent — the local ChatGPT-account Codex rejects it.
 var codexModels = []modelEntry{
+	{"sol", "gpt-5.6-sol", "GPT-5.6 Sol"},
+	{"terra", "gpt-5.6-terra", "GPT-5.6 Terra"},
+	{"luna", "gpt-5.6-luna", "GPT-5.6 Luna"},
 	{"55", "gpt-5.5", "GPT-5.5"},
-	{"54", "gpt-5.4", "GPT-5.4"},
-	{"mini", "gpt-5.4-mini", "GPT-5.4-Mini"},
-	{"codex", "gpt-5.3-codex", "GPT-5.3-Codex"},
-	{"spark", "gpt-5.3-codex-spark", "GPT-5.3-Codex-Spark"},
 }
 
 func modelsForBackend(backend string) []modelEntry {
@@ -247,18 +250,22 @@ func modelsForBackend(backend string) []modelEntry {
 	return claudeModels
 }
 
+// Effort levels start at High: low/medium go unused in practice, and the
+// separate "По умолчанию" (empty) choice already covers "let the CLI decide".
+// The CLI enum still accepts the lower levels — klax simply doesn't offer them.
 var claudeEfforts = []modelEntry{
-	{"low", "low", "Low"},
-	{"med", "medium", "Medium"},
 	{"high", "high", "High"},
+	{"xhigh", "xhigh", "Extra High"},
 	{"max", "max", "Max"},
 }
 
+// Codex GPT-5.6 exposes the deeper Max/Ultra reasoning levels on top of High/
+// Extra High; low/medium stay omitted, "По умолчанию" covers the CLI default.
 var codexEfforts = []modelEntry{
-	{"low", "low", "Low"},
-	{"med", "medium", "Medium"},
 	{"high", "high", "High"},
 	{"xhigh", "xhigh", "Extra High"},
+	{"max", "max", "Max"},
+	{"ultra", "ultra", "Ultra"},
 }
 
 func effortsForBackend(backend string) []modelEntry {

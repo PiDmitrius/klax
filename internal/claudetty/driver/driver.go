@@ -21,7 +21,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/PiDmitrius/klax/internal/claudemodel"
 	"github.com/PiDmitrius/klax/internal/claudetty/hook"
 	"github.com/PiDmitrius/klax/internal/claudetty/pty"
 	"github.com/PiDmitrius/klax/internal/claudetty/stream"
@@ -242,8 +241,10 @@ func Run(ctx context.Context, w io.Writer, opts Options) (int, error) {
 			tailer.Close()
 		}
 	}()
-	summary.Model = claudemodel.Normalize(opts.Model)
-	summary.ContextWindow = claudemodel.ContextWindow(opts.Model)
+	summary.Model = opts.Model
+	// ContextWindow is left unset (0 = unknown): the Claude transcript carries no
+	// window and klax never guesses one, so the gauge shows used tokens alone
+	// until a real number arrives. No assumption, no hardcode.
 
 	// emitReady reports whether transcript lines now belong to this turn and
 	// may be summarized/emitted. On a resume the file still holds the prior
@@ -639,9 +640,7 @@ func needleMatch(needle string, raw json.RawMessage) bool {
 func buildArgv(settingsJSON string, opts Options) []string {
 	argv := []string{"--settings", withBypassAccepted(settingsJSON, opts.PermissionMode)}
 	if opts.Model != "" {
-		// Defensive: the -p arg builder normalizes too, but the driver must
-		// never launch a bare "fable" (200k believed window) on its own.
-		argv = append(argv, "--model", claudemodel.Normalize(opts.Model))
+		argv = append(argv, "--model", opts.Model)
 	}
 	if opts.Effort != "" {
 		argv = append(argv, "--effort", opts.Effort)
@@ -665,12 +664,10 @@ func buildArgv(settingsJSON string, opts Options) []string {
 // CLAUDE_CODE_ENTRYPOINT — the child must compute its own entrypoint from its
 // genuinely interactive launch, not inherit ours.
 //
-// It deliberately does NOT set DISABLE_AUTO_COMPACT: the premature compaction
-// the bridge suffered was the model's believed window collapsing to 200k (a
-// bare "fable" alias), not the auto-compact policy — fixed by launching
-// fable[1m]. With the real 1M window the only compaction left fires at the
-// ceiling, exactly as it does for the bridge's other sessions, and must stay
-// on so a turn at the limit survives instead of hard-failing.
+// It deliberately does NOT set DISABLE_AUTO_COMPACT: auto-compact fires only at
+// the model's real context ceiling, exactly as it does for the bridge's other
+// sessions, and must stay on so a turn at the limit survives instead of
+// hard-failing.
 func childEnv(fifoPath string) []string {
 	var env []string
 	for _, e := range os.Environ() {

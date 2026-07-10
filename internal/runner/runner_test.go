@@ -23,7 +23,7 @@ func TestToolUseStringAppliesTildeBeforeTruncate(t *testing.T) {
 
 	cmd := `cd "` + home + `/very/long/path/with/many/segments/for/testing/that/keeps/going/and/going/through/even/more/directories/after/the/new/preview/limit" && echo done`
 	got := ToolUse{
-		Name:  "Bash",
+		Name:  "Exec",
 		Input: `{"command":"` + strings.ReplaceAll(cmd, `"`, `\"`) + `"}`,
 	}.String()
 
@@ -34,21 +34,32 @@ func TestToolUseStringAppliesTildeBeforeTruncate(t *testing.T) {
 		t.Fatalf("home path should be compacted before truncation in %q", got)
 	}
 	if !strings.HasSuffix(got, "…`") {
-		t.Fatalf("expected truncated bash preview in %q", got)
+		t.Fatalf("expected truncated exec preview in %q", got)
 	}
 }
 
-func TestToolUseStringCompactsMultilineBashPreview(t *testing.T) {
+func TestNormalizeToolNameMapsBashToExec(t *testing.T) {
+	if got := NormalizeToolName("Bash"); got != "Exec" {
+		t.Fatalf("Bash -> %q, want Exec", got)
+	}
+	for _, keep := range []string{"Exec", "Read", "Edit", "BashOutput", "Plan"} {
+		if got := NormalizeToolName(keep); got != keep {
+			t.Fatalf("%s -> %q, want unchanged", keep, got)
+		}
+	}
+}
+
+func TestToolUseStringCompactsMultilineExecPreview(t *testing.T) {
 	got := ToolUse{
-		Name:  "Bash",
+		Name:  "Exec",
 		Input: `{"command":"set -e\nrm -f /tmp/known_hosts\n\necho done"}`,
 	}.String()
 
 	if strings.Contains(got, "\n") {
-		t.Fatalf("expected one-line bash preview, got %q", got)
+		t.Fatalf("expected one-line exec preview, got %q", got)
 	}
 	if !strings.Contains(got, "set -e rm -f /tmp/known_hosts echo done") {
-		t.Fatalf("unexpected compacted bash preview: %q", got)
+		t.Fatalf("unexpected compacted exec preview: %q", got)
 	}
 }
 
@@ -194,7 +205,7 @@ func TestToolPreviewLimit(t *testing.T) {
 		t.Fatalf("UIToolPreviewLimit (%d) must exceed toolPreviewLimit (%d)", UIToolPreviewLimit, toolPreviewLimit)
 	}
 	cmd := strings.Repeat("x", UIToolPreviewLimit+50)
-	tool := ToolUse{Name: "Bash", Input: `{"command":"` + cmd + `"}`}
+	tool := ToolUse{Name: "Exec", Input: `{"command":"` + cmd + `"}`}
 
 	narrow := tool.String()
 	if narrow != tool.Preview(toolPreviewLimit) {
@@ -593,7 +604,7 @@ func TestClaudeStreamMultiTurnAgentLoop(t *testing.T) {
 		{"narration", "Жду поллер"},
 		{"tool", "📖 Read: /tmp/poll.out"},
 		{"narration", "SSH вернулся"},
-		{"tool", "⚙️ Bash: `uname -a`"},
+		{"tool", "⚙️ Exec: `uname -a`"},
 	}
 	got := rec.kindPairs()
 	if len(got) != len(want) {
@@ -660,7 +671,7 @@ func TestCodexStreamDemotesIntermediatesToNarration(t *testing.T) {
 	}
 	want := [][2]string{
 		{"narration", "начинаю"},
-		{"tool", "⚙️ Bash: `ls /tmp`"},
+		{"tool", "⚙️ Exec: `ls /tmp`"},
 	}
 	got := rec.kindPairs()
 	if len(got) != len(want) {
@@ -731,7 +742,7 @@ func TestCodexStreamSurfacesErrorItems(t *testing.T) {
 	}
 	got := rec.kindPairs()
 	want := [][2]string{
-		{"tool", "⚙️ Bash: `rg huge`"},
+		{"tool", "⚙️ Exec: `rg huge`"},
 		{"tool", "❌ Codex item error: tool output exceeded limit"},
 	}
 	if len(got) != len(want) {

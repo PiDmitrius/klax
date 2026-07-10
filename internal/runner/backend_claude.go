@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-
-	"github.com/PiDmitrius/klax/internal/claudemodel"
 )
 
 // ClaudeBackend implements Backend for Claude Code CLI.
@@ -62,11 +60,8 @@ func BuildClaudeArgs(opts RunOptions) []string {
 		args = append(args, "--permission-mode", mode)
 	}
 	if opts.Model != "" {
-		// Launch the bare "fable" alias as fable[1m]: without the marker the
-		// CLI believes a 200k window off the first-party lane and compacts a
-		// resumed session at ~200k. This is the single choke point for both
-		// the -p path and the tty driver (which re-parses these same args).
-		args = append(args, "--model", claudemodel.Normalize(opts.Model))
+		// The alias launches as-is; the CLI resolves it to the current model.
+		args = append(args, "--model", opts.Model)
 	}
 	if opts.Effort != "" {
 		args = append(args, "--effort", opts.Effort)
@@ -279,12 +274,7 @@ func (b *ClaudeBackend) ParseEvent(line []byte) ([]Event, bool) {
 		for _, block := range ev.Message.Content {
 			switch block.Type {
 			case "tool_use":
-				name := block.Name
-				input := string(block.Input)
-				if name == "TodoWrite" {
-					name = "Plan"
-					input = claudePlanInput(block.Input)
-				}
+				name, input := NormalizeClaudeToolUse(block.Name, block.Input)
 				e := Event{
 					Type: EventTool,
 					Tool: ToolUse{Name: name, Input: input},
@@ -356,6 +346,18 @@ func (b *ClaudeBackend) ParseEvent(line []byte) ([]Event, bool) {
 // ({"todos":[{"content","status","activeForm"}]}) into the canonical
 // PlanProgress JSON. "current" prefers the activeForm of the in_progress
 // item, falling back to the content of the first pending one.
+// NormalizeClaudeToolUse canonicalizes a Claude tool_use (raw name + raw JSON input) to
+// klax's display form. It is the SINGLE place both the live stream and transcript reload
+// call, so the two can never diverge: Bash→Exec (command execution) and TodoWrite→Plan with
+// its input rewritten to the plan-progress preview shape. Every other tool passes through.
+func NormalizeClaudeToolUse(name string, input json.RawMessage) (string, string) {
+	name = NormalizeToolName(name)
+	if name == "TodoWrite" {
+		return "Plan", claudePlanInput(input)
+	}
+	return name, string(input)
+}
+
 func claudePlanInput(raw json.RawMessage) string {
 	var parsed struct {
 		Todos []struct {

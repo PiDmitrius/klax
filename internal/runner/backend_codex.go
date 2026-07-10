@@ -134,7 +134,7 @@ func (b *CodexBackend) ParseEvent(line []byte) ([]Event, bool) {
 			return single(Event{
 				Type: EventTool,
 				Tool: ToolUse{
-					Name:  "Bash",
+					Name:  "Exec",
 					Input: fmt.Sprintf(`{"command":"%s"}`, escapeJSON(ev.Item.Command)),
 				},
 			})
