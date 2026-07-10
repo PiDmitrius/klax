@@ -52,7 +52,7 @@ var (
 // ToolUse.String() — backends must normalize their native event payloads into
 // this form before constructing a ToolUse. Per-tool schemas:
 //
-//	Bash        {"command": string}
+//	Exec        {"command": string}
 //	Read        {"file_path": string}
 //	Edit        {"file_path": string}
 //	Write       {"file_path": string}
@@ -100,6 +100,18 @@ const toolPreviewLimit = 120
 // in near-full rather than being clipped to a chat-sized line.
 const UIToolPreviewLimit = 256
 
+// NormalizeToolName maps a backend's raw tool name to klax's canonical display name.
+// Command execution is "Exec" everywhere: Claude names its tool "Bash" (the shell
+// interpreter), but the tool executes a command — it is not the interpreter — so it
+// normalizes to the same Exec as Codex's command_execution / exec_command. One tool, one
+// name, one preview across both backends. Apply it at every point a raw tool name enters.
+func NormalizeToolName(name string) string {
+	if name == "Bash" {
+		return "Exec"
+	}
+	return name
+}
+
 // String renders the tool label at the default (Telegram-width) preview limit.
 func (t ToolUse) String() string { return t.Preview(toolPreviewLimit) }
 
@@ -108,10 +120,14 @@ func (t ToolUse) String() string { return t.Preview(toolPreviewLimit) }
 // inherently short fields like file paths and patterns are never truncated.
 func (t ToolUse) Preview(limit int) string {
 	switch t.Name {
-	case "Bash":
+	case "Exec":
+		// Command execution — ONE canonical tool across both backends. Claude's "Bash",
+		// Codex's command_execution / exec_command, and the new custom_tool_call(exec)→
+		// tools.exec_command all normalize to Exec (see NormalizeToolName): the tool executes
+		// a command, it is not the Bash interpreter, so the name is shell-agnostic.
 		var inp struct{ Command string }
 		json.Unmarshal([]byte(t.Input), &inp)
-		return fmt.Sprintf("⚙️ Bash: `%s`", truncate(oneLinePreview(inp.Command), limit))
+		return fmt.Sprintf("⚙️ Exec: `%s`", truncate(oneLinePreview(inp.Command), limit))
 	case "Read":
 		var inp struct {
 			FilePath string `json:"file_path"`
@@ -399,7 +415,7 @@ type RunResult struct {
 type ProgressKind string
 
 const (
-	// ProgressKindTool is a tool invocation label ("⚙️ Bash: ls ~").
+	// ProgressKindTool is a tool invocation label ("⚙️ Exec: ls ~").
 	ProgressKindTool ProgressKind = "tool"
 	// ProgressKindNarration is an assistant text block that turned out not
 	// to be the final answer (another text block came after it). Frontends

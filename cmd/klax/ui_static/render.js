@@ -39,14 +39,16 @@ export function decodePos(p){ p = p || 0; return { turn: Math.floor(p / POS_MULT
 // as unread; standalone non-durable rows are not counted and just flow to the right
 // side of the divider by document order; unread answer blocks land inside the turn at the exact
 // block boundary. `watermark` is the encoded read position (pos()); undefined ⇒ no divider.
-// `contextHint` is the current session-level usage snapshot, used only as a live fallback while
-// the running turn has not yet produced turn-local usage.
 // `holdSplits` preserves group boundaries that used to be separated by the unread divider for one
 // live frame after the divider disappears. That lets the line fade out before the two bubble pieces
 // merge back into one.
-export function renderModel(turns, watermark, contextHint, holdSplits, joinHeldSplits){
+export function renderModel(turns, watermark, holdSplits, joinHeldSplits){
   const items = [];
   let queuePos = 0, divided = false;
+  // The last context we actually know — the most recent turn's own measured value (the exact
+  // number already drawn on its line). A running turn with no tokens of its own yet falls back to
+  // THIS, so the carried hint is the same one source, never a second parallel count that can disagree.
+  let lastCtxUsed = 0, lastCtxWindow = 0;
   const has = watermark !== undefined;
   const unread = p => has && p > watermark;
   for(const t of (turns || [])){
@@ -99,17 +101,16 @@ export function renderModel(turns, watermark, contextHint, holdSplits, joinHeldS
     // turn: BELOW the working dots, not above them. While the turn runs the order is
     // [answer][dots][context] — new content is born at the dots, the context line stays at
     // the bottom; when the turn settles the dots vanish and the context slides up to close
-    // the gap, still the bottom line. A running turn falls back to the current session context
-    // snapshot until turn-local usage appears; do not store that snapshot on the turn itself, or a
-    // copied hint can outlive the fresh session strip and render stale values under the dots.
+    // the gap, still the bottom line. A running turn with no tokens of its own yet falls back to
+    // lastCtx — the previous turn's final value, already known and already shown on its line.
     // It is NOT a group — buildItem renders it after the dots indicator.
     const finalCtx = contextText(t.ctx_used, t.ctx_window);
-    const liveCtx = contextText(contextHint && contextHint.used, contextHint && contextHint.window);
     const ctxLine = (t.state === "done" || t.state === "err") ? finalCtx
-      : t.state === "run" ? (finalCtx || liveCtx)
+      : t.state === "run" ? (finalCtx || contextText(lastCtxUsed, lastCtxWindow))
       : "";
     const note = t.state === "enq" ? "в очереди · " + queuePos : undefined;
     items.push({ kind: "turn", seq: t.seq, text: t.text || "", time: t.time, groups, state: t.state, note, ctxLine, ctxTime: lastGroupTime });
+    if(t.ctx_used){ lastCtxUsed = t.ctx_used; lastCtxWindow = t.ctx_window; } // carry the known context forward to a later running turn
   }
   return items;
 }
@@ -325,8 +326,8 @@ export function paint(col, items, onAbort){
   col.replaceChildren(frag);
 }
 
-export function renderSession(col, turns, unreadAfter, onAbort, contextHint, holdSplits, joinHeldSplits){
-  paint(col, renderModel(turns, unreadAfter, contextHint, holdSplits, joinHeldSplits), onAbort);
+export function renderSession(col, turns, unreadAfter, onAbort, holdSplits, joinHeldSplits){
+  paint(col, renderModel(turns, unreadAfter, holdSplits, joinHeldSplits), onAbort);
 }
 
 // --- smooth live updates (FLIP) ---

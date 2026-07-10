@@ -152,7 +152,7 @@ func TestReadModelContextFromToolOnlyBlock(t *testing.T) {
 	d, created := newReadModelDaemon(t)
 	items := []history.Item{
 		{Role: "user", Text: "u"},
-		{Role: "assistant", Tools: []history.ToolCall{{Name: "Bash", Label: "$ echo hi"}}, CtxUsed: 142_000, CtxWindow: 258_400},
+		{Role: "assistant", Tools: []history.ToolCall{{Name: "Exec", Label: "$ echo hi"}}, CtxUsed: 142_000, CtxWindow: 258_400},
 	}
 	turns := testRM(d, created, items, false, true)
 	if len(turns) != 1 {
