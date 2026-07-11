@@ -371,13 +371,42 @@ func (d *daemon) queuedCount(sk string, created int64) int {
 	return n
 }
 
-// newUISession creates a fresh active session for a UI chat and returns it so
-// the caller can switch the client to it.
-func (d *daemon) newUISession(sk, chatID string) *session.Session {
-	sess, _ := d.createSession(chatID, sk, "session")
-	d.saveStore()
-	d.broadcastSessions(sk)
-	return sess
+// createUISessionAtomic creates a new UI session already fully configured, saving and broadcasting
+// EXACTLY ONCE. No other client ever observes a defaults placeholder, and a rejected patch (or a
+// crash before the single save) leaves nothing behind — the session is only ever persisted/announced
+// after it is complete. Returns the created session, or the settings error with NOTHING created.
+func (d *daemon) createUISessionAtomic(sk, chatID string, patch uiSettingsPatch) (*session.Session, error) {
+	prevActive := d.store.Active(sk)                   // store.New below deactivates it; restore on rollback
+	sess, _ := d.createSession(chatID, sk, "session")  // in-memory only — no save/broadcast yet
+	if draftHasFields(patch) {
+		if err := d.applyUISessionSettingsCore(sk, sess.Created, patch); err != nil {
+			d.discardUnsavedSession(sk, sess.Created, prevActive) // never persisted/announced → clean removal
+			return nil, err
+		}
+		// Fold the "new session template" (scope defaults) update into this same commit.
+		if cur := d.store.Get(sk, sess.Created); cur != nil {
+			d.rememberNewSessionDefaultsCore(sk, cur)
+		}
+	}
+	d.saveStore()           // single persist…
+	d.broadcastSessions(sk) // …and single announce, of the fully-formed session
+	return d.store.Get(sk, sess.Created), nil
+}
+
+// discardUnsavedSession removes a session created in memory but never saved or broadcast (an atomic
+// create whose settings were rejected), and re-activates the session store.New had deactivated —
+// without persisting or announcing, since nothing external ever observed the aborted session.
+func (d *daemon) discardUnsavedSession(sk string, created int64, prevActive *session.Session) {
+	for i, s := range d.store.SessionsFor(sk) {
+		if s.Created == created {
+			d.store.Delete(sk, i)
+			break
+		}
+	}
+	d.dropRunner(sk, created)
+	if prevActive != nil {
+		d.store.UpdateSession(sk, prevActive.Created, func(cur *session.Session) { cur.Active = true })
+	}
 }
 
 // renameSession renames one session (by Created) and pushes the updated tab strip.
@@ -1089,40 +1118,17 @@ func (s *uiServer) handleNew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
-	// Validate the free-text working dir BEFORE creating anything, so a rejected draft (e.g. an
-	// inaccessible cwd) never leaves a mis-configured session behind and the dialog gets the real
-	// reason instead of a silent success with defaults.
-	if patch.CWD != nil {
-		if _, err := resolveWorkingDir(*patch.CWD); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
+	// Atomic create: validate + configure the session, then a SINGLE save + broadcast. A rejected
+	// draft (e.g. an inaccessible cwd) creates nothing and returns the real reason; nothing external
+	// ever sees a defaults placeholder, and a crash before the save leaves no half-built session.
+	sess, err := s.d.createUISessionAtomic(sk, s.chatID(user), patch)
+	if err != nil {
+		status := http.StatusBadRequest
+		if ue, ok := err.(*uiErr); ok {
+			status = ue.status
 		}
-	}
-	sess := s.d.newUISession(sk, s.chatID(user))
-	// Apply the draft's overrides to the freshly-created (message-less, unlocked) session. cwd is
-	// already validated; any other rejection is treated as fatal: roll the session back and return
-	// the reason, so creation-plus-configuration is atomic (no half-configured session).
-	if draftHasFields(patch) {
-		if err := s.d.applyUISessionSettings(sk, sess.Created, patch); err != nil {
-			// Roll the just-created session back. It can only fail to close if it is the scope's LAST
-			// session (closeSession refuses that) — extremely unlikely here (a session already exists
-			// before the client can render the "+"), but if it happens we must not leave a
-			// half-configured session behind silently: log it so a real occurrence is visible.
-			if rbErr := s.d.closeSession(sk, sess.Created); rbErr != nil {
-				log.Printf("ui: new-session rollback after settings failure could not close session %d: %v", sess.Created, rbErr)
-			}
-			status := http.StatusBadRequest
-			if ue, ok := err.(*uiErr); ok {
-				status = ue.status
-			}
-			http.Error(w, err.Error(), status)
-			return
-		}
-		// Remember this config as the per-chat new-session template (scope defaults) so the NEXT
-		// "+" draft inherits it — and keeps inheriting it after this session is closed.
-		if cur := s.d.store.Get(sk, sess.Created); cur != nil {
-			s.d.rememberNewSessionDefaults(sk, cur)
-		}
+		http.Error(w, err.Error(), status)
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {

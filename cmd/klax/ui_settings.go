@@ -161,11 +161,12 @@ func (d *daemon) uiDraftSettings(sk, chatID, backendOverride string) *uiSettings
 	}
 }
 
-// rememberNewSessionDefaults records a session's config as the per-chat "new session template"
+// rememberNewSessionDefaultsCore records a session's config as the per-chat "new session template"
 // (scope defaults) — the same durable memory the messenger writes on /backend, /model, … . It is
-// invoked when a UI draft is CONFIRMED (not on per-tab edits, which stay independent), so a new
-// draft inherits the last-created session's settings regardless of which sessions still exist.
-func (d *daemon) rememberNewSessionDefaults(sk string, sess *session.Session) {
+// invoked when a UI draft is CONFIRMED (not on per-tab edits, which stay independent), so a new draft
+// inherits the last-created session's settings regardless of which sessions still exist. It does NOT
+// persist — the caller (atomic session creation) folds the save into its single commit.
+func (d *daemon) rememberNewSessionDefaultsCore(sk string, sess *session.Session) {
 	backend := resolveSessionBackend(sess, d.scopeDefaults(sk), d.cfg.GetDefaultBackend())
 	d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
 		def.Backend = backend
@@ -176,17 +177,28 @@ func (d *daemon) rememberNewSessionDefaults(sk string, sess *session.Session) {
 		}
 		def.ClaudeTTY = sess.ClaudeTTY
 	})
-	d.saveStore()
 }
 
-// applyUISessionSettings applies a partial settings change to one session.
-// Unlike the messenger /settings handlers it edits ONLY the per-session
-// overrides (never the scope defaults that seed new sessions): each UI tab is
-// configured independently. The same guards apply — a run-affecting change is
-// refused while the session is busy, and the backend is locked once the first
-// message has been sent (model/think are backend-specific, so switching the
+// applyUISessionSettings validates + applies a partial settings change to one session and PERSISTS it
+// (save + broadcast). Unlike the messenger /settings handlers it edits ONLY the per-session overrides
+// (never the scope defaults that seed new sessions): each UI tab is configured independently. The same
+// guards apply — a run-affecting change is refused while the session is busy, and the backend is
+// locked once the first message has been sent (model/think are backend-specific, so switching the
 // backend resets them).
 func (d *daemon) applyUISessionSettings(sk string, created int64, p uiSettingsPatch) error {
+	if err := d.applyUISessionSettingsCore(sk, created, p); err != nil {
+		return err
+	}
+	d.saveStore()
+	d.broadcastSessions(sk)
+	return nil
+}
+
+// applyUISessionSettingsCore runs the validation + in-memory mutation but does NOT persist — the
+// caller owns the save + broadcast. Atomic session creation uses this so a new session is saved and
+// announced exactly ONCE, already fully configured (never a defaults placeholder, and no half-built
+// session left behind on a crash or a rejected patch).
+func (d *daemon) applyUISessionSettingsCore(sk string, created int64, p uiSettingsPatch) error {
 	sess := d.store.Get(sk, created)
 	if sess == nil {
 		return &uiErr{http.StatusNotFound, "сессия не найдена"}
@@ -279,8 +291,6 @@ func (d *daemon) applyUISessionSettings(sk string, created int64, p uiSettingsPa
 			cur.AppendSystemPrompt = newPrompt
 		}
 	})
-	d.saveStore()
-	d.broadcastSessions(sk)
 	return nil
 }
 
