@@ -185,9 +185,12 @@ function assert(c, m){ if(!c) throw new Error(m); }
 localStorage.setItem("klax_ui_token", "tok");
 function idTag(t){ let h1 = 5381, h2 = 52711; for(let i = 0; i < t.length; i++){ const c = t.charCodeAt(i); h1 = ((h1 << 5) + h1 + c) >>> 0; h2 = ((h2 << 5) + h2 + (c ^ 0x9e)) >>> 0; } return h1.toString(36) + h2.toString(36); }
 const K = n => "klax_ob." + idTag("tok") + "." + n;
-localStorage.setItem(K("n-alive"),  JSON.stringify({ created: 1, text: "keep me",      nonce: "n-alive",  sent: true }));
-localStorage.setItem(K("n-orphan"), JSON.stringify({ created: 2, text: "session gone", nonce: "n-orphan", sent: true }));
-localStorage.setItem(K("n-empty"),  JSON.stringify({ created: 3, text: "",             nonce: "n-empty",  sent: true }));
+// Session 1 is live; session 2 is closed. TWO unconfirmed messages for session 1 (must BOTH surface,
+// not just the first), one orphan for the closed session 2 (re-homes to session 1), one empty (dropped).
+localStorage.setItem(K("a1"),    JSON.stringify({ created: 1, text: "first",  nonce: "a1",    sent: true }));
+localStorage.setItem(K("a2"),    JSON.stringify({ created: 1, text: "second", nonce: "a2",    sent: true }));
+localStorage.setItem(K("orph"),  JSON.stringify({ created: 2, text: "orphan", nonce: "orph",  sent: true }));
+localStorage.setItem(K("empty"), JSON.stringify({ created: 1, text: "",       nonce: "empty", sent: true }));
 // A different identity's entry must be invisible to this identity's recovery (privacy namespacing).
 localStorage.setItem("klax_ob.OTHER.x", JSON.stringify({ created: 1, text: "not mine", nonce: "x", sent: true }));
 
@@ -197,13 +200,14 @@ const n = recoverOutbox({ isLive: c => c === 1, firstLive: () => 1, notice: () =
 
 const mine = () => { const p = "klax_ob." + idTag("tok") + "."; const out = []; for(let i = 0; i < localStorage.length; i++){ const k = localStorage.key(i); if(k && k.indexOf(p) === 0) out.push(JSON.parse(localStorage.getItem(k))); } return out; };
 const after = mine();
-assert(after.some(e => e.nonce === "n-alive" && e.text === "keep me"), "unconfirmed message for a live session must stay in the outbox");
-assert(!after.some(e => e.nonce === "n-empty"), "empty-text entry must be dropped");
-assert(!after.some(e => e.nonce === "n-orphan"), "orphan original nonce must be dropped after re-home");
-const moved = after.find(e => e.created === 1 && e.text === "session gone");
-assert(moved && moved.nonce !== "n-orphan", "orphan text must be re-homed to the first live session under a fresh nonce");
+// The three original per-message nonces and the empty entry are all gone (consolidated / dropped).
+["a1", "a2", "orph", "empty"].forEach(x => assert(!after.some(e => e.nonce === x), "original nonce " + x + " must not remain"));
+// Exactly ONE consolidated entry for session 1, holding ALL recovered texts (none stranded).
+assert(after.length === 1, "expected a single consolidated entry, got " + after.length);
+const c = after[0];
+assert(c.created === 1 && c.text === "first\n\nsecond\n\norphan", "consolidated text must contain every recovered message: " + JSON.stringify(c.text));
 assert(localStorage.getItem("klax_ob.OTHER.x") !== null, "another identity's entry must be left untouched");
-assert(n === 2, "two recoverable messages, got " + n);
+assert(n === 3, "three messages recovered (count must not over-report), got " + n);
 assert(notices === 1, "exactly one recovery notice");
 console.log("ok");
 `

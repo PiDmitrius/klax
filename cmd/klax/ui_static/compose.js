@@ -219,7 +219,13 @@ async function send(deps){
       return; // composer + retryNonce intact — nothing lost
     }
     const cur = retryNonce ? outboxGet(retryNonce) : null;
-    const reuse = !!(cur && cur.text === text);
+    // Reuse retryNonce when its stored entry still holds this exact text (idempotent resend), OR when
+    // the entry is GONE while retryNonce is still set — that means this text was already transmitted
+    // under retryNonce and its durable copy was dropped on a 204, e.g. delivered by ANOTHER tab that
+    // held the same recovered draft. Reusing the nonce lets the server dedup it into a no-op instead
+    // of minting a fresh nonce that would DUPLICATE-deliver. (An edit clears/rotates retryNonce via
+    // syncRetry, so a set retryNonce with a missing entry always corresponds to THIS unmodified text.)
+    const reuse = !!retryNonce && (!cur || cur.text === text);
     nonce = reuse ? retryNonce : newNonce();
     if(!outboxPut({ created, text, nonce, sent: true })){
       if(deps.notice) deps.notice("Не удалось сохранить сообщение локально — отправка отменена. Освободите хранилище браузера и повторите.");
@@ -272,45 +278,53 @@ function rollback(deps, created, text, staged, nonce, msg){
 
 // recoverOutbox restores every message that was submitted but never confirmed durable by the server
 // (tab closed/reloaded/crashed mid-send, or a send that failed) back into its session's composer
-// draft, carrying the original nonce so a resend is deduped by the server (never a double-delivery).
-// Called ONCE at startup, before the first tab is selected, so the active tab's recovered text lands
-// straight in the live composer via loadDraft. Entries stay in the outbox until a successful resend
-// clears them, so recovery is idempotent and lossless across repeated reloads. deps: { isLive(created),
-// firstLive():created, notice(text) }.
+// draft. Called ONCE at startup, before the first tab is selected, so the active tab's recovered text
+// lands straight in the live composer via loadDraft. Returns the number of messages recovered. deps:
+// { isLive(created), firstLive():created, notice(text) }.
+//
+// Every recoverable entry is resolved to a LIVE target session (its own if live, else the first live
+// one for a closed-session orphan) and GROUPED by target. A single message for a session keeps its own
+// nonce (idempotent resend). When several messages map to one session — the composer can only hold one
+// draft — their texts are CONCATENATED into that draft and CONSOLIDATED into a single fresh outbox
+// entry (written before the originals are dropped), so nothing is silently stranded behind the first
+// and the count never over-reports.
 export function recoverOutbox(deps){
   const list = outboxList();
   if(!list.length) return 0;
   const isLive = deps && deps.isLive, firstLive = deps && deps.firstLive;
-  let n = 0, moved = 0;
-  const stash = (created, text, nonce) => {
-    const d = drafts[created];
-    if(!d || (!d.text.trim() && !d.files.length)) drafts[created] = { text, files: [], nonce }; // never clobber a newer draft
-  };
+  const groups = new Map(); // target created -> [entries, in list order]
+  let moved = 0;
   for(const e of list){
     if(!e || !e.text){ outboxDrop(e && e.nonce); continue; } // nothing recoverable (no text)
-    if(!isLive || isLive(e.created)){
-      stash(e.created, e.text, e.nonce);
-      n++;
+    let target = e.created, orphan = false;
+    if(isLive && !isLive(e.created)){ target = firstLive ? firstLive() : 0; orphan = true; }
+    if(!target) continue; // no live target (empty strip) — keep the entry; it re-recovers next load
+    if(orphan) moved++;
+    if(!groups.has(target)) groups.set(target, []);
+    groups.get(target).push(e);
+  }
+  let recovered = 0;
+  for(const [target, entries] of groups){
+    const d = drafts[target];
+    if(d && (d.text.trim() || d.files.length)) continue; // a newer draft already occupies this composer — don't clobber
+    if(entries.length === 1 && entries[0].created === target){
+      drafts[target] = { text: entries[0].text, files: [], nonce: entries[0].nonce }; // keep its own nonce
+      recovered++;
     } else {
-      // Target session was closed while the send was pending: re-home the text to the first live
-      // session under a fresh nonce. Write the replacement FIRST and drop the original ONLY if the
-      // write committed — no delete-before-write window, and never a drop with no replacement. If
-      // there is no live target (or the write fails), KEEP the original; it re-recovers next load.
-      const target = firstLive ? firstLive() : 0;
-      if(target){
-        const nn = newNonce();
-        if(outboxPut({ created: target, text: e.text, nonce: nn, sent: false })){
-          outboxDrop(e.nonce);
-          stash(target, e.text, nn);
-          n++; moved++;
-        }
+      const text = entries.map(e => e.text).join("\n\n");
+      const nn = newNonce();
+      if(outboxPut({ created: target, text, nonce: nn, sent: false })){ // consolidate: write first…
+        entries.forEach(e => outboxDrop(e.nonce));                      // …then drop the originals
+        drafts[target] = { text, files: [], nonce: nn };
+        recovered += entries.length;
       }
+      // if the consolidation write fails, leave the originals untouched — retried next load
     }
   }
-  if(n && deps && deps.notice){
-    let msg = "Восстановлено несохранённых сообщений: " + n;
+  if(recovered && deps && deps.notice){
+    let msg = "Восстановлено несохранённых сообщений: " + recovered;
     if(moved) msg += "; часть перенесена (сессия закрыта)";
     deps.notice(msg);
   }
-  return n;
+  return recovered;
 }
