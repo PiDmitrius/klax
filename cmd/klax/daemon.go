@@ -677,16 +677,8 @@ func (d *daemon) notifyAllUsers(text string) {
 	d.uiNotifyAll(text)
 }
 
-// drainMaxWait bounds how long a restart waits for active sessions to finish. Without it a session
-// that never idles — e.g. a long-lived agent conversation running THROUGH this daemon, which stays
-// active across every turn — blocks the drain forever, so `klax update` installs a new binary but
-// the old process never exits to pick it up. On timeout we force the restart; the interrupted
-// turn's durable "run" record is recovered (never auto-rerun) on the next start, so no double side
-// effects, and startup replay re-runs anything still "enq".
-const drainMaxWait = 2 * time.Minute
-
 // startDrain puts the daemon into draining mode.
-// Waits for current task AND queued tasks to finish (bounded by drainMaxWait) before shutting down.
+// Waits for the current task AND queued tasks to finish before shutting down.
 func (d *daemon) startDrain(reason string) {
 	d.mu.Lock()
 	if d.draining {
@@ -714,17 +706,15 @@ func (d *daemon) startDrain(reason string) {
 	}
 	d.runnersMu.Unlock()
 
-	// Wait for all active session runners to finish — bounded, so a persistent/wedged session cannot
-	// block the restart forever (see drainMaxWait).
+	// KLAX UPDATE INVARIANT — set the marker and WAIT FOREVER. We NEVER force a restart out from under
+	// a live run: an active session (notably a long-lived agent conversation running THROUGH this
+	// daemon — its turn IS the run we are draining) is waited on unconditionally, never cut mid-turn.
+	// The canonical `klax update` flow is: write the marker, report, and END THE TURN — the run then
+	// frees on its own and the drain completes, so systemd picks up the new binary. A bounded/forced
+	// restart would sever a turn "на ровном месте"; that is exactly the behaviour this invariant bans.
 	log.Println("waiting for all sessions to drain...")
-	done := make(chan struct{})
-	go func() { d.drainWg.Wait(); close(done) }()
-	select {
-	case <-done:
-		log.Println("all sessions drained")
-	case <-time.After(drainMaxWait):
-		log.Printf("drain timed out after %s — forcing restart with sessions still active", drainMaxWait)
-	}
+	d.drainWg.Wait()
+	log.Println("all sessions drained")
 	d.shutdown()
 }
 
