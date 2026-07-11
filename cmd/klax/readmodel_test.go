@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/PiDmitrius/klax/internal/history"
-	"github.com/PiDmitrius/klax/internal/sealref"
 )
 
 func newReadModelDaemon(t *testing.T) (*daemon, int64) {
@@ -14,11 +13,7 @@ func newReadModelDaemon(t *testing.T) (*daemon, int64) {
 	d := newTestDeliveryDaemon(&fakeTransport{})
 	d.store = newStoreWithChat("user:alice", "one")
 	d.runners = make(map[runnerKey]*sessionRunner)
-	s, err := sealref.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	d.sealer = s
+	d.uiHub = newUIHub() // UI on
 	created := d.store.SessionsFor("user:alice")[0].Created
 	d.getRunner("user:alice", created) // bind the runner-owned durable store
 	return d, created

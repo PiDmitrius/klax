@@ -266,6 +266,20 @@ func (s *Store) normalize() {
 	}
 }
 
+// EachSession calls fn for every (chatID, Created) in the store under the lock — used at startup to
+// rebuild derived indexes (e.g. the file-token index) from each session's on-disk state.
+func (s *Store) EachSession(fn func(chatID string, created int64)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for chatID, cs := range s.Chats {
+		for _, sess := range cs.Sessions {
+			if sess != nil {
+				fn(chatID, sess.Created)
+			}
+		}
+	}
+}
+
 func (s *Store) SessionsFor(chatID string) []*Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()

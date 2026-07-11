@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/PiDmitrius/klax/internal/sessfiles"
 )
 
 // outLinkRe matches a markdown link or image: optional '!', [label](href) with a
@@ -19,11 +21,11 @@ const maxOutboundFiles = 16
 
 // rewriteOutboundForUI scans an agent answer for markdown links/images whose href is
 // a LOCAL file inside the session cwd, snapshot-copies
-// each into the durable store, mints a capability ref and rewrites the href to
+// each into the durable store, mints a durable per-file token and rewrites the href to
 // /api/file?ref=. A link that can't be confined or snapshotted degrades to its plain
-// label, so the UI never shows a dead local path. UI-only (no sealer => no rewrite).
+// label, so the UI never shows a dead local path. UI-only (UI off => no rewrite).
 func (d *daemon) rewriteOutboundForUI(sk string, created int64, md string) string {
-	if d.sealer == nil || md == "" || !strings.Contains(md, "](") {
+	if d.uiHub == nil || md == "" || !strings.Contains(md, "](") {
 		return md
 	}
 	// Grab the runner-owned store FIRST (this runs in the run's own Final, so the
@@ -58,12 +60,12 @@ func (d *daemon) rewriteOutboundForUI(sk string, created int64, md string) strin
 			return label
 		}
 		storedPath := store.Path(stored)
-		ref, err := d.mintFileRef(sk, created, storedPath, mime.TypeByExtension(filepath.Ext(stored)))
+		token, err := d.fileToken(store, sk, created, stored, sessfiles.DisplayName(stored), mime.TypeByExtension(filepath.Ext(stored)))
 		if err != nil {
 			return label
 		}
 		n++
-		outHref := "/api/file?ref=" + url.QueryEscape(ref)
+		outHref := "/api/file?ref=" + url.QueryEscape(token)
 		if bang == "!" {
 			if w, h := imageDimensions(storedPath); w > 0 && h > 0 {
 				outHref += fmt.Sprintf("&w=%d&h=%d", w, h)

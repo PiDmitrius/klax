@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/PiDmitrius/klax/internal/sealref"
 	"github.com/PiDmitrius/klax/internal/sessfiles"
 	"github.com/PiDmitrius/klax/internal/session"
 )
@@ -67,17 +66,12 @@ func TestHandleFileUsesDisplayNameForDownload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sealer, err := sealref.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	d.sealer = sealer
-	ref, err := d.mintFileRef("user:alice", sess.Created, store.Path(stored), "")
+	token, err := d.fileToken(store, "user:alice", sess.Created, stored, sessfiles.DisplayName(stored), "")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/file?ref="+ref, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/file?ref="+token, nil)
 	rec := httptest.NewRecorder()
 	(&uiServer{d: d}).handleFile(rec, req)
 
@@ -97,10 +91,6 @@ func TestInboundTextShowsAttachmentSize(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	d := newTestDeliveryDaemon(&fakeTransport{})
 	var err error
-	d.sealer, err = sealref.New()
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	store := sessfiles.Open("user:alice", 1)
 	_, _, _, _, err = store.Enqueue("user:alice", "", "nonce", "see attached", []sessfiles.NamedReader{{
@@ -127,31 +117,37 @@ func TestInboundTextShowsAttachmentSize(t *testing.T) {
 	}
 }
 
-// A minted file ref must be STABLE across rebuilds for the same (session, path, ct) — otherwise the
-// attachment's <img src> changes on every read-model rebuild and the image re-decodes/flickers.
-func TestMintFileRefStableAcrossRebuilds(t *testing.T) {
+// A file token must be STABLE across read-model rebuilds and persist in links.json across a reopen
+// (restart) — otherwise the attachment's <img src> changes and the image re-decodes/flickers.
+func TestFileTokenStableAndPersisted(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	d := newTestDeliveryDaemon(&fakeTransport{})
-	var err error
-	if d.sealer, err = sealref.New(); err != nil {
-		t.Fatal(err)
-	}
-	r1, err := d.mintFileRef("user:alice", 1, "/tmp/a.png", "image/png")
+	store := sessfiles.Open("user:alice", 1)
+	t1, err := d.fileToken(store, "user:alice", 1, "000001-01-a.png", "a.png", "image/png")
 	if err != nil {
 		t.Fatal(err)
 	}
-	r2, err := d.mintFileRef("user:alice", 1, "/tmp/a.png", "image/png")
+	t2, err := d.fileToken(store, "user:alice", 1, "000001-01-a.png", "a.png", "image/png")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r1 != r2 {
-		t.Fatalf("ref not stable across rebuilds: %q vs %q", r1, r2)
+	if t1 != t2 {
+		t.Fatalf("token not stable across rebuilds: %q vs %q", t1, t2)
 	}
-	// A different file (or session) gets its own distinct ref.
-	r3, err := d.mintFileRef("user:alice", 1, "/tmp/b.png", "image/png")
+	// A different file gets a distinct token.
+	t3, err := d.fileToken(store, "user:alice", 1, "000001-01-b.png", "b.png", "image/png")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r3 == r1 {
-		t.Fatal("distinct files must get distinct refs")
+	if t3 == t1 {
+		t.Fatal("distinct files must get distinct tokens")
+	}
+	// The token survives a fresh Store.Open (i.e. a restart) — it is durable in links.json.
+	links, err := sessfiles.Open("user:alice", 1).Links()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if links["000001-01-a.png"].Token != t1 {
+		t.Fatalf("token must persist in links.json across reopen: %q", links["000001-01-a.png"].Token)
 	}
 }

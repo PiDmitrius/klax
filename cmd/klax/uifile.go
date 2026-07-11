@@ -12,9 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
-	"github.com/PiDmitrius/klax/internal/sealref"
 	"github.com/PiDmitrius/klax/internal/sessfiles"
 	_ "golang.org/x/image/bmp"
 	_ "golang.org/x/image/webp"
@@ -30,12 +28,13 @@ func (d *daemon) inboundText(store *sessfiles.Store, t sessfiles.Turn, sk string
 	}
 	for _, name := range t.Files {
 		ct := mime.TypeByExtension(filepath.Ext(name))
-		ref, err := d.mintFileRef(sk, created, store.Path(name), ct)
+		display := sessfiles.DisplayName(name)
+		token, err := d.fileToken(store, sk, created, name, display, ct)
 		if err != nil {
 			continue
 		}
-		u := "/api/file?ref=" + url.QueryEscape(ref)
-		label := safeMarkdownLabel(sessfiles.DisplayName(name))
+		u := "/api/file?ref=" + url.QueryEscape(token)
+		label := safeMarkdownLabel(display)
 		size := formatFileSize(store.Path(name))
 		if strings.HasPrefix(ct, "image/") {
 			if w, h := imageDimensions(store.Path(name)); w > 0 && h > 0 {
@@ -101,12 +100,61 @@ func safeMarkdownLabel(s string) string {
 	}, s)
 }
 
-// fileRefTTL bounds how long a minted file capability URL stays valid. fileRefRemintGrace re-mints a
-// cached ref once it is within this window of expiry, so a served <img src> stays valid.
-const (
-	fileRefTTL         = time.Hour
-	fileRefRemintGrace = 10 * time.Minute
-)
+// fileToken returns the STABLE durable access token for one stored file (minting + persisting it in
+// the session's links.json on first request, reusing it afterwards) and records token -> (session,
+// stored file) in the in-memory index so handleFile can resolve it. The token never changes across
+// read-model rebuilds, so an attachment's /api/file?ref=… URL — and thus its <img src> — is stable.
+func (d *daemon) fileToken(store *sessfiles.Store, sk string, created int64, stored, name, contentType string) (string, error) {
+	token, err := store.EnsureLink(stored, name, contentType)
+	if err != nil {
+		return "", err
+	}
+	d.fileTokensMu.Lock()
+	if d.fileTokens == nil {
+		d.fileTokens = make(map[string]tokenRef)
+	}
+	d.fileTokens[token] = tokenRef{sk: sk, created: created, stored: stored}
+	d.fileTokensMu.Unlock()
+	return token, nil
+}
+
+// rebuildFileTokenIndex loads every session's links.json into the in-memory token index at startup, so
+// a token minted before the restart still resolves immediately.
+func (d *daemon) rebuildFileTokenIndex() {
+	type ref struct {
+		sk      string
+		created int64
+	}
+	var all []ref
+	d.store.EachSession(func(sk string, created int64) { all = append(all, ref{sk, created}) })
+	idx := make(map[string]tokenRef)
+	for _, r := range all {
+		links, err := sessfiles.Open(r.sk, r.created).Links()
+		if err != nil {
+			continue
+		}
+		for stored, e := range links {
+			if e.Token != "" {
+				idx[e.Token] = tokenRef{sk: r.sk, created: r.created, stored: stored}
+			}
+		}
+	}
+	d.fileTokensMu.Lock()
+	d.fileTokens = idx
+	d.fileTokensMu.Unlock()
+}
+
+// dropFileTokens forgets a removed session's tokens (its dir — files/ + links.json — is gone, so the
+// tokens are already dead; this just bounds the index). Idempotent.
+func (d *daemon) dropFileTokens(sk string, created int64) {
+	d.fileTokensMu.Lock()
+	defer d.fileTokensMu.Unlock()
+	for token, tr := range d.fileTokens {
+		if tr.sk == sk && tr.created == created {
+			delete(d.fileTokens, token)
+		}
+	}
+}
 
 // inlineImageTypes are the only media types /api/file serves inline. Everything else
 // (HTML, SVG, JS, PDF, unknown) is forced to download as an opaque octet-stream — an
@@ -116,73 +164,49 @@ var inlineImageTypes = map[string]bool{
 	"image/png": true, "image/jpeg": true, "image/gif": true, "image/webp": true, "image/bmp": true,
 }
 
-// mintFileRef returns a capability URL ref for one of a session's files. It CACHES the sealed ref per
-// (session, path, contentType) and returns the SAME ref across read-model rebuilds until it nears
-// expiry — the sealed ref is randomized per mint (fresh nonce), so re-minting on every rebuild changed
-// an attachment's URL and made its <img> re-decode/flicker. A cached ref reuses its full TTL of
-// validity (no security change: a single mint was always valid for the whole TTL). Callers only ever
-// mint for paths already confined to a session root, so a leaked UI token can't widen this to
-// arbitrary read.
-func (d *daemon) mintFileRef(sk string, created int64, path, contentType string) (string, error) {
-	key := sk + "\x00" + strconv.FormatInt(created, 10) + "\x00" + path + "\x00" + contentType
-	now := time.Now()
-	d.fileRefsMu.Lock()
-	if e, ok := d.fileRefs[key]; ok && e.exp-now.Unix() > int64(fileRefRemintGrace.Seconds()) {
-		d.fileRefsMu.Unlock()
-		return e.ref, nil // stable across rebuilds → same <img src>, no re-decode
-	}
-	d.fileRefsMu.Unlock()
-
-	exp := now.Add(fileRefTTL)
-	ref, err := d.sealer.Seal(sealref.Payload{
-		SessionKey:  sk,
-		Created:     created,
-		Path:        path,
-		ContentType: contentType,
-		Exp:         exp.Unix(),
-	})
-	if err != nil {
-		return "", err
-	}
-	d.fileRefsMu.Lock()
-	if d.fileRefs == nil {
-		d.fileRefs = make(map[string]fileRefEntry)
-	}
-	d.fileRefs[key] = fileRefEntry{ref: ref, exp: exp.Unix()}
-	for k, e := range d.fileRefs { // opportunistic sweep of expired entries (bounds the map)
-		if e.exp <= now.Unix() {
-			delete(d.fileRefs, k)
-		}
-	}
-	d.fileRefsMu.Unlock()
-	return ref, nil
-}
-
-// handleFile serves a session file by sealed ref. The ref IS the capability — no
-// bearer header is required (an <img src> can't send one). The ref proves the
-// server minted it for this session+path+exp; serving additionally requires the
-// session to still exist and the path to remain inside a session root.
+// handleFile serves a session file by its durable per-file token. The token IS the capability — no
+// bearer header is required (an <img src> can't send one). Serving requires, in order: the token
+// resolves in the index, the session still exists, the token is still present in that session's
+// links.json for the stored file, and the file lies inside the session's files/ dir. One token grants
+// access to exactly one file — there is no session-wide key.
 func (s *uiServer) handleFile(w http.ResponseWriter, r *http.Request) {
-	p, err := s.d.sealer.Open(r.URL.Query().Get("ref"), time.Now())
-	if err != nil {
+	token := r.URL.Query().Get("ref")
+	if token == "" {
 		http.Error(w, "invalid reference", http.StatusForbidden)
 		return
 	}
-	// Liveness: a closed/deleted session's refs are dead even if bytes linger until
-	// the TTL sweep.
-	sess := s.d.store.Get(p.SessionKey, p.Created)
-	if sess == nil {
+	s.d.fileTokensMu.Lock()
+	tr, ok := s.d.fileTokens[token]
+	s.d.fileTokensMu.Unlock()
+	if !ok {
+		http.Error(w, "invalid reference", http.StatusForbidden)
+		return
+	}
+	// A closed/deleted session's tokens are dead (its dir — files/ + links.json — is gone).
+	if s.d.store.Get(tr.sk, tr.created) == nil {
 		http.NotFound(w, r)
 		return
 	}
-	// Defense in depth: re-confine to a session root at serve time (minting already
-	// checked, but the path could have changed).
-	roots := []string{sess.CWD, filepath.Join(sessfiles.WorkDir(p.SessionKey, p.Created), "files")}
-	if !pathInRoots(p.Path, roots...) {
+	store := sessfiles.Open(tr.sk, tr.created)
+	// Re-verify the token against links.json (the in-memory index could be stale after a concurrent
+	// delete) — it must still map to this stored file.
+	links, err := store.Links()
+	if err != nil {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	f, err := os.Open(p.Path)
+	entry, ok := links[tr.stored]
+	if !ok || entry.Token != token {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	// Defense in depth: the stored file must lie inside this session's files/ dir.
+	path := store.Path(tr.stored)
+	if !pathInRoots(path, filepath.Join(sessfiles.WorkDir(tr.sk, tr.created), "files")) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -199,19 +223,22 @@ func (s *uiServer) handleFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Content-Security-Policy", "sandbox") // blocks active content if opened as a document
-	ct := p.ContentType
+	ct := entry.ContentType
 	if ct == "" {
-		ct = mime.TypeByExtension(filepath.Ext(p.Path))
+		ct = mime.TypeByExtension(filepath.Ext(path))
 	}
 	mt, _, _ := mime.ParseMediaType(ct)
 	if inlineImageTypes[mt] {
 		w.Header().Set("Content-Type", mt)
 	} else {
-		name := sessfiles.DisplayName(filepath.Base(p.Path))
+		name := entry.Name
+		if name == "" {
+			name = sessfiles.DisplayName(filepath.Base(path))
+		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(name))
 	}
-	http.ServeContent(w, r, filepath.Base(p.Path), fi.ModTime(), f)
+	http.ServeContent(w, r, filepath.Base(path), fi.ModTime(), f)
 }
 
 // pathInRoots reports whether path (after symlink resolution) lies inside any of the
