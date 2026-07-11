@@ -62,6 +62,10 @@ func codexExecChildTool(src, name, arg string) ToolCall {
 		if patch := resolveCodexPatch(src, arg); patch != "" {
 			return codexResponseToolCall("", "apply_patch", patch)
 		}
+	case "write_stdin":
+		// tools.write_stdin({session_id: …, chars: "…"}) — the session id is an internal handle we
+		// don't surface; only `chars` distinguishes a poll-wait (empty) from real stdin input.
+		return codexWriteStdinTool(jsObjectString(arg, "chars"))
 	}
 	return codexResponseToolCall("", name, "")
 }

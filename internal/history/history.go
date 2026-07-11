@@ -324,6 +324,18 @@ func readCodex(path string) ([]Item, error) {
 		lastWasCompacted = false
 		lastCompacted = -1
 	}
+	// appendCodexTool appends a decoded Codex tool row, collapsing a run of IDENTICAL write_stdin
+	// poll-waits (empty chars) into one line — Codex polls a long-running command repeatedly, so the
+	// raw transcript is otherwise a wall of identical "ожидание завершения команды" rows.
+	waitLabel := codexWriteStdinTool("").Label
+	appendCodexTool := func(tc ToolCall, ts string) {
+		if tc.Label == waitLabel && len(items) > 0 {
+			if prev := items[len(items)-1]; prev.Role == "assistant" && len(prev.Tools) == 1 && prev.Tools[0].Label == waitLabel {
+				return
+			}
+		}
+		appendAssistant(Item{Role: "assistant", Tools: []ToolCall{tc}, Time: ts})
+	}
 	for _, raw := range bytes.Split(data, []byte("\n")) {
 		raw = bytes.TrimSpace(raw)
 		if len(raw) == 0 {
@@ -404,7 +416,7 @@ func readCodex(path string) ([]Item, error) {
 			src := rawJSONArgument(p.Input)
 			if tools := decodeCodexExecTools(src); len(tools) > 0 {
 				for _, tc := range tools {
-					appendAssistant(Item{Role: "assistant", Tools: []ToolCall{tc}, Time: ts})
+					appendCodexTool(tc, ts)
 				}
 			} else if src != "" {
 				appendAssistant(Item{Role: "assistant", Tools: []ToolCall{toolCall("Exec", jsonObject("command", src))}, Time: ts})
@@ -417,7 +429,7 @@ func readCodex(path string) ([]Item, error) {
 				if args == "" {
 					args = rawJSONArgument(p.Input) // custom_tool_call carries "input" instead of "arguments"
 				}
-				appendAssistant(Item{Role: "assistant", Tools: []ToolCall{codexResponseToolCall(p.Namespace, p.Name, args)}, Time: ts})
+				appendCodexTool(codexResponseToolCall(p.Namespace, p.Name, args), ts)
 			}
 		case entry.Type == "response_item" && p.Type == "web_search_call":
 			if tool, ok := codexWebSearchTool(p.Action); ok {
@@ -483,6 +495,20 @@ func codexHistoryItemTool(item *codexHistoryItem) (ToolCall, bool) {
 	return ToolCall{}, false
 }
 
+// codexExecWaitCmd is the row Codex's write_stdin poll (empty chars) renders as — a bare "waiting
+// for the command to finish" line, WITHOUT the internal session id (an implementation detail).
+const codexExecWaitCmd = "ожидание завершения команды"
+
+// codexWriteStdinTool maps a Codex write_stdin call (structured or decoded from an exec wrapper) to a
+// row: an empty `chars` is a poll that just waits for the running command, so it shows the wait line;
+// non-empty `chars` is actual input sent to the command's stdin.
+func codexWriteStdinTool(chars string) ToolCall {
+	if chars == "" {
+		return toolCall("Exec", jsonObject("command", codexExecWaitCmd))
+	}
+	return toolCall("Exec", jsonObject("command", "ввод: "+chars))
+}
+
 func codexResponseToolCall(namespace, name, input string) ToolCall {
 	switch name {
 	case "exec_command":
@@ -491,15 +517,10 @@ func codexResponseToolCall(namespace, name, input string) ToolCall {
 		}
 	case "write_stdin":
 		var inp struct {
-			SessionID int    `json:"session_id"`
-			Chars     string `json:"chars"`
+			Chars string `json:"chars"`
 		}
-		if json.Unmarshal([]byte(input), &inp) == nil && inp.SessionID != 0 {
-			action := "wait for command session"
-			if inp.Chars != "" {
-				action = "write to command session"
-			}
-			return toolCall("Exec", jsonObject("command", action+" "+itoa(inp.SessionID)))
+		if json.Unmarshal([]byte(input), &inp) == nil {
+			return codexWriteStdinTool(inp.Chars)
 		}
 	case "view_image":
 		if path := jsonStringField(input, "path"); path != "" {
@@ -559,21 +580,6 @@ func jsonStringField(raw string, keys ...string) string {
 func jsonObject(key, value string) string {
 	b, _ := json.Marshal(map[string]string{key: value})
 	return string(b)
-}
-
-func itoa(n int) string {
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if i == len(buf) {
-		i--
-		buf[i] = '0'
-	}
-	return string(buf[i:])
 }
 
 func mcpInput(server, tool string) string {
