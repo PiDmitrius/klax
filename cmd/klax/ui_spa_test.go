@@ -148,3 +148,71 @@ assert(standaloneTool.kind === "bubble" && standaloneTool.cls === "tool" && stan
 		t.Fatalf("node renderModel test failed: %v\n%s", err, out)
 	}
 }
+
+// The durable send-outbox is the client half of the "a submitted message is never lost" guarantee:
+// recoverOutbox must keep a still-unconfirmed message for a live session, re-home one whose target
+// session was closed (under a fresh nonce, dropping the undeliverable original), and discard an
+// unrecoverable attachment-only entry — all without losing any written text.
+func TestSendOutboxRecovery(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not found")
+	}
+	dir := t.TempDir()
+	for _, name := range []string{"base.js", "compose.js"} {
+		body, err := moduleFS.ReadFile("ui_static/" + name)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), body, 0600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"type":"module"}`), 0600); err != nil {
+		t.Fatalf("write package.json: %v", err)
+	}
+	script := `
+// Minimal localStorage mock with length/key() so the per-nonce outbox can scan its own keys.
+const store = new Map();
+globalThis.localStorage = {
+  getItem: k => store.has(k) ? store.get(k) : null,
+  setItem: (k, v) => { store.set(k, String(v)); },
+  removeItem: k => { store.delete(k); },
+  key: i => { const ks = Array.from(store.keys()); return i < ks.length ? ks[i] : null; },
+  get length(){ return store.size; },
+};
+function assert(c, m){ if(!c) throw new Error(m); }
+// The outbox namespaces keys by a djb2 tag of the auth token — replicate it to seed entries.
+localStorage.setItem("klax_ui_token", "tok");
+function idTag(t){ let h1 = 5381, h2 = 52711; for(let i = 0; i < t.length; i++){ const c = t.charCodeAt(i); h1 = ((h1 << 5) + h1 + c) >>> 0; h2 = ((h2 << 5) + h2 + (c ^ 0x9e)) >>> 0; } return h1.toString(36) + h2.toString(36); }
+const K = n => "klax_ob." + idTag("tok") + "." + n;
+localStorage.setItem(K("n-alive"),  JSON.stringify({ created: 1, text: "keep me",      nonce: "n-alive",  sent: true }));
+localStorage.setItem(K("n-orphan"), JSON.stringify({ created: 2, text: "session gone", nonce: "n-orphan", sent: true }));
+localStorage.setItem(K("n-empty"),  JSON.stringify({ created: 3, text: "",             nonce: "n-empty",  sent: true }));
+// A different identity's entry must be invisible to this identity's recovery (privacy namespacing).
+localStorage.setItem("klax_ob.OTHER.x", JSON.stringify({ created: 1, text: "not mine", nonce: "x", sent: true }));
+
+const { recoverOutbox } = await import("./compose.js");
+let notices = 0;
+const n = recoverOutbox({ isLive: c => c === 1, firstLive: () => 1, notice: () => notices++ });
+
+const mine = () => { const p = "klax_ob." + idTag("tok") + "."; const out = []; for(let i = 0; i < localStorage.length; i++){ const k = localStorage.key(i); if(k && k.indexOf(p) === 0) out.push(JSON.parse(localStorage.getItem(k))); } return out; };
+const after = mine();
+assert(after.some(e => e.nonce === "n-alive" && e.text === "keep me"), "unconfirmed message for a live session must stay in the outbox");
+assert(!after.some(e => e.nonce === "n-empty"), "empty-text entry must be dropped");
+assert(!after.some(e => e.nonce === "n-orphan"), "orphan original nonce must be dropped after re-home");
+const moved = after.find(e => e.created === 1 && e.text === "session gone");
+assert(moved && moved.nonce !== "n-orphan", "orphan text must be re-homed to the first live session under a fresh nonce");
+assert(localStorage.getItem("klax_ob.OTHER.x") !== null, "another identity's entry must be left untouched");
+assert(n === 2, "two recoverable messages, got " + n);
+assert(notices === 1, "exactly one recovery notice");
+console.log("ok");
+`
+	scriptPath := filepath.Join(dir, "outbox_test.mjs")
+	if err := os.WriteFile(scriptPath, []byte(script), 0600); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	out, err := exec.Command("node", scriptPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node outbox test failed: %v\n%s", err, out)
+	}
+}

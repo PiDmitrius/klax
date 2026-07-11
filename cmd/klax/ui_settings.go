@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/PiDmitrius/klax/internal/pathutil"
 	"github.com/PiDmitrius/klax/internal/session"
 )
 
@@ -18,23 +19,26 @@ type uiSettingsOption struct {
 
 // uiSettings is the full per-session settings view the dialog renders from. It
 // carries the current values, the option lists for the session's current
-// backend, the guards (busy/backend-locked), and live context-window usage.
+// backend, and the guards (busy/backend-locked). Context usage is NOT here — it
+// lives inline in the chat, so the dialog no longer duplicates it.
 type uiSettings struct {
-	Created       int64              `json:"created"`
-	Name          string             `json:"name"`
-	Backend       string             `json:"backend"`
-	Model         string             `json:"model"` // "" = backend default
-	Think         string             `json:"think"` // "" = backend default
+	Created int64  `json:"created"`
+	Name    string `json:"name"`
+	Backend string `json:"backend"`
+	Model   string `json:"model"` // "" = backend default
+	Think   string `json:"think"` // "" = backend default
+	// Read-only facts shown as "additional parameters" (settings dialog): the model the
+	// backend ACTUALLY answered with last (may differ from the selected default) and the
+	// resolved session UUID. Both empty until the first response lands.
+	AssignedModel string             `json:"assigned_model,omitempty"`
+	SessionID     string             `json:"session_id,omitempty"`
 	Sandbox       string             `json:"sandbox"`
 	TTY           bool               `json:"tty"`
-	CWD           string             `json:"cwd"`
+	CWD           string             `json:"cwd"` // ~-abbreviated for display; the server re-expands ~ on save
 	Prompt        string             `json:"prompt"` // append-system-prompt
-	Messages      int                `json:"messages"`
 	Busy          bool               `json:"busy"`
 	BackendLocked bool               `json:"backend_locked"` // first message already sent
 	TTYAvailable  bool               `json:"tty_available"`  // backend == claude
-	CtxUsed       int                `json:"ctx_used"`
-	CtxWindow     int                `json:"ctx_window"`
 	Backends      []uiSettingsOption `json:"backends"`
 	Models        []uiSettingsOption `json:"models"`
 	Efforts       []uiSettingsOption `json:"efforts"`
@@ -62,6 +66,13 @@ type uiErr struct {
 }
 
 func (e *uiErr) Error() string { return e.msg }
+
+// draftHasFields reports whether a new-session draft patch carries any override to
+// apply after creation (an all-nil patch means "just create with defaults").
+func draftHasFields(p uiSettingsPatch) bool {
+	return p.Name != nil || p.Backend != nil || p.Model != nil || p.Think != nil ||
+		p.Sandbox != nil || p.TTY != nil || p.CWD != nil || p.Prompt != nil
+}
 
 func uiSettingsOptions(entries []modelEntry) []uiSettingsOption {
 	out := make([]uiSettingsOption, 0, len(entries))
@@ -94,20 +105,78 @@ func (d *daemon) uiSessionSettings(sk string, created int64) (*uiSettings, bool)
 		Backend:       backend,
 		Model:         sess.ModelOverride,
 		Think:         sess.ThinkOverride,
+		AssignedModel: sess.Model,
+		SessionID:     sess.ID,
 		Sandbox:       effectiveSandboxMode(def, sess),
 		TTY:           sess.ClaudeTTY,
-		CWD:           sess.CWD,
+		CWD:           pathutil.TildePathsInText(sess.CWD),
 		Prompt:        sess.AppendSystemPrompt,
-		Messages:      sess.Messages,
 		Busy:          d.isSessionBusy(sk, created),
 		BackendLocked: sess.Messages > 0,
 		TTYAvailable:  backend == "claude",
-		CtxUsed:       sess.ContextUsed,
-		CtxWindow:     sess.ContextWindow,
 		Backends:      []uiSettingsOption{{Value: "claude", Label: "Claude"}, {Value: "codex", Label: "Codex"}},
 		Models:        uiSettingsOptions(modelsForBackend(backend)),
 		Efforts:       uiSettingsOptions(effortsForBackend(backend)),
 	}, true
+}
+
+// uiDraftSettings builds the settings view for the "new session" draft dialog — a
+// session that does not exist yet (Created:0). It mirrors exactly what createSession
+// would seed (scope-default backend/model/think/sandbox/tty + the default cwd), so
+// "confirm with no changes" produces the same session the old immediate-create did.
+// backendOverride previews a different backend's option lists while the draft is open;
+// switching backends resets the model/think choices (they are backend-specific).
+func (d *daemon) uiDraftSettings(sk, chatID, backendOverride string) *uiSettings {
+	// Seed the draft from the SCOPE DEFAULTS — the durable per-chat "new session template" that the
+	// messenger also uses (store.New reads it; /backend, /model, … and UI session creation write it).
+	// This is what makes a draft inherit the last-configured session GENERALLY: the template survives
+	// deleting that session, so a new draft never falls back to some other surviving tab's settings.
+	def := d.scopeDefaults(sk)
+	backend := resolveSessionBackend(nil, def, d.cfg.GetDefaultBackend())
+	model, think, tty := def.Model, def.Think, def.ClaudeTTY
+	if backendOverride == "claude" || backendOverride == "codex" {
+		if backendOverride != backend {
+			// A previewed backend that differs: its model/think lists don't apply, so reset
+			// those (mirrors the server's backend-switch reset for a real session).
+			model, think, tty = "", "", false
+		}
+		backend = backendOverride
+	}
+	if backend != "claude" {
+		tty = false
+	}
+	return &uiSettings{
+		Created:       0,
+		Name:          "",
+		Backend:       backend,
+		Model:         model,
+		Think:         think,
+		Sandbox:       effectiveSandboxMode(def, nil),
+		TTY:           tty,
+		CWD:           pathutil.TildePathsInText(d.defaultSessionCWD(chatID, sk)),
+		TTYAvailable:  backend == "claude",
+		Backends:      []uiSettingsOption{{Value: "claude", Label: "Claude"}, {Value: "codex", Label: "Codex"}},
+		Models:        uiSettingsOptions(modelsForBackend(backend)),
+		Efforts:       uiSettingsOptions(effortsForBackend(backend)),
+	}
+}
+
+// rememberNewSessionDefaults records a session's config as the per-chat "new session template"
+// (scope defaults) — the same durable memory the messenger writes on /backend, /model, … . It is
+// invoked when a UI draft is CONFIRMED (not on per-tab edits, which stay independent), so a new
+// draft inherits the last-created session's settings regardless of which sessions still exist.
+func (d *daemon) rememberNewSessionDefaults(sk string, sess *session.Session) {
+	backend := resolveSessionBackend(sess, d.scopeDefaults(sk), d.cfg.GetDefaultBackend())
+	d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
+		def.Backend = backend
+		def.Model = sess.ModelOverride
+		def.Think = sess.ThinkOverride
+		if sess.Sandbox != "" {
+			def.Sandbox = sess.Sandbox
+		}
+		def.ClaudeTTY = sess.ClaudeTTY
+	})
+	d.saveStore()
 }
 
 // applyUISessionSettings applies a partial settings change to one session.
@@ -229,6 +298,11 @@ func (s *uiServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		created, _ := strconv.ParseInt(r.URL.Query().Get("session"), 10, 64)
+		if created <= 0 { // session=0 → the "new session" draft view (no session exists yet)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(s.d.uiDraftSettings(sk, s.chatID(user), r.URL.Query().Get("backend")))
+			return
+		}
 		settings, ok := s.d.uiSessionSettings(sk, created)
 		if !ok {
 			http.Error(w, "session not found", http.StatusNotFound)

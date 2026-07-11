@@ -276,6 +276,44 @@ func TestNewAssignsUniqueCreatedAcrossRapidCalls(t *testing.T) {
 	}
 }
 
+func TestReorderRearrangesAndToleratesPartialOrder(t *testing.T) {
+	store := &Store{
+		Chats: make(map[string]*ChatSessions),
+		Scope: make(map[string]*ScopeDefaults),
+	}
+	var ids []int64
+	for i := 0; i < 4; i++ {
+		ids = append(ids, store.New("user:alice", "s", "/tmp", ScopeDefaults{Backend: "claude"}).Created)
+	}
+	// ids is [a,b,c,d] in creation order. Move d to the front, c after it.
+	if !store.Reorder("user:alice", []int64{ids[3], ids[2]}) {
+		t.Fatal("Reorder returned false for a real change")
+	}
+	got := store.SessionsFor("user:alice")
+	// Listed ids come first in the requested order; the rest keep their relative order.
+	want := []int64{ids[3], ids[2], ids[0], ids[1]}
+	for i, w := range want {
+		if got[i].Created != w {
+			t.Fatalf("Reorder order[%d]=%d, want %d (full: %v)", i, got[i].Created, w, createds(got))
+		}
+	}
+	// An unknown id is ignored and a no-op order changes nothing.
+	if store.Reorder("user:alice", []int64{99999}) {
+		t.Fatal("Reorder must be a no-op (false) when nothing moves")
+	}
+	if got2 := store.SessionsFor("user:alice"); createds(got2)[0] != ids[3] {
+		t.Fatalf("no-op Reorder disturbed the order: %v", createds(got2))
+	}
+}
+
+func createds(ss []*Session) []int64 {
+	out := make([]int64, len(ss))
+	for i, s := range ss {
+		out[i] = s.Created
+	}
+	return out
+}
+
 func TestGetReturnsCloneByCreated(t *testing.T) {
 	store := &Store{
 		Chats: make(map[string]*ChatSessions),

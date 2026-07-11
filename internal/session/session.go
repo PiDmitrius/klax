@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -434,6 +435,54 @@ func (s *Store) Delete(chatID string, idx int) bool {
 		return false
 	}
 	cs.Sessions = append(cs.Sessions[:idx], cs.Sessions[idx+1:]...)
+	return true
+}
+
+// Reorder rearranges a chat's sessions to match the given order of Created ids
+// (the tab strip's drag-and-drop). Ids not present are ignored; sessions omitted
+// from the list keep their relative order after the listed ones, so a partial or
+// stale order can never drop a tab. Returns true if the order actually changed.
+func (s *Store) Reorder(chatID string, order []int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cs := s.chat(chatID)
+	if len(cs.Sessions) < 2 {
+		return false
+	}
+	rank := make(map[int64]int, len(order))
+	for i, id := range order {
+		if _, seen := rank[id]; !seen {
+			rank[id] = i
+		}
+	}
+	orig := make(map[int64]int, len(cs.Sessions))
+	for i, sess := range cs.Sessions {
+		orig[sess.Created] = i
+	}
+	sorted := make([]*Session, len(cs.Sessions))
+	copy(sorted, cs.Sessions)
+	sort.SliceStable(sorted, func(a, b int) bool {
+		ra, oka := rank[sorted[a].Created]
+		rb, okb := rank[sorted[b].Created]
+		if oka && okb {
+			return ra < rb
+		}
+		if oka != okb {
+			return oka // ids present in the requested order come first
+		}
+		return orig[sorted[a].Created] < orig[sorted[b].Created]
+	})
+	changed := false
+	for i := range sorted {
+		if sorted[i] != cs.Sessions[i] {
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		return false
+	}
+	cs.Sessions = sorted
 	return true
 }
 

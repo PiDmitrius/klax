@@ -394,6 +394,17 @@ func (d *daemon) renameSession(sk string, created int64, name string) bool {
 	return true
 }
 
+// reorderSessions applies the tab strip's drag-and-drop order (by Created id) and
+// pushes the updated strip. A no-op order change persists nothing.
+func (d *daemon) reorderSessions(sk string, order []int64) bool {
+	if !d.store.Reorder(sk, order) {
+		return false
+	}
+	d.saveStore()
+	d.broadcastSessions(sk)
+	return true
+}
+
 // closeSession aborts any in-flight run on a session and removes it (the
 // transcript JSONL stays on disk). Refuses the last remaining session; promotes
 // a new active one if the closed tab was active. Mirrors the /nuke teardown
@@ -646,6 +657,7 @@ func (s *uiServer) routes() http.Handler {
 	mux.HandleFunc("/api/read", s.handleRead)
 	mux.HandleFunc("/api/new", s.handleNew)
 	mux.HandleFunc("/api/rename", s.handleRename)
+	mux.HandleFunc("/api/reorder", s.handleReorder)
 	mux.HandleFunc("/api/close", s.handleClose)
 	mux.HandleFunc("/api/sessions", s.handleSessions)
 	mux.HandleFunc("/api/settings", s.handleSettings)
@@ -1068,8 +1080,44 @@ func (s *uiServer) handleNew(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// Optional initial settings from the "new session" draft dialog: the tab strip
+	// now defers creation until the draft is confirmed, sending the chosen fields
+	// here so the session is born configured. An empty body keeps the old behaviour.
+	var patch uiSettingsPatch
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil && err != io.EOF {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
 	sk := s.d.sessionKey(s.chatID(user))
+	// Validate the free-text working dir BEFORE creating anything, so a rejected draft (e.g. an
+	// inaccessible cwd) never leaves a mis-configured session behind and the dialog gets the real
+	// reason instead of a silent success with defaults.
+	if patch.CWD != nil {
+		if _, err := resolveWorkingDir(*patch.CWD); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
 	sess := s.d.newUISession(sk, s.chatID(user))
+	// Apply the draft's overrides to the freshly-created (message-less, unlocked) session. cwd is
+	// already validated; any other rejection is treated as fatal: roll the session back and return
+	// the reason, so creation-plus-configuration is atomic (no half-configured session).
+	if draftHasFields(patch) {
+		if err := s.d.applyUISessionSettings(sk, sess.Created, patch); err != nil {
+			_ = s.d.closeSession(sk, sess.Created) // best-effort rollback of the just-created session
+			status := http.StatusBadRequest
+			if ue, ok := err.(*uiErr); ok {
+				status = ue.status
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+		// Remember this config as the per-chat new-session template (scope defaults) so the NEXT
+		// "+" draft inherits it — and keeps inheriting it after this session is closed.
+		if cur := s.d.store.Get(sk, sess.Created); cur != nil {
+			s.d.rememberNewSessionDefaults(sk, cur)
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
 		Created int64 `json:"created"`
@@ -1103,6 +1151,28 @@ func (s *uiServer) handleRename(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *uiServer) handleReorder(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.auth(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Order []int64 `json:"order"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	sk := s.d.sessionKey(s.chatID(user))
+	s.d.reorderSessions(sk, body.Order)
 	w.WriteHeader(http.StatusNoContent)
 }
 
