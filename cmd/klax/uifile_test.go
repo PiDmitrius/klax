@@ -126,3 +126,32 @@ func TestInboundTextShowsAttachmentSize(t *testing.T) {
 		t.Fatalf("inboundText missing human size: %q", got)
 	}
 }
+
+// A minted file ref must be STABLE across rebuilds for the same (session, path, ct) — otherwise the
+// attachment's <img src> changes on every read-model rebuild and the image re-decodes/flickers.
+func TestMintFileRefStableAcrossRebuilds(t *testing.T) {
+	d := newTestDeliveryDaemon(&fakeTransport{})
+	var err error
+	if d.sealer, err = sealref.New(); err != nil {
+		t.Fatal(err)
+	}
+	r1, err := d.mintFileRef("user:alice", 1, "/tmp/a.png", "image/png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, err := d.mintFileRef("user:alice", 1, "/tmp/a.png", "image/png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r1 != r2 {
+		t.Fatalf("ref not stable across rebuilds: %q vs %q", r1, r2)
+	}
+	// A different file (or session) gets its own distinct ref.
+	r3, err := d.mintFileRef("user:alice", 1, "/tmp/b.png", "image/png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r3 == r1 {
+		t.Fatal("distinct files must get distinct refs")
+	}
+}

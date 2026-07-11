@@ -81,6 +81,16 @@ type daemon struct {
 	tgRich     atomic.Bool       // global: render Telegram replies as Rich Messages (/rich)
 	uiHub      *uiHub            // web UI event hub; nil when the UI is not configured
 	sealer     *sealref.Sealer   // mints/opens file capability refs; nil when UI is off
+	fileRefs   map[string]fileRefEntry // stable capability ref per (session,path,ct) — reused across
+	fileRefsMu sync.Mutex              // read-model rebuilds so an attachment's <img src> never changes
+}
+
+// fileRefEntry caches one minted file capability ref with its expiry so the SAME ref is returned on
+// every read-model rebuild — the sealed ref is otherwise randomized per mint (a fresh nonce), which
+// changed an attachment's URL on every rebuild and made its <img> re-decode/flicker.
+type fileRefEntry struct {
+	ref string
+	exp int64 // unix seconds
 }
 
 func startupBackoff(attempt int) time.Duration {
@@ -560,6 +570,7 @@ func runDaemon() {
 			if d.sealer, err = sealref.New(); err != nil {
 				log.Fatalf("ui: sealer init: %v", err)
 			}
+			d.fileRefs = make(map[string]fileRefEntry)
 			d.transports["ui"] = &uiTransport{d: d}
 			d.formats["ui"] = ""
 			d.sources["ui"] = &uiServer{d: d, addr: cfg.UIListen, tokens: uiTokens}

@@ -101,9 +101,12 @@ func safeMarkdownLabel(s string) string {
 	}, s)
 }
 
-// fileRefTTL bounds how long a minted file capability URL stays valid. Short, since
-// the UI re-mints fresh refs on every history/event render.
-const fileRefTTL = time.Hour
+// fileRefTTL bounds how long a minted file capability URL stays valid. fileRefRemintGrace re-mints a
+// cached ref once it is within this window of expiry, so a served <img src> stays valid.
+const (
+	fileRefTTL         = time.Hour
+	fileRefRemintGrace = 10 * time.Minute
+)
 
 // inlineImageTypes are the only media types /api/file serves inline. Everything else
 // (HTML, SVG, JS, PDF, unknown) is forced to download as an opaque octet-stream — an
@@ -113,17 +116,46 @@ var inlineImageTypes = map[string]bool{
 	"image/png": true, "image/jpeg": true, "image/gif": true, "image/webp": true, "image/bmp": true,
 }
 
-// mintFileRef seals a capability URL ref for one of a session's files. Callers
-// (history merge, outbound) only ever mint for paths they have already confined to
-// a session root, so a leaked UI token can never widen this into arbitrary read.
+// mintFileRef returns a capability URL ref for one of a session's files. It CACHES the sealed ref per
+// (session, path, contentType) and returns the SAME ref across read-model rebuilds until it nears
+// expiry — the sealed ref is randomized per mint (fresh nonce), so re-minting on every rebuild changed
+// an attachment's URL and made its <img> re-decode/flicker. A cached ref reuses its full TTL of
+// validity (no security change: a single mint was always valid for the whole TTL). Callers only ever
+// mint for paths already confined to a session root, so a leaked UI token can't widen this to
+// arbitrary read.
 func (d *daemon) mintFileRef(sk string, created int64, path, contentType string) (string, error) {
-	return d.sealer.Seal(sealref.Payload{
+	key := sk + "\x00" + strconv.FormatInt(created, 10) + "\x00" + path + "\x00" + contentType
+	now := time.Now()
+	d.fileRefsMu.Lock()
+	if e, ok := d.fileRefs[key]; ok && e.exp-now.Unix() > int64(fileRefRemintGrace.Seconds()) {
+		d.fileRefsMu.Unlock()
+		return e.ref, nil // stable across rebuilds → same <img src>, no re-decode
+	}
+	d.fileRefsMu.Unlock()
+
+	exp := now.Add(fileRefTTL)
+	ref, err := d.sealer.Seal(sealref.Payload{
 		SessionKey:  sk,
 		Created:     created,
 		Path:        path,
 		ContentType: contentType,
-		Exp:         time.Now().Add(fileRefTTL).Unix(),
+		Exp:         exp.Unix(),
 	})
+	if err != nil {
+		return "", err
+	}
+	d.fileRefsMu.Lock()
+	if d.fileRefs == nil {
+		d.fileRefs = make(map[string]fileRefEntry)
+	}
+	d.fileRefs[key] = fileRefEntry{ref: ref, exp: exp.Unix()}
+	for k, e := range d.fileRefs { // opportunistic sweep of expired entries (bounds the map)
+		if e.exp <= now.Unix() {
+			delete(d.fileRefs, k)
+		}
+	}
+	d.fileRefsMu.Unlock()
+	return ref, nil
 }
 
 // handleFile serves a session file by sealed ref. The ref IS the capability — no
