@@ -413,6 +413,23 @@ func (s *Store) New(chatID, name, cwd string, defaults ScopeDefaults) *Session {
 	return cloneSession(sess)
 }
 
+// Add inserts an ALREADY-FORMED session into a chat ATOMICALLY: under a single lock it deactivates
+// the current active session, assigns a unique Created, marks the new one active, and appends it. No
+// intermediate or partially-configured state is ever visible to a concurrent SessionsFor — the whole
+// session is published in one operation. The store takes ownership of `sess`; a clone is returned.
+func (s *Store) Add(chatID string, sess *Session) *Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cs := s.chat(chatID)
+	for _, existing := range cs.Sessions {
+		existing.Active = false
+	}
+	sess.Created = nextCreated(cs.Sessions)
+	sess.Active = true
+	cs.Sessions = append(cs.Sessions, sess)
+	return cloneSession(sess)
+}
+
 // nextCreated returns a Created timestamp guaranteed to be unique within the
 // given slice. The Created field is the canonical key used by both UpdateSession
 // and the per-session runner map, so collisions (rapid back-to-back /new in the

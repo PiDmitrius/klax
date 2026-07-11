@@ -34,7 +34,7 @@ type uiSettings struct {
 	SessionID     string             `json:"session_id,omitempty"`
 	Sandbox       string             `json:"sandbox"`
 	TTY           bool               `json:"tty"`
-	CWD           string             `json:"cwd"` // ~-abbreviated for display; the server re-expands ~ on save
+	CWD           string             `json:"cwd"`    // ~-abbreviated for display; the server re-expands ~ on save
 	Prompt        string             `json:"prompt"` // append-system-prompt
 	Busy          bool               `json:"busy"`
 	BackendLocked bool               `json:"backend_locked"` // first message already sent
@@ -146,18 +146,18 @@ func (d *daemon) uiDraftSettings(sk, chatID, backendOverride string) *uiSettings
 		tty = false
 	}
 	return &uiSettings{
-		Created:       0,
-		Name:          "",
-		Backend:       backend,
-		Model:         model,
-		Think:         think,
-		Sandbox:       effectiveSandboxMode(def, nil),
-		TTY:           tty,
-		CWD:           pathutil.TildePathsInText(d.defaultSessionCWD(chatID, sk)),
-		TTYAvailable:  backend == "claude",
-		Backends:      []uiSettingsOption{{Value: "claude", Label: "Claude"}, {Value: "codex", Label: "Codex"}},
-		Models:        uiSettingsOptions(modelsForBackend(backend)),
-		Efforts:       uiSettingsOptions(effortsForBackend(backend)),
+		Created:      0,
+		Name:         "",
+		Backend:      backend,
+		Model:        model,
+		Think:        think,
+		Sandbox:      effectiveSandboxMode(def, nil),
+		TTY:          tty,
+		CWD:          pathutil.TildePathsInText(d.defaultSessionCWD(chatID, sk)),
+		TTYAvailable: backend == "claude",
+		Backends:     []uiSettingsOption{{Value: "claude", Label: "Claude"}, {Value: "codex", Label: "Codex"}},
+		Models:       uiSettingsOptions(modelsForBackend(backend)),
+		Efforts:      uiSettingsOptions(effortsForBackend(backend)),
 	}
 }
 
@@ -195,103 +195,121 @@ func (d *daemon) applyUISessionSettings(sk string, created int64, p uiSettingsPa
 }
 
 // applyUISessionSettingsCore runs the validation + in-memory mutation but does NOT persist — the
-// caller owns the save + broadcast. Atomic session creation uses this so a new session is saved and
-// announced exactly ONCE, already fully configured (never a defaults placeholder, and no half-built
-// session left behind on a crash or a rejected patch).
+// caller owns the save + broadcast.
 func (d *daemon) applyUISessionSettingsCore(sk string, created int64, p uiSettingsPatch) error {
 	sess := d.store.Get(sk, created)
 	if sess == nil {
 		return &uiErr{http.StatusNotFound, "сессия не найдена"}
 	}
-	// Validate the WHOLE patch against current state BEFORE mutating anything, so a
-	// partially-valid combined patch (e.g. {backend:"codex", tty:true}) is rejected
-	// cleanly instead of leaving the session half-changed.
-	newName := sess.Name
+	backend := resolveSessionBackend(sess, d.scopeDefaults(sk), d.cfg.GetDefaultBackend())
+	// Validate the WHOLE patch (incl. cwd I/O) BEFORE taking the store lock, then apply the resolved
+	// result in a single UpdateSession — so a rejected patch never half-changes the session.
+	r, err := validateSettingsPatch(sess, backend, d.isSessionBusy(sk, created), p)
+	if err != nil {
+		return err
+	}
+	d.store.UpdateSession(sk, created, func(cur *session.Session) { applySettingsPatch(cur, r) })
+	return nil
+}
+
+// resolvedPatch is a validated settings patch: the raw patch plus the resolved string values whose
+// computation needs I/O or backend context (name, cwd, prompt, effective backend). It is the SINGLE
+// bridge between validation (validateSettingsPatch) and mutation (applySettingsPatch), used by both
+// the settings-edit path and the atomic new-session path so there is ONE source of validation truth.
+type resolvedPatch struct {
+	p                 uiSettingsPatch
+	name, cwd, prompt string
+	backend           string
+	backendChanged    bool
+}
+
+// validateSettingsPatch validates `p` against `cur`'s current state (`backend` = its effective
+// backend, `busy` gates run-affecting changes) and resolves the derived values. It performs the cwd
+// filesystem check here so the later mutation holds no lock during I/O. It never mutates `cur`.
+func validateSettingsPatch(cur *session.Session, backend string, busy bool, p uiSettingsPatch) (resolvedPatch, error) {
+	r := resolvedPatch{p: p, name: cur.Name, cwd: cur.CWD, prompt: cur.AppendSystemPrompt, backend: backend}
 	if p.Name != nil {
-		newName = strings.TrimSpace(*p.Name)
-		if newName == "" {
-			return &uiErr{http.StatusBadRequest, "имя не может быть пустым"}
+		r.name = strings.TrimSpace(*p.Name)
+		if r.name == "" {
+			return r, &uiErr{http.StatusBadRequest, "имя не может быть пустым"}
 		}
 	}
 	touchesRun := p.Backend != nil || p.Model != nil || p.Think != nil || p.Sandbox != nil || p.TTY != nil || p.CWD != nil || p.Prompt != nil
-	if touchesRun && d.isSessionBusy(sk, created) {
-		return &uiErr{http.StatusConflict, "Сессия занята — параметры запуска нельзя менять до завершения."}
+	if touchesRun && busy {
+		return r, &uiErr{http.StatusConflict, "Сессия занята — параметры запуска нельзя менять до завершения."}
 	}
-	backend := resolveSessionBackend(sess, d.scopeDefaults(sk), d.cfg.GetDefaultBackend())
-	backendChanged := false
 	if p.Backend != nil && *p.Backend != backend {
 		if *p.Backend != "claude" && *p.Backend != "codex" {
-			return &uiErr{http.StatusBadRequest, "движок: claude или codex"}
+			return r, &uiErr{http.StatusBadRequest, "движок: claude или codex"}
 		}
-		if sess.Messages > 0 {
-			return &uiErr{http.StatusConflict, "Движок нельзя изменить после первого сообщения."}
+		if cur.Messages > 0 {
+			return r, &uiErr{http.StatusConflict, "Движок нельзя изменить после первого сообщения."}
 		}
-		backend = *p.Backend
-		backendChanged = true
+		r.backend = *p.Backend
+		r.backendChanged = true
 	}
 	// model/think are validated against the EFFECTIVE (possibly new) backend.
-	if p.Model != nil && *p.Model != "" && !validOption(modelsForBackend(backend), *p.Model) {
-		return &uiErr{http.StatusBadRequest, "неизвестная модель"}
+	if p.Model != nil && *p.Model != "" && !validOption(modelsForBackend(r.backend), *p.Model) {
+		return r, &uiErr{http.StatusBadRequest, "неизвестная модель"}
 	}
-	if p.Think != nil && *p.Think != "" && !validOption(effortsForBackend(backend), *p.Think) {
-		return &uiErr{http.StatusBadRequest, "неизвестный уровень мышления"}
+	if p.Think != nil && *p.Think != "" && !validOption(effortsForBackend(r.backend), *p.Think) {
+		return r, &uiErr{http.StatusBadRequest, "неизвестный уровень мышления"}
 	}
 	if p.Sandbox != nil && *p.Sandbox != "on" && *p.Sandbox != "off" {
-		return &uiErr{http.StatusBadRequest, "sandbox: on или off"}
+		return r, &uiErr{http.StatusBadRequest, "sandbox: on или off"}
 	}
-	if p.TTY != nil && *p.TTY && backend != "claude" {
-		return &uiErr{http.StatusBadRequest, "TTY доступен только для claude"}
+	if p.TTY != nil && *p.TTY && r.backend != "claude" {
+		return r, &uiErr{http.StatusBadRequest, "TTY доступен только для claude"}
 	}
-	newCWD := sess.CWD
 	if p.CWD != nil {
 		cwd, err := resolveWorkingDir(*p.CWD)
 		if err != nil {
-			return &uiErr{http.StatusBadRequest, err.Error()}
+			return r, &uiErr{http.StatusBadRequest, err.Error()}
 		}
-		newCWD = cwd
+		r.cwd = cwd
 	}
-	newPrompt := sess.AppendSystemPrompt
 	if p.Prompt != nil {
-		newPrompt = strings.TrimSpace(*p.Prompt) // empty clears the append-prompt
+		r.prompt = strings.TrimSpace(*p.Prompt) // empty clears the append-prompt
 	}
+	return r, nil
+}
 
-	// All checks passed — apply atomically in a single update.
-	d.store.UpdateSession(sk, created, func(cur *session.Session) {
-		cur.Name = newName
-		if backendChanged {
-			cur.Backend = backend
-			// model/think are backend-specific — reset unless this same patch sets
-			// them; TTY exists only for claude.
-			if p.Model == nil {
-				cur.ModelOverride = ""
-			}
-			if p.Think == nil {
-				cur.ThinkOverride = ""
-			}
-			if backend != "claude" {
-				cur.ClaudeTTY = false
-			}
+// applySettingsPatch applies a validated patch to `cur`. Pure (no I/O, no store) so it can run under
+// the store lock (edit path) or on a not-yet-inserted session (atomic create).
+func applySettingsPatch(cur *session.Session, r resolvedPatch) {
+	p := r.p
+	cur.Name = r.name
+	if r.backendChanged {
+		cur.Backend = r.backend
+		// model/think are backend-specific — reset unless this same patch sets them; TTY is claude-only.
+		if p.Model == nil {
+			cur.ModelOverride = ""
 		}
-		if p.Model != nil {
-			cur.ModelOverride = *p.Model
+		if p.Think == nil {
+			cur.ThinkOverride = ""
 		}
-		if p.Think != nil {
-			cur.ThinkOverride = *p.Think
+		if r.backend != "claude" {
+			cur.ClaudeTTY = false
 		}
-		if p.Sandbox != nil {
-			cur.Sandbox = *p.Sandbox
-		}
-		if p.TTY != nil {
-			cur.ClaudeTTY = *p.TTY
-		}
-		if p.CWD != nil {
-			cur.CWD = newCWD
-		}
-		if p.Prompt != nil {
-			cur.AppendSystemPrompt = newPrompt
-		}
-	})
-	return nil
+	}
+	if p.Model != nil {
+		cur.ModelOverride = *p.Model
+	}
+	if p.Think != nil {
+		cur.ThinkOverride = *p.Think
+	}
+	if p.Sandbox != nil {
+		cur.Sandbox = *p.Sandbox
+	}
+	if p.TTY != nil {
+		cur.ClaudeTTY = *p.TTY
+	}
+	if p.CWD != nil {
+		cur.CWD = r.cwd
+	}
+	if p.Prompt != nil {
+		cur.AppendSystemPrompt = r.prompt
+	}
 }
 
 // handleSettings serves the per-session settings dialog: GET returns the view

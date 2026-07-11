@@ -276,6 +276,41 @@ func TestNewAssignsUniqueCreatedAcrossRapidCalls(t *testing.T) {
 	}
 }
 
+func TestAddInsertsFullyFormedSessionActivating(t *testing.T) {
+	store := &Store{
+		Chats: make(map[string]*ChatSessions),
+		Scope: make(map[string]*ScopeDefaults),
+	}
+	first := store.New("user:alice", "one", "/tmp", ScopeDefaults{Backend: "claude"})
+	// Add a fully-formed session in one atomic op; it must become active and deactivate the previous.
+	added := store.Add("user:alice", &Session{Name: "two", Backend: "codex", ModelOverride: "m", CWD: "/w"})
+	if added.Created == 0 || added.Created <= first.Created {
+		t.Fatalf("Add must assign a unique increasing Created: %d vs %d", added.Created, first.Created)
+	}
+	if !added.Active {
+		t.Fatal("added session must be active")
+	}
+	if added.Name != "two" || added.Backend != "codex" || added.ModelOverride != "m" || added.CWD != "/w" {
+		t.Fatalf("added session lost its formed config: %+v", added)
+	}
+	sessions := store.SessionsFor("user:alice")
+	if len(sessions) != 2 {
+		t.Fatalf("want 2 sessions, got %d", len(sessions))
+	}
+	active := 0
+	for _, s := range sessions {
+		if s.Active {
+			active++
+		}
+	}
+	if active != 1 {
+		t.Fatalf("exactly one session must be active after Add, got %d", active)
+	}
+	if store.Active("user:alice").Created != added.Created {
+		t.Fatal("the added session must be the active one")
+	}
+}
+
 func TestReorderRearrangesAndToleratesPartialOrder(t *testing.T) {
 	store := &Store{
 		Chats: make(map[string]*ChatSessions),

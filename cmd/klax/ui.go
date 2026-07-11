@@ -371,42 +371,37 @@ func (d *daemon) queuedCount(sk string, created int64) int {
 	return n
 }
 
-// createUISessionAtomic creates a new UI session already fully configured, saving and broadcasting
-// EXACTLY ONCE. No other client ever observes a defaults placeholder, and a rejected patch (or a
-// crash before the single save) leaves nothing behind — the session is only ever persisted/announced
-// after it is complete. Returns the created session, or the settings error with NOTHING created.
+// createUISessionAtomic creates a new UI session already fully configured. The session is VALIDATED
+// and FORMED entirely outside the shared store, then inserted with a single Store.Add (one lock) and
+// saved + announced once — so a concurrent /api/sessions can never observe a defaults or half-built
+// placeholder, a rejected patch creates nothing at all, and a crash before the save leaves nothing.
+// Returns the created session, or the settings error with NOTHING created.
 func (d *daemon) createUISessionAtomic(sk, chatID string, patch uiSettingsPatch) (*session.Session, error) {
-	prevActive := d.store.Active(sk)                   // store.New below deactivates it; restore on rollback
-	sess, _ := d.createSession(chatID, sk, "session")  // in-memory only — no save/broadcast yet
+	def := d.scopeDefaults(sk)
+	backend := resolveSessionBackend(nil, def, d.cfg.GetDefaultBackend())
+	// Seed a message-less session from the scope defaults (what createSession would have produced),
+	// then validate + apply the draft on it — all in memory, before the store is touched.
+	sess := &session.Session{
+		Name:          "session",
+		Backend:       backend,
+		ModelOverride: def.Model,
+		ThinkOverride: def.Think,
+		Sandbox:       effectiveSandboxMode(def, nil),
+		ClaudeTTY:     def.ClaudeTTY && backend == "claude",
+		CWD:           d.defaultSessionCWD(chatID, sk),
+	}
 	if draftHasFields(patch) {
-		if err := d.applyUISessionSettingsCore(sk, sess.Created, patch); err != nil {
-			d.discardUnsavedSession(sk, sess.Created, prevActive) // never persisted/announced → clean removal
+		r, err := validateSettingsPatch(sess, backend, false, patch) // fresh session: never busy/locked
+		if err != nil {
 			return nil, err
 		}
-		// Fold the "new session template" (scope defaults) update into this same commit.
-		if cur := d.store.Get(sk, sess.Created); cur != nil {
-			d.rememberNewSessionDefaultsCore(sk, cur)
-		}
+		applySettingsPatch(sess, r)
 	}
-	d.saveStore()           // single persist…
-	d.broadcastSessions(sk) // …and single announce, of the fully-formed session
-	return d.store.Get(sk, sess.Created), nil
-}
-
-// discardUnsavedSession removes a session created in memory but never saved or broadcast (an atomic
-// create whose settings were rejected), and re-activates the session store.New had deactivated —
-// without persisting or announcing, since nothing external ever observed the aborted session.
-func (d *daemon) discardUnsavedSession(sk string, created int64, prevActive *session.Session) {
-	for i, s := range d.store.SessionsFor(sk) {
-		if s.Created == created {
-			d.store.Delete(sk, i)
-			break
-		}
-	}
-	d.dropRunner(sk, created)
-	if prevActive != nil {
-		d.store.UpdateSession(sk, prevActive.Created, func(cur *session.Session) { cur.Active = true })
-	}
+	created := d.store.Add(sk, sess) // atomic single-lock insert of the fully-formed session
+	d.rememberNewSessionDefaultsCore(sk, created)
+	d.saveStore()
+	d.broadcastSessions(sk)
+	return created, nil
 }
 
 // renameSession renames one session (by Created) and pushes the updated tab strip.
