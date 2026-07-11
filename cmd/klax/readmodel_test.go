@@ -220,7 +220,7 @@ func TestReadModelAbortedSurfaced(t *testing.T) {
 	if len(turns[0].Blocks) != 1 || turns[0].Blocks[0].Role != "error" {
 		t.Fatalf("aborted turn missing its error block: %+v", turns[0].Blocks)
 	}
-	if turns[0].Blocks[0].Text != "прервано" {
+	if turns[0].Blocks[0].Text != "Прервано" {
 		t.Fatalf("aborted turn text = %q, want localized text", turns[0].Blocks[0].Text)
 	}
 }
@@ -230,9 +230,9 @@ func TestErrBlockCanonicalReasons(t *testing.T) {
 		reason string
 		want   string
 	}{
-		{turnErrAborted, "прервано"},
-		{turnErrAttachmentsMissing, "вложения недоступны, сообщение не обработано"},
-		{turnErrRunStartFailed, "не удалось зафиксировать запуск, сообщение не обработано"},
+		{turnErrAborted, "Прервано"},
+		{turnErrAttachmentsMissing, "Вложения недоступны, сообщение не обработано"},
+		{turnErrRunStartFailed, "Не удалось зафиксировать запуск, сообщение не обработано"},
 		{"backend failed", "backend failed"},
 	}
 	for _, tt := range tests {

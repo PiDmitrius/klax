@@ -57,11 +57,11 @@ func blockID(seq int64, role, text string, tools []history.ToolCall) string {
 func errBlock(seq int64, reason string) uiBlock {
 	switch reason {
 	case "", turnErrAborted:
-		reason = "прервано"
+		reason = "Прервано"
 	case turnErrAttachmentsMissing:
-		reason = "вложения недоступны, сообщение не обработано"
+		reason = "Вложения недоступны, сообщение не обработано"
 	case turnErrRunStartFailed:
-		reason = "не удалось зафиксировать запуск, сообщение не обработано"
+		reason = "Не удалось зафиксировать запуск, сообщение не обработано"
 	}
 	return uiBlock{ID: blockID(seq, "error", reason, nil), Role: "error", Text: reason}
 }
