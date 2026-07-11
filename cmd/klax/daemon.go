@@ -713,9 +713,51 @@ func (d *daemon) startDrain(reason string) {
 	// frees on its own and the drain completes, so systemd picks up the new binary. A bounded/forced
 	// restart would sever a turn "на ровном месте"; that is exactly the behaviour this invariant bans.
 	log.Println("waiting for all sessions to drain...")
-	d.drainWg.Wait()
-	log.Println("all sessions drained")
-	d.shutdown()
+	// The wait is unbounded (invariant above), but NOT silent: while a run is still active, log a
+	// periodic heartbeat naming the busy chats so an operator watching `klax update` hang can see WHY
+	// and which session to `/abort` if one has genuinely wedged. This forces nothing — it only makes
+	// the wait diagnosable instead of a single line printed once at drain start.
+	done := make(chan struct{})
+	go func() { d.drainWg.Wait(); close(done) }()
+	waitStart := time.Now()
+	tick := time.NewTicker(30 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-done:
+			log.Println("all sessions drained")
+			d.shutdown()
+			return
+		case <-tick.C:
+			busy := d.busyChats()
+			log.Printf("still draining after %s — %d session(s) active%s; /abort a wedged chat to unstick",
+				time.Since(waitStart).Round(time.Second), len(busy), formatBusyChats(busy))
+		}
+	}
+}
+
+// busyChats lists the chat ids with an active (running or queued) runner — used only for the drain
+// heartbeat log so an operator can see which session is holding up a restart.
+func (d *daemon) busyChats() []string {
+	d.runnersMu.Lock()
+	defer d.runnersMu.Unlock()
+	var out []string
+	for key, sr := range d.runners {
+		sr.mu.Lock()
+		active := sr.processing || len(sr.queue) > 0 || sr.runner.IsBusy()
+		sr.mu.Unlock()
+		if active {
+			out = append(out, key.sk)
+		}
+	}
+	return out
+}
+
+func formatBusyChats(chats []string) string {
+	if len(chats) == 0 {
+		return ""
+	}
+	return " [" + strings.Join(chats, ", ") + "]"
 }
 
 func (d *daemon) saveStore() {

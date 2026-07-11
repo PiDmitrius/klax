@@ -229,7 +229,11 @@ function startDrag(e, tab){
     tab.addEventListener("transitionend", done, { once: true });
     setTimeout(done, DRAG_SETTLE_MS + 80); // fallback if transitionend doesn't fire (no visible change)
     const order = ordered.map(el => parseInt(el.dataset.created, 10)).filter(Boolean);
-    api("/api/reorder", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ order }) }).catch(() => {});
+    // On failure the server's (unchanged) order reconciles back via the next broadcast; tell the user
+    // why their reorder didn't stick, matching rename/close/settings error handling elsewhere.
+    api("/api/reorder", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ order }) })
+      .then(r => { if(!r.ok) notice("не удалось сохранить порядок вкладок"); })
+      .catch(() => notice("не удалось сохранить порядок вкладок"));
   };
   const onUp = () => finish(true);
   const onCancel = () => finish(false);

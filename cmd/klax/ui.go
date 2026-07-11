@@ -1104,7 +1104,13 @@ func (s *uiServer) handleNew(w http.ResponseWriter, r *http.Request) {
 	// the reason, so creation-plus-configuration is atomic (no half-configured session).
 	if draftHasFields(patch) {
 		if err := s.d.applyUISessionSettings(sk, sess.Created, patch); err != nil {
-			_ = s.d.closeSession(sk, sess.Created) // best-effort rollback of the just-created session
+			// Roll the just-created session back. It can only fail to close if it is the scope's LAST
+			// session (closeSession refuses that) — extremely unlikely here (a session already exists
+			// before the client can render the "+"), but if it happens we must not leave a
+			// half-configured session behind silently: log it so a real occurrence is visible.
+			if rbErr := s.d.closeSession(sk, sess.Created); rbErr != nil {
+				log.Printf("ui: new-session rollback after settings failure could not close session %d: %v", sess.Created, rbErr)
+			}
 			status := http.StatusBadRequest
 			if ue, ok := err.(*uiErr); ok {
 				status = ue.status
