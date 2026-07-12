@@ -16,6 +16,7 @@ import { initSystem, systemRestartNotice } from "./system.js";
 import { initDebug } from "./debug.js";
 
 const model = new TurnModel();
+const tailClient = globalThis.crypto && globalThis.crypto.randomUUID ? globalThis.crypto.randomUUID() : String(Date.now()) + "-" + Math.random();
 const SERVER_STARTED_KEY = "klax_server_started";
 let serverStarted = loadServerStarted();
 
@@ -671,6 +672,7 @@ function setDegraded(on){
 
 // the poll host events.js drives
 const host = {
+  client: tailClient,
   started: () => serverStarted,
   setStarted: saveServerStarted,
   model,

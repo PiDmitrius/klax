@@ -26,7 +26,7 @@ export async function tailLoop(host){
     const ac = new AbortController();
     const t = setTimeout(() => ac.abort(), POLL_ABORT_MS);
     try {
-      const body = JSON.stringify({ cursors: host.cursors(), notice: host.noticeCursor(), sess_rev: host.sessRev() });
+      const body = JSON.stringify({ cursors: host.cursors(), notice: host.noticeCursor(), sess_rev: host.sessRev(), client: host.client });
       const r = await api("/api/tail", { method: "POST", headers: { "Content-Type": "application/json" }, body, signal: ac.signal });
       if(r.status === 401){ if(host.onAuthFail) host.onAuthFail(); return; }
       if(!r.ok){ health(false); await sleep(backoff = nextBackoff(backoff)); continue; }

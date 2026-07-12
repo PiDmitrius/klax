@@ -57,8 +57,9 @@ function render(data){
       action.onclick = installFound;
       item.append(bullet, codeValue(release.tag), age, action); list.appendChild(item);
     }
-    if(!(u.releases || []).length){ const empty = document.createElement("div"); empty.className = "sysrelease-empty"; empty.textContent = "Релизы не найдены"; list.appendChild(empty); }
     body.appendChild(list);
+  } else if(u.checked && !u.checking){
+    const empty = document.createElement("div"); empty.className = "sysrelease-empty"; empty.textContent = "Релизы не найдены"; body.appendChild(empty);
   }
   if(u.check_error && u.check_error !== seenCheckError){
     seenCheckError = u.check_error;
@@ -114,7 +115,7 @@ async function beginInstall(chosen){
     const r = await api("/api/system/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tag: chosen.tag, source: chosen.source }) });
     const data = await r.json();
     if(!r.ok) throw new Error(data.message || "Ошибка установки");
-    notify(data.message, "info");
+    notify(data.message, data.started ? "info" : "warning");
     if(lastData && lastData.update){ lastData.update.running = !!data.running; render(lastData); }
     refresh();
   } catch(e){ notify(errorNotice("Ошибка установки", e), { error: true }); refresh(); }

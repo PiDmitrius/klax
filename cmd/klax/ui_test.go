@@ -146,6 +146,8 @@ func TestNoticeBarrierWaitsForClientCursor(t *testing.T) {
 	h := newUIHub()
 	h.enterPoll("alice")
 	h.leavePoll("alice")
+	h.observeClient("alice", "tab-a", "")
+	h.observeClient("alice", "tab-b", "")
 	targets := h.broadcastAll(uiEvent{Type: "notice", Text: "restart"})
 	done := make(chan struct{})
 	go func() {
@@ -157,7 +159,13 @@ func TestNoticeBarrierWaitsForClientCursor(t *testing.T) {
 		t.Fatal("barrier returned before the client acknowledged the notice")
 	case <-time.After(10 * time.Millisecond):
 	}
-	h.acknowledge("alice", fmt.Sprintf("%d-%d", h.epoch, targets["alice"]))
+	h.observeClient("alice", "tab-a", fmt.Sprintf("%d-%d", h.epoch, targets[uiClientKey("alice", "tab-a")]))
+	select {
+	case <-done:
+		t.Fatal("barrier returned after only one of two tabs acknowledged the notice")
+	case <-time.After(10 * time.Millisecond):
+	}
+	h.observeClient("alice", "tab-b", fmt.Sprintf("%d-%d", h.epoch, targets[uiClientKey("alice", "tab-b")]))
 	select {
 	case <-done:
 	case <-time.After(time.Second):

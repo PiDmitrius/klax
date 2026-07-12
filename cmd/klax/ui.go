@@ -133,15 +133,16 @@ type uiHub struct {
 	mu       sync.Mutex
 	epoch    int64
 	seq      uint64
-	ring     map[string][]ringItem    // per-user retained events
-	ringSz   map[string]int           // per-user ring byte size
-	notify   map[string]chan struct{} // per-user wake channel (closed-channel broadcast)
-	inflight map[string]int           // per-user concurrently-held polls
-	known    map[string]struct{}      // every user that has ever polled — notice-broadcast target set
-	acked    map[string]uint64        // newest notice seq acknowledged by each user's next tail request
-	ackWake  chan struct{}            // closed/replaced whenever an acknowledgement advances
-	sessRev  map[string]uint64        // per-user session-strip revision — bumped on every broadcastSessions
-	rmMu     sync.Mutex               // guards rm (read-model cache; separate from mu — off the poll hot path)
+	ring     map[string][]ringItem           // per-user retained events
+	ringSz   map[string]int                  // per-user ring byte size
+	notify   map[string]chan struct{}        // per-user wake channel (closed-channel broadcast)
+	inflight map[string]int                  // per-user concurrently-held polls
+	known    map[string]struct{}             // every user that has ever polled — notice-broadcast target set
+	acked    map[string]uint64               // newest notice seq acknowledged by each active browser tab
+	ackWake  chan struct{}                   // closed/replaced whenever an acknowledgement advances
+	clients  map[string]map[string]time.Time // recently polling browser tabs per canonical user
+	sessRev  map[string]uint64               // per-user session-strip revision — bumped on every broadcastSessions
+	rmMu     sync.Mutex                      // guards rm (read-model cache; separate from mu — off the poll hot path)
 	rm       map[uiUnreadKey]readModelEntry
 }
 
@@ -155,6 +156,7 @@ func newUIHub() *uiHub {
 		known:    make(map[string]struct{}),
 		acked:    make(map[string]uint64),
 		ackWake:  make(chan struct{}),
+		clients:  make(map[string]map[string]time.Time),
 		sessRev:  make(map[string]uint64),
 		rm:       make(map[uiUnreadKey]readModelEntry),
 	}
@@ -318,24 +320,48 @@ func (h *uiHub) broadcastAll(ev uiEvent) map[string]uint64 {
 	targets := make(map[string]uint64, len(seen))
 	for user := range seen {
 		h.emitLocked(user, ev)
-		targets[user] = h.seq
+		for client, seenAt := range h.clients[user] {
+			if time.Since(seenAt) <= time.Minute {
+				targets[uiClientKey(user, client)] = h.seq
+			} else {
+				delete(h.clients[user], client)
+				delete(h.acked, uiClientKey(user, client))
+			}
+		}
 	}
 	return targets
 }
 
-func (h *uiHub) acknowledge(user, cursor string) {
-	epoch, seq, ok := parseCursor(cursor)
-	if !ok || epoch != h.epoch {
+func uiClientKey(user, client string) string { return user + "\x00" + client }
+
+func (h *uiHub) observeClient(user, client, cursor string) {
+	if client == "" {
 		return
 	}
+	epoch, seq, ok := parseCursor(cursor)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if seq <= h.acked[user] {
+	clients := h.clients[user]
+	if clients == nil {
+		clients = make(map[string]time.Time)
+		h.clients[user] = clients
+	}
+	for id, seenAt := range clients {
+		if time.Since(seenAt) > time.Minute {
+			delete(clients, id)
+			delete(h.acked, uiClientKey(user, id))
+		}
+	}
+	if _, exists := clients[client]; !exists && len(clients) >= uiMaxInflightPerUser*2 {
 		return
 	}
-	h.acked[user] = seq
-	close(h.ackWake)
-	h.ackWake = make(chan struct{})
+	clients[client] = time.Now()
+	key := uiClientKey(user, client)
+	if ok && epoch == h.epoch && seq > h.acked[key] {
+		h.acked[key] = seq
+		close(h.ackWake)
+		h.ackWake = make(chan struct{})
+	}
 }
 
 func (h *uiHub) waitAcknowledged(targets map[string]uint64, timeout time.Duration) {
@@ -795,6 +821,7 @@ type tailReq struct {
 	Cursors map[string]string `json:"cursors"`  // created -> "<turn>.<block>.<state>.<trail>[.<head>]"
 	Notice  string            `json:"notice"`   // ring cursor for transient notices
 	SessRev uint64            `json:"sess_rev"` // last session-strip revision the client rendered
+	Client  string            `json:"client"`   // page-lifetime id: restart notices are flushed to every active tab
 }
 type tailSessionData struct {
 	Rows   []uiTurn `json:"rows"`
@@ -936,7 +963,7 @@ func (s *uiServer) handleTail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.d.uiHub.leavePoll(user)
-	s.d.uiHub.acknowledge(user, req.Notice)
+	s.d.uiHub.observeClient(user, req.Client, req.Notice)
 
 	deadline := time.NewTimer(uiPollHold)
 	defer deadline.Stop()
