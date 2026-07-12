@@ -12,7 +12,7 @@ let sessions = [], deps = {}, settingsFor = 0, settingsAutofocused = false;
 // The "+" no longer creates immediately: it opens this draft, and the session is born only on
 // OK/Enter. Closing the dialog (✕ / backdrop / Escape) discards the draft and creates nothing.
 // draftView caches the last server option-lists (models/efforts for the chosen backend).
-let draft = null, draftView = null;
+let draft = null, draftView = null, draftSubmitting = false;
 // dragging = a tab reorder drag/settle is in progress; while true renderTabs leaves the strip DOM
 // alone. didDrag = the click immediately after a drop must be swallowed (not treated as a select).
 let dragging = false, didDrag = false;
@@ -254,9 +254,9 @@ function fetchDraft(backend){
 // `draft` holds the pending field values; nothing is created until onModalOk/createFromDraft.
 function openDraft(){
   settingsFor = 0; settingsAutofocused = false;
-  draft = {}; draftView = null;
+  draft = {}; draftView = null; draftSubmitting = false;
   const tt = document.querySelector(".smodal-title"); if(tt) tt.textContent = "Новая сессия";
-  const ok = document.querySelector(".smodal-ok"); if(ok) ok.textContent = "Создать";
+  const ok = document.querySelector(".smodal-ok"); if(ok){ ok.textContent = "Создать"; ok.disabled = false; }
   document.getElementById("smodal").classList.remove("hidden");
   document.getElementById("sbody").innerHTML = '<div class="shint">Загрузка…</div>';
   fetchDraft("").then(d => {
@@ -298,7 +298,9 @@ function onModalOk(){ if(draft) createFromDraft(); else closeSettings(); }
 // switches to the freshly-created session. model/think are sent explicitly so "По умолчанию" is
 // honoured; name/cwd/prompt only when non-empty (empty keeps the server-seeded default).
 async function createFromDraft(){
-  if(!draft) return;
+  if(!draft || draftSubmitting) return;
+  draftSubmitting = true;
+  const ok = document.querySelector(".smodal-ok"); if(ok) ok.disabled = true;
   const d = draft, trim = v => (v || "").trim();
   const body = { backend: d.backend, model: d.model || "", think: d.think || "", sandbox: d.sandbox, tty: !!d.tty };
   if(trim(d.name)) body.name = trim(d.name);
@@ -310,10 +312,11 @@ async function createFromDraft(){
   let r;
   try {
     r = await api("/api/new", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  } catch(e){ notice("не удалось создать сессию"); return; }
-  if(!r.ok){ notice((await r.text()).trim() || "не удалось создать сессию"); return; }
+  } catch(e){ draftSubmitting = false; if(ok) ok.disabled = false; notice("не удалось создать сессию"); return; }
+  if(!r.ok){ draftSubmitting = false; if(ok) ok.disabled = false; notice((await r.text()).trim() || "не удалось создать сессию"); return; }
   const j = await r.json();
   draft = null; draftView = null;
+  draftSubmitting = false; if(ok) ok.disabled = false;
   document.getElementById("smodal").classList.add("hidden");
   settingsFor = 0; settingsAutofocused = false;
   if(j.created && deps.onNew) await deps.onNew(j.created);
@@ -381,7 +384,8 @@ export function openSettings(created, title){
 }
 function closeSettings(){
   settingsFor = 0; settingsAutofocused = false;
-  draft = null; draftView = null; // discard any pending "new session" draft — closing creates nothing
+  draft = null; draftView = null; draftSubmitting = false; // discard any pending "new session" draft — closing creates nothing
+  const ok = document.querySelector(".smodal-ok"); if(ok) ok.disabled = false;
   document.getElementById("smodal").classList.add("hidden");
   // Dismissing settings (notably the "Новая сессия" dialog that auto-opens on create and
   // grabs the name field) hands focus back to the composer so you can type straight away.

@@ -35,6 +35,7 @@ function newNonce(){ return SENDTAB + "-" + (++nonceCtr); }
 let files = [];                 // staged { file, name, url? } for the next send (url = lazy thumb blob)
 let retryNonce = "";            // outbox nonce this live composer currently corresponds to ("" = none)
 const drafts = {};              // created -> { text, files, nonce } — stashed composer state per tab
+const recoveryQueues = {};      // created -> remaining recovered drafts, each retaining its ORIGINAL nonce
 
 // --- Durable outbox: a no-loss guarantee for the TEXT of a submitted message. Every send mirrors its
 // text to localStorage BEFORE the network request and clears it only once the server confirms the
@@ -96,13 +97,13 @@ function syncRetry(text){
     // it committed — so a durable copy always exists (the old A, or the new B), never neither. If the
     // replacement can't be stored, keep the old copy; send() then mints/stores fresh or refuses.
     const nn = newNonce();
-    if(outboxPut({ created: e.created, text: t, nonce: nn, sent: false })){
+    if(outboxPut({ created: e.created, text: t, nonce: nn, sent: false, at: Date.now() })){
       outboxDrop(retryNonce);
       retryNonce = nn;
     }
   } else {
     // Not-yet-transmitted draft: safe to update in place; a failed write leaves the prior text durable.
-    outboxPut({ created: e.created, text: t, nonce: retryNonce, sent: false });
+    outboxPut({ created: e.created, text: t, nonce: retryNonce, sent: false, at: e.at || Date.now() });
   }
 }
 
@@ -169,9 +170,8 @@ export function loadDraft(created){
 }
 export function dropDraft(created){
   const d = drafts[created];
-  if(!d) return;
-  delete drafts[created];
-  d.files.forEach(releaseThumb);
+  if(d){ delete drafts[created]; d.files.forEach(releaseThumb); }
+  delete recoveryQueues[created]; // durable originals stay in localStorage and become orphans on reload
 }
 
 function renderChips(){
@@ -227,7 +227,7 @@ async function send(deps){
     // syncRetry, so a set retryNonce with a missing entry always corresponds to THIS unmodified text.)
     const reuse = !!retryNonce && (!cur || cur.text === text);
     nonce = reuse ? retryNonce : newNonce();
-    if(!outboxPut({ created, text, nonce, sent: true })){
+    if(!outboxPut({ created, text, nonce, sent: true, at: (cur && cur.at) || Date.now() })){
       if(deps.notice) deps.notice("Не удалось сохранить сообщение локально — отправка отменена. Освободите хранилище браузера и повторите.");
       return; // composer + retryNonce left intact — nothing lost
     }
@@ -256,9 +256,29 @@ async function send(deps){
     // (and is shown again in the composer by rollback) until a successful resend clears it.
     if(!r.ok){ rollback(deps, created, text, staged, nonce, (await r.text()).trim() || "сообщение не принято"); return; }
     outboxDrop(nonce); // server accepted & fsynced it — the browser copy is no longer needed
+    showNextRecovered(created, deps);
   } catch(e){
     rollback(deps, created, text, staged, nonce, "сеть недоступна — сообщение не отправлено"); // outbox copy stays
   }
+}
+
+// After one recovered message is confirmed, surface the next ORIGINAL message for that session.
+// Never clobber text/files the user typed while the request was in flight; in that case the queue
+// simply waits until a later successful send/tab restore.
+function showNextRecovered(created, deps){
+  const q = recoveryQueues[created];
+  if(!q || !q.length) return;
+  const next = q[0];
+  if(deps.getActive() === created){
+    const ta = document.getElementById("input");
+    if(!ta || ta.value.trim() || files.length) return;
+    q.shift(); ta.value = next.text; retryNonce = next.nonce; autoGrow(ta); renderChips();
+  } else {
+    const d = drafts[created];
+    if(d && (d.text.trim() || d.files.length)) return;
+    q.shift(); drafts[created] = next;
+  }
+  if(!q.length) delete recoveryQueues[created];
 }
 
 function rollback(deps, created, text, staged, nonce, msg){
@@ -280,51 +300,36 @@ function rollback(deps, created, text, staged, nonce, msg){
 // (tab closed/reloaded/crashed mid-send, or a send that failed) back into its session's composer
 // draft. Called ONCE at startup, before the first tab is selected, so the active tab's recovered text
 // lands straight in the live composer via loadDraft. Returns the number of messages recovered. deps:
-// { isLive(created), firstLive():created, notice(text) }.
+// { isLive(created), notice(text) }.
 //
-// Every recoverable entry is resolved to a LIVE target session (its own if live, else the first live
-// one for a closed-session orphan) and GROUPED by target. A single message for a session keeps its own
-// nonce (idempotent resend). When several messages map to one session — the composer can only hold one
-// draft — their texts are CONCATENATED into that draft and CONSOLIDATED into a single fresh outbox
-// entry (written before the originals are dropped), so nothing is silently stranded behind the first
-// and the count never over-reports.
+// Every live-session entry keeps its ORIGINAL nonce and remains a separate message. The first is
+// shown in the composer; the rest queue behind it and surface one-by-one after a successful 204.
+// This is the only exactly-once-safe recovery: the server can dedupe a request whose 204 was lost.
+// Entries for a closed session are deliberately NOT re-homed — the original may already have run,
+// and sending it to another session under a fresh nonce would duplicate side effects.
 export function recoverOutbox(deps){
-  const list = outboxList();
+  const list = outboxList().sort((a, b) => (a.at || 0) - (b.at || 0));
   if(!list.length) return 0;
-  const isLive = deps && deps.isLive, firstLive = deps && deps.firstLive;
-  const groups = new Map(); // target created -> [entries, in list order]
-  let moved = 0;
+  const isLive = deps && deps.isLive;
+  const groups = new Map(); // target created -> separate original drafts, in submission order
+  let orphaned = 0;
   for(const e of list){
     if(!e || !e.text){ outboxDrop(e && e.nonce); continue; } // nothing recoverable (no text)
-    let target = e.created, orphan = false;
-    if(isLive && !isLive(e.created)){ target = firstLive ? firstLive() : 0; orphan = true; }
-    if(!target) continue; // no live target (empty strip) — keep the entry; it re-recovers next load
-    if(orphan) moved++;
-    if(!groups.has(target)) groups.set(target, []);
-    groups.get(target).push(e);
+    if(isLive && !isLive(e.created)){ orphaned++; continue; }
+    if(!groups.has(e.created)) groups.set(e.created, []);
+    groups.get(e.created).push({ text: e.text, files: [], nonce: e.nonce });
   }
   let recovered = 0;
   for(const [target, entries] of groups){
     const d = drafts[target];
     if(d && (d.text.trim() || d.files.length)) continue; // a newer draft already occupies this composer — don't clobber
-    if(entries.length === 1 && entries[0].created === target){
-      drafts[target] = { text: entries[0].text, files: [], nonce: entries[0].nonce }; // keep its own nonce
-      recovered++;
-    } else {
-      const text = entries.map(e => e.text).join("\n\n");
-      const nn = newNonce();
-      if(outboxPut({ created: target, text, nonce: nn, sent: false })){ // consolidate: write first…
-        entries.forEach(e => outboxDrop(e.nonce));                      // …then drop the originals
-        drafts[target] = { text, files: [], nonce: nn };
-        recovered += entries.length;
-      }
-      // if the consolidation write fails, leave the originals untouched — retried next load
-    }
+    drafts[target] = entries.shift();
+    if(entries.length) recoveryQueues[target] = entries;
+    recovered += 1 + entries.length;
   }
   if(recovered && deps && deps.notice){
-    let msg = "Восстановлено несохранённых сообщений: " + recovered;
-    if(moved) msg += "; часть перенесена (сессия закрыта)";
-    deps.notice(msg);
+    deps.notice("Восстановлено несохранённых сообщений: " + recovered);
   }
+  if(orphaned && deps && deps.notice) deps.notice("Не восстановлено сообщений из закрытых сессий: " + orphaned);
   return recovered;
 }

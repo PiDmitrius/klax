@@ -575,7 +575,7 @@ async function onSessionsList(list){
   // Runs once, as soon as we know the session list.
   if(!outboxRecovered && list.length){
     outboxRecovered = true;
-    recoverOutbox({ isLive: c => list.some(s => s.created === c), firstLive: () => (list[0] && list[0].created) || 0, notice: showNotice });
+    recoverOutbox({ isLive: c => list.some(s => s.created === c), notice: showNotice });
   }
   const affected = new Set();
   let activeReadAdvanced = false;

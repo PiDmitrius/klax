@@ -44,6 +44,29 @@ func TestReadModelQueuedSurfaced(t *testing.T) {
 	}
 }
 
+func TestReadModelKeepsDurableUserTimeWhenTranscriptAppears(t *testing.T) {
+	d, created := newReadModelDaemon(t)
+	sr := d.getRunner("user:alice", created)
+	_, marker, _, _, err := sr.store.Enqueue("ui:alice", "", "n", "screenshot", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued := testRM(d, created, nil, false, true)
+	if len(queued) != 1 || queued[0].Time == "" {
+		t.Fatalf("queue-only turn missing durable time: %+v", queued)
+	}
+	fromTranscript := testRM(d, created, []history.Item{
+		{Role: "user", Text: "screenshot", Marker: marker, Time: "2099-01-01T00:00:00Z"},
+		{Role: "assistant", Text: "answer"},
+	}, false, true)
+	if len(fromTranscript) != 1 {
+		t.Fatalf("transcript-backed turn shape: %+v", fromTranscript)
+	}
+	if fromTranscript[0].Time != queued[0].Time {
+		t.Fatalf("user time changed on queue→transcript transition: %q → %q", queued[0].Time, fromTranscript[0].Time)
+	}
+}
+
 // A run turn in the transcript renders "run" only while the session is busy and it is the
 // newest run; an idle session (a missed MarkDone) resolves it to "done". While running, the
 // most-recent (in-progress) block is HELD back — represented by the working dots — so it never

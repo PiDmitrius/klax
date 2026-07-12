@@ -161,24 +161,6 @@ func (d *daemon) uiDraftSettings(sk, chatID, backendOverride string) *uiSettings
 	}
 }
 
-// rememberNewSessionDefaultsCore records a session's config as the per-chat "new session template"
-// (scope defaults) — the same durable memory the messenger writes on /backend, /model, … . It is
-// invoked when a UI draft is CONFIRMED (not on per-tab edits, which stay independent), so a new draft
-// inherits the last-created session's settings regardless of which sessions still exist. It does NOT
-// persist — the caller (atomic session creation) folds the save into its single commit.
-func (d *daemon) rememberNewSessionDefaultsCore(sk string, sess *session.Session) {
-	backend := resolveSessionBackend(sess, d.scopeDefaults(sk), d.cfg.GetDefaultBackend())
-	d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
-		def.Backend = backend
-		def.Model = sess.ModelOverride
-		def.Think = sess.ThinkOverride
-		if sess.Sandbox != "" {
-			def.Sandbox = sess.Sandbox
-		}
-		def.ClaudeTTY = sess.ClaudeTTY
-	})
-}
-
 // applyUISessionSettings validates + applies a partial settings change to one session and PERSISTS it
 // (save + broadcast). Unlike the messenger /settings handlers it edits ONLY the per-session overrides
 // (never the scope defaults that seed new sessions): each UI tab is configured independently. The same

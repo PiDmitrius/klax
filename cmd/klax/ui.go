@@ -397,8 +397,14 @@ func (d *daemon) createUISessionAtomic(sk, chatID string, patch uiSettingsPatch)
 		}
 		applySettingsPatch(sess, r)
 	}
-	created := d.store.Add(sk, sess) // atomic single-lock insert of the fully-formed session
-	d.rememberNewSessionDefaultsCore(sk, created)
+	newDefaults := session.ScopeDefaults{
+		Backend:   resolveSessionBackend(sess, def, d.cfg.GetDefaultBackend()),
+		Model:     sess.ModelOverride,
+		Think:     sess.ThinkOverride,
+		Sandbox:   sess.Sandbox,
+		ClaudeTTY: sess.ClaudeTTY,
+	}
+	created := d.store.AddWithDefaults(sk, sess, &newDefaults) // session + its template: one store commit
 	d.saveStore()
 	d.broadcastSessions(sk)
 	return created, nil

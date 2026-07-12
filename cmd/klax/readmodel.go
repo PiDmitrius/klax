@@ -154,6 +154,7 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 			seq    = -int64(startOrdinal + i + 1) // stable absolute legacy id unless a durable seq is found
 			state  = "done"
 			text   = g.lead.Text
+			turnAt = g.lead.Time
 			reason string
 		)
 		if m := g.lead.Marker; m != "" {
@@ -162,12 +163,16 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 				seq = t.Seq
 				state = resolveTurnState(t.Last, busy, t.Seq == newestRun)
 				reason = t.Reason
+				// The durable accept time is the ONE user-message timestamp. Before the backend transcript
+				// records this turn it is already shown from queue.jsonl; switching later to the transcript's
+				// slightly different timestamp changed the bubble signature and rebuilt an unchanged image.
+				turnAt = time.Unix(0, t.TS).Format(time.RFC3339)
 				if e := d.inboundText(store, t, sk, created); e != "" {
 					text = e
 				}
 			}
 		}
-		ut := uiTurn{Seq: seq, Role: "user", Text: text, Time: g.lead.Time, State: state}
+		ut := uiTurn{Seq: seq, Role: "user", Text: text, Time: turnAt, State: state}
 		// Split an assistant item's text and each tool into separate blocks, matching the
 		// live progress stream (one narration block, one block per tool) so a block's id is
 		// computed over the same canonical shape in both the transcript and the live event.

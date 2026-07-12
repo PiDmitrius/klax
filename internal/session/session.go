@@ -49,29 +49,27 @@ type Session struct {
 }
 
 type ChatSessions struct {
-	// HighWater is a MONOTONIC per-chat counter: the highest session key ever handed out in this chat.
-	// It only increases and is NEVER reused, so a deleted session's key can't be reassigned — reuse
-	// would bind a new session to the deleted one's canonical (removed) durable Store (writes returning
-	// ErrRemoved) or merge runs. It survives deletion and is persisted in sessions.json; on load it is
-	// lifted to the max existing key (normalize) so migrated stores keep their keys and new ones simply
-	// continue above them.
+	// HighWater is the legacy per-chat high-water written by development builds before session keys
+	// became store-global. normalize folds it into Store.HighWater and clears it; keep the field only
+	// so those stores migrate without reusing a deleted session's key.
 	HighWater int64      `json:"high_water,omitempty"`
 	Sessions  []*Session `json:"sessions"`
 }
 
-// nextCreated advances the high-water and returns the new session key (Session.Created — the canonical
-// key for the runner map and the durable-store registry; despite the name it is a monotonic counter,
-// not a timestamp, for new sessions).
-func (cs *ChatSessions) nextCreated() int64 {
-	cs.HighWater++
-	return cs.HighWater
+type Store struct {
+	mu sync.Mutex
+	// HighWater is the store-global monotonic session-key counter. Every new klax session, regardless
+	// of chat, gets the next value, so MergeKeys can never combine colliding identities.
+	HighWater int64                     `json:"high_water,omitempty"`
+	Chats     map[string]*ChatSessions  `json:"chats"`
+	Scope     map[string]*ScopeDefaults `json:"scope_defaults,omitempty"`
+	path      string
 }
 
-type Store struct {
-	mu    sync.Mutex
-	Chats map[string]*ChatSessions  `json:"chats"`
-	Scope map[string]*ScopeDefaults `json:"scope_defaults,omitempty"`
-	path  string
+// nextCreated advances the store-global high-water. Caller holds s.mu.
+func (s *Store) nextCreated() int64 {
+	s.HighWater++
+	return s.HighWater
 }
 
 func (s *Session) UnmarshalJSON(data []byte) error {
@@ -137,7 +135,7 @@ func LoadStore() (*Store, error) {
 	}
 
 	// Try new format first.
-	if err := json.Unmarshal(data, s); err == nil && (len(s.Chats) > 0 || len(s.Scope) > 0) {
+	if err := json.Unmarshal(data, s); err == nil && (s.HighWater > 0 || len(s.Chats) > 0 || len(s.Scope) > 0) {
 		s.normalize()
 		return s, nil
 	}
@@ -211,14 +209,16 @@ func (s *Store) Save() error {
 	}
 	path := s.path
 	payload := struct {
-		Chats map[string]*ChatSessions  `json:"chats"`
-		Scope map[string]*ScopeDefaults `json:"scope_defaults,omitempty"`
+		HighWater int64                     `json:"high_water,omitempty"`
+		Chats     map[string]*ChatSessions  `json:"chats"`
+		Scope     map[string]*ScopeDefaults `json:"scope_defaults,omitempty"`
 	}{
-		Chats: make(map[string]*ChatSessions, len(s.Chats)),
-		Scope: make(map[string]*ScopeDefaults, len(s.Scope)),
+		HighWater: s.HighWater,
+		Chats:     make(map[string]*ChatSessions, len(s.Chats)),
+		Scope:     make(map[string]*ScopeDefaults, len(s.Scope)),
 	}
 	for key, chat := range s.Chats {
-		payload.Chats[key] = &ChatSessions{Sessions: cloneSessions(chat.Sessions), HighWater: chat.HighWater}
+		payload.Chats[key] = &ChatSessions{Sessions: cloneSessions(chat.Sessions)}
 	}
 	for key, def := range s.Scope {
 		payload.Scope[key] = cloneDefaults(def)
@@ -265,17 +265,20 @@ func (s *Store) normalize() {
 		if chat.Sessions == nil {
 			chat.Sessions = []*Session{}
 		}
+		// Migrate the short-lived per-chat counter format into the one canonical global source.
+		if chat.HighWater > s.HighWater {
+			s.HighWater = chat.HighWater
+		}
+		chat.HighWater = 0
 		def := s.scope(key)
 		for _, sess := range chat.Sessions {
 			if sess == nil {
 				continue
 			}
-			// Legacy stores had no HighWater: lift it to at least the max existing key, so migrated stores
-			// keep their keys and new ones continue above them (deleted-session keys from before this field
-			// existed are unrecoverable, but a fresh process starts with an empty Store registry, so a reused
-			// key there binds a fresh Store — harmless — while going forward HighWater prevents reuse).
-			if sess.Created > chat.HighWater {
-				chat.HighWater = sess.Created
+			// Lift the global counter to every existing key. Legacy timestamp keys therefore remain valid,
+			// while every new key is unique across all chats and safe under MergeKeys.
+			if sess.Created > s.HighWater {
+				s.HighWater = sess.Created
 			}
 			if sess.Backend == "" && sess.Messages > 0 {
 				sess.Backend = "claude"
@@ -404,7 +407,7 @@ func (s *Store) Ensure(chatID, name, cwd string, defaults ScopeDefaults) *Sessio
 	for _, sess := range cs.Sessions {
 		sess.Active = false
 	}
-	created := cs.nextCreated()
+	created := s.nextCreated()
 	sess := &Session{
 		Name:          name,
 		CWD:           cwd,
@@ -434,7 +437,7 @@ func (s *Store) New(chatID, name, cwd string, defaults ScopeDefaults) *Session {
 	for _, sess := range cs.Sessions {
 		sess.Active = false
 	}
-	created := cs.nextCreated()
+	created := s.nextCreated()
 	sess := &Session{
 		Name:          name,
 		CWD:           cwd,
@@ -455,15 +458,25 @@ func (s *Store) New(chatID, name, cwd string, defaults ScopeDefaults) *Session {
 // intermediate or partially-configured state is ever visible to a concurrent SessionsFor — the whole
 // session is published in one operation. The store takes ownership of `sess`; a clone is returned.
 func (s *Store) Add(chatID string, sess *Session) *Session {
+	return s.AddWithDefaults(chatID, sess, nil)
+}
+
+// AddWithDefaults atomically publishes an already-formed session AND, when defaults is non-nil,
+// records that same session's new-session template. Keeping both mutations under one lock means two
+// concurrent creates cannot leave the older session's defaults as the final template.
+func (s *Store) AddWithDefaults(chatID string, sess *Session, defaults *ScopeDefaults) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cs := s.chat(chatID)
 	for _, existing := range cs.Sessions {
 		existing.Active = false
 	}
-	sess.Created = cs.nextCreated()
+	sess.Created = s.nextCreated()
 	sess.Active = true
 	cs.Sessions = append(cs.Sessions, sess)
+	if defaults != nil {
+		*s.scope(chatID) = *defaults
+	}
 	return cloneSession(sess)
 }
 

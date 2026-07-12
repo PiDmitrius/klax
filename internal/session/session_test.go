@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -276,7 +277,7 @@ func TestNewAssignsUniqueCreatedAcrossRapidCalls(t *testing.T) {
 	}
 }
 
-// The session key is a monotonic per-chat counter that is NEVER reused after a delete (reuse would
+// The session key is a store-global monotonic counter that is NEVER reused after a delete (reuse would
 // bind a new session to a deleted one's removed durable Store), and the high-water survives a
 // save/reload. Invariant: 1, 2, delete → 3 (not 2).
 func TestCreatedNeverReusedAfterDelete(t *testing.T) {
@@ -308,6 +309,61 @@ func TestCreatedNeverReusedAfterDelete(t *testing.T) {
 	}
 	if d := reloaded.New("user:alice", "d", "/tmp", ScopeDefaults{}); d.Created != 4 {
 		t.Fatalf("high-water not persisted across reload: want 4, got %d", d.Created)
+	}
+}
+
+func TestSessionKeysStayUniqueAcrossMerge(t *testing.T) {
+	store := &Store{
+		Chats: make(map[string]*ChatSessions),
+		Scope: make(map[string]*ScopeDefaults),
+	}
+	a := store.New("tg:1", "telegram", "/tmp", ScopeDefaults{})
+	b := store.New("mx:1", "max", "/tmp", ScopeDefaults{})
+	c := store.New("user:alice", "canonical", "/tmp", ScopeDefaults{})
+	if a.Created != 1 || b.Created != 2 || c.Created != 3 {
+		t.Fatalf("keys must be global 1,2,3; got %d,%d,%d", a.Created, b.Created, c.Created)
+	}
+	if !store.MergeKeys("user:alice", []string{"tg:1", "mx:1"}) {
+		t.Fatal("MergeKeys returned false")
+	}
+	seen := map[int64]bool{}
+	for _, sess := range store.SessionsFor("user:alice") {
+		if seen[sess.Created] {
+			t.Fatalf("duplicate key %d after merge", sess.Created)
+		}
+		seen[sess.Created] = true
+	}
+	if next := store.New("user:alice", "next", "/tmp", ScopeDefaults{}); next.Created != 4 {
+		t.Fatalf("next key after merge = %d, want 4", next.Created)
+	}
+}
+
+func TestLoadMigratesPerChatHighWaterToGlobal(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	path := filepath.Join(StoreDir(), "sessions.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	data := `{"chats":{"user:alice":{"high_water":9,"sessions":[]},"tg:2":{"high_water":12,"sessions":[]}}}`
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := LoadStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store.New("user:alice", "next", "/tmp", ScopeDefaults{}).Created; got != 13 {
+		t.Fatalf("key after per-chat high-water migration = %d, want 13", got)
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(saved), `"high_water"`) != 1 {
+		t.Fatalf("saved store must contain only the global high-water: %s", saved)
 	}
 }
 
@@ -343,6 +399,19 @@ func TestAddInsertsFullyFormedSessionActivating(t *testing.T) {
 	}
 	if store.Active("user:alice").Created != added.Created {
 		t.Fatal("the added session must be the active one")
+	}
+}
+
+func TestAddWithDefaultsCommitsSessionAndTemplateTogether(t *testing.T) {
+	store := &Store{Chats: map[string]*ChatSessions{}, Scope: map[string]*ScopeDefaults{}}
+	def := &ScopeDefaults{Backend: "codex", Model: "m", Think: "high", Sandbox: "on"}
+	added := store.AddWithDefaults("user:alice", &Session{Name: "new", CWD: "/tmp", Backend: "codex"}, def)
+	if added == nil || added.Created == 0 {
+		t.Fatalf("session was not added: %+v", added)
+	}
+	got := store.ScopeDefaults("user:alice")
+	if got == nil || *got != *def {
+		t.Fatalf("defaults = %+v, want %+v", got, def)
 	}
 }
 
