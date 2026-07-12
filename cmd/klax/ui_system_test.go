@@ -108,11 +108,21 @@ func TestSystemUpdateMethodAndSingleFlight(t *testing.T) {
 	if rejected["running"] != false {
 		t.Fatalf("unchecked tag accepted: %#v", rejected)
 	}
+	if rejected["started"] != false {
+		t.Fatalf("unchecked tag reported started: %#v", rejected)
+	}
 
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, authSystemJSON(http.MethodPost, "/api/system/update", `{"tag":"v9.9.9"}`))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first update status = %d", rec.Code)
+	}
+	var first map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&first); err != nil {
+		t.Fatal(err)
+	}
+	if first["started"] != true {
+		t.Fatalf("first update not reported started: %#v", first)
 	}
 	<-started
 
@@ -127,6 +137,9 @@ func TestSystemUpdateMethodAndSingleFlight(t *testing.T) {
 	}
 	if second["message"] != "Обновление уже выполняется" {
 		t.Fatalf("second response = %#v", second)
+	}
+	if second["started"] != false {
+		t.Fatalf("second update reported started: %#v", second)
 	}
 
 	close(release)
@@ -151,6 +164,21 @@ func TestSystemVersionActions(t *testing.T) {
 	} {
 		if got := releaseAction(tc.latest); got != tc.action {
 			t.Fatalf("latest %s: action %s, want %s", tc.latest, got, tc.action)
+		}
+	}
+}
+
+func TestInstallStatusMessages(t *testing.T) {
+	for _, tc := range []struct{ action, tag, start, pending string }{
+		{"update", "v2.0.0", "Обновление до v2.0.0 запущено", "Обновление до v2.0.0 установлено, ожидается перезапуск"},
+		{"reinstall", "v1.0.0", "Переустановка v1.0.0 запущена", "v1.0.0 переустановлена, ожидается перезапуск"},
+		{"install", "v0.9.0", "Установка v0.9.0 запущена", "v0.9.0 установлена, ожидается перезапуск"},
+	} {
+		if got := installStartMessage(tc.action, tc.tag); got != tc.start {
+			t.Fatalf("start %s = %q", tc.action, got)
+		}
+		if got := installPendingMessage(tc.action, tc.tag); got != tc.pending {
+			t.Fatalf("pending %s = %q", tc.action, got)
 		}
 	}
 }

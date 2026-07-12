@@ -12,10 +12,25 @@ import { initCompose, saveDraft, loadDraft, dropDraft, recoverOutbox } from "./c
 import { initTabs, reconcileSessions, renderTabs } from "./tabs.js";
 import { injectEmojiFont } from "./emoji.js";
 import { showNotice } from "./notices.js";
-import { initSystem } from "./system.js";
+import { initSystem, systemRestartNotice } from "./system.js";
 import { initDebug } from "./debug.js";
 
 const model = new TurnModel();
+const SERVER_STARTED_KEY = "klax_server_started";
+let serverStarted = loadServerStarted();
+
+function loadServerStarted(){
+  try {
+    const value = sessionStorage.getItem(SERVER_STARTED_KEY), parsed = Number(value);
+    return value !== null && Number.isFinite(parsed) ? parsed : null;
+  }
+  catch(_){ return null; }
+}
+
+function saveServerStarted(value){
+  serverStarted = value;
+  try { sessionStorage.setItem(SERVER_STARTED_KEY, String(value)); } catch(_){}
+}
 const loaded = {};        // created -> transcript loaded?
 const readThrough = {};   // created -> encoded (turn,block) read watermark (pos()); undefined until seeded
 const unreadJump = {};    // created -> one-shot scroll to the unread divider
@@ -656,6 +671,8 @@ function setDegraded(on){
 
 // the poll host events.js drives
 const host = {
+  started: () => serverStarted,
+  setStarted: saveServerStarted,
   model,
   ctx: {
     onSessions: list => { onSessionsList(list).catch(e => console.error("klax sessions", e)); },
@@ -686,7 +703,7 @@ const host = {
     renderTabs(active);
   },
   onAuthFail: () => { const a = document.getElementById("app"); if(a) a.classList.remove("active"); const g = document.getElementById("gate"); if(g) g.classList.remove("hidden"); },
-  onRestart: () => showNotice("klax обновился"),
+  onRestart: () => showNotice(systemRestartNotice()),
   // Show the amber logo only after the 2nd consecutive failure, so a single dropped poll
   // (or a fast daemon restart the next poll rides through) never flashes it; clear on any
   // good poll. The poll loop keeps retrying regardless — this is purely the visible signal.

@@ -16,7 +16,7 @@ const POLL_ABORT_MS = 30000; // > server hold (~25s); bounds a wedged request
 //   noticeCursor()/setNoticeCursor(c)  the transient-notice ring cursor
 //   model, ctx{onSessions,onNotice}, onAffected(set), onRestart, onAuthFail, onHealth(ok,fails)
 export async function tailLoop(host){
-  let backoff = 0, fails = 0, lastStarted = null;
+  let backoff = 0, fails = 0, lastStarted = host.started ? host.started() : null;
   const health = ok => { fails = ok ? 0 : fails + 1; if(host.onHealth) host.onHealth(ok, fails); };
   for(;;){
     // The abort timer bounds the WHOLE round-trip, body read included — it is cleared in `finally`,
@@ -36,6 +36,7 @@ export async function tailLoop(host){
       if(data.started !== undefined){
         if(lastStarted !== null && data.started !== lastStarted && host.onRestart) host.onRestart();
         lastStarted = data.started;
+        if(host.setStarted) host.setStarted(data.started);
       }
       if(data.sessions && host.ctx.onSessions) host.ctx.onSessions(data.sessions);
       if(data.sess_rev !== undefined && host.setSessRev) host.setSessRev(data.sess_rev);

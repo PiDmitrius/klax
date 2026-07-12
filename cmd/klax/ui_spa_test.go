@@ -31,6 +31,22 @@ func TestSPASystemControlsAndNoticeStack(t *testing.T) {
 	if !strings.Contains(string(app), `initSystem({ notice: showNotice })`) {
 		t.Fatal("system modal is not initialized")
 	}
+	if !strings.Contains(string(app), `systemRestartNotice()`) {
+		t.Fatal("daemon restart must close the system modal before showing its result")
+	}
+	if !strings.Contains(string(app), `sessionStorage.getItem(SERVER_STARTED_KEY)`) {
+		t.Fatal("daemon epoch must survive a page reload")
+	}
+	system, err := moduleFS.ReadFile("ui_static/system.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(system), `if(data.started !== true) setPendingInstall(null)`) {
+		t.Fatal("UI must not attribute a rejected install to a later restart")
+	}
+	if !strings.Contains(string(system), `sessionStorage.setItem(PENDING_INSTALL_KEY`) {
+		t.Fatal("accepted install must survive a page reload")
+	}
 	if !strings.Contains(string(app), `initDebug({ notice: showNotice })`) {
 		t.Fatal("explicit debug notification harness is not initialized")
 	}

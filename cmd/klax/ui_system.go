@@ -21,7 +21,6 @@ type systemState struct {
 	updateStarted  time.Time
 	updateFinished time.Time
 	lastOK         bool
-	lastMessage    string
 	lastVersion    string
 	releases       []releaseInfo
 	checkRunning   bool
@@ -61,7 +60,6 @@ type systemUpdateView struct {
 	StartedAt  string              `json:"started_at,omitempty"`
 	FinishedAt string              `json:"finished_at,omitempty"`
 	OK         bool                `json:"ok"`
-	Message    string              `json:"message,omitempty"`
 	Installed  string              `json:"installed,omitempty"`
 	Current    string              `json:"current"`
 	Checked    bool                `json:"checked"`
@@ -107,7 +105,7 @@ func (d *daemon) systemView() systemView {
 		Update: systemUpdateView{
 			Mode: mode, SourceDir: pathutil.TildePathsInText(d.cfg.SourceDir), Running: st.running,
 			StartedAt: formatSystemTime(st.updateStarted), FinishedAt: formatSystemTime(st.updateFinished),
-			OK: st.lastOK, Message: st.lastMessage, Installed: st.lastVersion,
+			OK: st.lastOK, Installed: st.lastVersion,
 			Current: "v" + version, Checked: st.checked, Checking: st.checkRunning, CheckError: st.checkError, Releases: releases,
 		},
 	}
@@ -183,7 +181,8 @@ func (d *daemon) startSystemUpdate(tag string) (bool, string) {
 	st.running = true
 	st.updateStarted = time.Now()
 	st.updateFinished = time.Time{}
-	st.lastMessage = "Обновление запущено"
+	action := releaseAction(tag)
+	st.lastOK = false
 	fn := st.updateFn
 	st.mu.Unlock()
 
@@ -197,15 +196,58 @@ func (d *daemon) startSystemUpdate(tag string) (bool, string) {
 			}()
 			res = fn(context.Background(), tag, io.Discard)
 		}()
+		if res.OK {
+			res.Message = installPendingMessage(action, tag)
+		} else if res.Message != "" {
+			res.Message = "Ошибка установки " + tag + ": " + res.Message
+		} else {
+			res.Message = "Ошибка установки " + tag
+		}
 		st.mu.Lock()
-		st.running = false
 		st.updateFinished = time.Now()
 		st.lastOK = res.OK
-		st.lastMessage = res.Message
 		st.lastVersion = res.Version
 		st.mu.Unlock()
+		d.uiNotifyAll(res.Message)
+		st.mu.Lock()
+		st.running = false
+		st.mu.Unlock()
 	}()
-	return true, "Установка запущена"
+	return true, installStartMessage(action, tag)
+}
+
+func (d *daemon) systemUpdateRunning() bool {
+	d.mu.Lock()
+	st := d.system
+	d.mu.Unlock()
+	if st == nil {
+		return false
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.running
+}
+
+func installStartMessage(action, tag string) string {
+	switch action {
+	case "update":
+		return "Обновление до " + tag + " запущено"
+	case "reinstall":
+		return "Переустановка " + tag + " запущена"
+	default:
+		return "Установка " + tag + " запущена"
+	}
+}
+
+func installPendingMessage(action, tag string) string {
+	switch action {
+	case "update":
+		return "Обновление до " + tag + " установлено, ожидается перезапуск"
+	case "reinstall":
+		return tag + " переустановлена, ожидается перезапуск"
+	default:
+		return tag + " установлена, ожидается перезапуск"
+	}
 }
 
 func (s *uiServer) handleSystem(w http.ResponseWriter, r *http.Request) {
@@ -254,6 +296,7 @@ func (s *uiServer) handleSystemUpdate(w http.ResponseWriter, r *http.Request) {
 	started, message := s.d.startSystemUpdate(body.Tag)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
+		"started": started,
 		"running": started || s.d.systemView().Update.Running,
 		"message": message,
 	})

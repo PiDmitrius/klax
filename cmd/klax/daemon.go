@@ -826,6 +826,11 @@ func (d *daemon) watchMarker() {
 			return
 		}
 		if m := readMarker(); m != nil {
+			// A UI-triggered install writes the marker before its goroutine records and broadcasts
+			// the result. Let that ONE owner finish first; the next tick starts the normal drain.
+			if d.systemUpdateRunning() {
+				continue
+			}
 			log.Printf("restart marker found (reason: %s)", m.Reason)
 			d.startDrain(m.Reason)
 			return

@@ -1,9 +1,31 @@
 import { api, copyText, flashCopied } from "./base.js";
-import { uiConfirm } from "./modal.js";
 
 const $ = id => document.getElementById(id);
 let refreshTimer = 0;
 let notify = () => {};
+let lastData = null;
+let confirmInstall = null;
+const PENDING_INSTALL_KEY = "klax_pending_install";
+const PENDING_INSTALL_TTL = 15 * 60 * 1000;
+let pendingInstall = loadPendingInstall();
+let seenCheckError = "";
+
+function loadPendingInstall(){
+  try {
+    const value = JSON.parse(sessionStorage.getItem(PENDING_INSTALL_KEY));
+    if(value && Date.now() - value.savedAt < PENDING_INSTALL_TTL) return value;
+    sessionStorage.removeItem(PENDING_INSTALL_KEY);
+  } catch(_){}
+  return null;
+}
+
+function setPendingInstall(value){
+  pendingInstall = value ? { ...value, savedAt: Date.now() } : null;
+  try {
+    if(pendingInstall) sessionStorage.setItem(PENDING_INSTALL_KEY, JSON.stringify(pendingInstall));
+    else sessionStorage.removeItem(PENDING_INSTALL_KEY);
+  } catch(_){}
+}
 
 function codeValue(value){
   const el = document.createElement("code"); el.className = "syscode"; el.textContent = value || "—";
@@ -32,6 +54,7 @@ function elapsed(sec){
 }
 
 function render(data){
+  lastData = data;
   const body = $("sysbody"), u = data.update || {};
   body.textContent = "";
   body.append(row("Версия", "v" + data.version, { copy: true }), row("Запущен", new Date(data.started_at).toLocaleString()), row("Работает", elapsed(data.uptime_sec)), row("Процесс", String(data.pid), { copy: true }), row("Платформа", data.platform));
@@ -49,15 +72,27 @@ function render(data){
       if(release.url){ age.href = release.url; age.target = "_blank"; age.rel = "noopener noreferrer"; }
       const action = document.createElement("button"); action.className = "sysaction" + (release.action === "update" ? " update" : "");
       action.dataset.tag = release.tag; action.dataset.action = release.action; action.disabled = !!u.running;
-      action.textContent = ({ update: "Обновить", install: "Установить", reinstall: "Переустановить" }[release.action] || "Установить");
+      action.textContent = actionLabel(release.action);
       action.onclick = installFound;
       item.append(bullet, codeValue(release.tag), age, action); list.appendChild(item);
     }
     if(!(u.releases || []).length){ const empty = document.createElement("div"); empty.className = "sysrelease-empty"; empty.textContent = "Релизы не найдены"; list.appendChild(empty); }
     body.appendChild(list);
   }
-  if(u.check_error) body.append(row("Ошибка проверки", u.check_error));
-  if(u.message) body.append(row("Состояние", u.message));
+  if(u.check_error && u.check_error !== seenCheckError){
+    seenCheckError = u.check_error;
+    notify("Ошибка проверки обновлений\n" + u.check_error, { error: true });
+  }
+  if(!u.check_error) seenCheckError = "";
+  if(pendingInstall && !u.running && u.finished_at && !u.ok) setPendingInstall(null);
+  if(confirmInstall){
+    const box = document.createElement("div"); box.className = "sysconfirm";
+    const text = document.createElement("div"); text.className = "sysconfirm-text"; text.textContent = confirmText(confirmInstall);
+    const actions = document.createElement("div"); actions.className = "sysconfirm-actions";
+    const cancel = document.createElement("button"); cancel.textContent = "Отмена"; cancel.onclick = () => { confirmInstall = null; render(lastData); };
+    const ok = document.createElement("button"); ok.className = "sysconfirm-ok" + (confirmInstall.action === "update" ? " update" : ""); ok.textContent = actionLabel(confirmInstall.action); ok.onclick = beginInstall;
+    actions.append(cancel, ok); box.append(text, actions); body.appendChild(box);
+  }
   clearTimeout(refreshTimer);
   if(!$("sysmodal").classList.contains("hidden") && (u.running || u.checking)) refreshTimer = setTimeout(refresh, 1200);
 }
@@ -71,6 +106,14 @@ async function refresh(){
 }
 
 function close(){ clearTimeout(refreshTimer); $("sysmodal").classList.add("hidden"); }
+
+function actionLabel(action){ return ({ update: "Обновить", install: "Установить", reinstall: "Переустановить" }[action] || "Установить"); }
+
+function confirmText(pending){
+  if(pending.action === "update") return "Обновить klax: " + pending.current + " → " + pending.tag + "?";
+  if(pending.action === "reinstall") return "Переустановить klax " + pending.tag + "?";
+  return "Установить klax " + pending.tag + " вместо " + pending.current + "?";
+}
 
 function errorNotice(title, error){
   const detail = String(error && error.message || "").trim();
@@ -87,14 +130,35 @@ async function checkUpdates(){
 }
 
 async function installFound(event){
-  const button = event.currentTarget, label = button.textContent || "Установить", tag = button.dataset.tag;
-  if(!(await uiConfirm(label + " найденную версию klax?", label))) return;
+  const button = event.currentTarget;
+  confirmInstall = { tag: button.dataset.tag, action: button.dataset.action, current: "v" + lastData.version };
+  render(lastData);
+}
+
+async function beginInstall(){
+  const chosen = confirmInstall;
+  if(!chosen) return;
+  confirmInstall = null;
+  setPendingInstall(chosen);
   try {
-    const r = await api("/api/system/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tag }) });
+    const r = await api("/api/system/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tag: chosen.tag }) });
     const data = await r.json();
     if(!r.ok) throw new Error(data.message || "Ошибка установки");
-    notify(data.message); refresh();
-  } catch(e){ notify(errorNotice("Ошибка установки", e), { error: true }); }
+    if(data.started !== true) setPendingInstall(null);
+    notify(data.message, data.running ? "info" : "warning");
+    if(lastData && lastData.update){ lastData.update.running = !!data.running; render(lastData); }
+    refresh();
+  } catch(e){ setPendingInstall(null); notify(errorNotice("Ошибка установки", e), { error: true }); refresh(); }
+}
+
+export function systemRestartNotice(){
+  close();
+  const done = pendingInstall;
+  setPendingInstall(null); confirmInstall = null;
+  if(!done) return "klax обновился";
+  if(done.action === "update") return "klax обновлён: " + done.current + " → " + done.tag;
+  if(done.action === "reinstall") return "klax " + done.tag + " переустановлен";
+  return "Установлена версия " + done.tag + " вместо " + done.current;
 }
 
 export function initSystem({ notice }){
