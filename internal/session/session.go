@@ -51,6 +51,27 @@ type Session struct {
 
 type ChatSessions struct {
 	Sessions []*Session `json:"sessions"`
+	// LastCreated is the high-water of every Created ever assigned in this chat. It SURVIVES deletion
+	// (unlike scanning Sessions), so a Created is never reused — reuse would hand a new session a deleted
+	// session's canonical (removed) durable Store. Persisted in sessions.json.
+	LastCreated int64 `json:"last_created,omitempty"`
+}
+
+// nextCreated returns a Created strictly greater than LastCreated (the persisted high-water) AND every
+// currently-live session, so a Created is NEVER reused. Created is the canonical key for both the
+// runner map and the durable-store registry; a reused id would merge runs or bind a new session to a
+// deleted one's removed Store (writes returning ErrRemoved).
+func (cs *ChatSessions) nextCreated() int64 {
+	next := time.Now().Unix()
+	if cs.LastCreated >= next {
+		next = cs.LastCreated + 1
+	}
+	for _, sess := range cs.Sessions {
+		if sess != nil && sess.Created >= next {
+			next = sess.Created + 1
+		}
+	}
+	return next
 }
 
 type Store struct {
@@ -204,7 +225,7 @@ func (s *Store) Save() error {
 		Scope: make(map[string]*ScopeDefaults, len(s.Scope)),
 	}
 	for key, chat := range s.Chats {
-		payload.Chats[key] = &ChatSessions{Sessions: cloneSessions(chat.Sessions)}
+		payload.Chats[key] = &ChatSessions{Sessions: cloneSessions(chat.Sessions), LastCreated: chat.LastCreated}
 	}
 	for key, def := range s.Scope {
 		payload.Scope[key] = cloneDefaults(def)
@@ -255,6 +276,13 @@ func (s *Store) normalize() {
 		for _, sess := range chat.Sessions {
 			if sess == nil {
 				continue
+			}
+			// Legacy stores had no LastCreated: lift the high-water to at least the max live Created so a
+			// reused id can never predate a still-live session. (Deleted-session ids from before this field
+			// existed are unrecoverable, but a new process starts with an empty store registry, so a reused
+			// id there binds a fresh Store — harmless — while going forward LastCreated prevents reuse.)
+			if sess.Created > chat.LastCreated {
+				chat.LastCreated = sess.Created
 			}
 			if sess.Backend == "" && sess.Messages > 0 {
 				sess.Backend = "claude"
@@ -383,10 +411,12 @@ func (s *Store) Ensure(chatID, name, cwd string, defaults ScopeDefaults) *Sessio
 	for _, sess := range cs.Sessions {
 		sess.Active = false
 	}
+	created := cs.nextCreated()
+	cs.LastCreated = created
 	sess := &Session{
 		Name:          name,
 		CWD:           cwd,
-		Created:       nextCreated(cs.Sessions),
+		Created:       created,
 		Active:        true,
 		Backend:       def.Backend,
 		ModelOverride: def.Model,
@@ -412,10 +442,12 @@ func (s *Store) New(chatID, name, cwd string, defaults ScopeDefaults) *Session {
 	for _, sess := range cs.Sessions {
 		sess.Active = false
 	}
+	created := cs.nextCreated()
+	cs.LastCreated = created
 	sess := &Session{
 		Name:          name,
 		CWD:           cwd,
-		Created:       nextCreated(cs.Sessions),
+		Created:       created,
 		Active:        true,
 		Backend:       def.Backend,
 		ModelOverride: def.Model,
@@ -438,24 +470,11 @@ func (s *Store) Add(chatID string, sess *Session) *Session {
 	for _, existing := range cs.Sessions {
 		existing.Active = false
 	}
-	sess.Created = nextCreated(cs.Sessions)
+	sess.Created = cs.nextCreated()
+	cs.LastCreated = sess.Created
 	sess.Active = true
 	cs.Sessions = append(cs.Sessions, sess)
 	return cloneSession(sess)
-}
-
-// nextCreated returns a Created timestamp guaranteed to be unique within the
-// given slice. The Created field is the canonical key used by both UpdateSession
-// and the per-session runner map, so collisions (rapid back-to-back /new in the
-// same wall-clock second) would silently merge runs.
-func nextCreated(existing []*Session) int64 {
-	now := time.Now().Unix()
-	for _, sess := range existing {
-		if sess != nil && sess.Created >= now {
-			now = sess.Created + 1
-		}
-	}
-	return now
 }
 
 func (s *Store) Delete(chatID string, idx int) bool {

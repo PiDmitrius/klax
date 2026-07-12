@@ -148,6 +148,33 @@ func TestSessionStoreCanonicalNoResurrection(t *testing.T) {
 	}
 }
 
+// After delete, a new session created the same second must get a DIFFERENT Created (never reused) and
+// therefore a FRESH, writable canonical Store — not the deleted session's removed one.
+func TestNewSessionAfterDeleteGetsFreshStore(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	d := newTestDeliveryDaemon(&fakeTransport{})
+	d.store = &session.Store{Chats: map[string]*session.ChatSessions{}, Scope: map[string]*session.ScopeDefaults{}}
+	sk := "user:alice"
+
+	a := d.store.New(sk, "a", "/tmp", session.ScopeDefaults{})
+	if _, err := d.sessionStore(sk, a.Created).EnsureLink("000001-01-x.png", "x.png", "image/png"); err != nil {
+		t.Fatal(err)
+	}
+	d.removeSessionStore(sk, a.Created) // marks a's canonical Store removed
+	if !d.store.Delete(sk, 0) {
+		t.Fatal("delete failed")
+	}
+
+	b := d.store.New(sk, "b", "/tmp", session.ScopeDefaults{})
+	if b.Created == a.Created {
+		t.Fatalf("Created reused after delete: %d", b.Created)
+	}
+	// The new session's canonical Store must be a fresh, writable one (not a's removed Store).
+	if _, err := d.sessionStore(sk, b.Created).EnsureLink("000001-01-y.png", "y.png", "image/png"); err != nil {
+		t.Fatalf("new session's store must be writable, got %v", err)
+	}
+}
+
 // A file token must be STABLE across read-model rebuilds and persist in links.json across a reopen
 // (restart) — otherwise the attachment's <img src> changes and the image re-decodes/flickers.
 func TestFileTokenStableAndPersisted(t *testing.T) {

@@ -276,6 +276,41 @@ func TestNewAssignsUniqueCreatedAcrossRapidCalls(t *testing.T) {
 	}
 }
 
+// Created must NEVER be reused after a delete, even in the same wall-clock second — otherwise a new
+// session would inherit a deleted one's canonical (removed) durable Store. The high-water enforces
+// this and must survive a save/reload (persisted in sessions.json).
+func TestCreatedNeverReusedAfterDelete(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	store, err := LoadStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := store.New("user:alice", "a", "/tmp", ScopeDefaults{})
+	if !store.Delete("user:alice", 0) {
+		t.Fatal("delete failed")
+	}
+	// The slice is now empty, but the high-water must still block reuse (same second → a.Created+1).
+	b := store.New("user:alice", "b", "/tmp", ScopeDefaults{})
+	if b.Created <= a.Created {
+		t.Fatalf("Created reused/decreased after delete: a=%d b=%d", a.Created, b.Created)
+	}
+	// The high-water survives a save + reload.
+	if !store.Delete("user:alice", 0) { // b is now index 0
+		t.Fatal("delete b failed")
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := LoadStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := reloaded.New("user:alice", "c", "/tmp", ScopeDefaults{})
+	if c.Created <= b.Created {
+		t.Fatalf("high-water not persisted across reload: b=%d c=%d", b.Created, c.Created)
+	}
+}
+
 func TestAddInsertsFullyFormedSessionActivating(t *testing.T) {
 	store := &Store{
 		Chats: make(map[string]*ChatSessions),
