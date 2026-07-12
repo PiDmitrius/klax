@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/PiDmitrius/klax/internal/config"
+	"github.com/PiDmitrius/klax/internal/pathutil"
 	"github.com/PiDmitrius/klax/internal/session"
 	"github.com/PiDmitrius/klax/internal/tg"
 )
@@ -546,7 +547,7 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		if len(args) == 0 {
 			sess := d.store.Active(sk)
 			if sess != nil {
-				d.sendMessage(chatID, msgID, fmt.Sprintf("📂 <code>%s</code>", html.EscapeString(tildePath(sess.CWD))))
+				d.sendMessage(chatID, msgID, fmt.Sprintf("📂 <code>%s</code>", html.EscapeString(pathutil.TildePathsInText(sess.CWD))))
 			}
 			return
 		}
@@ -572,7 +573,7 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			return
 		}
 		d.saveStore()
-		d.sendMessage(chatID, msgID, fmt.Sprintf("📂 <code>%s</code>", html.EscapeString(tildePath(sess.CWD))))
+		d.sendMessage(chatID, msgID, fmt.Sprintf("📂 <code>%s</code>", html.EscapeString(pathutil.TildePathsInText(sess.CWD))))
 
 	case "/prompt":
 		sess := d.store.Active(sk)
@@ -804,7 +805,7 @@ func (d *daemon) groupsText() string {
 		if enabled, ok := d.groupVerb[id]; ok && !enabled {
 			verbose = "off"
 		}
-		sb.WriteString(fmt.Sprintf("- <code>%s</code>\n  📂 <code>%s</code>\n  🗣 verbose: <code>%s</code>\n", html.EscapeString(id), html.EscapeString(tildePath(d.groupChats[id])), verbose))
+		sb.WriteString(fmt.Sprintf("- <code>%s</code>\n  📂 <code>%s</code>\n  🗣 verbose: <code>%s</code>\n", html.EscapeString(id), html.EscapeString(pathutil.TildePathsInText(d.groupChats[id])), verbose))
 	}
 	return sb.String()
 }

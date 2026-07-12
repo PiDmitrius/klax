@@ -10,6 +10,7 @@ import (
 
 	"github.com/PiDmitrius/klax/internal/config"
 	"github.com/PiDmitrius/klax/internal/max"
+	"github.com/PiDmitrius/klax/internal/pathutil"
 	"github.com/PiDmitrius/klax/internal/tg"
 	"github.com/PiDmitrius/klax/internal/vk"
 )
@@ -166,7 +167,7 @@ func displayPathValue(path, home string) string {
 	if path == home {
 		return "~"
 	}
-	return tildePath(path)
+	return pathutil.TildePathsInText(path)
 }
 
 func expandPathValue(path, home string) string {

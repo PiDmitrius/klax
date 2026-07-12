@@ -11,6 +11,8 @@
     --badge-work-stroke:#a87700;
     --link:#006400;
     --tab-active-bg:#ffffff; --tab-active-border:#006400;
+    --compact-block-h:44px;
+    --system-action-w:140px;
   }
   html[data-theme="dark"] {
     --bg:#15171c; --panel:#1a1d23; --chat:#15171c; --fg:#d8dee9; --muted:#8b92a0; --border:#2a2e37;
@@ -47,6 +49,10 @@
   /* Single top panel: tabs + controls */
   #bar { display: flex; align-items: center; gap: 8px; padding: 6px 8px;
          background: var(--panel); border-bottom: 1px solid var(--border); }
+  #bar .logo-btn { flex: none; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 8px;
+                   background: transparent; display: block; line-height: 0; }
+  #bar .logo-btn:hover { filter: brightness(1.08); }
+  #bar .logo-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   #bar .logo { flex: none; display: block; filter: drop-shadow(0 1px 1px rgba(0,0,0,.14)); transition: opacity .2s; }
   /* Degraded live channel: the poll loop lost the server and is retrying. The brand mark
      goes amber (the themed work/warning hue) and breathes until a poll succeeds — an
@@ -119,7 +125,7 @@
 
   /* Centred conversation column — on wide desktop the chat does not span the
      whole screen, so left (klax) and right (user) messages stay close. */
-  #logwrap { flex: 1; min-height: 0; position: relative; display: flex; --composer-h: 72px; }
+  #logwrap { flex: 1; min-height: 0; position: relative; display: flex; overflow-x: clip; --composer-h: 72px; }
   #log { flex: 1; overflow-y: auto; overscroll-behavior-y: contain; overflow-anchor: none; scrollbar-gutter: stable both-edges;
          display: flex; flex-direction: column; align-items: center; background: var(--chat);
          /* Reserve the composer's height as a transparent BOTTOM BORDER, not padding: the
@@ -149,13 +155,12 @@
   @media (prefers-reduced-motion: reduce) { .turn.enter, .msg.enter, .readline.leaving { animation: none; } }
   /* klax-side blocks fill the column for a consistent width — only the colour
      differs between text, tool, error and command output. */
-  .msg.assistant, .msg.tool, .msg.error, .msg.notice { align-self: stretch; }
+  .msg.assistant, .msg.tool, .msg.error { align-self: stretch; }
   .msg.user { align-self: flex-end; max-width: 85%; background: var(--bubble-user); }
   .msg.assistant { background: var(--bubble-assistant); }
   .msg.system { align-self: center; font-size: 12px; color: var(--muted); background: transparent; }
   .msg.tool { font-family: ui-monospace, monospace; font-size: 12px; color: var(--tool-fg); background: var(--tool-bg); }
   .msg.error { background: var(--error-bg); color: var(--error-fg); }
-  .msg.notice { background: var(--tool-bg); color: var(--fg); font-size: 12px; }
   /* typing indicator (work-in-progress marker, like Telegram's "..."): just the animated
      dots + ✕. The context line is a separate tool bubble below the dots, not beside them. */
   .msg.typing { align-self: flex-start; width: fit-content; padding: 12px 14px; display: inline-flex; align-items: center; gap: 0; }
@@ -196,14 +201,13 @@
   .body code { background: var(--code-bg); padding: 1px 4px; border-radius: 4px; cursor: pointer; }
   .body pre code { background: none; padding: 0; cursor: text; }
   .copyflash { animation: copyflash .38s ease-out; }
-  /* Whole-message copy — same affordance as the fence button, at the bubble's own corner
-     (fence buttons sit inset inside their pre, so the two never coincide). */
-  .msg > .mcopy { position: absolute; top: 6px; right: 6px; padding: 2px 7px; font-size: 12px; line-height: 1;
-                  border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--muted);
-                  cursor: pointer; opacity: 0; transition: opacity .12s; user-select: none; z-index: 2; }
-  .msg:hover > .mcopy { opacity: .7; }
-  .msg > .mcopy:hover { opacity: 1; color: var(--fg); }
-  @media (hover: none) { .msg > .mcopy, .body pre .copy { opacity: .45; } }
+  /* One copy affordance for whole timeline messages and notifications. */
+  .block-copy { position: absolute; top: 6px; right: 6px; padding: 2px 7px; font-size: 12px; line-height: 1;
+                border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--muted);
+                cursor: pointer; opacity: 0; transition: opacity .12s; user-select: none; z-index: 2; }
+  .msg:hover > .block-copy, .notify:hover > .block-copy { opacity: .7; }
+  .block-copy:hover, .block-copy:focus-visible { opacity: 1; color: var(--fg); }
+  @media (hover: none) { .block-copy, .body pre .copy { opacity: .45; } }
   /* GitHub-markdown reading font for conversation prose (assistant + user only) —
      tabs, composer, tool labels and notices keep the compact UI font. */
   .msg.assistant .body, .msg.user .body {
@@ -235,7 +239,7 @@
               border-top: 1px solid var(--border); background: var(--panel); }
   #cbar { position: relative; width: 100%; max-width: 788px; display: grid; grid-template-columns: 1fr; grid-template-rows: auto auto; }
   #inputSizer, #cbar textarea {
-    grid-column: 1; grid-row: 2; width: 100%; min-height: 44px; max-height: 240px;
+    grid-column: 1; grid-row: 2; width: 100%; min-height: var(--compact-block-h); max-height: 240px;
     padding: 11px 48px 11px 44px; border-radius: 12px; border: 1px solid var(--border);
     font: inherit; line-height: 1.4; white-space: pre-wrap; overflow-wrap: break-word;
   }
@@ -269,11 +273,31 @@
                   border: 2px solid #006400; border-radius: 8px; margin: 6px 0; display: block; box-sizing: border-box; } /* #006400 = the favicon's stroke (dark green) */
   .body .att-file { display: inline-block; margin: 4px 0; padding: 2px 8px; background: var(--tool-bg);
                     border: 1px solid var(--border); border-radius: 8px; font-size: 13px; }
-  #notice { position: fixed; bottom: 84px; right: 16px; max-width: 40ch;
-            background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px;
-            font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.25);
-            opacity: 0; transition: opacity .2s; pointer-events: none; }
-  #notice.show { opacity: 1; }
+  /* System notices live in the timeline viewport. Their bottom follows the observed composer
+     height, so a growing textarea/chip area raises the stack instead of being covered by it. */
+  #notifications { position: absolute; bottom: calc(var(--composer-h) + 12px); right: 16px; z-index: 3; display: flex;
+                   flex-direction: column; gap: 8px; pointer-events: none;
+                   width: 400px; max-width: calc(100% - 32px); }
+  .notify { background: var(--panel); border: 1px solid var(--border); color: var(--fg);
+            position: relative; padding: 9px 42px 9px 11px; border-radius: 8px; font: 13px/1.4 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+            min-height: var(--compact-block-h);
+            pointer-events: auto; cursor: pointer; max-height: 200px; overflow: hidden;
+            display: grid; grid-template-columns: 20px minmax(0,1fr); align-items: center; gap: 9px;
+            overflow-wrap: anywhere; filter: drop-shadow(0 4px 8px rgba(0,0,0,.25));
+            opacity: 0; transform: translateX(30px); transition: opacity .35s ease, transform .35s ease; }
+  .notify.visible { opacity: 1; transform: translateX(0); }
+  .notify.info { border-color: var(--accent); }
+  .notify.warning { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, var(--panel)); }
+  .notify.error { border-color: var(--error-fg); background: var(--error-bg); }
+  .notify-icon { width: 20px; height: 20px; display: flex; align-items: center; justify-content: center;
+                 font-family: -apple-system, system-ui, sans-serif; font-size: 17px; line-height: 20px; font-weight: 700; color: var(--accent); }
+  .notify.warning .notify-icon { color: var(--warn); }
+  .notify.error .notify-icon { color: var(--error-fg); font-size: 20px; }
+  .notify-text { white-space: pre-wrap; min-width: 0; }
+  .notify.fade-out { opacity: 0; transform: translateX(40px); }
+  .notify.collapse { height: 0 !important; min-height: 0 !important; padding-top: 0 !important; padding-bottom: 0 !important;
+                     margin-top: -8px; border-width: 0;
+                     transition: height .28s ease, padding .28s ease, margin .28s ease, border-width .28s ease; }
   /* custom dialog (replaces system confirm/prompt, keeps the UI style) */
   #modal { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center;
            background: rgba(0,0,0,.45); }
@@ -287,6 +311,31 @@
   .modal-actions button { padding: 7px 16px; }
   .modal-ok { background: var(--accent); color: #fff; border-color: var(--accent); }
   .modal-ok.danger { background: #d92d20; border-color: #d92d20; }
+  /* application/runtime status dialog */
+  #sysmodal { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center;
+              background: rgba(0,0,0,.45); }
+  .sysmodal-box { width: 500px; max-width: 92vw; background: var(--bg); color: var(--fg);
+                  border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px 18px;
+                  box-shadow: 0 12px 44px rgba(0,0,0,.35); }
+  .sysmodal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .sysmodal-title { font-weight: 600; font-size: 15px; }
+  .sysmodal-x { background: none; border: none; color: var(--muted); font-size: 15px; line-height: 1; padding: 2px 6px; }
+  .sysmodal-x:hover { color: var(--error-fg); }
+  .sysrow { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; min-height: 27px; font-size: 13px; }
+  .syskey { color: var(--muted); flex: none; }
+  .sysvalgroup { min-width: 0; display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; text-align: right; }
+  .sysval { min-width: 0; overflow-wrap: anywhere; }
+  code.syscode { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; cursor: pointer; overflow-wrap: anywhere; }
+  .syscheck, .sysaction { width: var(--system-action-w); background: var(--bg); color: var(--fg); }
+  .sysaction.update { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .sysreleases { margin: 6px 0 2px; display: flex; flex-direction: column; gap: 7px; }
+  .sysrelease { display: grid; grid-template-columns: 12px auto minmax(72px,1fr) auto; align-items: center; gap: 9px; }
+  .sysbullet { color: var(--muted); font-size: 16px; line-height: 1; text-align: center; }
+  .sysrelease-empty { color: var(--muted); font-size: 12px; padding-left: 21px; }
+  .sysage { color: var(--muted); font-size: 11px; white-space: nowrap; }
+  .syssep { height: 1px; background: var(--border); margin: 9px 0; opacity: .6; }
+  .sysmodal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+  .syscheck:disabled, .sysaction:disabled { opacity: .5; cursor: wait; }
   /* per-session settings dialog (double-click a tab) */
   #smodal { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center;
             background: rgba(0,0,0,.45); }
@@ -345,3 +394,19 @@
   .smodal-actions { display: flex; justify-content: flex-end; margin-top: 14px; }
   .smodal-ok { min-width: 76px; background: var(--accent); color: #fff; border-color: var(--accent); }
   .hidden { display: none !important; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .notify { transition: opacity .12s ease; transform: none; }
+    .notify.fade-out { transform: none; }
+    .notify.collapse { transition: height .12s ease, padding .12s ease, margin .12s ease, border-width .12s ease; }
+  }
+
+  /* Explicit local visual harness: /?debug. It is absent from the normal UI. */
+  #debugpanel { position: fixed; left: 16px; top: 70px; z-index: 95; width: 190px; padding: 10px;
+                background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+                box-shadow: 0 8px 28px rgba(0,0,0,.25); }
+  .debug-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;
+                font: 12px/1.2 ui-monospace, monospace; color: var(--muted); }
+  .debug-close { padding: 1px 4px; border: 0; background: transparent; color: var(--muted); }
+  .debug-actions { display: flex; flex-direction: column; gap: 6px; }
+  .debug-actions button { width: 100%; padding: 6px 8px; text-align: left; font-size: 12px; }

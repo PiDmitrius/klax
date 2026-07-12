@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"html"
-	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -14,15 +13,6 @@ import (
 	"github.com/PiDmitrius/klax/internal/runner"
 	"github.com/PiDmitrius/klax/internal/session"
 )
-
-// tildePath replaces $HOME prefix with ~ for display.
-func tildePath(path string) string {
-	home, _ := os.UserHomeDir()
-	if strings.HasPrefix(path, home) {
-		return "~" + path[len(home):]
-	}
-	return path
-}
 
 // formatLogItems renders the pre-answer progress log. Tool invocations stay
 // as inline monospace ("техлог"). Narration blocks — the intermediate
