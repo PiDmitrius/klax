@@ -2,7 +2,7 @@
 // it computes ordered render items from turn.state alone — no array-index surgery, no
 // runningTurn/queuedTurns guessing. A user turn is ONE {kind:"turn"} unit (its user bubble
 // + grouped answer blocks + state indicator render inside one <div class="turn" data-seq>);
-// standalone notices and the unread divider are their own items. paint() is the thin DOM
+// standalone transcript rows and the unread divider are their own items. paint() is the thin DOM
 // layer (exercised end-to-end by the Step-4 browser harness). Markdown + capability image
 // refs come from markdown.js.
 
@@ -53,10 +53,11 @@ export function renderModel(turns, watermark, holdSplits, joinHeldSplits){
   const unread = p => has && p > watermark;
   for(const t of (turns || [])){
     if(t.role !== "user"){
+      // System notices belong exclusively to the notification stack, never the timeline.
+      if(t.role === "notice") continue;
       // `key` is the standalone's live eventSeq (render-key stability only); it carries no data-pos
       // so it never drives read-advance, and it is not counted as unread.
-      if(t.role === "notice") items.push({ kind: "bubble", cls: "notice", text: t.text || "", md: false, time: t.time, key: t.eventSeq });
-      else items.push({ kind: "bubble", cls: (t.kind === "error" || t.role === "error") ? "error" : t.role === "system" ? "system" : t.role === "tool" ? "tool" : "assistant", text: t.text || "", md: t.role !== "tool", time: t.time, key: t.eventSeq });
+      items.push({ kind: "bubble", cls: (t.kind === "error" || t.role === "error") ? "error" : t.role === "system" ? "system" : t.role === "tool" ? "tool" : "assistant", text: t.text || "", md: t.role !== "tool", time: t.time, key: t.eventSeq });
       continue;
     }
     const blocks_ = t.blocks || [];
@@ -146,7 +147,7 @@ function updateBubble(d, cls, html, time, dataPos, raw){
   d.className = "msg " + cls + (meta ? " hasmeta" : "");
   if(dataPos) d.dataset.pos = String(dataPos); // encoded (turn,block) position — drives read-advance
   else delete d.dataset.pos;
-  const copy = raw ? '<button class="mcopy" title="Копировать сообщение">⧉</button>' : "";
+  const copy = raw ? '<button class="mcopy block-copy" title="Копировать сообщение">⧉</button>' : "";
   d.innerHTML = copy + '<div class="body">'+html+'</div>' + meta;
   if(raw) d._raw = raw;
   else delete d._raw;

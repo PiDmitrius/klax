@@ -11,6 +11,9 @@ import { selectionInLog } from "./scroll.js";
 import { initCompose, saveDraft, loadDraft, dropDraft, recoverOutbox } from "./compose.js";
 import { initTabs, reconcileSessions, renderTabs } from "./tabs.js";
 import { injectEmojiFont } from "./emoji.js";
+import { showNotice } from "./notices.js";
+import { initSystem } from "./system.js";
+import { initDebug } from "./debug.js";
 
 const model = new TurnModel();
 const loaded = {};        // created -> transcript loaded?
@@ -626,22 +629,14 @@ async function syncSessions(){
   } catch(e){}
 }
 
-function showNotice(text){
-  const n = document.getElementById("notice");
-  if(!n) return;
-  n.textContent = text; n.classList.add("show");
-  clearTimeout(showNotice._t); showNotice._t = setTimeout(() => n.classList.remove("show"), 5000);
-}
-
 // noticeText turns a command-output notice (Telegram HTML) into plain text with line breaks.
 function noticeText(s){ return (s || "").replace(/<br\s*\/?>/gi, "\n").replace(/<[^>]+>/g, "").trim(); }
 
-// onNoticeEvent shows the toast AND keeps the notice visible in the active conversation
-// (a command/status line stays in the log, not just a 5s toast).
+// System messages have one UI surface: the transient bottom-up notification stack.
+// They never enter the session model/timeline (which made them appear and then vanish on reload).
 function onNoticeEvent(text){
   const t = noticeText(text);
   showNotice(t);
-  if(active){ model.appendStandalone(active, { role: "notice", text: t }); commitLive(active); }
 }
 
 // toggleToBottom shows the down-arrow affordance only when the user has scrolled up.
@@ -654,7 +649,9 @@ function setDegraded(on){
   const logo = document.querySelector("#bar .logo");
   if(!logo) return;
   logo.classList.toggle("degraded", on);
-  logo.setAttribute("aria-label", on ? "klax — нет соединения с сервером" : "klax");
+  const button = document.getElementById("sysbtn");
+  const label = on ? "klax — нет соединения с сервером" : "klax — состояние системы";
+  if(button){ button.setAttribute("aria-label", label); button.title = label; }
 }
 
 // the poll host events.js drives
@@ -722,6 +719,8 @@ async function afterClose(created){
 function start(){
   document.getElementById("gate").classList.add("hidden");
   const app = document.getElementById("app"); if(app) app.classList.add("active");
+  initSystem({ notice: showNotice });
+  initDebug({ notice: showNotice });
   initCompose({
     getActive, notice: showNotice,
     isLive: c => sessionList.some(s => s.created === c),

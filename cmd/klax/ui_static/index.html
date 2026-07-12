@@ -17,7 +17,7 @@
 
 <div id="app">
   <div id="bar">
-    <svg class="logo" viewBox="0 0 32 32" width="26" height="26" aria-label="klax"><defs><linearGradient id="lg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1ec21e"/><stop offset="0.5" stop-color="#00b500"/><stop offset="1" stop-color="#008e00"/></linearGradient></defs><rect x="1.25" y="1.25" width="29.5" height="29.5" rx="8" fill="url(#lg)" stroke="#006400" stroke-width="0.8"/><text x="16" y="23" font-family="ui-monospace,monospace" font-size="21" font-weight="bold" fill="#ffffff" text-anchor="middle">k</text></svg>
+    <button id="sysbtn" class="logo-btn" title="klax — состояние системы" aria-label="klax — состояние системы"><svg class="logo" viewBox="0 0 32 32" width="26" height="26" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1ec21e"/><stop offset="0.5" stop-color="#00b500"/><stop offset="1" stop-color="#008e00"/></linearGradient></defs><rect x="1.25" y="1.25" width="29.5" height="29.5" rx="8" fill="url(#lg)" stroke="#006400" stroke-width="0.8"/><text x="16" y="23" font-family="ui-monospace,monospace" font-size="21" font-weight="bold" fill="#ffffff" text-anchor="middle">k</text></svg></button>
     <div id="tabswrap"><div id="tabs"></div></div>
     <button id="newtab" class="new" title="Новая сессия">+</button>
     <button id="theme" title="Тема">🌙</button>
@@ -25,6 +25,7 @@
   <div id="logwrap">
     <div id="log"><div id="logcol"></div></div>
     <button id="tobottom" class="hidden" title="Вниз" aria-label="Вниз"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M6 13l6 6 6-6"/></svg></button>
+    <div id="notifications" role="status" aria-live="polite" aria-atomic="false"></div>
     <div id="composer">
       <div id="cbar">
         <div id="chips" class="hidden"></div>
@@ -37,7 +38,6 @@
     </div>
   </div>
 </div>
-<div id="notice"></div>
 <div id="modal" class="hidden">
   <div class="modal-box">
     <div class="modal-msg"></div>
@@ -46,6 +46,13 @@
       <button class="modal-cancel">Отмена</button>
       <button class="modal-ok">OK</button>
     </div>
+  </div>
+</div>
+<div id="sysmodal" class="hidden">
+  <div class="sysmodal-box">
+    <div class="sysmodal-head"><span class="sysmodal-title">klax</span><button id="sysclose" class="sysmodal-x" title="Закрыть">✕</button></div>
+    <div id="sysbody"></div>
+    <div class="sysmodal-actions"><button id="sysok">OK</button></div>
   </div>
 </div>
 <div id="smodal" class="hidden">

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,19 +16,20 @@ import (
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/config"
+	"github.com/PiDmitrius/klax/internal/pathutil"
 )
 
 var versionRe = regexp.MustCompile(`(const version = ")(\d+)\.(\d+)\.(\d+)(")`)
 
-func bumpPatch(srcDir string) error {
+func bumpPatchTo(srcDir string, logw io.Writer) (string, error) {
 	path := filepath.Join(srcDir, "cmd", "klax", "main.go")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return "", err
 	}
 	m := versionRe.FindSubmatchIndex(data)
 	if m == nil {
-		return fmt.Errorf("version string not found in %s", path)
+		return "", fmt.Errorf("version string not found in %s", path)
 	}
 	patch, _ := strconv.Atoi(string(data[m[8]:m[9]]))
 	newVersion := fmt.Sprintf("%s%s.%s.%d%s",
@@ -37,14 +39,23 @@ func bumpPatch(srcDir string) error {
 		patch+1,
 		string(data[m[10]:m[11]]),
 	)
-	out := make([]byte, 0, len(data)+4)
-	out = append(out, data[:m[0]]...)
-	out = append(out, newVersion...)
-	out = append(out, data[m[1]:]...)
-	fmt.Printf("version: %s.%s.%d → %s.%s.%d\n",
+	updated := make([]byte, 0, len(data)+4)
+	updated = append(updated, data[:m[0]]...)
+	updated = append(updated, newVersion...)
+	updated = append(updated, data[m[1]:]...)
+	newNumber := fmt.Sprintf("%s.%s.%d", string(data[m[4]:m[5]]), string(data[m[6]:m[7]]), patch+1)
+	fmt.Fprintf(logw, "version: %s.%s.%d → %s\n",
 		string(data[m[4]:m[5]]), string(data[m[6]:m[7]]), patch,
-		string(data[m[4]:m[5]]), string(data[m[6]:m[7]]), patch+1)
-	return os.WriteFile(path, out, 0644)
+		newNumber)
+	if err := os.WriteFile(path, updated, 0644); err != nil {
+		return "", err
+	}
+	return newNumber, nil
+}
+
+func bumpPatch(srcDir string) error {
+	_, err := bumpPatchTo(srcDir, os.Stdout)
+	return err
 }
 
 const repo = "PiDmitrius/klax"
@@ -81,11 +92,15 @@ func latestTag() (string, error) {
 
 // downloadRelease downloads the release binary for the current platform.
 func downloadRelease(tag string) (string, error) {
+	return downloadReleaseTo(tag, os.Stdout)
+}
+
+func downloadReleaseTo(tag string, out io.Writer) (string, error) {
 	arch := runtime.GOARCH
 	name := fmt.Sprintf("klax-%s-linux-%s", tag, arch)
 	url := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", repo, tag, name)
 
-	fmt.Printf("downloading %s...\n", name)
+	fmt.Fprintf(out, "downloading %s...\n", name)
 	resp, err := downloadClient.Get(url)
 	if err != nil {
 		return "", err
@@ -116,62 +131,64 @@ func runUpdate() {
 		os.Exit(1)
 	}
 
-	srcDir := cfg.SourceDir
+	if res := performUpdate(context.Background(), cfg.SourceDir, os.Stdout); !res.OK {
+		fmt.Fprintln(os.Stderr, res.Message)
+		os.Exit(1)
+	}
+}
+
+type updateResult struct {
+	OK      bool
+	Version string
+	Message string
+}
+
+// performUpdate is the shared update engine for the CLI and UI. It never exits
+// the process; install only writes the normal restart marker.
+func performUpdate(ctx context.Context, srcDir string, out io.Writer) updateResult {
 	if srcDir == "" {
-		// No local source — download latest release.
 		tag, err := latestTag()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "cannot get latest version: %v\n", err)
-			os.Exit(1)
+			return updateResult{Message: fmt.Sprintf("cannot get latest version: %v", err)}
 		}
-		fmt.Printf("latest: %s (current: %s)\n", tag, version)
-
-		binPath, err := downloadRelease(tag)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "download failed: %v\n", err)
-			os.Exit(1)
-		}
-		defer os.Remove(binPath)
-
-		// Run install from the downloaded binary.
-		install := exec.Command(binPath, "install")
-		install.Stdout = os.Stdout
-		install.Stderr = os.Stderr
-		if err := install.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "install failed: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("daemon will restart via marker")
-		return
+		fmt.Fprintf(out, "latest: %s (current: %s)\n", tag, version)
+		return performReleaseUpdate(ctx, tag, out)
 	}
 
-	// Local source — bump version and build.
-	if err := bumpPatch(srcDir); err != nil {
-		fmt.Fprintf(os.Stderr, "version bump failed: %v\n", err)
-		os.Exit(1)
+	newVersion, err := bumpPatchTo(srcDir, out)
+	if err != nil {
+		return updateResult{Message: fmt.Sprintf("version bump failed: %v", err)}
 	}
-
-	fmt.Printf("building in %s...\n", srcDir)
-	build := exec.Command("go", "build", "-o", filepath.Join(srcDir, "klax"), "./cmd/klax")
-	build.Dir = srcDir
-	build.Stdout = os.Stdout
-	build.Stderr = os.Stderr
-	if err := build.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "build failed: %v\n", err)
-		os.Exit(1)
+	fmt.Fprintf(out, "building in %s...\n", pathutil.TildePathsInText(srcDir))
+	bin := filepath.Join(srcDir, "klax")
+	if err := runUpdateCommand(ctx, out, srcDir, "go", "build", "-o", bin, "./cmd/klax"); err != nil {
+		return updateResult{Message: fmt.Sprintf("build failed: %v", err)}
 	}
-
-	// Install (copies binary to ~/.local/bin/, updates service, writes restart marker)
-	install := exec.Command(filepath.Join(srcDir, "klax"), "install")
-	install.Stdout = os.Stdout
-	install.Stderr = os.Stderr
-	if err := install.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "install failed: %v\n", err)
-		os.Exit(1)
+	if err := runUpdateCommand(ctx, out, "", bin, "install"); err != nil {
+		return updateResult{Message: fmt.Sprintf("install failed: %v", err)}
 	}
+	fmt.Fprintln(out, "daemon will restart via marker")
+	return updateResult{OK: true, Version: newVersion, Message: "Установлено, перезапуск будет выполнен после завершения текущих задач"}
+}
 
-	// Daemon will pick up the marker and restart via drain.
-	fmt.Println("daemon will restart via marker")
+func performReleaseUpdate(ctx context.Context, tag string, out io.Writer) updateResult {
+	binPath, err := downloadReleaseTo(tag, out)
+	if err != nil {
+		return updateResult{Message: fmt.Sprintf("download failed: %v", err)}
+	}
+	defer os.Remove(binPath)
+	if err := runUpdateCommand(ctx, out, "", binPath, "install"); err != nil {
+		return updateResult{Message: fmt.Sprintf("install failed: %v", err)}
+	}
+	fmt.Fprintln(out, "daemon will restart via marker")
+	return updateResult{OK: true, Version: strings.TrimPrefix(tag, "v"), Message: "Установлено, перезапуск будет выполнен после завершения текущих задач"}
+}
+
+func runUpdateCommand(ctx context.Context, out io.Writer, dir, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	cmd.Stdout, cmd.Stderr = out, out
+	return cmd.Run()
 }
 
 // parseVersion extracts major, minor, patch from "v0.4.39" or "0.5.11".

@@ -18,6 +18,7 @@ import (
 
 	"github.com/PiDmitrius/klax/internal/config"
 	"github.com/PiDmitrius/klax/internal/history"
+	"github.com/PiDmitrius/klax/internal/pathutil"
 	"github.com/PiDmitrius/klax/internal/session"
 )
 
@@ -489,7 +490,7 @@ func (d *daemon) sessionsSnapshot(sk string) []uiSessionInfo {
 			Queued:      d.queuedCount(sk, s.Created),
 			Backend:     backend,
 			Model:       model,
-			CWD:         s.CWD,
+			CWD:         pathutil.TildePathsInText(s.CWD),
 			Messages:    s.Messages,
 			CtxUsed:     s.ContextUsed,
 			CtxWindow:   s.ContextWindow,
@@ -691,6 +692,9 @@ func (s *uiServer) routes() http.Handler {
 	mux.HandleFunc("/api/close", s.handleClose)
 	mux.HandleFunc("/api/sessions", s.handleSessions)
 	mux.HandleFunc("/api/settings", s.handleSettings)
+	mux.HandleFunc("/api/system", s.handleSystem)
+	mux.HandleFunc("/api/system/check", s.handleSystemCheck)
+	mux.HandleFunc("/api/system/update", s.handleSystemUpdate)
 	mux.HandleFunc("/api/transcript", s.handleTranscript)
 	mux.HandleFunc("/api/file", s.handleFile)
 	mux.HandleFunc("/emoji/", s.handleEmoji)

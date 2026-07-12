@@ -72,17 +72,18 @@ type daemon struct {
 	sendPause    map[string]time.Time
 	sendFails    map[string]int
 	chatEvents   map[string]uint64
-	identities   map[int64]string    // telegram userID -> canonical user ID
-	maxIdents    map[int64]string    // max userID -> canonical user ID
-	vkIdents     map[int]string      // vk userID -> canonical user ID
-	groupChats   map[string]string   // chatID -> CWD for group mode chats
-	groupVerb    map[string]bool     // chatID -> verbose progress output for group mode chats
-	tgRich       atomic.Bool         // global: render Telegram replies as Rich Messages (/rich)
-	uiHub        *uiHub              // web UI event hub; nil when the UI is not configured (also the "UI on" gate)
-	fileTokens   map[string]tokenRef // durable per-file access token -> its (session, stored file)
-	fileTokensMu sync.Mutex          // rebuilt from each session's links.json at startup
+	identities   map[int64]string               // telegram userID -> canonical user ID
+	maxIdents    map[int64]string               // max userID -> canonical user ID
+	vkIdents     map[int]string                 // vk userID -> canonical user ID
+	groupChats   map[string]string              // chatID -> CWD for group mode chats
+	groupVerb    map[string]bool                // chatID -> verbose progress output for group mode chats
+	tgRich       atomic.Bool                    // global: render Telegram replies as Rich Messages (/rich)
+	uiHub        *uiHub                         // web UI event hub; nil when the UI is not configured (also the "UI on" gate)
+	system       *systemState                   // process/update status shared by all authenticated UI users
+	fileTokens   map[string]tokenRef            // durable per-file access token -> its (session, stored file)
+	fileTokensMu sync.Mutex                     // rebuilt from each session's links.json at startup
 	sessStores   map[runnerKey]*sessfiles.Store // ONE canonical durable Store per (sk,created)
-	sessStoresMu sync.Mutex                      // shared by runner/read-model/file-links/delete
+	sessStoresMu sync.Mutex                     // shared by runner/read-model/file-links/delete
 }
 
 // tokenRef locates the file a durable access token addresses. The token itself lives in the session's

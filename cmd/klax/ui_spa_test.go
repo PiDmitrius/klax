@@ -9,6 +9,103 @@ import (
 	"testing"
 )
 
+func TestSPASystemControlsAndNoticeStack(t *testing.T) {
+	page := string(spaHTML)
+	for _, want := range []string{`id="sysbtn"`, `id="sysmodal"`, `id="notifications"`} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("SPA shell missing %s", want)
+		}
+	}
+	if strings.Contains(page, `id="notice"`) {
+		t.Fatal("SPA shell still contains singleton notice")
+	}
+	wrap, notifications, composer := strings.Index(page, `id="logwrap"`), strings.Index(page, `id="notifications"`), strings.Index(page, `id="composer"`)
+	if wrap < 0 || notifications < wrap || composer < notifications {
+		t.Fatal("notification stack must live inside logwrap immediately above the composer")
+	}
+
+	app, err := moduleFS.ReadFile("ui_static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(app), `initSystem({ notice: showNotice })`) {
+		t.Fatal("system modal is not initialized")
+	}
+	if !strings.Contains(string(app), `initDebug({ notice: showNotice })`) {
+		t.Fatal("explicit debug notification harness is not initialized")
+	}
+	if strings.Contains(string(app), `appendStandalone(active, { role: "notice"`) {
+		t.Fatal("system notices must not enter the timeline model")
+	}
+	for _, name := range []string{"notices.js", "system.js", "debug.js"} {
+		if _, err := moduleFS.ReadFile("ui_static/" + name); err != nil {
+			t.Fatalf("missing embedded %s: %v", name, err)
+		}
+	}
+	css, err := moduleFS.ReadFile("ui_static/app.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(css), "flex-direction: column; gap: 8px") {
+		t.Fatal("notification stack must append newest at the bottom and grow upward")
+	}
+}
+
+func TestNoticeSeverity(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not found")
+	}
+	dir := t.TempDir()
+	for _, name := range []string{"base.js", "notices.js"} {
+		body, err := moduleFS.ReadFile("ui_static/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), body, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"type":"module"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	script := `
+import { noticeSeverity, noticeText, showNotice } from "./notices.js";
+function assert(c, m){ if(!c) throw new Error(m); }
+assert(noticeSeverity("сеть недоступна — сообщение не отправлено") === "error", "send failure must be error");
+assert(noticeSeverity("сообщение не принято") === "error", "rejected message must be error");
+assert(noticeSeverity("🔄 klax перезапускается...") === "warning", "restart must be warning");
+assert(noticeSeverity("klax обновился") === "info", "success must be info");
+assert(noticeSeverity("plain", { error: true }) === "error", "explicit severity must win");
+assert(noticeText("🔄 klax перезапускается...") === "klax перезапускается...", "legacy icon must be removed");
+
+class Classes { constructor(){ this.s = new Set(); } add(...v){ for(const x of v) this.s.add(x); } contains(v){ return this.s.has(v); } }
+class El {
+  constructor(tag){ this.tagName = tag; this.classList = new Classes(); this.children = []; this.parentNode = null; this.style = {}; this.offsetHeight = 44; }
+  set className(v){ this._className = v; this.classList = new Classes(); for(const x of v.split(/\s+/)) if(x) this.classList.add(x); }
+  get className(){ return this._className || ""; }
+  setAttribute(){}
+  append(...els){ for(const el of els) this.appendChild(el); }
+  appendChild(el){ el.parentNode = this; this.children.push(el); return el; }
+  remove(){ if(this.parentNode) this.parentNode.children = this.parentNode.children.filter(x => x !== this); }
+  querySelectorAll(){ return this.children.filter(x => !x.classList.contains("fade-out")); }
+}
+const notifications = new El("div");
+globalThis.document = { getElementById: id => id === "notifications" ? notifications : null, createElement: tag => new El(tag) };
+globalThis.setTimeout = () => 1; globalThis.clearTimeout = () => {};
+for(let i = 1; i <= 12; i++) showNotice("notice " + i, "info");
+assert(notifications.children.length === 10, "stack capacity must stay at 10");
+assert(notifications.children[0].children[1].textContent === "notice 3", "oldest overflow notices must be removed first");
+assert(notifications.children[9].children[1].textContent === "notice 12", "newest notice must remain the last DOM item / visual bottom");
+`
+	path := filepath.Join(dir, "notices_test.mjs")
+	if err := os.WriteFile(path, []byte(script), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("node", path).CombinedOutput(); err != nil {
+		t.Fatalf("node notices test failed: %v\n%s", err, out)
+	}
+}
+
 // serveModule serves an embedded ES module with the right MIME and rejects traversal /
 // missing files; handleSPA dispatches *.js / *.css to it without needing auth or a daemon.
 func TestServeModule(t *testing.T) {
@@ -138,6 +235,7 @@ assert(oldTool.startPos === newTool.startPos, "tool text/id changes must keep po
 
 const standaloneTool = renderModel([{ role: "tool", text: "🗜 Compaction: Summary" }], undefined)[0];
 assert(standaloneTool.kind === "bubble" && standaloneTool.cls === "tool" && standaloneTool.md === false, "standalone tool rows must render as tool bubbles");
+assert(renderModel([{ role: "notice", text: "restart" }], undefined).length === 0, "system notices must never render in the timeline");
 `
 	scriptPath := filepath.Join(dir, "render_model_test.mjs")
 	if err := os.WriteFile(scriptPath, []byte(script), 0600); err != nil {
