@@ -27,6 +27,7 @@ type ToolCall struct {
 }
 
 func toolCall(name, input string) ToolCall {
+	name = runner.NormalizeToolName(name)
 	return ToolCall{Name: name, Label: runner.ToolUse{Name: name, Input: input}.Preview(runner.UIToolPreviewLimit)}
 }
 

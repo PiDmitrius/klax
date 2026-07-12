@@ -106,8 +106,11 @@ const UIToolPreviewLimit = 256
 // normalizes to the same Exec as Codex's command_execution / exec_command. One tool, one
 // name, one preview across both backends. Apply it at every point a raw tool name enters.
 func NormalizeToolName(name string) string {
-	if name == "Bash" {
+	switch name {
+	case "Bash":
 		return "Exec"
+	case "wait":
+		return "Wait"
 	}
 	return name
 }
@@ -128,6 +131,8 @@ func (t ToolUse) Preview(limit int) string {
 		var inp struct{ Command string }
 		json.Unmarshal([]byte(t.Input), &inp)
 		return fmt.Sprintf("⚙️ Exec: `%s`", truncate(oneLinePreview(inp.Command), limit))
+	case "Wait":
+		return "⏳ Wait"
 	case "Read":
 		var inp struct {
 			FilePath string `json:"file_path"`
