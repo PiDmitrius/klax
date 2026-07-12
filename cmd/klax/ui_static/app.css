@@ -14,7 +14,7 @@
     --compact-block-h:44px;
     --system-action-w:140px;
     --attachment-border:#006400;
-    --layer-debug:95; --layer-modal:100; --layer-notifications:110;
+    --layer-debug:95; --layer-modal:100; --layer-confirm:105; --layer-notifications:110;
   }
   html[data-theme="dark"] {
     --bg:#15171c; --panel:#1a1d23; --chat:#15171c; --fg:#d8dee9; --muted:#8b92a0; --border:#2a2e37;
@@ -301,7 +301,7 @@
                      margin-top: -8px; border-width: 0;
                      transition: height .28s ease, padding .28s ease, margin .28s ease, border-width .28s ease; }
   /* custom dialog (replaces system confirm/prompt, keeps the UI style) */
-  #modal { position: fixed; inset: 0; z-index: var(--layer-modal); display: flex; align-items: center; justify-content: center;
+  #modal { position: fixed; inset: 0; z-index: var(--layer-confirm); display: flex; align-items: center; justify-content: center;
            background: rgba(0,0,0,.45); }
   .modal-box { width: 340px; max-width: 90vw; background: var(--bg); color: var(--fg);
                border: 1px solid var(--border); border-radius: 12px; padding: 18px;
@@ -338,11 +338,6 @@
   .syssep { height: 1px; background: var(--border); margin: 9px 0; opacity: .6; }
   .sysmodal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
   .syscheck:disabled, .sysaction:disabled { opacity: .5; cursor: wait; }
-  .sysconfirm { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
-  .sysconfirm-text { font-size: 13px; margin-bottom: 10px; }
-  .sysconfirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
-  .sysconfirm-ok { width: var(--system-action-w); background: var(--bg); color: var(--fg); }
-  .sysconfirm-ok.update { background: var(--accent); color: #fff; border-color: var(--accent); }
   /* per-session settings dialog (double-click a tab) */
   #smodal { position: fixed; inset: 0; z-index: var(--layer-modal); display: flex; align-items: center; justify-content: center;
             background: rgba(0,0,0,.45); }

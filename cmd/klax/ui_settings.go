@@ -181,7 +181,7 @@ func (d *daemon) applyUISessionSettings(sk string, created int64, p uiSettingsPa
 func (d *daemon) applyUISessionSettingsCore(sk string, created int64, p uiSettingsPatch) error {
 	sess := d.store.Get(sk, created)
 	if sess == nil {
-		return &uiErr{http.StatusNotFound, "сессия не найдена"}
+		return &uiErr{http.StatusNotFound, "Сессия не найдена"}
 	}
 	backend := resolveSessionBackend(sess, d.scopeDefaults(sk), d.cfg.GetDefaultBackend())
 	// Validate the WHOLE patch (incl. cwd I/O) BEFORE taking the store lock, then apply the resolved
@@ -213,7 +213,7 @@ func validateSettingsPatch(cur *session.Session, backend string, busy bool, p ui
 	if p.Name != nil {
 		r.name = strings.TrimSpace(*p.Name)
 		if r.name == "" {
-			return r, &uiErr{http.StatusBadRequest, "имя не может быть пустым"}
+			return r, &uiErr{http.StatusBadRequest, "Имя не может быть пустым"}
 		}
 	}
 	touchesRun := p.Backend != nil || p.Model != nil || p.Think != nil || p.Sandbox != nil || p.TTY != nil || p.CWD != nil || p.Prompt != nil
@@ -222,7 +222,7 @@ func validateSettingsPatch(cur *session.Session, backend string, busy bool, p ui
 	}
 	if p.Backend != nil && *p.Backend != backend {
 		if *p.Backend != "claude" && *p.Backend != "codex" {
-			return r, &uiErr{http.StatusBadRequest, "движок: claude или codex"}
+			return r, &uiErr{http.StatusBadRequest, "Движок: claude или codex"}
 		}
 		if cur.Messages > 0 {
 			return r, &uiErr{http.StatusConflict, "Движок нельзя изменить после первого сообщения."}
@@ -232,10 +232,10 @@ func validateSettingsPatch(cur *session.Session, backend string, busy bool, p ui
 	}
 	// model/think are validated against the EFFECTIVE (possibly new) backend.
 	if p.Model != nil && *p.Model != "" && !validOption(modelsForBackend(r.backend), *p.Model) {
-		return r, &uiErr{http.StatusBadRequest, "неизвестная модель"}
+		return r, &uiErr{http.StatusBadRequest, "Неизвестная модель"}
 	}
 	if p.Think != nil && *p.Think != "" && !validOption(effortsForBackend(r.backend), *p.Think) {
-		return r, &uiErr{http.StatusBadRequest, "неизвестный уровень мышления"}
+		return r, &uiErr{http.StatusBadRequest, "Неизвестный уровень мышления"}
 	}
 	if p.Sandbox != nil && *p.Sandbox != "on" && *p.Sandbox != "off" {
 		return r, &uiErr{http.StatusBadRequest, "sandbox: on или off"}
@@ -301,7 +301,7 @@ func applySettingsPatch(cur *session.Session, r resolvedPatch) {
 func (s *uiServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
@@ -315,7 +315,7 @@ func (s *uiServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		settings, ok := s.d.uiSessionSettings(sk, created)
 		if !ok {
-			http.Error(w, "session not found", http.StatusNotFound)
+			http.Error(w, "Session not found", http.StatusNotFound)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -326,11 +326,11 @@ func (s *uiServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 			uiSettingsPatch
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			http.Error(w, "Bad request", http.StatusBadRequest)
 			return
 		}
 		if body.Session <= 0 {
-			http.Error(w, "a positive session is required", http.StatusBadRequest)
+			http.Error(w, "A positive session is required", http.StatusBadRequest)
 			return
 		}
 		if err := s.d.applyUISessionSettings(sk, body.Session, body.uiSettingsPatch); err != nil {
@@ -343,12 +343,12 @@ func (s *uiServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		settings, ok := s.d.uiSessionSettings(sk, body.Session)
 		if !ok {
-			http.Error(w, "session not found", http.StatusNotFound)
+			http.Error(w, "Session not found", http.StatusNotFound)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(settings)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }

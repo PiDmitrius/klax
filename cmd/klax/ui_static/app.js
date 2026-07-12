@@ -703,7 +703,7 @@ const host = {
     renderTabs(active);
   },
   onAuthFail: () => { const a = document.getElementById("app"); if(a) a.classList.remove("active"); const g = document.getElementById("gate"); if(g) g.classList.remove("hidden"); },
-  onRestart: () => showNotice(systemRestartNotice()),
+  onRestart: (kind, version) => showNotice(systemRestartNotice(kind, version)),
   // Show the amber logo only after the 2nd consecutive failure, so a single dropped poll
   // (or a fast daemon restart the next poll rides through) never flashes it; clear on any
   // good poll. The poll loop keeps retrying regardless — this is purely the visible signal.

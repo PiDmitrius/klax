@@ -34,7 +34,7 @@ export async function tailLoop(host){
       backoff = 0;
       health(true);
       if(data.started !== undefined){
-        if(lastStarted !== null && data.started !== lastStarted && host.onRestart) host.onRestart();
+        if(lastStarted !== null && data.started !== lastStarted && host.onRestart) host.onRestart(data.startup, data.version);
         lastStarted = data.started;
         if(host.setStarted) host.setStarted(data.started);
       }

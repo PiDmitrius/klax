@@ -254,11 +254,11 @@ async function send(deps){
     }
     // Keep the outbox copy on ANY non-2xx: the message is still unconfirmed, so it stays durable
     // (and is shown again in the composer by rollback) until a successful resend clears it.
-    if(!r.ok){ rollback(deps, created, text, staged, nonce, (await r.text()).trim() || "сообщение не принято"); return; }
+    if(!r.ok){ rollback(deps, created, text, staged, nonce, (await r.text()).trim() || "Сообщение не принято"); return; }
     outboxDrop(nonce); // server accepted & fsynced it — the browser copy is no longer needed
     showNextRecovered(created, deps);
   } catch(e){
-    rollback(deps, created, text, staged, nonce, "сеть недоступна — сообщение не отправлено"); // outbox copy stays
+    rollback(deps, created, text, staged, nonce, "Сеть недоступна — сообщение не отправлено"); // outbox copy stays
   }
 }
 

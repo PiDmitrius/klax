@@ -26,15 +26,18 @@ type systemState struct {
 	checkRunning   bool
 	checked        bool
 	checkError     string
-	updateFn       func(context.Context, string, io.Writer) updateResult
+	updateFn       func(context.Context, systemInstallTarget, io.Writer) updateResult
 	releasesFn     func() ([]releaseInfo, error)
 }
 
 func newSystemState(started time.Time) *systemState {
 	return &systemState{
 		startedAt: started,
-		updateFn: func(ctx context.Context, tag string, out io.Writer) updateResult {
-			return performReleaseUpdate(ctx, tag, out)
+		updateFn: func(ctx context.Context, target systemInstallTarget, out io.Writer) updateResult {
+			if target.Source == "local" {
+				return performSourceReinstall(ctx, target.SourceDir, out)
+			}
+			return performReleaseUpdate(ctx, target.Tag, out)
 		},
 		releasesFn: fetchReleases,
 	}
@@ -73,6 +76,13 @@ type systemReleaseView struct {
 	Age    string `json:"age"`
 	URL    string `json:"url"`
 	Action string `json:"action"`
+	Source string `json:"source"`
+}
+
+type systemInstallTarget struct {
+	Tag       string
+	Source    string
+	SourceDir string
 }
 
 type systemView struct {
@@ -92,9 +102,12 @@ func (d *daemon) systemView() systemView {
 	if d.cfg.SourceDir != "" {
 		mode = "source"
 	}
-	releases := make([]systemReleaseView, 0, len(st.releases))
+	releases := make([]systemReleaseView, 0, len(st.releases)+1)
+	if d.cfg.SourceDir != "" {
+		releases = append(releases, systemReleaseView{Tag: "v" + version, Age: "локальная сборка", Action: "reinstall", Source: "local"})
+	}
 	for _, release := range st.releases {
-		releases = append(releases, systemReleaseView{Tag: release.Tag, Age: releaseAge(release.PublishedAt), URL: release.URL, Action: releaseAction(release.Tag)})
+		releases = append(releases, systemReleaseView{Tag: release.Tag, Age: releaseAge(release.PublishedAt), URL: release.URL, Action: releaseAction(release.Tag), Source: "github"})
 	}
 	return systemView{
 		Version:   version,
@@ -160,30 +173,32 @@ func (d *daemon) startUpdateCheck() bool {
 	return true
 }
 
-func (d *daemon) startSystemUpdate(tag string) (bool, string) {
+func (d *daemon) startSystemUpdate(tag, source string) (bool, string) {
 	st := d.systemState()
 	st.mu.Lock()
 	if st.running {
 		st.mu.Unlock()
 		return false, "Обновление уже выполняется"
 	}
-	allowed := false
-	for _, release := range st.releases {
-		if release.Tag == tag {
-			allowed = true
-			break
+	allowed := source == "local" && d.cfg.SourceDir != "" && tag == "v"+version
+	if source == "github" {
+		for _, release := range st.releases {
+			if release.Tag == tag {
+				allowed = true
+				break
+			}
 		}
 	}
-	if !st.checked || !allowed || st.checkError != "" {
+	if !allowed || (source == "github" && (!st.checked || st.checkError != "")) {
 		st.mu.Unlock()
 		return false, "Сначала проверьте обновления или выберите версию из списка"
 	}
 	st.running = true
 	st.updateStarted = time.Now()
 	st.updateFinished = time.Time{}
-	action := releaseAction(tag)
 	st.lastOK = false
 	fn := st.updateFn
+	target := systemInstallTarget{Tag: tag, Source: source, SourceDir: d.cfg.SourceDir}
 	st.mu.Unlock()
 
 	go func() {
@@ -194,26 +209,36 @@ func (d *daemon) startSystemUpdate(tag string) (bool, string) {
 					res = updateResult{Message: fmt.Sprintf("update failed: %v", v)}
 				}
 			}()
-			res = fn(context.Background(), tag, io.Discard)
+			res = fn(context.Background(), target, io.Discard)
 		}()
-		if res.OK {
-			res.Message = installPendingMessage(action, tag)
-		} else if res.Message != "" {
-			res.Message = "Ошибка установки " + tag + ": " + res.Message
-		} else {
-			res.Message = "Ошибка установки " + tag
+		if !res.OK {
+			res.Message = installFailureMessage(tag, res.Message)
 		}
 		st.mu.Lock()
 		st.updateFinished = time.Now()
 		st.lastOK = res.OK
 		st.lastVersion = res.Version
 		st.mu.Unlock()
-		d.uiNotifyAll(res.Message)
+		if !res.OK {
+			d.uiNotifyAll(res.Message)
+		}
 		st.mu.Lock()
 		st.running = false
 		st.mu.Unlock()
 	}()
-	return true, installStartMessage(action, tag)
+	return true, installStartMessage(tag)
+}
+
+func installStartMessage(tag string) string {
+	return "Устанавливается klax " + tag + "..."
+}
+
+func installFailureMessage(tag, detail string) string {
+	message := "Не удалось установить klax " + tag
+	if detail != "" {
+		message += "\n" + detail
+	}
+	return message
 }
 
 func (d *daemon) systemUpdateRunning() bool {
@@ -228,35 +253,13 @@ func (d *daemon) systemUpdateRunning() bool {
 	return st.running
 }
 
-func installStartMessage(action, tag string) string {
-	switch action {
-	case "update":
-		return "Обновление до " + tag + " запущено"
-	case "reinstall":
-		return "Переустановка " + tag + " запущена"
-	default:
-		return "Установка " + tag + " запущена"
-	}
-}
-
-func installPendingMessage(action, tag string) string {
-	switch action {
-	case "update":
-		return "Обновление до " + tag + " установлено, ожидается перезапуск"
-	case "reinstall":
-		return tag + " переустановлена, ожидается перезапуск"
-	default:
-		return tag + " установлена, ожидается перезапуск"
-	}
-}
-
 func (s *uiServer) handleSystem(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(r); !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -265,11 +268,11 @@ func (s *uiServer) handleSystem(w http.ResponseWriter, r *http.Request) {
 
 func (s *uiServer) handleSystemCheck(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(r); !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	started := s.d.startUpdateCheck()
@@ -279,21 +282,25 @@ func (s *uiServer) handleSystemCheck(w http.ResponseWriter, r *http.Request) {
 
 func (s *uiServer) handleSystemUpdate(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(r); !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	var body struct {
-		Tag string `json:"tag"`
+		Tag    string `json:"tag"`
+		Source string `json:"source"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Tag == "" {
-		http.Error(w, "tag is required", http.StatusBadRequest)
+		http.Error(w, "Tag is required", http.StatusBadRequest)
 		return
 	}
-	started, message := s.d.startSystemUpdate(body.Tag)
+	if body.Source == "" {
+		body.Source = "github"
+	}
+	started, message := s.d.startSystemUpdate(body.Tag, body.Source)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"started": started,

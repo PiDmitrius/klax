@@ -51,8 +51,11 @@ func TestSystemAPIAuthAndView(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Version != version || got.Update.Mode != "source" || got.Update.SourceDir != "/source" || got.Update.Checked || len(got.Update.Releases) != 0 {
+	if got.Version != version || got.Update.Mode != "source" || got.Update.SourceDir != "/source" || got.Update.Checked || len(got.Update.Releases) != 1 {
 		t.Fatalf("unexpected view: %+v", got)
+	}
+	if local := got.Update.Releases[0]; local.Source != "local" || local.Tag != "v"+version {
+		t.Fatalf("initial local artifact = %+v", local)
 	}
 }
 
@@ -82,12 +85,26 @@ func TestSystemCheckIsExplicit(t *testing.T) {
 	}
 }
 
+func TestSystemCheckedViewIncludesLocalArtifact(t *testing.T) {
+	s, st := systemTestServer()
+	st.checked = true
+	st.releases = []releaseInfo{{Tag: "v9.9.9", PublishedAt: time.Now().Format(time.RFC3339)}}
+	got := s.d.systemView().Update.Releases
+	if len(got) != 2 {
+		t.Fatalf("release choices = %+v", got)
+	}
+	local := got[0]
+	if local.Tag != "v"+version || local.Source != "local" || local.Action != "reinstall" || local.Age != "локальная сборка" {
+		t.Fatalf("local artifact = %+v", local)
+	}
+}
+
 func TestSystemUpdateMethodAndSingleFlight(t *testing.T) {
 	s, st := systemTestServer()
 	st.checked, st.releases = true, []releaseInfo{{Tag: "v9.9.9"}}
 	started := make(chan struct{})
 	release := make(chan struct{})
-	st.updateFn = func(context.Context, string, io.Writer) updateResult {
+	st.updateFn = func(context.Context, systemInstallTarget, io.Writer) updateResult {
 		close(started)
 		<-release
 		return updateResult{OK: true, Version: "9.9.9", Message: "done"}
@@ -169,16 +186,53 @@ func TestSystemVersionActions(t *testing.T) {
 }
 
 func TestInstallStatusMessages(t *testing.T) {
-	for _, tc := range []struct{ action, tag, start, pending string }{
-		{"update", "v2.0.0", "Обновление до v2.0.0 запущено", "Обновление до v2.0.0 установлено, ожидается перезапуск"},
-		{"reinstall", "v1.0.0", "Переустановка v1.0.0 запущена", "v1.0.0 переустановлена, ожидается перезапуск"},
-		{"install", "v0.9.0", "Установка v0.9.0 запущена", "v0.9.0 установлена, ожидается перезапуск"},
+	if got := installStartMessage("v2.0.0"); got != "Устанавливается klax v2.0.0..." {
+		t.Fatalf("start = %q", got)
+	}
+	if got := installFailureMessage("v2.0.0", "disk full"); got != "Не удалось установить klax v2.0.0\ndisk full" {
+		t.Fatalf("failure = %q", got)
+	}
+}
+
+func TestStartupNotice(t *testing.T) {
+	for _, tc := range []struct {
+		marker *restartMarker
+		kind   string
+		text   string
+	}{
+		{&restartMarker{Reason: "update"}, "installed", "✅ Установлен klax v" + version},
+		{&restartMarker{Reason: "signal"}, "started", "✅ Запущен klax v" + version},
+		{nil, "started", "✅ Запущен klax v" + version},
 	} {
-		if got := installStartMessage(tc.action, tc.tag); got != tc.start {
-			t.Fatalf("start %s = %q", tc.action, got)
+		kind, text := startupNotice(tc.marker)
+		if kind != tc.kind || text != tc.text {
+			t.Fatalf("startupNotice(%+v) = %q, %q", tc.marker, kind, text)
 		}
-		if got := installPendingMessage(tc.action, tc.tag); got != tc.pending {
-			t.Fatalf("pending %s = %q", tc.action, got)
+	}
+}
+
+func TestSystemLocalReinstallUsesSourceArtifact(t *testing.T) {
+	s, st := systemTestServer()
+	targets := make(chan systemInstallTarget, 1)
+	st.updateFn = func(_ context.Context, target systemInstallTarget, _ io.Writer) updateResult {
+		targets <- target
+		return updateResult{OK: true, Version: version}
+	}
+	rec := httptest.NewRecorder()
+	s.routes().ServeHTTP(rec, authSystemJSON(http.MethodPost, "/api/system/update", `{"tag":"v`+version+`","source":"local"}`))
+	var response map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response["started"] != true {
+		t.Fatalf("local reinstall response = %#v", response)
+	}
+	select {
+	case target := <-targets:
+		if target.Source != "local" || target.Tag != "v"+version || target.SourceDir != "/source" {
+			t.Fatalf("local target = %+v", target)
 		}
+	case <-time.After(time.Second):
+		t.Fatal("local reinstall did not start")
 	}
 }
