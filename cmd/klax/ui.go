@@ -133,13 +133,16 @@ type uiHub struct {
 	mu       sync.Mutex
 	epoch    int64
 	seq      uint64
-	ring     map[string][]ringItem    // per-user retained events
-	ringSz   map[string]int           // per-user ring byte size
-	notify   map[string]chan struct{} // per-user wake channel (closed-channel broadcast)
-	inflight map[string]int           // per-user concurrently-held polls
-	known    map[string]struct{}      // every user that has ever polled — notice-broadcast target set
-	sessRev  map[string]uint64        // per-user session-strip revision — bumped on every broadcastSessions
-	rmMu     sync.Mutex               // guards rm (read-model cache; separate from mu — off the poll hot path)
+	ring     map[string][]ringItem           // per-user retained events
+	ringSz   map[string]int                  // per-user ring byte size
+	notify   map[string]chan struct{}        // per-user wake channel (closed-channel broadcast)
+	inflight map[string]int                  // per-user concurrently-held polls
+	known    map[string]struct{}             // every user that has ever polled — notice-broadcast target set
+	acked    map[string]uint64               // newest notice seq acknowledged by each active browser tab
+	ackWake  chan struct{}                   // closed/replaced whenever an acknowledgement advances
+	clients  map[string]map[string]time.Time // recently polling browser tabs per canonical user
+	sessRev  map[string]uint64               // per-user session-strip revision — bumped on every broadcastSessions
+	rmMu     sync.Mutex                      // guards rm (read-model cache; separate from mu — off the poll hot path)
 	rm       map[uiUnreadKey]readModelEntry
 }
 
@@ -151,6 +154,9 @@ func newUIHub() *uiHub {
 		notify:   make(map[string]chan struct{}),
 		inflight: make(map[string]int),
 		known:    make(map[string]struct{}),
+		acked:    make(map[string]uint64),
+		ackWake:  make(chan struct{}),
+		clients:  make(map[string]map[string]time.Time),
 		sessRev:  make(map[string]uint64),
 		rm:       make(map[uiUnreadKey]readModelEntry),
 	}
@@ -298,7 +304,7 @@ func (h *uiHub) sessionsRev(user string) uint64 {
 // events, or is currently polling) — daemon-wide banners (restart/update). Since durable-tail
 // removed retained content events, an active user often has no ring/inflight entry in the gap
 // between two tail requests; `known` keeps the banner from being dropped for them.
-func (h *uiHub) broadcastAll(ev uiEvent) {
+func (h *uiHub) broadcastAll(ev uiEvent) map[string]uint64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	seen := make(map[string]struct{})
@@ -311,17 +317,87 @@ func (h *uiHub) broadcastAll(ev uiEvent) {
 	for user := range h.inflight {
 		seen[user] = struct{}{}
 	}
+	targets := make(map[string]uint64, len(seen))
 	for user := range seen {
 		h.emitLocked(user, ev)
+		for client, seenAt := range h.clients[user] {
+			if time.Since(seenAt) <= time.Minute {
+				targets[uiClientKey(user, client)] = h.seq
+			} else {
+				delete(h.clients[user], client)
+				delete(h.acked, uiClientKey(user, client))
+			}
+		}
+	}
+	return targets
+}
+
+func uiClientKey(user, client string) string { return user + "\x00" + client }
+
+func (h *uiHub) observeClient(user, client, cursor string) {
+	if client == "" {
+		return
+	}
+	epoch, seq, ok := parseCursor(cursor)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	clients := h.clients[user]
+	if clients == nil {
+		clients = make(map[string]time.Time)
+		h.clients[user] = clients
+	}
+	for id, seenAt := range clients {
+		if time.Since(seenAt) > time.Minute {
+			delete(clients, id)
+			delete(h.acked, uiClientKey(user, id))
+		}
+	}
+	if _, exists := clients[client]; !exists && len(clients) >= uiMaxInflightPerUser*2 {
+		return
+	}
+	clients[client] = time.Now()
+	key := uiClientKey(user, client)
+	if ok && epoch == h.epoch && seq > h.acked[key] {
+		h.acked[key] = seq
+		close(h.ackWake)
+		h.ackWake = make(chan struct{})
+	}
+}
+
+func (h *uiHub) waitAcknowledged(targets map[string]uint64, timeout time.Duration) {
+	if len(targets) == 0 {
+		return
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		h.mu.Lock()
+		pending := false
+		for user, seq := range targets {
+			if h.acked[user] < seq {
+				pending = true
+				break
+			}
+		}
+		wake := h.ackWake
+		h.mu.Unlock()
+		if !pending {
+			return
+		}
+		select {
+		case <-wake:
+		case <-timer.C:
+			return
+		}
 	}
 }
 
 // uiNotifyAll pushes a notice to every connected UI client (any user).
-func (d *daemon) uiNotifyAll(text string) {
+func (d *daemon) uiNotifyAll(text string) map[string]uint64 {
 	if d.uiHub == nil {
-		return
+		return nil
 	}
-	d.uiHub.broadcastAll(uiEvent{Type: "notice", Text: text})
+	return d.uiHub.broadcastAll(uiEvent{Type: "notice", Text: text})
 }
 
 // uiEmit marshals and broadcasts one event to a user. No-op when the UI is off. Only NOTICES
@@ -443,7 +519,7 @@ func (d *daemon) reorderSessions(sk string, order []int64) bool {
 func (d *daemon) closeSession(sk string, created int64) error {
 	sessions := d.store.SessionsFor(sk)
 	if len(sessions) <= 1 {
-		return errors.New("нельзя закрыть последнюю сессию")
+		return errors.New("Нельзя закрыть последнюю сессию")
 	}
 	idx, wasActive := -1, false
 	for i, s := range sessions {
@@ -453,7 +529,7 @@ func (d *daemon) closeSession(sk string, created int64) error {
 		}
 	}
 	if idx == -1 {
-		return errors.New("сессия не найдена")
+		return errors.New("Сессия не найдена")
 	}
 	d.abortSession(sk, created, true)
 	d.store.Delete(sk, idx)
@@ -745,6 +821,7 @@ type tailReq struct {
 	Cursors map[string]string `json:"cursors"`  // created -> "<turn>.<block>.<state>.<trail>[.<head>]"
 	Notice  string            `json:"notice"`   // ring cursor for transient notices
 	SessRev uint64            `json:"sess_rev"` // last session-strip revision the client rendered
+	Client  string            `json:"client"`   // page-lifetime id: restart notices are flushed to every active tab
 }
 type tailSessionData struct {
 	Rows   []uiTurn `json:"rows"`
@@ -752,6 +829,8 @@ type tailSessionData struct {
 }
 type tailResp struct {
 	Started  int64                      `json:"started"` // hub epoch — a change means the daemon restarted
+	Startup  string                     `json:"startup"` // installed|started — canonical outcome of this process start
+	Version  string                     `json:"version"`
 	Sessions []uiSessionInfo            `json:"sessions"`
 	Tails    map[string]tailSessionData `json:"tails,omitempty"`
 	Notices  []string                   `json:"notices,omitempty"`
@@ -825,7 +904,7 @@ func (s *uiServer) buildTail(user, sk string, req tailReq) tailResp {
 	// taken after `rev` reflects at least rev's state — so resp.SessRev is never ahead of Sessions,
 	// and any bump after `rev` instead closes the wake channel and drives a rebuild.
 	rev := s.d.uiHub.sessionsRev(user)
-	resp := tailResp{Started: s.d.uiHub.epoch, Sessions: s.d.sessionsSnapshot(sk), SessRev: rev}
+	resp := tailResp{Started: s.d.uiHub.epoch, Startup: s.d.startupKind, Version: version, Sessions: s.d.sessionsSnapshot(sk), SessRev: rev}
 	for createdStr, cur := range req.Cursors {
 		created, err := strconv.ParseInt(createdStr, 10, 64)
 		if err != nil {
@@ -866,7 +945,7 @@ func (s *uiServer) buildTail(user, sk string, req tailReq) tailResp {
 func (s *uiServer) handleTail(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
@@ -876,14 +955,15 @@ func (s *uiServer) handleTail(w http.ResponseWriter, r *http.Request) {
 
 	var req tailReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
 	}
 	if !s.d.uiHub.enterPoll(user) {
-		http.Error(w, "too many concurrent polls", http.StatusTooManyRequests)
+		http.Error(w, "Too many concurrent polls", http.StatusTooManyRequests)
 		return
 	}
 	defer s.d.uiHub.leavePoll(user)
+	s.d.uiHub.observeClient(user, req.Client, req.Notice)
 
 	deadline := time.NewTimer(uiPollHold)
 	defer deadline.Stop()
@@ -912,11 +992,11 @@ func (s *uiServer) handleTail(w http.ResponseWriter, r *http.Request) {
 func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	// Accept-during-drain: do NOT refuse here. enqueueToSession durably persists the
@@ -933,7 +1013,7 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	)
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			http.Error(w, "bad multipart", http.StatusBadRequest)
+			http.Error(w, "Bad multipart", http.StatusBadRequest)
 			return
 		}
 		text = r.FormValue("text")
@@ -958,7 +1038,7 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 			Nonce   string `json:"nonce"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
+			http.Error(w, "Bad request", http.StatusBadRequest)
 			return
 		}
 		text = body.Text
@@ -968,13 +1048,13 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	// The UI always targets a specific tab; never silently fall back to the
 	// active session the way the messenger paths do.
 	if targetCreated <= 0 {
-		http.Error(w, "a positive session is required", http.StatusBadRequest)
+		http.Error(w, "A positive session is required", http.StatusBadRequest)
 		return
 	}
 	// A UI send always carries a per-tab nonce for idempotency and traceability, so a
 	// missing one is a malformed request.
 	if nonce == "" {
-		http.Error(w, "a send nonce is required", http.StatusBadRequest)
+		http.Error(w, "A send nonce is required", http.StatusBadRequest)
 		return
 	}
 	// Refuse a send to a tab whose session no longer exists (e.g. closed from
@@ -982,7 +1062,7 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	// answer success. A 404 lets the client restore the composer. (Mirrors handleAbort's
 	// existence check.)
 	if s.d.store.Get(s.d.sessionKey(s.chatID(user)), targetCreated) == nil {
-		http.Error(w, "session not found", http.StatusNotFound)
+		http.Error(w, "Session not found", http.StatusNotFound)
 		return
 	}
 	// The accepted user message is echoed to every UI tab from the common accept
@@ -999,7 +1079,7 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	}) {
 		// Dropped after our entry checks (drain flipped in the window) — tell the
 		// client so it restores the composer instead of silently losing the draft.
-		http.Error(w, "klax перезапускается — попробуйте через минуту", http.StatusServiceUnavailable)
+		http.Error(w, "Ожидается перезапуск klax — попробуйте через минуту", http.StatusServiceUnavailable)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1008,27 +1088,27 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 func (s *uiServer) handleAbort(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	var body struct {
 		Session int64 `json:"session"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
 	}
 	if body.Session <= 0 {
-		http.Error(w, "a positive session is required", http.StatusBadRequest)
+		http.Error(w, "A positive session is required", http.StatusBadRequest)
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
 	if s.d.store.Get(sk, body.Session) == nil {
-		http.Error(w, "session not found", http.StatusNotFound)
+		http.Error(w, "Session not found", http.StatusNotFound)
 		return
 	}
 	s.d.abortSession(sk, body.Session, false)
@@ -1044,11 +1124,11 @@ func (s *uiServer) handleAbort(w http.ResponseWriter, r *http.Request) {
 func (s *uiServer) handleRead(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	var body struct {
@@ -1057,16 +1137,16 @@ func (s *uiServer) handleRead(w http.ResponseWriter, r *http.Request) {
 		Block   int   `json:"block"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
 	}
 	if body.Session <= 0 {
-		http.Error(w, "a positive session is required", http.StatusBadRequest)
+		http.Error(w, "A positive session is required", http.StatusBadRequest)
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
 	if s.d.store.Get(sk, body.Session) == nil {
-		http.Error(w, "session not found", http.StatusNotFound)
+		http.Error(w, "Session not found", http.StatusNotFound)
 		return
 	}
 	raised := false
@@ -1095,7 +1175,7 @@ func raiseReadThrough(cur *session.Session, turn int64, block int) bool {
 func (s *uiServer) handleSessions(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
@@ -1107,11 +1187,11 @@ func (s *uiServer) handleSessions(w http.ResponseWriter, r *http.Request) {
 func (s *uiServer) handleNew(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	// Optional initial settings from the "new session" draft dialog: the tab strip
@@ -1119,7 +1199,7 @@ func (s *uiServer) handleNew(w http.ResponseWriter, r *http.Request) {
 	// here so the session is born configured. An empty body keeps the old behaviour.
 	var patch uiSettingsPatch
 	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil && err != io.EOF {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
@@ -1144,11 +1224,11 @@ func (s *uiServer) handleNew(w http.ResponseWriter, r *http.Request) {
 func (s *uiServer) handleRename(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	var body struct {
@@ -1156,16 +1236,16 @@ func (s *uiServer) handleRename(w http.ResponseWriter, r *http.Request) {
 		Name    string `json:"name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
 	}
 	if body.Session <= 0 || strings.TrimSpace(body.Name) == "" {
-		http.Error(w, "session and name are required", http.StatusBadRequest)
+		http.Error(w, "Session and name are required", http.StatusBadRequest)
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
 	if !s.d.renameSession(sk, body.Session, body.Name) {
-		http.Error(w, "session not found", http.StatusNotFound)
+		http.Error(w, "Session not found", http.StatusNotFound)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1174,18 +1254,18 @@ func (s *uiServer) handleRename(w http.ResponseWriter, r *http.Request) {
 func (s *uiServer) handleReorder(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	var body struct {
 		Order []int64 `json:"order"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
@@ -1196,22 +1276,22 @@ func (s *uiServer) handleReorder(w http.ResponseWriter, r *http.Request) {
 func (s *uiServer) handleClose(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	var body struct {
 		Session int64 `json:"session"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
 	}
 	if body.Session <= 0 {
-		http.Error(w, "a positive session is required", http.StatusBadRequest)
+		http.Error(w, "A positive session is required", http.StatusBadRequest)
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
@@ -1230,7 +1310,7 @@ func (s *uiServer) handleClose(w http.ResponseWriter, r *http.Request) {
 func (s *uiServer) handleTranscript(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 	created, _ := strconv.ParseInt(r.URL.Query().Get("session"), 10, 64)
@@ -1242,7 +1322,7 @@ func (s *uiServer) handleTranscript(w http.ResponseWriter, r *http.Request) {
 	sk := s.d.sessionKey(s.chatID(user))
 	sess := s.d.store.Get(sk, created)
 	if sess == nil {
-		http.Error(w, "session not found", http.StatusNotFound)
+		http.Error(w, "Session not found", http.StatusNotFound)
 		return
 	}
 	backend := sess.Backend

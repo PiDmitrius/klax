@@ -80,6 +80,7 @@ type daemon struct {
 	tgRich       atomic.Bool                    // global: render Telegram replies as Rich Messages (/rich)
 	uiHub        *uiHub                         // web UI event hub; nil when the UI is not configured (also the "UI on" gate)
 	system       *systemState                   // process/update status shared by all authenticated UI users
+	startupKind  string                         // installed|started — derived once from the startup marker
 	fileTokens   map[string]tokenRef            // durable per-file access token -> its (session, stored file)
 	fileTokensMu sync.Mutex                     // rebuilt from each session's links.json at startup
 	sessStores   map[runnerKey]*sessfiles.Store // ONE canonical durable Store per (sk,created)
@@ -590,18 +591,14 @@ func runDaemon() {
 	writePID()
 	log.Printf("klax %s started (pid %d)", version, os.Getpid())
 
-	// Startup notification: if restart marker exists, notify users we're back.
-	if m := readMarker(); m != nil {
-		var text string
-		switch m.Reason {
-		case "update":
-			text = fmt.Sprintf("✅ klax обновлён (v%s)", version)
-		default:
-			text = fmt.Sprintf("✅ klax перезапущен (v%s)", version)
-		}
-		// Messengers get the restart banner here; UI clients show their own notice
-		// on the `started` change their next tail observes (handleTail/tailLoop).
-		d.notifyAllUsers(text)
+	// The marker distinguishes a completed install from every other kind of process start.
+	// Keep that fact in the new process after removing the marker so every UI tab reads the same
+	// canonical startup outcome from /api/tail instead of inferring it from browser-local state.
+	m := readMarker()
+	startupKind, text := startupNotice(m)
+	d.startupKind = startupKind
+	d.notifyAllUsers(text)
+	if m != nil {
 		removeMarker()
 	}
 
@@ -639,6 +636,13 @@ func runDaemon() {
 	select {}
 }
 
+func startupNotice(marker *restartMarker) (kind, text string) {
+	if marker != nil && marker.Reason == "update" {
+		return "installed", fmt.Sprintf("✅ Установлен klax v%s", version)
+	}
+	return "started", fmt.Sprintf("✅ Запущен klax v%s", version)
+}
+
 // startPoll starts the inbound source loop for the given name.
 func (d *daemon) startPoll(name string) {
 	d.mu.Lock()
@@ -673,7 +677,7 @@ func (d *daemon) stopPoll(name string) {
 
 // notifyAllUsers sends a message to all allowed users on enabled platforms.
 // These are self-initiated messages (no replyTo).
-func (d *daemon) notifyAllUsers(text string) {
+func (d *daemon) notifyAllUsers(text string) map[string]uint64 {
 	if _, ok := d.transports["tg"]; ok && !d.disabled["tg"] {
 		for _, uid := range d.cfg.AllowedUsers {
 			chatID := fmt.Sprintf("tg:%d", uid)
@@ -695,7 +699,7 @@ func (d *daemon) notifyAllUsers(text string) {
 			d.sendMessage(chatID, "", text)
 		}
 	}
-	d.uiNotifyAll(text)
+	return d.uiNotifyAll(text)
 }
 
 // startDrain puts the daemon into draining mode.
@@ -713,7 +717,7 @@ func (d *daemon) startDrain(reason string) {
 	if readMarker() == nil {
 		writeMarker(reason)
 	}
-	d.notifyAllUsers("🔄 klax перезапускается...")
+	uiNotice := d.notifyAllUsers("🔄 Ожидается перезапуск klax...")
 
 	// Kick processing on all session runners that have queued messages.
 	d.runnersMu.Lock()
@@ -747,6 +751,9 @@ func (d *daemon) startDrain(reason string) {
 		select {
 		case <-done:
 			log.Println("all sessions drained")
+			if d.uiHub != nil {
+				d.uiHub.waitAcknowledged(uiNotice, 2*time.Second)
+			}
 			d.shutdown()
 			return
 		case <-tick.C:
@@ -826,6 +833,11 @@ func (d *daemon) watchMarker() {
 			return
 		}
 		if m := readMarker(); m != nil {
+			// A UI-triggered install writes the marker before its goroutine records and broadcasts
+			// the result. Let that ONE owner finish first; the next tick starts the normal drain.
+			if d.systemUpdateRunning() {
+				continue
+			}
 			log.Printf("restart marker found (reason: %s)", m.Reason)
 			d.startDrain(m.Reason)
 			return

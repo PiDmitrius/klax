@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/PiDmitrius/klax/internal/config"
 	"github.com/PiDmitrius/klax/internal/runner"
@@ -137,6 +139,37 @@ func TestBroadcastAllReachesKnownUserBetweenPolls(t *testing.T) {
 	h.broadcastAll(uiEvent{Type: "notice", Text: "restart"})
 	if ev, _, _ := h.collect("alice", h.epoch, 0); len(ev) != 1 {
 		t.Fatalf("known user between polls missed the notice: got %d events, want 1", len(ev))
+	}
+}
+
+func TestNoticeBarrierWaitsForClientCursor(t *testing.T) {
+	h := newUIHub()
+	h.enterPoll("alice")
+	h.leavePoll("alice")
+	h.observeClient("alice", "tab-a", "")
+	h.observeClient("alice", "tab-b", "")
+	targets := h.broadcastAll(uiEvent{Type: "notice", Text: "restart"})
+	done := make(chan struct{})
+	go func() {
+		h.waitAcknowledged(targets, time.Second)
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("barrier returned before the client acknowledged the notice")
+	case <-time.After(10 * time.Millisecond):
+	}
+	h.observeClient("alice", "tab-a", fmt.Sprintf("%d-%d", h.epoch, targets[uiClientKey("alice", "tab-a")]))
+	select {
+	case <-done:
+		t.Fatal("barrier returned after only one of two tabs acknowledged the notice")
+	case <-time.After(10 * time.Millisecond):
+	}
+	h.observeClient("alice", "tab-b", fmt.Sprintf("%d-%d", h.epoch, targets[uiClientKey("alice", "tab-b")]))
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("barrier did not release after the client acknowledged the notice")
 	}
 }
 

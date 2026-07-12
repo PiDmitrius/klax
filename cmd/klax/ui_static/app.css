@@ -14,6 +14,7 @@
     --compact-block-h:44px;
     --system-action-w:140px;
     --attachment-border:#006400;
+    --layer-debug:95; --layer-modal:100; --layer-confirm:105; --layer-notifications:110;
   }
   html[data-theme="dark"] {
     --bg:#15171c; --panel:#1a1d23; --chat:#15171c; --fg:#d8dee9; --muted:#8b92a0; --border:#2a2e37;
@@ -276,7 +277,7 @@
                     border: 1px solid var(--border); border-radius: 8px; font-size: 13px; }
   /* System notices live in the timeline viewport. Their bottom follows the observed composer
      height, so a growing textarea/chip area raises the stack instead of being covered by it. */
-  #notifications { position: absolute; bottom: calc(var(--composer-h) + 12px); right: 16px; z-index: 3; display: flex;
+  #notifications { position: absolute; bottom: calc(var(--composer-h) + 12px); right: 16px; z-index: var(--layer-notifications); display: flex;
                    flex-direction: column; gap: 8px; pointer-events: none;
                    width: 400px; max-width: calc(100% - 32px); }
   .notify { background: var(--panel); border: 1px solid var(--border); color: var(--fg);
@@ -300,7 +301,7 @@
                      margin-top: -8px; border-width: 0;
                      transition: height .28s ease, padding .28s ease, margin .28s ease, border-width .28s ease; }
   /* custom dialog (replaces system confirm/prompt, keeps the UI style) */
-  #modal { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center;
+  #modal { position: fixed; inset: 0; z-index: var(--layer-confirm); display: flex; align-items: center; justify-content: center;
            background: rgba(0,0,0,.45); }
   .modal-box { width: 340px; max-width: 90vw; background: var(--bg); color: var(--fg);
                border: 1px solid var(--border); border-radius: 12px; padding: 18px;
@@ -313,7 +314,7 @@
   .modal-ok { background: var(--accent); color: #fff; border-color: var(--accent); }
   .modal-ok.danger { background: #d92d20; border-color: #d92d20; }
   /* application/runtime status dialog */
-  #sysmodal { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center;
+  #sysmodal { position: fixed; inset: 0; z-index: var(--layer-modal); display: flex; align-items: center; justify-content: center;
               background: rgba(0,0,0,.45); }
   .sysmodal-box { width: 500px; max-width: 92vw; background: var(--bg); color: var(--fg);
                   border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px 18px;
@@ -338,7 +339,7 @@
   .sysmodal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
   .syscheck:disabled, .sysaction:disabled { opacity: .5; cursor: wait; }
   /* per-session settings dialog (double-click a tab) */
-  #smodal { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center;
+  #smodal { position: fixed; inset: 0; z-index: var(--layer-modal); display: flex; align-items: center; justify-content: center;
             background: rgba(0,0,0,.45); }
   .smodal-box { width: 430px; max-width: 92vw; background: var(--bg); color: var(--fg);
                 border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px 18px;
@@ -403,7 +404,7 @@
   }
 
   /* Explicit local visual harness: /?debug. It is absent from the normal UI. */
-  #debugpanel { position: fixed; left: 16px; top: 70px; z-index: 95; width: 190px; padding: 10px;
+  #debugpanel { position: fixed; left: 16px; top: 70px; z-index: var(--layer-debug); width: 190px; padding: 10px;
                 background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
                 box-shadow: 0 8px 28px rgba(0,0,0,.25); }
   .debug-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;

@@ -325,8 +325,8 @@ function startDrag(e, tab){
     // On failure the server's (unchanged) order reconciles back via the next broadcast; tell the user
     // why their reorder didn't stick, matching rename/close/settings error handling elsewhere.
     api("/api/reorder", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ order }) })
-      .then(r => { if(!r.ok) notice("не удалось сохранить порядок вкладок"); })
-      .catch(() => notice("не удалось сохранить порядок вкладок"));
+      .then(r => { if(!r.ok) notice("Не удалось сохранить порядок вкладок"); })
+      .catch(() => notice("Не удалось сохранить порядок вкладок"));
   };
   const onUp = () => finish(true);
   const onCancel = () => finish(false);
@@ -405,8 +405,8 @@ async function createFromDraft(){
   let r;
   try {
     r = await api("/api/new", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  } catch(e){ draftSubmitting = false; if(ok) ok.disabled = false; notice("не удалось создать сессию"); return; }
-  if(!r.ok){ draftSubmitting = false; if(ok) ok.disabled = false; notice((await r.text()).trim() || "не удалось создать сессию"); return; }
+  } catch(e){ draftSubmitting = false; if(ok) ok.disabled = false; notice("Не удалось создать сессию"); return; }
+  if(!r.ok){ draftSubmitting = false; if(ok) ok.disabled = false; notice((await r.text()).trim() || "Не удалось создать сессию"); return; }
   const j = await r.json();
   draft = null; draftView = null;
   draftSubmitting = false; if(ok) ok.disabled = false;
@@ -419,9 +419,9 @@ async function closeSession(created, name){
   if(!(await uiConfirm("Закрыть сессию «" + (name || ("#" + created)) + "»?", "Закрыть", true))) return;
   try {
     const r = await api("/api/close", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: created }) });
-    if(!r.ok){ notice((await r.text()).trim() || "не удалось закрыть"); return; }
+    if(!r.ok){ notice((await r.text()).trim() || "Не удалось закрыть"); return; }
     if(deps.afterClose) deps.afterClose(created);
-  } catch(e){ notice("не удалось закрыть"); }
+  } catch(e){ notice("Не удалось закрыть"); }
 }
 
 // --- settings modal ---
@@ -563,9 +563,9 @@ function renderSettings(d, isDraft){
 function patchSettings(created, patch){
   patch.session = created;
   api("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) })
-    .then(r => { if(r.ok) return r.json(); r.text().then(t => notice(t.trim() || "не удалось применить")); return fetchSettings(created); })
+    .then(r => { if(r.ok) return r.json(); r.text().then(t => notice(t.trim() || "Не удалось применить")); return fetchSettings(created); })
     .then(d => { if(d && settingsFor === created) renderSettings(d); })
-    .catch(() => notice("не удалось применить"));
+    .catch(() => notice("Не удалось применить"));
 }
 
 // maybeRefreshSettings re-syncs an open dialog when sessions change (busy lock/unlock, ctx update).

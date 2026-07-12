@@ -51,8 +51,11 @@ func TestSystemAPIAuthAndView(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Version != version || got.Update.Mode != "source" || got.Update.SourceDir != "/source" || got.Update.Checked || len(got.Update.Releases) != 0 {
+	if got.Version != version || got.Update.Mode != "source" || got.Update.SourceDir != "/source" || got.Update.Checked || len(got.Update.Releases) != 1 {
 		t.Fatalf("unexpected view: %+v", got)
+	}
+	if local := got.Update.Releases[0]; local.Source != "local" || local.Tag != "v"+version {
+		t.Fatalf("initial local artifact = %+v", local)
 	}
 }
 
@@ -82,12 +85,26 @@ func TestSystemCheckIsExplicit(t *testing.T) {
 	}
 }
 
+func TestSystemCheckedViewIncludesLocalArtifact(t *testing.T) {
+	s, st := systemTestServer()
+	st.checked = true
+	st.releases = []releaseInfo{{Tag: "v9.9.9", PublishedAt: time.Now().Format(time.RFC3339)}}
+	got := s.d.systemView().Update.Releases
+	if len(got) != 2 {
+		t.Fatalf("release choices = %+v", got)
+	}
+	local := got[0]
+	if local.Tag != "v"+version || local.Source != "local" || local.Action != "reinstall" || local.Age != "локальная сборка" {
+		t.Fatalf("local artifact = %+v", local)
+	}
+}
+
 func TestSystemUpdateMethodAndSingleFlight(t *testing.T) {
 	s, st := systemTestServer()
 	st.checked, st.releases = true, []releaseInfo{{Tag: "v9.9.9"}}
 	started := make(chan struct{})
 	release := make(chan struct{})
-	st.updateFn = func(context.Context, string, io.Writer) updateResult {
+	st.updateFn = func(context.Context, systemInstallTarget, io.Writer) updateResult {
 		close(started)
 		<-release
 		return updateResult{OK: true, Version: "9.9.9", Message: "done"}
@@ -108,11 +125,21 @@ func TestSystemUpdateMethodAndSingleFlight(t *testing.T) {
 	if rejected["running"] != false {
 		t.Fatalf("unchecked tag accepted: %#v", rejected)
 	}
+	if rejected["started"] != false {
+		t.Fatalf("unchecked tag reported started: %#v", rejected)
+	}
 
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, authSystemJSON(http.MethodPost, "/api/system/update", `{"tag":"v9.9.9"}`))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("first update status = %d", rec.Code)
+	}
+	var first map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&first); err != nil {
+		t.Fatal(err)
+	}
+	if first["started"] != true {
+		t.Fatalf("first update not reported started: %#v", first)
 	}
 	<-started
 
@@ -127,6 +154,9 @@ func TestSystemUpdateMethodAndSingleFlight(t *testing.T) {
 	}
 	if second["message"] != "Обновление уже выполняется" {
 		t.Fatalf("second response = %#v", second)
+	}
+	if second["started"] != false {
+		t.Fatalf("second update reported started: %#v", second)
 	}
 
 	close(release)
@@ -152,5 +182,57 @@ func TestSystemVersionActions(t *testing.T) {
 		if got := releaseAction(tc.latest); got != tc.action {
 			t.Fatalf("latest %s: action %s, want %s", tc.latest, got, tc.action)
 		}
+	}
+}
+
+func TestInstallStatusMessages(t *testing.T) {
+	if got := installStartMessage("v2.0.0"); got != "Устанавливается klax v2.0.0..." {
+		t.Fatalf("start = %q", got)
+	}
+	if got := installFailureMessage("v2.0.0", "disk full"); got != "Не удалось установить klax v2.0.0\ndisk full" {
+		t.Fatalf("failure = %q", got)
+	}
+}
+
+func TestStartupNotice(t *testing.T) {
+	for _, tc := range []struct {
+		marker *restartMarker
+		kind   string
+		text   string
+	}{
+		{&restartMarker{Reason: "update"}, "installed", "✅ Установлен klax v" + version},
+		{&restartMarker{Reason: "signal"}, "started", "✅ Запущен klax v" + version},
+		{nil, "started", "✅ Запущен klax v" + version},
+	} {
+		kind, text := startupNotice(tc.marker)
+		if kind != tc.kind || text != tc.text {
+			t.Fatalf("startupNotice(%+v) = %q, %q", tc.marker, kind, text)
+		}
+	}
+}
+
+func TestSystemLocalReinstallUsesSourceArtifact(t *testing.T) {
+	s, st := systemTestServer()
+	targets := make(chan systemInstallTarget, 1)
+	st.updateFn = func(_ context.Context, target systemInstallTarget, _ io.Writer) updateResult {
+		targets <- target
+		return updateResult{OK: true, Version: version}
+	}
+	rec := httptest.NewRecorder()
+	s.routes().ServeHTTP(rec, authSystemJSON(http.MethodPost, "/api/system/update", `{"tag":"v`+version+`","source":"local"}`))
+	var response map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response["started"] != true {
+		t.Fatalf("local reinstall response = %#v", response)
+	}
+	select {
+	case target := <-targets:
+		if target.Source != "local" || target.Tag != "v"+version || target.SourceDir != "/source" {
+			t.Fatalf("local target = %+v", target)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("local reinstall did not start")
 	}
 }

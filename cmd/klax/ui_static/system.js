@@ -4,6 +4,8 @@ import { uiConfirm } from "./modal.js";
 const $ = id => document.getElementById(id);
 let refreshTimer = 0;
 let notify = () => {};
+let lastData = null;
+let seenCheckError = "";
 
 function codeValue(value){
   const el = document.createElement("code"); el.className = "syscode"; el.textContent = value || "—";
@@ -32,6 +34,7 @@ function elapsed(sec){
 }
 
 function render(data){
+  lastData = data;
   const body = $("sysbody"), u = data.update || {};
   body.textContent = "";
   body.append(row("Версия", "v" + data.version, { copy: true }), row("Запущен", new Date(data.started_at).toLocaleString()), row("Работает", elapsed(data.uptime_sec)), row("Процесс", String(data.pid), { copy: true }), row("Платформа", data.platform));
@@ -40,7 +43,7 @@ function render(data){
   const check = document.createElement("button"); check.id = "syscheck"; check.className = "syscheck";
   check.disabled = !!u.checking; check.textContent = u.checking ? "Проверяется…" : "Проверить"; check.onclick = checkUpdates;
   body.append(row("Обновления", "", { noValue: true, button: check }));
-  if(u.checked && !u.checking){
+  if((u.releases || []).length){
     const list = document.createElement("div"); list.className = "sysreleases";
     for(const release of (u.releases || [])){
       const item = document.createElement("div"); item.className = "sysrelease";
@@ -49,17 +52,22 @@ function render(data){
       if(release.url){ age.href = release.url; age.target = "_blank"; age.rel = "noopener noreferrer"; }
       const action = document.createElement("button"); action.className = "sysaction" + (release.action === "update" ? " update" : "");
       action.dataset.tag = release.tag; action.dataset.action = release.action; action.disabled = !!u.running;
-      action.textContent = ({ update: "Обновить", install: "Установить", reinstall: "Переустановить" }[release.action] || "Установить");
+      action.dataset.source = release.source;
+      action.textContent = actionLabel(release.action);
       action.onclick = installFound;
       item.append(bullet, codeValue(release.tag), age, action); list.appendChild(item);
     }
-    if(!(u.releases || []).length){ const empty = document.createElement("div"); empty.className = "sysrelease-empty"; empty.textContent = "Релизы не найдены"; list.appendChild(empty); }
     body.appendChild(list);
+  } else if(u.checked && !u.checking){
+    const empty = document.createElement("div"); empty.className = "sysrelease-empty"; empty.textContent = "Релизы не найдены"; body.appendChild(empty);
   }
-  if(u.check_error) body.append(row("Ошибка проверки", u.check_error));
-  if(u.message) body.append(row("Состояние", u.message));
+  if(u.check_error && u.check_error !== seenCheckError){
+    seenCheckError = u.check_error;
+    notify("Ошибка проверки обновлений\n" + u.check_error, { error: true });
+  }
+  if(!u.check_error) seenCheckError = "";
   clearTimeout(refreshTimer);
-  if(!$("sysmodal").classList.contains("hidden") && (u.running || u.checking)) refreshTimer = setTimeout(refresh, 1200);
+  if(u.running || (!$("sysmodal").classList.contains("hidden") && u.checking)) refreshTimer = setTimeout(refresh, 1200);
 }
 
 async function refresh(){
@@ -71,6 +79,14 @@ async function refresh(){
 }
 
 function close(){ clearTimeout(refreshTimer); $("sysmodal").classList.add("hidden"); }
+
+function actionLabel(action){ return ({ update: "Обновить", install: "Установить", reinstall: "Переустановить" }[action] || "Установить"); }
+
+function confirmText(pending){
+  if(pending.action === "update") return "Обновить klax " + pending.current + " до " + pending.tag + "?";
+  if(pending.action === "reinstall") return "Переустановить klax " + pending.tag + "?";
+  return "Установить klax " + pending.tag + " вместо " + pending.current + "?";
+}
 
 function errorNotice(title, error){
   const detail = String(error && error.message || "").trim();
@@ -87,14 +103,28 @@ async function checkUpdates(){
 }
 
 async function installFound(event){
-  const button = event.currentTarget, label = button.textContent || "Установить", tag = button.dataset.tag;
-  if(!(await uiConfirm(label + " найденную версию klax?", label))) return;
+  const button = event.currentTarget;
+  const chosen = { tag: button.dataset.tag, source: button.dataset.source, action: button.dataset.action, current: "v" + lastData.version };
+  if(!(await uiConfirm(confirmText(chosen), actionLabel(chosen.action)))) return;
+  close();
+  beginInstall(chosen);
+}
+
+async function beginInstall(chosen){
   try {
-    const r = await api("/api/system/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tag }) });
+    const r = await api("/api/system/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tag: chosen.tag, source: chosen.source }) });
     const data = await r.json();
     if(!r.ok) throw new Error(data.message || "Ошибка установки");
-    notify(data.message); refresh();
-  } catch(e){ notify(errorNotice("Ошибка установки", e), { error: true }); }
+    notify(data.message, data.started ? "info" : "warning");
+    if(lastData && lastData.update){ lastData.update.running = !!data.running; render(lastData); }
+    refresh();
+  } catch(e){ notify(errorNotice("Ошибка установки", e), { error: true }); refresh(); }
+}
+
+export function systemRestartNotice(kind, runningVersion){
+  close();
+  const tag = String(runningVersion || "").replace(/^v?/, "v");
+  return (kind === "installed" ? "Установлен klax " : "Запущен klax ") + tag;
 }
 
 export function initSystem({ notice }){

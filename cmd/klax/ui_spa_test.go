@@ -31,6 +31,22 @@ func TestSPASystemControlsAndNoticeStack(t *testing.T) {
 	if !strings.Contains(string(app), `initSystem({ notice: showNotice })`) {
 		t.Fatal("system modal is not initialized")
 	}
+	if !strings.Contains(string(app), `systemRestartNotice(kind, version)`) {
+		t.Fatal("daemon restart must close the system modal before showing its result")
+	}
+	if !strings.Contains(string(app), `sessionStorage.getItem(SERVER_STARTED_KEY)`) {
+		t.Fatal("daemon epoch must survive a page reload")
+	}
+	system, err := moduleFS.ReadFile("ui_static/system.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(system), "PENDING_INSTALL_KEY") {
+		t.Fatal("browser-local install attribution must not duplicate the server startup outcome")
+	}
+	if !strings.Contains(string(system), "close();\n  beginInstall(chosen);") {
+		t.Fatal("accepted install must close the klax modal before starting")
+	}
 	if !strings.Contains(string(app), `initDebug({ notice: showNotice })`) {
 		t.Fatal("explicit debug notification harness is not initialized")
 	}
@@ -71,12 +87,16 @@ func TestNoticeSeverity(t *testing.T) {
 	script := `
 import { noticeSeverity, noticeText, showNotice } from "./notices.js";
 function assert(c, m){ if(!c) throw new Error(m); }
-assert(noticeSeverity("сеть недоступна — сообщение не отправлено") === "error", "send failure must be error");
-assert(noticeSeverity("сообщение не принято") === "error", "rejected message must be error");
-assert(noticeSeverity("🔄 klax перезапускается...") === "warning", "restart must be warning");
+assert(noticeSeverity("Сеть недоступна — сообщение не отправлено") === "error", "send failure must be error");
+assert(noticeSeverity("Сообщение не принято") === "error", "rejected message must be error");
+assert(noticeSeverity("Ожидается перезапуск klax...") === "warning", "restart must be warning");
 assert(noticeSeverity("klax обновился") === "info", "success must be info");
+assert(noticeSeverity("Устанавливается klax v1.2.3...") === "info", "install progress must be info");
+assert(noticeSeverity("Ожидается перезапуск klax...") === "warning", "restart wait must be warning");
+assert(noticeSeverity("Установлен klax v1.2.3") === "info", "installed must be info");
+assert(noticeSeverity("Не удалось установить klax v1.2.3") === "error", "install failure must be error");
+assert(noticeText("🔄 Ожидается перезапуск klax...") === "Ожидается перезапуск klax...", "UI must replace the transport icon with its own severity icon");
 assert(noticeSeverity("plain", { error: true }) === "error", "explicit severity must win");
-assert(noticeText("🔄 klax перезапускается...") === "klax перезапускается...", "legacy icon must be removed");
 
 class Classes { constructor(){ this.s = new Set(); } add(...v){ for(const x of v) this.s.add(x); } contains(v){ return this.s.has(v); } }
 class El {

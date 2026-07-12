@@ -172,14 +172,14 @@ var inlineImageTypes = map[string]bool{
 func (s *uiServer) handleFile(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("ref")
 	if token == "" {
-		http.Error(w, "invalid reference", http.StatusForbidden)
+		http.Error(w, "Invalid reference", http.StatusForbidden)
 		return
 	}
 	s.d.fileTokensMu.Lock()
 	tr, ok := s.d.fileTokens[token]
 	s.d.fileTokensMu.Unlock()
 	if !ok {
-		http.Error(w, "invalid reference", http.StatusForbidden)
+		http.Error(w, "Invalid reference", http.StatusForbidden)
 		return
 	}
 	// A closed/deleted session's tokens are dead (its dir — files/ + links.json — is gone).
@@ -192,18 +192,18 @@ func (s *uiServer) handleFile(w http.ResponseWriter, r *http.Request) {
 	// delete) — it must still map to this stored file.
 	links, err := store.Links()
 	if err != nil {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 	entry, ok := links[tr.stored]
 	if !ok || entry.Token != token {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 	// Defense in depth: the stored file must lie inside this session's files/ dir.
 	path := store.Path(tr.stored)
 	if !pathInRoots(path, filepath.Join(sessfiles.WorkDir(tr.sk, tr.created), "files")) {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 	f, err := os.Open(path)

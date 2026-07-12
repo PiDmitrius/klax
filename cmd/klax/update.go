@@ -137,6 +137,22 @@ func runUpdate() {
 	}
 }
 
+func runReinstall() {
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot load config: %v\nRun 'klax setup' first.\n", err)
+		os.Exit(1)
+	}
+	if cfg.SourceDir == "" {
+		fmt.Fprintln(os.Stderr, "reinstall requires source_dir")
+		os.Exit(1)
+	}
+	if res := performSourceReinstall(context.Background(), cfg.SourceDir, os.Stdout); !res.OK {
+		fmt.Fprintln(os.Stderr, res.Message)
+		os.Exit(1)
+	}
+}
+
 type updateResult struct {
 	OK      bool
 	Version string
@@ -159,16 +175,7 @@ func performUpdate(ctx context.Context, srcDir string, out io.Writer) updateResu
 	if err != nil {
 		return updateResult{Message: fmt.Sprintf("version bump failed: %v", err)}
 	}
-	fmt.Fprintf(out, "building in %s...\n", pathutil.TildePathsInText(srcDir))
-	bin := filepath.Join(srcDir, "klax")
-	if err := runUpdateCommand(ctx, out, srcDir, "go", "build", "-o", bin, "./cmd/klax"); err != nil {
-		return updateResult{Message: fmt.Sprintf("build failed: %v", err)}
-	}
-	if err := runUpdateCommand(ctx, out, "", bin, "install"); err != nil {
-		return updateResult{Message: fmt.Sprintf("install failed: %v", err)}
-	}
-	fmt.Fprintln(out, "daemon will restart via marker")
-	return updateResult{OK: true, Version: newVersion, Message: "Установлено, перезапуск будет выполнен после завершения текущих задач"}
+	return performSourceInstall(ctx, srcDir, newVersion, out)
 }
 
 func performReleaseUpdate(ctx context.Context, tag string, out io.Writer) updateResult {
@@ -177,11 +184,35 @@ func performReleaseUpdate(ctx context.Context, tag string, out io.Writer) update
 		return updateResult{Message: fmt.Sprintf("download failed: %v", err)}
 	}
 	defer os.Remove(binPath)
+	return performArtifactInstall(ctx, binPath, strings.TrimPrefix(tag, "v"), out)
+}
+
+func performSourceReinstall(ctx context.Context, srcDir string, out io.Writer) updateResult {
+	return performSourceInstall(ctx, srcDir, version, out)
+}
+
+func performSourceInstall(ctx context.Context, srcDir, artifactVersion string, out io.Writer) updateResult {
+	fmt.Fprintf(out, "building in %s...\n", pathutil.TildePathsInText(srcDir))
+	tmp, err := os.CreateTemp("", "klax-local-*")
+	if err != nil {
+		return updateResult{Message: fmt.Sprintf("build temp failed: %v", err)}
+	}
+	binPath := tmp.Name()
+	tmp.Close()
+	os.Remove(binPath)
+	defer os.Remove(binPath)
+	if err := runUpdateCommand(ctx, out, srcDir, "go", "build", "-o", binPath, "./cmd/klax"); err != nil {
+		return updateResult{Message: fmt.Sprintf("build failed: %v", err)}
+	}
+	return performArtifactInstall(ctx, binPath, artifactVersion, out)
+}
+
+func performArtifactInstall(ctx context.Context, binPath, artifactVersion string, out io.Writer) updateResult {
 	if err := runUpdateCommand(ctx, out, "", binPath, "install"); err != nil {
 		return updateResult{Message: fmt.Sprintf("install failed: %v", err)}
 	}
 	fmt.Fprintln(out, "daemon will restart via marker")
-	return updateResult{OK: true, Version: strings.TrimPrefix(tag, "v"), Message: "Установлено, перезапуск будет выполнен после завершения текущих задач"}
+	return updateResult{OK: true, Version: artifactVersion, Message: "Установлено, перезапуск будет выполнен после завершения текущих задач"}
 }
 
 func runUpdateCommand(ctx context.Context, out io.Writer, dir, name string, args ...string) error {
