@@ -245,13 +245,14 @@ func TestReadCodexHistoryToolLabels(t *testing.T) {
 		`{"type":"response_item","payload":{"type":"web_search_call","action":{"type":"search","queries":["fallback query"]}}}`,
 		`{"type":"item.started","item":{"type":"command_execution","command":"pwd"}}`,
 		`{"type":"item.started","item":{"type":"mcp_tool_call","server":"codex_apps","tool":"github_get_profile"}}`,
+		`{"type":"response_item","payload":{"type":"function_call","name":"wait","arguments":"{\"cell_id\":\"5\"}"}}`,
 	})
 	items, err := readCodex(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 10 {
-		t.Fatalf("want 10 items, got %d: %+v", len(items), items)
+	if len(items) != 11 {
+		t.Fatalf("want 11 items, got %d: %+v", len(items), items)
 	}
 	if tc := items[0].Tools[0]; tc.Name != "Edit" || !strings.Contains(tc.Label, "/tmp/x.txt") {
 		t.Fatalf("patch tool label = %+v", tc)
@@ -282,6 +283,9 @@ func TestReadCodexHistoryToolLabels(t *testing.T) {
 	}
 	if tc := items[9].Tools[0]; tc.Name != "MCP" || !strings.Contains(tc.Label, "codex_apps.github_get_profile") {
 		t.Fatalf("item.started mcp label = %+v", tc)
+	}
+	if tc := items[10].Tools[0]; tc.Name != "Wait" || tc.Label != "⏳ Wait" {
+		t.Fatalf("wait tool label = %+v", tc)
 	}
 }
 

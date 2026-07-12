@@ -42,6 +42,9 @@ func TestNormalizeToolNameMapsBashToExec(t *testing.T) {
 	if got := NormalizeToolName("Bash"); got != "Exec" {
 		t.Fatalf("Bash -> %q, want Exec", got)
 	}
+	if got := NormalizeToolName("wait"); got != "Wait" {
+		t.Fatalf("wait -> %q, want Wait", got)
+	}
 	for _, keep := range []string{"Exec", "Read", "Edit", "BashOutput", "Plan"} {
 		if got := NormalizeToolName(keep); got != keep {
 			t.Fatalf("%s -> %q, want unchanged", keep, got)

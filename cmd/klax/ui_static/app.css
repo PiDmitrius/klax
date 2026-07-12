@@ -13,6 +13,7 @@
     --tab-active-bg:#ffffff; --tab-active-border:#006400;
     --compact-block-h:44px;
     --system-action-w:140px;
+    --attachment-border:#006400;
   }
   html[data-theme="dark"] {
     --bg:#15171c; --panel:#1a1d23; --chat:#15171c; --fg:#d8dee9; --muted:#8b92a0; --border:#2a2e37;
@@ -43,6 +44,7 @@
   button { cursor: pointer; border: 1px solid var(--border); background: var(--panel); color: var(--fg);
            border-radius: 8px; padding: 8px 12px; }
   button:hover { border-color: var(--accent); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   #app { display: none; flex-direction: column; flex: 1; min-height: 0; }
   #app.active { display: flex; }
 
@@ -52,7 +54,6 @@
   #bar .logo-btn { flex: none; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 8px;
                    background: transparent; display: block; line-height: 0; }
   #bar .logo-btn:hover { filter: brightness(1.08); }
-  #bar .logo-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   #bar .logo { flex: none; display: block; filter: drop-shadow(0 1px 1px rgba(0,0,0,.14)); transition: opacity .2s; }
   /* Degraded live channel: the poll loop lost the server and is retrying. The brand mark
      goes amber (the themed work/warning hue) and breathes until a poll succeeds — an
@@ -257,10 +258,10 @@
   #cbar .attach:hover { color: var(--accent); background: var(--tool-bg); }
   #cbar .send svg, #cbar .attach svg { display: block; }
   /* Staged-attachment chips above the textarea */
-  #chips { grid-column: 1; grid-row: 1; display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 8px 2px; }
+  #chips { grid-column: 1; grid-row: 1; display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 8px 0; margin-bottom: 7px; }
   #chips.hidden { display: none; }
   .chip { display: inline-flex; align-items: center; gap: 6px; max-width: 200px; padding: 4px 6px 4px 4px;
-          background: var(--tool-bg); border: 1px solid var(--border); border-radius: 8px; font-size: 12px; }
+          background: var(--tool-bg); border: 2px solid var(--attachment-border); border-radius: 8px; font-size: 12px; }
   .chip img { width: 28px; height: 28px; object-fit: cover; border-radius: 4px; display: block; flex: none; }
   .chip .ic { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; font-size: 15px; flex: none; }
   .chip .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -270,7 +271,7 @@
   #cbar.drag { outline: 2px dashed var(--accent); outline-offset: 3px; }
   /* Inline images the agent produced (served via /api/file capability refs) */
   .body img.att { width: auto; height: auto; max-width: 100%; max-height: 420px; object-fit: contain;
-                  border: 2px solid #006400; border-radius: 8px; margin: 6px 0; display: block; box-sizing: border-box; } /* #006400 = the favicon's stroke (dark green) */
+                  border: 2px solid var(--attachment-border); border-radius: 8px; margin: 6px 0; display: block; box-sizing: border-box; }
   .body .att-file { display: inline-block; margin: 4px 0; padding: 2px 8px; background: var(--tool-bg);
                     border: 1px solid var(--border); border-radius: 8px; font-size: 13px; }
   /* System notices live in the timeline viewport. Their bottom follows the observed composer
