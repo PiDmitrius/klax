@@ -81,6 +81,8 @@ type daemon struct {
 	uiHub        *uiHub              // web UI event hub; nil when the UI is not configured (also the "UI on" gate)
 	fileTokens   map[string]tokenRef // durable per-file access token -> its (session, stored file)
 	fileTokensMu sync.Mutex          // rebuilt from each session's links.json at startup
+	sessStores   map[runnerKey]*sessfiles.Store // ONE canonical durable Store per (sk,created)
+	sessStoresMu sync.Mutex                      // shared by runner/read-model/file-links/delete
 }
 
 // tokenRef locates the file a durable access token addresses. The token itself lives in the session's
@@ -174,12 +176,12 @@ func (d *daemon) getRunner(sk string, created int64) *sessionRunner {
 	defer d.runnersMu.Unlock()
 	sr, ok := d.runners[key]
 	if !ok {
-		sr = &sessionRunner{runner: runner.New(), store: sessfiles.Open(sk, created)}
+		sr = &sessionRunner{runner: runner.New(), store: d.sessionStore(sk, created)}
 		d.runners[key] = sr
 	} else if sr.store == nil {
 		// A runner injected without a store (only happens in tests that pre-populate
-		// d.runners directly) gets one lazily, so the durable-queue path never nils.
-		sr.store = sessfiles.Open(sk, created)
+		// d.runners directly) gets the CANONICAL one, so the durable-queue path never nils.
+		sr.store = d.sessionStore(sk, created)
 	}
 	return sr
 }
@@ -201,21 +203,32 @@ func (d *daemon) dropRunner(sk string, created int64) {
 	d.runnersMu.Unlock()
 }
 
-// removeSessionStore deletes a session's durable files + queue log. It removes via
-// the runner-owned store when one exists, so the "removed" latch lands on the SAME
-// *Store instance an in-flight run holds — a fresh Open() would latch a different
-// object and the run's late Mark* could recreate (resurrect) the directory. Call it
-// BEFORE dropRunner, while the runner still exists.
-// sessionStore returns the durable store for a session, preferring the runner-owned
-// instance when one exists so the removed-latch is shared with any in-flight run — a
-// fresh Open has its own latch and could resurrect a just-deleted dir (the F3 class).
+// sessionStore returns the ONE canonical durable Store for a session — the SAME *sessfiles.Store
+// instance for every caller (runner, read model, file links, delete). This is essential: a Store's
+// mutex and its `removed` latch are per-instance, so if different callers used separate Open()'d
+// instances, a late EnsureLink/Enqueue on one could re-create a directory another had just RemoveAll'd
+// (resurrection). Kept even after Remove — the removed instance's latch is what makes any late call
+// return ErrRemoved instead of resurrecting; a fresh Open would have a clean latch. The registry is
+// keyed by (sk,created), which is unique-and-never-reused, so it grows only with distinct sessions.
 func (d *daemon) sessionStore(sk string, created int64) *sessfiles.Store {
-	if sr := d.lookupRunner(sk, created); sr != nil && sr.store != nil {
-		return sr.store
+	key := runnerKey{sk: sk, created: created}
+	d.sessStoresMu.Lock()
+	defer d.sessStoresMu.Unlock()
+	if d.sessStores == nil {
+		d.sessStores = make(map[runnerKey]*sessfiles.Store)
 	}
-	return sessfiles.Open(sk, created)
+	st, ok := d.sessStores[key]
+	if !ok {
+		st = sessfiles.Open(sk, created)
+		d.sessStores[key] = st
+	}
+	return st
 }
 
+// removeSessionStore deletes a session's durable dir (files/ + queue.jsonl + links.json). It removes
+// via the CANONICAL store (sessionStore), so the `removed` latch lands on the one instance every other
+// caller shares — a late Enqueue/Mark*/EnsureLink then returns ErrRemoved instead of resurrecting the
+// dir. The instance stays in the registry so that latch keeps protecting it.
 func (d *daemon) removeSessionStore(sk string, created int64) {
 	_ = d.sessionStore(sk, created).Remove()
 	d.dropFileTokens(sk, created) // the session dir (files/ + links.json) is gone — forget its tokens

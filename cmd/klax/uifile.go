@@ -129,7 +129,7 @@ func (d *daemon) rebuildFileTokenIndex() {
 	d.store.EachSession(func(sk string, created int64) { all = append(all, ref{sk, created}) })
 	idx := make(map[string]tokenRef)
 	for _, r := range all {
-		links, err := sessfiles.Open(r.sk, r.created).Links()
+		links, err := d.sessionStore(r.sk, r.created).Links()
 		if err != nil {
 			continue
 		}
@@ -187,7 +187,7 @@ func (s *uiServer) handleFile(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	store := sessfiles.Open(tr.sk, tr.created)
+	store := s.d.sessionStore(tr.sk, tr.created)
 	// Re-verify the token against links.json (the in-memory index could be stale after a concurrent
 	// delete) — it must still map to this stored file.
 	links, err := store.Links()

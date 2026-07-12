@@ -117,6 +117,37 @@ func TestInboundTextShowsAttachmentSize(t *testing.T) {
 	}
 }
 
+// sessionStore must return ONE canonical Store per (sk,created), and after removeSessionStore no late
+// call (a different sessfiles.Open would have its own clean latch) may resurrect the session dir.
+func TestSessionStoreCanonicalNoResurrection(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	d := newTestDeliveryDaemon(&fakeTransport{})
+	sk, created := "user:alice", int64(1)
+
+	if s1, s2 := d.sessionStore(sk, created), d.sessionStore(sk, created); s1 != s2 {
+		t.Fatal("sessionStore must return one canonical instance")
+	}
+	if _, err := d.sessionStore(sk, created).EnsureLink("000001-01-a.png", "a.png", "image/png"); err != nil {
+		t.Fatal(err)
+	}
+	dir := sessfiles.WorkDir(sk, created)
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("session dir should exist after EnsureLink: %v", err)
+	}
+
+	d.removeSessionStore(sk, created)
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("dir should be gone after removeSessionStore: %v", err)
+	}
+	// A late EnsureLink through the canonical store must refuse and NOT re-create the directory.
+	if _, err := d.sessionStore(sk, created).EnsureLink("000001-01-b.png", "b.png", "image/png"); err != sessfiles.ErrRemoved {
+		t.Fatalf("late EnsureLink after remove = %v, want ErrRemoved", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("late EnsureLink must not resurrect the dir: stat=%v", err)
+	}
+}
+
 // A file token must be STABLE across read-model rebuilds and persist in links.json across a reopen
 // (restart) — otherwise the attachment's <img src> changes and the image re-decodes/flickers.
 func TestFileTokenStableAndPersisted(t *testing.T) {
