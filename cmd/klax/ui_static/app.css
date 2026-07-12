@@ -63,10 +63,17 @@
      tab's border and the lifted tab's shadow at the strip edges. Padding enlarges the clip box so both
      paint fully, and an equal NEGATIVE margin pulls that padding back out of the layout, so the strip's
      size and the tabs' positions are UNCHANGED — the extra room is purely a bleed area for the shadow.
-     The native scrollbar is hidden (it ate vertical space); wheel/trackpad still scrolls. */
-  #tabs { display: flex; gap: 4px; overflow-x: auto; flex: 1; min-width: 0; scrollbar-width: none;
+     The native scrollbar is hidden (it ate vertical space); tabs.js maps a vertical wheel to this
+     horizontal viewport. The wrapper owns the edge fades and leaves +/theme fixed outside it. */
+  #tabswrap { flex: 1; min-width: 0; position: relative; }
+  #tabs { display: flex; gap: 4px; overflow-x: auto; min-width: 0; scrollbar-width: none;
           padding: 6px 4px; margin: -6px -4px; }
   #tabs::-webkit-scrollbar { display: none; }
+  #tabswrap::before, #tabswrap::after { content: ""; position: absolute; z-index: 20; top: -6px; bottom: -6px;
+    width: 22px; pointer-events: none; opacity: 0; transition: opacity .12s ease; }
+  #tabswrap::before { left: -4px; background: linear-gradient(90deg, var(--panel), transparent); }
+  #tabswrap::after { right: -4px; background: linear-gradient(270deg, var(--panel), transparent); }
+  #tabswrap.overflow-left::before, #tabswrap.overflow-right::after { opacity: 1; }
   #bar > button { flex: none; padding: 4px 10px; font-size: 15px; line-height: 1; }
   .tab { padding: 6px 12px; border-radius: 8px; white-space: nowrap; cursor: pointer;
          border: 1px solid transparent; display: flex; align-items: center; gap: 6px; }

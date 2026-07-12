@@ -17,12 +17,32 @@ let draft = null, draftView = null, draftSubmitting = false;
 // alone. didDrag = the click immediately after a drop must be swallowed (not treated as a select).
 let dragging = false, didDrag = false;
 const DRAG_SETTLE_MS = 180;
+let renderedActive = "";
+let tabsResizeObserver = null;
 // The shell's <title> (product name, server-injected) — the base for the unread prefix.
 const BASE_TITLE = (typeof document !== "undefined" && document.title) || "klax";
 function sameSession(a, b){ return String(a) === String(b); }
 
 export function initTabs(d){
   deps = d;
+  const tabs = document.getElementById("tabs");
+  if(tabs){
+    tabs.addEventListener("scroll", updateTabOverflow, { passive: true });
+    // A normal mouse wheel has only deltaY. Over the tab strip it means "browse tabs"; precision
+    // trackpads that already provide deltaX keep that axis. Do not steal vertical page scrolling
+    // when every tab fits.
+    tabs.addEventListener("wheel", e => {
+      if(tabs.scrollWidth <= tabs.clientWidth + 1) return;
+      const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if(!delta) return;
+      tabs.scrollLeft += delta;
+      e.preventDefault();
+    }, { passive: false });
+    if(typeof ResizeObserver !== "undefined"){
+      tabsResizeObserver = new ResizeObserver(() => { updateTabOverflow(); ensureActiveVisible(false); });
+      tabsResizeObserver.observe(tabs);
+    }
+  }
   const nb = document.getElementById("newtab");
   if(nb) nb.addEventListener("click", openDraft);
   const sc = document.getElementById("sclose");
@@ -80,8 +100,36 @@ export function renderTabs(active){
     if(t.parentNode !== strip || strip.children[sessions.indexOf(s)] !== t) strip.appendChild(t);
   }
   for(const [key, t] of existing) if(!keep.has(key)) t.remove();
+  const activeKey = String(active || "");
+  const activeChanged = activeKey !== renderedActive;
+  renderedActive = activeKey;
+  requestAnimationFrame(() => {
+    updateTabOverflow();
+    if(activeChanged) ensureActiveVisible(true);
+  });
   const mark = (totalUnread || "") + "*".repeat(busyCount); // unread count + one * per busy session
   document.title = mark ? "(" + mark + ") " + BASE_TITLE : BASE_TITLE;
+}
+
+function updateTabOverflow(){
+  const strip = document.getElementById("tabs"), wrap = document.getElementById("tabswrap");
+  if(!strip || !wrap) return;
+  const max = Math.max(0, strip.scrollWidth - strip.clientWidth);
+  wrap.classList.toggle("overflow-left", strip.scrollLeft > 1);
+  wrap.classList.toggle("overflow-right", strip.scrollLeft < max - 1);
+}
+
+function ensureActiveVisible(smooth){
+  const strip = document.getElementById("tabs");
+  const tab = strip && strip.querySelector(".tab.active");
+  if(!tab) return;
+  const left = tab.offsetLeft, right = left + tab.offsetWidth;
+  const viewLeft = strip.scrollLeft, viewRight = viewLeft + strip.clientWidth;
+  let target = viewLeft;
+  if(left < viewLeft) target = left;
+  else if(right > viewRight) target = right - strip.clientWidth;
+  else return;
+  strip.scrollTo({ left: Math.max(0, target), behavior: smooth ? "smooth" : "auto" });
 }
 
 function createTab(){
@@ -123,7 +171,9 @@ function startDrag(e, tab){
   if(!strip || strip.querySelectorAll(".tab[data-created]").length < 2) return; // nothing to reorder
   didDrag = false; // fresh gesture — clear any stale flag so it can't swallow this click
   const startX = e.clientX, startY = e.clientY;
-  let active = false, gap = 0, foot = 0, halfW = 0, fromIdx = 0, origCenter = 0, otherEls = [], otherCenters = [], otherOrigIdx = [], toK = 0;
+  let active = false, gap = 0, foot = 0, halfW = 0, fromIdx = 0, origCenter = 0, startScroll = 0,
+    minPointerDX = 0, maxPointerDX = 0, otherEls = [], otherCenters = [], otherOrigIdx = [], toK = 0,
+    lastClientX = e.clientX, autoRAF = 0;
 
   const begin = () => {
     active = true; dragging = true;
@@ -134,17 +184,54 @@ function startDrag(e, tab){
     const gcs = getComputedStyle(strip);
     gap = parseFloat(gcs.columnGap || gcs.gap) || 0;
     const rect = tab.getBoundingClientRect();
+    const viewport = strip.getBoundingClientRect();
+    startScroll = strip.scrollLeft;
+    // Keep the lifted tab fully inside the strip's clip box. Once the pointer reaches either edge,
+    // only scrollLeft advances; the transform itself cannot extend scrollWidth and create a runaway
+    // feedback loop (scroll → larger transformed overflow → more scroll forever).
+    // The lifted tab is scale(1.05) around its centre, so its PAINTED bounds extend by 2.5% on
+    // either side beyond `rect`. Its 4px blur shadow extends farther still. Reserve both expansions
+    // inside the overflow clip box: at the edge the tab meets the soft fade, never a guillotined
+    // shadow. One extra pixel covers rasterization at fractional device scales.
+    const SHADOW_GUARD = 7;
+    const inset = Math.ceil(rect.width * 0.025) + SHADOW_GUARD;
+    minPointerDX = viewport.left + inset - rect.left;
+    maxPointerDX = viewport.right - inset - rect.right;
+    if(minPointerDX > maxPointerDX){ minPointerDX = maxPointerDX = 0; } // pathological: tab wider than viewport
     foot = rect.width + gap;                 // the footprint the dragged tab inserts/removes
     halfW = rect.width / 2;                    // its half-width — the 50%-overlap trigger distance
-    origCenter = rect.left + rect.width / 2;  // its center in the ORIGINAL (transform-free) layout
+    origCenter = rect.left + rect.width / 2 + startScroll; // ORIGINAL center in scroll-content coordinates
     otherEls = []; otherCenters = []; otherOrigIdx = [];
     full.forEach((el, i) => {
       if(el === tab) return;
       const r = el.getBoundingClientRect();
-      otherEls.push(el); otherCenters.push(r.left + r.width / 2); otherOrigIdx.push(i);
+      otherEls.push(el); otherCenters.push(r.left + r.width / 2 + startScroll); otherOrigIdx.push(i);
       el.style.transition = "transform " + DRAG_SETTLE_MS + "ms ease";
     });
     tab.classList.add("tabdrag"); // lift: z-index + shadow (scale comes from the inline transform)
+    autoRAF = requestAnimationFrame(autoScroll);
+  };
+
+  // While dragging near an edge, move the viewport continuously. `layout` works in scroll-content
+  // coordinates, so adding the scroll delta to pointer dx keeps the lifted tab glued to the cursor
+  // and lets it cross tabs that were initially off-screen.
+  const autoScroll = () => {
+    if(!active) return;
+    const r = strip.getBoundingClientRect(), edge = 52;
+    let speed = 0;
+    if(lastClientX < r.left + edge) speed = -Math.min(14, Math.ceil(14 * (r.left + edge - lastClientX) / edge));
+    else if(lastClientX > r.right - edge) speed = Math.min(14, Math.ceil(14 * (lastClientX - (r.right - edge)) / edge));
+    if(speed){
+      const before = strip.scrollLeft;
+      strip.scrollLeft += speed;
+      if(strip.scrollLeft !== before) layout(dragDX(lastClientX));
+    }
+    autoRAF = requestAnimationFrame(autoScroll);
+  };
+
+  const dragDX = clientX => {
+    const pointerDX = Math.max(minPointerDX, Math.min(maxPointerDX, clientX - startX));
+    return pointerDX + strip.scrollLeft - startScroll;
   };
 
   // layout(dx) positions the lifted tab under the cursor and shifts the other tabs to open the slot it
@@ -162,7 +249,9 @@ function startDrag(e, tab){
       if(center > trigger) k++; else break;
     }
     toK = k;
-    tab.style.transform = "translateX(" + Math.round(dx) + "px) scale(1.05)";
+    // Keep the exact (possibly fractional) scroll compensation. Rounding it while scrollLeft is
+    // fractional creates a one-pixel oscillation at either terminal edge.
+    tab.style.transform = "translateX(" + dx + "px) scale(1.05)";
     for(let j = 0; j < otherEls.length; j++){
       const finalIdx = j < k ? j : j + 1;      // where sibling j ends up once the tab lands at k
       const diff = finalIdx - otherOrigIdx[j];  // ∈ {-1,0,1} — it only ever crosses the dragged slot
@@ -171,17 +260,19 @@ function startDrag(e, tab){
   };
 
   const onMove = ev => {
+    lastClientX = ev.clientX;
     if(!active){
       if(Math.abs(ev.clientX - startX) < 5 && Math.abs(ev.clientY - startY) < 5) return;
       begin();
     }
-    layout(ev.clientX - startX);
+    layout(dragDX(ev.clientX));
     ev.preventDefault();
   };
 
   // finish(commit): pointerUP commits the reorder; pointerCANCEL (OS/scroll interruption, lost capture)
   // ABORTS it — restore the original layout, no DOM reorder, no POST. Only a real drop reorders.
   const finish = commit => {
+    if(autoRAF){ cancelAnimationFrame(autoRAF); autoRAF = 0; }
     tab.removeEventListener("pointermove", onMove);
     tab.removeEventListener("pointerup", onUp);
     tab.removeEventListener("pointercancel", onCancel);
@@ -195,6 +286,7 @@ function startDrag(e, tab){
       tab.style.transition = ""; tab.style.transform = "";
       document.body.classList.remove("dragging-tab");
       dragging = false;
+      updateTabOverflow();
       return;
     }
     // Final order = the other tabs with the dragged one inserted at its hovered slot (toK).
@@ -220,6 +312,7 @@ function startDrag(e, tab){
       tab.style.transform = "";
       document.body.classList.remove("dragging-tab");
       dragging = false;
+      updateTabOverflow();
       // NOTE: do NOT re-render here with a locally-guessed active — the strip's `.active` class was
       // never touched during the drag, so the client's viewed tab stays highlighted, and the DOM is
       // already in final order. The server's Active flag is NOT the client's viewed tab (there is no
