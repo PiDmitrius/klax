@@ -6,9 +6,9 @@
 import { TurnModel } from "./model.js";
 import { renderSession, beginShift, playShift, fadeOutDivider, DIVIDER_FADE_MS, pos, parsePos, decodePos } from "./render.js";
 import { tailLoop } from "./events.js";
-import { api, getToken, setToken } from "./base.js";
+import { api, getToken, setToken, copyText, flashCopied } from "./base.js";
 import { selectionInLog } from "./scroll.js";
-import { initCompose, saveDraft, loadDraft, dropDraft } from "./compose.js";
+import { initCompose, saveDraft, loadDraft, dropDraft, recoverOutbox } from "./compose.js";
 import { initTabs, reconcileSessions, renderTabs } from "./tabs.js";
 import { injectEmojiFont } from "./emoji.js";
 
@@ -34,6 +34,7 @@ const COMMIT_MS = 200;
 const MERGE_JOIN_MS = 180;
 let liveBusy = false, liveDirty = false, liveGateTimer = 0;
 let sessionList = []; // last /api/sessions list — for hash-change validity + lookups
+let outboxRecovered = false; // one-shot: restore the durable send-outbox into composers on first load
 const offsetFor = {}, moreFor = {}; // created -> first-loaded turn index + has-older-history flag (pagination)
 const loadingOlder = {}; // created -> a loadOlder() is in flight (guards the auto-load-on-scroll + the initial fill)
 // Timeline window (anchored on the "непрочитанные сообщения" line = the read watermark). Measured in
@@ -541,6 +542,9 @@ async function selectSession(created){
   // math below, then re-baseline the resize observer so the swap itself doesn't anchor.
   if(switching){ loadDraft(created); syncComposerH(); }
   if(location.hash !== "#" + created) location.hash = String(created);
+  // Persist the viewed tab per-browser so a FRESH open (no URL hash — bookmark, new tab, base URL)
+  // restores it instead of falling back to the first tab. Cheap; survives reloads and restarts.
+  try { localStorage.setItem("klax_active", String(created)); } catch(e){}
   if(!loaded[created]){
     // Not yet loaded: load first (loadTranscript seeds readThrough from the server and then
     // positions the view — jump to the divider if unread, else the bottom).
@@ -566,6 +570,13 @@ async function onSessionsList(list){
   list = list || [];
   const oldList = sessionList;
   sessionList = list;
+  // Restore any submitted-but-unconfirmed messages (durable outbox) BEFORE the first tab is selected,
+  // so the active tab's recovered text loads straight into the composer via selectSession→loadDraft.
+  // Runs once, as soon as we know the session list.
+  if(!outboxRecovered && list.length){
+    outboxRecovered = true;
+    recoverOutbox({ isLive: c => list.some(s => s.created === c), notice: showNotice });
+  }
   const affected = new Set();
   let activeReadAdvanced = false;
   for(const s of list){
@@ -597,7 +608,12 @@ async function onSessionsList(list){
   if(activeReadAdvanced && loaded[active]) commitLive(active);
   else if(affected.has(active) && loaded[active]) scheduleLiveRerender(active);
   if(!active && list.length){
-    const want = parseInt(location.hash.slice(1), 10);
+    // Restore priority: explicit URL hash → this browser's last-viewed tab (localStorage) →
+    // the server's active flag → first tab. Both remembered ids fall through if that session
+    // was since closed (find returns undefined), so a stale value can never strand the UI.
+    let stored = 0;
+    try { stored = parseInt(localStorage.getItem("klax_active"), 10) || 0; } catch(e){}
+    const want = parseInt(location.hash.slice(1), 10) || stored;
     const a = list.find(s => s.created === want) || list.find(s => s.active) || list[0];
     if(a) await selectSession(a.created);
   }
@@ -630,28 +646,6 @@ function onNoticeEvent(text){
 
 // toggleToBottom shows the down-arrow affordance only when the user has scrolled up.
 function toggleToBottom(){ const b = document.getElementById("tobottom"); if(b) b.classList.toggle("hidden", atBottom()); }
-
-// fallbackCopy uses the legacy execCommand path for insecure/plain-HTTP origins where
-// navigator.clipboard is unavailable.
-function fallbackCopy(text, ok){
-  try {
-    const ta = document.createElement("textarea");
-    ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
-    document.body.appendChild(ta); ta.select(); document.execCommand("copy"); document.body.removeChild(ta);
-    if(ok) ok();
-  } catch(e){}
-}
-function copyText(text, ok){
-  if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(ok).catch(() => fallbackCopy(text, ok));
-  else fallbackCopy(text, ok);
-}
-function flashCopied(el){
-  if(!el) return;
-  el.classList.remove("copyflash");
-  void el.offsetWidth;
-  el.classList.add("copyflash");
-  el.addEventListener("animationend", () => el.classList.remove("copyflash"), { once: true });
-}
 
 // setDegraded turns the top-left logo amber while the live channel is down (the poll loop
 // is failing and backing off) and restores it on the next good poll — an explicit,
@@ -703,9 +697,25 @@ const host = {
 };
 
 async function onNewSession(created){ await syncSessions(); await selectSession(created); }
+// neighborCreated returns the tab to focus after `closed` is removed: the one to its LEFT (like a
+// browser), or the one to its RIGHT if it was the leftmost. Read from the current strip order.
+function neighborCreated(closed){
+  const idx = sessionList.findIndex(s => s.created === closed);
+  if(idx < 0) return 0;
+  const n = sessionList[idx - 1] || sessionList[idx + 1];
+  return n ? n.created : 0;
+}
 async function afterClose(created){
+  // Closing the ACTIVE tab focuses its neighbor (left, else right) — not a jump to the first tab.
+  // Closing a background tab never moves focus. Compute the neighbor while `closed` is still in the
+  // strip order, select it before syncSessions so onSessionsList keeps it (no auto-pick of the first).
+  const wasActive = created === active;
+  const next = wasActive ? neighborCreated(created) : 0;
   model.drop(created); delete loaded[created]; markRead(created); dropDraft(created);
-  if(created === active) active = 0;
+  if(wasActive){
+    active = 0;
+    if(next) await selectSession(next);
+  }
   await syncSessions();
 }
 

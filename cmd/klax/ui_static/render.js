@@ -169,18 +169,8 @@ function indicator(state, note, onAbort){
   return d;
 }
 
-function reusableImages(col){
-  const bySrc = new Map();
-  col.querySelectorAll("img.att[src]").forEach(img => {
-    const src = img.getAttribute("src");
-    if(!src) return;
-    const list = bySrc.get(src) || [];
-    list.push(img);
-    bySrc.set(src, list);
-  });
-  return bySrc;
-}
-
+// reuseImages swaps a freshly-built node's img.att elements with same-src already-loaded ones from a
+// map of discarded nodes' images, so a rebuilt bubble that shows the same image doesn't reload it.
 function reuseImages(root, bySrc){
   root.querySelectorAll("img.att[src]").forEach(img => {
     const src = img.getAttribute("src");
@@ -237,29 +227,47 @@ function stamp(node, key, sig){
 // render (no markdown re-parse, no repaint) — only changed blocks and transient indicators update.
 function childSig(kind, extra){ return JSON.stringify([kind, extra]); }
 
+// reconcileChildren makes parent's children exactly `desired` (in that order), IN PLACE — reused
+// nodes are moved with insertBefore, NEVER detached through a document fragment. Keeping a node
+// attached to the live document across a re-render is what stops an <img> attachment from blanking /
+// flickering for a frame: a fragment detach (or re-parenting into a brand-new container) forces the
+// browser to re-decode the image on re-attach, which is exactly the flicker. An unchanged node that
+// keeps its position isn't touched at all.
+function reconcileChildren(parent, desired){
+  const want = new Set(desired);
+  for(const ch of Array.from(parent.children)) if(!want.has(ch)) parent.removeChild(ch);
+  let ref = parent.firstChild;
+  for(const node of desired){
+    if(node === ref){ ref = ref.nextSibling; continue; }
+    parent.insertBefore(node, ref); // move an existing child (or insert a new one) before ref
+  }
+}
+
 // buildTurn renders a user turn, REUSING unchanged child nodes from `old` verbatim so a streaming
 // delta or a run→done flip only touches the block that changed — the finished blocks above never
-// re-parse or flicker. `old` is the previous turn node (or null for a fresh build).
+// re-parse or flicker. `old` is the previous turn node, REUSED AS THE CONTAINER and reconciled in
+// place (children are never re-parented into a fresh div), or null for a fresh build.
 function buildTurn(it, onAbort, old){
-  const turn = document.createElement("div");
+  const turn = old || document.createElement("div");
   turn.className = "turn"; turn.dataset.seq = it.seq;
   const reuse = new Map();
-  if(old) Array.from(old.children).forEach(ch => {
+  Array.from(turn.children).forEach(ch => {
     if(ch.dataset && ch.dataset.flip && ch.dataset.csig !== undefined) reuse.set(ch.dataset.flip, ch);
   });
-  // put appends a child, reusing the old node verbatim when its signature is unchanged. When a
+  const desired = []; // ordered child nodes; reconciled into `turn` in place at the end
+  // put queues a child, reusing the old node verbatim when its signature is unchanged. When a
   // bubble's content changed but its FLIP key is the same, patch the existing .msg in place instead
   // of replacing it: wrapped monospace tool text otherwise visibly blinks during tail re-syncs.
   const put = (key, sig, make, patch) => {
     const o = reuse.get(key);
-    if(o && o.dataset.csig === sig){ reuse.delete(key); turn.appendChild(o); return; }
+    if(o && o.dataset.csig === sig){ reuse.delete(key); desired.push(o); return; }
     if(o && patch && patch(o)){
       reuse.delete(key);
       o.dataset.flip = key; o.dataset.csig = sig;
-      turn.appendChild(o);
+      desired.push(o);
       return;
     }
-    const el = make(); el.dataset.flip = key; el.dataset.csig = sig; turn.appendChild(el);
+    const el = make(); el.dataset.flip = key; el.dataset.csig = sig; desired.push(el);
   };
   const patchBubble = (cls, html, time, dataPos, raw) => old => {
     if(!old.classList || !old.classList.contains("msg")) return false;
@@ -270,7 +278,7 @@ function buildTurn(it, onAbort, old){
   put("u", userSig, () => bubble("user", userHTML, it.time, undefined, it.text),
     patchBubble("user", userHTML, it.time, undefined, it.text));
   for(const g of it.groups){
-    if(g.divider){ turn.appendChild(divider()); continue; } // a fresh in-flow node; dismissal fades it via fadeOutDivider, then the next render drops it
+    if(g.divider){ desired.push(divider()); continue; } // a fresh in-flow node; dismissal fades it via fadeOutDivider, then the next render drops it
     const fk = "g:" + g.startPos;
     const cls = g.cls + (g.joinPrev ? " join-prev" : "") + (g.joinNext ? " join-next" : "");
     const sig = childSig("g", { cls: g.cls, tool: g.tool, time: g.time, maxPos: g.maxPos, joinPrev: !!g.joinPrev, joinNext: !!g.joinNext,
@@ -294,6 +302,7 @@ function buildTurn(it, onAbort, old){
     put("g:ctx:" + it.seq, ctxSig, () => bubble("tool", ctxHTML, it.ctxTime, undefined, it.ctxLine),
       patchBubble("tool", ctxHTML, it.ctxTime, undefined, it.ctxLine));
   }
+  reconcileChildren(turn, desired); // apply the child order IN PLACE — reused nodes stay attached
   return turn;
 }
 
@@ -305,25 +314,49 @@ function buildItem(it, onAbort){
 
 export function paint(col, items, onAbort){
   const nodes = reusableNodes(col);
-  const frag = document.createDocumentFragment();
+  const desired = []; // ordered final nodes, reconciled into `col` in place (no fragment detach)
+  const fresh = [];   // freshly-built nodes that may hold NEW <img> elements to reconnect
   items.forEach((it, index) => {
     const key = renderKey(it, index);
     const sig = renderSig(it);
     const old = key && nodes.get(key);
     if(old && old.dataset.renderSig === sig){
       nodes.delete(key); // a duplicate key later must build fresh, not steal this node
-      frag.appendChild(old);
+      desired.push(old); // reuse verbatim, in place
       return;
     }
-    // A changed/new turn is rebuilt REUSING its unchanged child nodes from the old turn (verbatim, no
-    // re-parse); other item kinds are built fresh. Consume the old key either way.
-    const built = it.kind === "turn" ? buildTurn(it, onAbort, old || null) : buildItem(it, onAbort);
+    // A changed/new turn is reconciled INTO its old container (reusing unchanged children verbatim, no
+    // re-parse); other kinds are built fresh. Consume the old key either way.
+    let built, reusedContainer = false;
+    if(it.kind === "turn"){
+      const oc = old && old.classList && old.classList.contains("turn") ? old : null;
+      built = buildTurn(it, onAbort, oc);
+      reusedContainer = !!oc; // its children (incl. images) were reused in place — no new imgs to swap
+    } else {
+      built = buildItem(it, onAbort);
+    }
     if(old) nodes.delete(key);
-    frag.appendChild(stamp(built, key, sig));
+    const stamped = stamp(built, key, sig);
+    desired.push(stamped);
+    if(!reusedContainer) fresh.push(stamped);
   });
-  const images = reusableImages(col);
-  reuseImages(frag, images);
-  col.replaceChildren(frag);
+  // Preserve already-loaded images: swap a NEW img.att in a freshly-built node with the same-src node
+  // from a DISCARDED old node (the un-consumed `nodes` — about to be removed), never from a still-
+  // present reused node. In-place node reuse already keeps most images attached; this covers a node
+  // that was genuinely rebuilt (e.g. a bubble split/merge) but shows the same image.
+  if(fresh.length && nodes.size){
+    const bySrc = new Map();
+    nodes.forEach(node => {
+      if(!node.querySelectorAll) return;
+      node.querySelectorAll("img.att[src]").forEach(img => {
+        const src = img.getAttribute("src"); if(!src) return;
+        let list = bySrc.get(src); if(!list){ list = []; bySrc.set(src, list); }
+        list.push(img);
+      });
+    });
+    if(bySrc.size) fresh.forEach(node => reuseImages(node, bySrc));
+  }
+  reconcileChildren(col, desired);
 }
 
 export function renderSession(col, turns, unreadAfter, onAbort, holdSplits, joinHeldSplits){

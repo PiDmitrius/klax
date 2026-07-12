@@ -59,7 +59,14 @@
   #bar .logo.degraded { animation: logowarn 1.8s ease-in-out infinite; }
   @keyframes logowarn { 50% { opacity: .5; } }
   @media (prefers-reduced-motion: reduce) { #bar .logo.degraded { animation: none; } }
-  #tabs { display: flex; gap: 4px; overflow-x: auto; flex: 1; min-width: 0; }
+  /* The strip scrolls horizontally, but overflow-x:auto also clips vertically — cutting the active
+     tab's border and the lifted tab's shadow at the strip edges. Padding enlarges the clip box so both
+     paint fully, and an equal NEGATIVE margin pulls that padding back out of the layout, so the strip's
+     size and the tabs' positions are UNCHANGED — the extra room is purely a bleed area for the shadow.
+     The native scrollbar is hidden (it ate vertical space); wheel/trackpad still scrolls. */
+  #tabs { display: flex; gap: 4px; overflow-x: auto; flex: 1; min-width: 0; scrollbar-width: none;
+          padding: 6px 4px; margin: -6px -4px; }
+  #tabs::-webkit-scrollbar { display: none; }
   #bar > button { flex: none; padding: 4px 10px; font-size: 15px; line-height: 1; }
   .tab { padding: 6px 12px; border-radius: 8px; white-space: nowrap; cursor: pointer;
          border: 1px solid transparent; display: flex; align-items: center; gap: 6px; }
@@ -91,6 +98,15 @@
   .tab .tx { margin-left: 2px; color: var(--muted); opacity: 0; font-size: 12px; cursor: pointer; }
   .tab:hover .tx, .tab.active .tx { opacity: .65; }
   .tab .tx:hover { opacity: 1; color: var(--error-fg); }
+  /* Drag-and-drop reorder (animated sortable): the grabbed tab LIFTS and glues to the cursor while
+     the others slide apart to open its landing slot; on release it settles into place. No ghost, no
+     marker — the live arrangement IS the preview. The dragged tab's transform is driven inline (JS);
+     these classes carry the lift chrome and the settle transition. */
+  .tab.tabdrag { z-index: 30; position: relative; background: var(--panel);
+    box-shadow: 0 1px 4px rgba(0,0,0,.25); } /* OPAQUE while lifted; light minimal shadow, not bottom-heavy */
+  .tab.active.tabdrag { background: var(--tab-active-bg); border-color: var(--tab-active-border); } /* keep the selected outline */
+  .tab.tabsettle { transition: transform .18s cubic-bezier(.2,.7,.3,1), box-shadow .18s ease; }
+  body.dragging-tab, body.dragging-tab .tab { cursor: grabbing; user-select: none; }
   .stop { margin-left: 10px; padding: 2px 8px; font-size: 12px; border-radius: 6px; cursor: pointer;
           background: var(--error-bg); color: var(--error-fg); border: 1px solid var(--border); }
 
@@ -307,16 +323,18 @@
   .sfield > label { display: block; color: var(--muted); font-size: 13px; margin-bottom: 5px; }
   .sfield input, .sfield textarea { width: 100%; padding: 7px 9px; border-radius: 8px;
                  border: 1px solid var(--border); background: var(--panel); color: var(--fg); font: inherit; }
-  .sfield textarea { resize: vertical; min-height: 38px; line-height: 1.4; }
+  .sfield textarea { resize: vertical; min-height: 34px; line-height: 1.4; } /* one line by default; drag to grow */
   .sfield input:disabled, .sfield textarea:disabled { opacity: .45; cursor: not-allowed; }
   .sbusy { background: var(--tool-bg); color: var(--tool-fg); border-radius: 8px; padding: 7px 10px;
            font-size: 12px; margin-bottom: 12px; }
   .ssep { height: 1px; background: var(--border); margin: 12px 0; opacity: .6; }
-  .sctx-label { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
-  .sctx-bar { height: 7px; border-radius: 4px; background: var(--tool-bg); overflow: hidden; }
-  .sctx-fill { height: 100%; background: var(--accent); border-radius: 4px; transition: width .25s; }
-  .sctx-fill.hot { background: var(--warn); }
-  .sctx-fill.crit { background: var(--error-fg); }
+  .sfact { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; font-size: 12px; margin-top: 6px; }
+  .sfact-k { color: var(--muted); flex: none; }
+  .sfact-v { color: var(--fg); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The UUID is click-to-copy and MUST look identical to inline code everywhere else
+     (timeline .body code) — same chip + the same shared .copyflash animation on copy. */
+  .sfact code.suuid { background: var(--code-bg); padding: 1px 4px; border-radius: 4px; cursor: pointer;
+    overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .smodal-actions { display: flex; justify-content: flex-end; margin-top: 14px; }
   .smodal-ok { min-width: 76px; background: var(--accent); color: #fff; border-color: var(--accent); }
   .hidden { display: none !important; }

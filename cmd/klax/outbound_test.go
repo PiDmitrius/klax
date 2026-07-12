@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/PiDmitrius/klax/internal/sealref"
 	"github.com/PiDmitrius/klax/internal/sessfiles"
 	"github.com/PiDmitrius/klax/internal/session"
 )
@@ -30,11 +29,7 @@ func TestRewriteOutboundForUI(t *testing.T) {
 	d.store = &session.Store{Chats: map[string]*session.ChatSessions{}, Scope: map[string]*session.ScopeDefaults{}}
 	d.store.New("tg:1", "one", cwd, session.ScopeDefaults{})
 	d.runners = make(map[runnerKey]*sessionRunner)
-	s, err := sealref.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	d.sealer = s
+	d.uiHub = newUIHub() // UI on: the file-link rewrite is enabled
 	created := d.store.SessionsFor("tg:1")[0].Created
 
 	md := "img ![c](chart.png) esc [r](../../../etc/passwd) web [w](https://x.com/a)"
@@ -65,9 +60,9 @@ func TestRewriteOutboundForUI(t *testing.T) {
 		t.Fatalf("outbound file was not snapshotted into %s", filesDir)
 	}
 
-	// With no sealer (UI off) the markdown is returned unchanged.
-	d.sealer = nil
+	// With the UI off the markdown is returned unchanged.
+	d.uiHub = nil
 	if got := d.rewriteOutboundForUI("tg:1", created, md); got != md {
-		t.Fatalf("no-sealer must pass through unchanged: %q", got)
+		t.Fatalf("UI-off must pass through unchanged: %q", got)
 	}
 }

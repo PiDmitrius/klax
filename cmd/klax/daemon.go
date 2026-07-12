@@ -21,7 +21,6 @@ import (
 	"github.com/PiDmitrius/klax/internal/config"
 	"github.com/PiDmitrius/klax/internal/max"
 	"github.com/PiDmitrius/klax/internal/runner"
-	"github.com/PiDmitrius/klax/internal/sealref"
 	"github.com/PiDmitrius/klax/internal/sessfiles"
 	"github.com/PiDmitrius/klax/internal/session"
 	"github.com/PiDmitrius/klax/internal/tg"
@@ -57,30 +56,41 @@ type runnerKey struct {
 }
 
 type daemon struct {
-	cfg        *config.Config
-	state      *session.State
-	transports map[string]transport.Transport // "tg" -> tg.Bot, "mx" -> max.Bot
-	formats    map[string]string              // "tg" -> "html", "vk" -> ""
-	disabled   map[string]bool                // disabled transports
-	pollCtx    map[string]context.CancelFunc  // cancel functions for poll goroutines
-	sources    map[string]Source              // inbound channels by name (tg/mx/vk/ui)
-	store      *session.Store
-	runners    map[runnerKey]*sessionRunner // (sessionKey, created) -> runner+queue
-	runnersMu  sync.Mutex
-	mu         sync.Mutex
-	draining   bool           // stop accepting new tasks, wait for current to finish
-	drainWg    sync.WaitGroup // tracks active sessionRunners for drain
-	sendPause  map[string]time.Time
-	sendFails  map[string]int
-	chatEvents map[string]uint64
-	identities map[int64]string  // telegram userID -> canonical user ID
-	maxIdents  map[int64]string  // max userID -> canonical user ID
-	vkIdents   map[int]string    // vk userID -> canonical user ID
-	groupChats map[string]string // chatID -> CWD for group mode chats
-	groupVerb  map[string]bool   // chatID -> verbose progress output for group mode chats
-	tgRich     atomic.Bool       // global: render Telegram replies as Rich Messages (/rich)
-	uiHub      *uiHub            // web UI event hub; nil when the UI is not configured
-	sealer     *sealref.Sealer   // mints/opens file capability refs; nil when UI is off
+	cfg          *config.Config
+	state        *session.State
+	transports   map[string]transport.Transport // "tg" -> tg.Bot, "mx" -> max.Bot
+	formats      map[string]string              // "tg" -> "html", "vk" -> ""
+	disabled     map[string]bool                // disabled transports
+	pollCtx      map[string]context.CancelFunc  // cancel functions for poll goroutines
+	sources      map[string]Source              // inbound channels by name (tg/mx/vk/ui)
+	store        *session.Store
+	runners      map[runnerKey]*sessionRunner // (sessionKey, created) -> runner+queue
+	runnersMu    sync.Mutex
+	mu           sync.Mutex
+	draining     bool           // stop accepting new tasks, wait for current to finish
+	drainWg      sync.WaitGroup // tracks active sessionRunners for drain
+	sendPause    map[string]time.Time
+	sendFails    map[string]int
+	chatEvents   map[string]uint64
+	identities   map[int64]string    // telegram userID -> canonical user ID
+	maxIdents    map[int64]string    // max userID -> canonical user ID
+	vkIdents     map[int]string      // vk userID -> canonical user ID
+	groupChats   map[string]string   // chatID -> CWD for group mode chats
+	groupVerb    map[string]bool     // chatID -> verbose progress output for group mode chats
+	tgRich       atomic.Bool         // global: render Telegram replies as Rich Messages (/rich)
+	uiHub        *uiHub              // web UI event hub; nil when the UI is not configured (also the "UI on" gate)
+	fileTokens   map[string]tokenRef // durable per-file access token -> its (session, stored file)
+	fileTokensMu sync.Mutex          // rebuilt from each session's links.json at startup
+	sessStores   map[runnerKey]*sessfiles.Store // ONE canonical durable Store per (sk,created)
+	sessStoresMu sync.Mutex                      // shared by runner/read-model/file-links/delete
+}
+
+// tokenRef locates the file a durable access token addresses. The token itself lives in the session's
+// links.json (stable across rebuilds/restarts); this in-memory index resolves it at serve time.
+type tokenRef struct {
+	sk      string
+	created int64
+	stored  string
 }
 
 func startupBackoff(attempt int) time.Duration {
@@ -166,12 +176,12 @@ func (d *daemon) getRunner(sk string, created int64) *sessionRunner {
 	defer d.runnersMu.Unlock()
 	sr, ok := d.runners[key]
 	if !ok {
-		sr = &sessionRunner{runner: runner.New(), store: sessfiles.Open(sk, created)}
+		sr = &sessionRunner{runner: runner.New(), store: d.sessionStore(sk, created)}
 		d.runners[key] = sr
 	} else if sr.store == nil {
 		// A runner injected without a store (only happens in tests that pre-populate
-		// d.runners directly) gets one lazily, so the durable-queue path never nils.
-		sr.store = sessfiles.Open(sk, created)
+		// d.runners directly) gets the CANONICAL one, so the durable-queue path never nils.
+		sr.store = d.sessionStore(sk, created)
 	}
 	return sr
 }
@@ -193,23 +203,35 @@ func (d *daemon) dropRunner(sk string, created int64) {
 	d.runnersMu.Unlock()
 }
 
-// removeSessionStore deletes a session's durable files + queue log. It removes via
-// the runner-owned store when one exists, so the "removed" latch lands on the SAME
-// *Store instance an in-flight run holds — a fresh Open() would latch a different
-// object and the run's late Mark* could recreate (resurrect) the directory. Call it
-// BEFORE dropRunner, while the runner still exists.
-// sessionStore returns the durable store for a session, preferring the runner-owned
-// instance when one exists so the removed-latch is shared with any in-flight run — a
-// fresh Open has its own latch and could resurrect a just-deleted dir (the F3 class).
+// sessionStore returns the ONE canonical durable Store for a session — the SAME *sessfiles.Store
+// instance for every caller (runner, read model, file links, delete). This is essential: a Store's
+// mutex and its `removed` latch are per-instance, so if different callers used separate Open()'d
+// instances, a late EnsureLink/Enqueue on one could re-create a directory another had just RemoveAll'd
+// (resurrection). Kept even after Remove — the removed instance's latch is what makes any late call
+// return ErrRemoved instead of resurrecting; a fresh Open would have a clean latch. The registry is
+// keyed by (sk,created), which is unique-and-never-reused, so it grows only with distinct sessions.
 func (d *daemon) sessionStore(sk string, created int64) *sessfiles.Store {
-	if sr := d.lookupRunner(sk, created); sr != nil && sr.store != nil {
-		return sr.store
+	key := runnerKey{sk: sk, created: created}
+	d.sessStoresMu.Lock()
+	defer d.sessStoresMu.Unlock()
+	if d.sessStores == nil {
+		d.sessStores = make(map[runnerKey]*sessfiles.Store)
 	}
-	return sessfiles.Open(sk, created)
+	st, ok := d.sessStores[key]
+	if !ok {
+		st = sessfiles.Open(sk, created)
+		d.sessStores[key] = st
+	}
+	return st
 }
 
+// removeSessionStore deletes a session's durable dir (files/ + queue.jsonl + links.json). It removes
+// via the CANONICAL store (sessionStore), so the `removed` latch lands on the one instance every other
+// caller shares — a late Enqueue/Mark*/EnsureLink then returns ErrRemoved instead of resurrecting the
+// dir. The instance stays in the registry so that latch keeps protecting it.
 func (d *daemon) removeSessionStore(sk string, created int64) {
 	_ = d.sessionStore(sk, created).Remove()
+	d.dropFileTokens(sk, created) // the session dir (files/ + links.json) is gone — forget its tokens
 }
 
 // isSessionBusy reports whether the session has work in flight or queued.
@@ -557,9 +579,7 @@ func runDaemon() {
 		}
 		if len(uiTokens) > 0 {
 			d.uiHub = newUIHub()
-			if d.sealer, err = sealref.New(); err != nil {
-				log.Fatalf("ui: sealer init: %v", err)
-			}
+			d.rebuildFileTokenIndex() // load every session's links.json so existing tokens resolve at once
 			d.transports["ui"] = &uiTransport{d: d}
 			d.formats["ui"] = ""
 			d.sources["ui"] = &uiServer{d: d, addr: cfg.UIListen, tokens: uiTokens}
@@ -677,16 +697,8 @@ func (d *daemon) notifyAllUsers(text string) {
 	d.uiNotifyAll(text)
 }
 
-// drainMaxWait bounds how long a restart waits for active sessions to finish. Without it a session
-// that never idles — e.g. a long-lived agent conversation running THROUGH this daemon, which stays
-// active across every turn — blocks the drain forever, so `klax update` installs a new binary but
-// the old process never exits to pick it up. On timeout we force the restart; the interrupted
-// turn's durable "run" record is recovered (never auto-rerun) on the next start, so no double side
-// effects, and startup replay re-runs anything still "enq".
-const drainMaxWait = 2 * time.Minute
-
 // startDrain puts the daemon into draining mode.
-// Waits for current task AND queued tasks to finish (bounded by drainMaxWait) before shutting down.
+// Waits for the current task AND queued tasks to finish before shutting down.
 func (d *daemon) startDrain(reason string) {
 	d.mu.Lock()
 	if d.draining {
@@ -714,18 +726,58 @@ func (d *daemon) startDrain(reason string) {
 	}
 	d.runnersMu.Unlock()
 
-	// Wait for all active session runners to finish — bounded, so a persistent/wedged session cannot
-	// block the restart forever (see drainMaxWait).
+	// KLAX UPDATE INVARIANT — set the marker and WAIT FOREVER. We NEVER force a restart out from under
+	// a live run: an active session (notably a long-lived agent conversation running THROUGH this
+	// daemon — its turn IS the run we are draining) is waited on unconditionally, never cut mid-turn.
+	// The canonical `klax update` flow is: write the marker, report, and END THE TURN — the run then
+	// frees on its own and the drain completes, so systemd picks up the new binary. A bounded/forced
+	// restart would sever a turn "на ровном месте"; that is exactly the behaviour this invariant bans.
 	log.Println("waiting for all sessions to drain...")
+	// The wait is unbounded (invariant above), but NOT silent: while a run is still active, log a
+	// periodic heartbeat naming the busy chats so an operator watching `klax update` hang can see WHY
+	// and which session to `/abort` if one has genuinely wedged. This forces nothing — it only makes
+	// the wait diagnosable instead of a single line printed once at drain start.
 	done := make(chan struct{})
 	go func() { d.drainWg.Wait(); close(done) }()
-	select {
-	case <-done:
-		log.Println("all sessions drained")
-	case <-time.After(drainMaxWait):
-		log.Printf("drain timed out after %s — forcing restart with sessions still active", drainMaxWait)
+	waitStart := time.Now()
+	tick := time.NewTicker(30 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-done:
+			log.Println("all sessions drained")
+			d.shutdown()
+			return
+		case <-tick.C:
+			busy := d.busyChats()
+			log.Printf("still draining after %s — %d session(s) active%s; /abort a wedged chat to unstick",
+				time.Since(waitStart).Round(time.Second), len(busy), formatBusyChats(busy))
+		}
 	}
-	d.shutdown()
+}
+
+// busyChats lists the chat ids with an active (running or queued) runner — used only for the drain
+// heartbeat log so an operator can see which session is holding up a restart.
+func (d *daemon) busyChats() []string {
+	d.runnersMu.Lock()
+	defer d.runnersMu.Unlock()
+	var out []string
+	for key, sr := range d.runners {
+		sr.mu.Lock()
+		active := sr.processing || len(sr.queue) > 0 || sr.runner.IsBusy()
+		sr.mu.Unlock()
+		if active {
+			out = append(out, key.sk)
+		}
+	}
+	return out
+}
+
+func formatBusyChats(chats []string) string {
+	if len(chats) == 0 {
+		return ""
+	}
+	return " [" + strings.Join(chats, ", ") + "]"
 }
 
 func (d *daemon) saveStore() {

@@ -371,13 +371,43 @@ func (d *daemon) queuedCount(sk string, created int64) int {
 	return n
 }
 
-// newUISession creates a fresh active session for a UI chat and returns it so
-// the caller can switch the client to it.
-func (d *daemon) newUISession(sk, chatID string) *session.Session {
-	sess, _ := d.createSession(chatID, sk, "session")
+// createUISessionAtomic creates a new UI session already fully configured. The session is VALIDATED
+// and FORMED entirely outside the shared store, then inserted with a single Store.Add (one lock) and
+// saved + announced once — so a concurrent /api/sessions can never observe a defaults or half-built
+// placeholder, a rejected patch creates nothing at all, and a crash before the save leaves nothing.
+// Returns the created session, or the settings error with NOTHING created.
+func (d *daemon) createUISessionAtomic(sk, chatID string, patch uiSettingsPatch) (*session.Session, error) {
+	def := d.scopeDefaults(sk)
+	backend := resolveSessionBackend(nil, def, d.cfg.GetDefaultBackend())
+	// Seed a message-less session from the scope defaults (what createSession would have produced),
+	// then validate + apply the draft on it — all in memory, before the store is touched.
+	sess := &session.Session{
+		Name:          "session",
+		Backend:       backend,
+		ModelOverride: def.Model,
+		ThinkOverride: def.Think,
+		Sandbox:       effectiveSandboxMode(def, nil),
+		ClaudeTTY:     def.ClaudeTTY && backend == "claude",
+		CWD:           d.defaultSessionCWD(chatID, sk),
+	}
+	if draftHasFields(patch) {
+		r, err := validateSettingsPatch(sess, backend, false, patch) // fresh session: never busy/locked
+		if err != nil {
+			return nil, err
+		}
+		applySettingsPatch(sess, r)
+	}
+	newDefaults := session.ScopeDefaults{
+		Backend:   resolveSessionBackend(sess, def, d.cfg.GetDefaultBackend()),
+		Model:     sess.ModelOverride,
+		Think:     sess.ThinkOverride,
+		Sandbox:   sess.Sandbox,
+		ClaudeTTY: sess.ClaudeTTY,
+	}
+	created := d.store.AddWithDefaults(sk, sess, &newDefaults) // session + its template: one store commit
 	d.saveStore()
 	d.broadcastSessions(sk)
-	return sess
+	return created, nil
 }
 
 // renameSession renames one session (by Created) and pushes the updated tab strip.
@@ -387,6 +417,17 @@ func (d *daemon) renameSession(sk string, created int64, name string) bool {
 		return false
 	}
 	if d.store.UpdateSession(sk, created, func(cur *session.Session) { cur.Name = name }) == nil {
+		return false
+	}
+	d.saveStore()
+	d.broadcastSessions(sk)
+	return true
+}
+
+// reorderSessions applies the tab strip's drag-and-drop order (by Created id) and
+// pushes the updated strip. A no-op order change persists nothing.
+func (d *daemon) reorderSessions(sk string, order []int64) bool {
+	if !d.store.Reorder(sk, order) {
 		return false
 	}
 	d.saveStore()
@@ -646,6 +687,7 @@ func (s *uiServer) routes() http.Handler {
 	mux.HandleFunc("/api/read", s.handleRead)
 	mux.HandleFunc("/api/new", s.handleNew)
 	mux.HandleFunc("/api/rename", s.handleRename)
+	mux.HandleFunc("/api/reorder", s.handleReorder)
 	mux.HandleFunc("/api/close", s.handleClose)
 	mux.HandleFunc("/api/sessions", s.handleSessions)
 	mux.HandleFunc("/api/settings", s.handleSettings)
@@ -1068,8 +1110,27 @@ func (s *uiServer) handleNew(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// Optional initial settings from the "new session" draft dialog: the tab strip
+	// now defers creation until the draft is confirmed, sending the chosen fields
+	// here so the session is born configured. An empty body keeps the old behaviour.
+	var patch uiSettingsPatch
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil && err != io.EOF {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
 	sk := s.d.sessionKey(s.chatID(user))
-	sess := s.d.newUISession(sk, s.chatID(user))
+	// Atomic create: validate + configure the session, then a SINGLE save + broadcast. A rejected
+	// draft (e.g. an inaccessible cwd) creates nothing and returns the real reason; nothing external
+	// ever sees a defaults placeholder, and a crash before the save leaves no half-built session.
+	sess, err := s.d.createUISessionAtomic(sk, s.chatID(user), patch)
+	if err != nil {
+		status := http.StatusBadRequest
+		if ue, ok := err.(*uiErr); ok {
+			status = ue.status
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
 		Created int64 `json:"created"`
@@ -1103,6 +1164,28 @@ func (s *uiServer) handleRename(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *uiServer) handleReorder(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.auth(r)
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Order []int64 `json:"order"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	sk := s.d.sessionKey(s.chatID(user))
+	s.d.reorderSessions(sk, body.Order)
 	w.WriteHeader(http.StatusNoContent)
 }
 

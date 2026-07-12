@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
-	"time"
 )
 
 type ScopeDefaults struct {
@@ -21,7 +21,7 @@ type Session struct {
 	ID            string `json:"id"`                       // session UUID (claude or codex thread_id)
 	Name          string `json:"name"`                     // user-friendly name
 	CWD           string `json:"cwd"`                      // working directory
-	Created       int64  `json:"created"`                  // unix timestamp
+	Created       int64  `json:"created"`                  // monotonic per-chat session key (never reused; not a timestamp for new sessions)
 	LastUsed      int64  `json:"last_used"`                // unix timestamp
 	Active        bool   `json:"active"`                   // currently selected
 	Backend       string `json:"backend,omitempty"`        // "claude" (default) or "codex"
@@ -49,14 +49,27 @@ type Session struct {
 }
 
 type ChatSessions struct {
-	Sessions []*Session `json:"sessions"`
+	// HighWater is the legacy per-chat high-water written by development builds before session keys
+	// became store-global. normalize folds it into Store.HighWater and clears it; keep the field only
+	// so those stores migrate without reusing a deleted session's key.
+	HighWater int64      `json:"high_water,omitempty"`
+	Sessions  []*Session `json:"sessions"`
 }
 
 type Store struct {
-	mu    sync.Mutex
-	Chats map[string]*ChatSessions  `json:"chats"`
-	Scope map[string]*ScopeDefaults `json:"scope_defaults,omitempty"`
-	path  string
+	mu sync.Mutex
+	// HighWater is the store-global monotonic session-key counter. Every new klax session, regardless
+	// of chat, gets the next value, so MergeKeys can never combine colliding identities.
+	HighWater int64                     `json:"high_water,omitempty"`
+	Chats     map[string]*ChatSessions  `json:"chats"`
+	Scope     map[string]*ScopeDefaults `json:"scope_defaults,omitempty"`
+	path      string
+}
+
+// nextCreated advances the store-global high-water. Caller holds s.mu.
+func (s *Store) nextCreated() int64 {
+	s.HighWater++
+	return s.HighWater
 }
 
 func (s *Session) UnmarshalJSON(data []byte) error {
@@ -122,7 +135,7 @@ func LoadStore() (*Store, error) {
 	}
 
 	// Try new format first.
-	if err := json.Unmarshal(data, s); err == nil && (len(s.Chats) > 0 || len(s.Scope) > 0) {
+	if err := json.Unmarshal(data, s); err == nil && (s.HighWater > 0 || len(s.Chats) > 0 || len(s.Scope) > 0) {
 		s.normalize()
 		return s, nil
 	}
@@ -196,11 +209,13 @@ func (s *Store) Save() error {
 	}
 	path := s.path
 	payload := struct {
-		Chats map[string]*ChatSessions  `json:"chats"`
-		Scope map[string]*ScopeDefaults `json:"scope_defaults,omitempty"`
+		HighWater int64                     `json:"high_water,omitempty"`
+		Chats     map[string]*ChatSessions  `json:"chats"`
+		Scope     map[string]*ScopeDefaults `json:"scope_defaults,omitempty"`
 	}{
-		Chats: make(map[string]*ChatSessions, len(s.Chats)),
-		Scope: make(map[string]*ScopeDefaults, len(s.Scope)),
+		HighWater: s.HighWater,
+		Chats:     make(map[string]*ChatSessions, len(s.Chats)),
+		Scope:     make(map[string]*ScopeDefaults, len(s.Scope)),
 	}
 	for key, chat := range s.Chats {
 		payload.Chats[key] = &ChatSessions{Sessions: cloneSessions(chat.Sessions)}
@@ -250,16 +265,40 @@ func (s *Store) normalize() {
 		if chat.Sessions == nil {
 			chat.Sessions = []*Session{}
 		}
+		// Migrate the short-lived per-chat counter format into the one canonical global source.
+		if chat.HighWater > s.HighWater {
+			s.HighWater = chat.HighWater
+		}
+		chat.HighWater = 0
 		def := s.scope(key)
 		for _, sess := range chat.Sessions {
 			if sess == nil {
 				continue
+			}
+			// Lift the global counter to every existing key. Legacy timestamp keys therefore remain valid,
+			// while every new key is unique across all chats and safe under MergeKeys.
+			if sess.Created > s.HighWater {
+				s.HighWater = sess.Created
 			}
 			if sess.Backend == "" && sess.Messages > 0 {
 				sess.Backend = "claude"
 			}
 			if def.Backend == "" && sess.Backend != "" {
 				def.Backend = sess.Backend
+			}
+		}
+	}
+}
+
+// EachSession calls fn for every (chatID, Created) in the store under the lock — used at startup to
+// rebuild derived indexes (e.g. the file-token index) from each session's on-disk state.
+func (s *Store) EachSession(fn func(chatID string, created int64)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for chatID, cs := range s.Chats {
+		for _, sess := range cs.Sessions {
+			if sess != nil {
+				fn(chatID, sess.Created)
 			}
 		}
 	}
@@ -368,10 +407,11 @@ func (s *Store) Ensure(chatID, name, cwd string, defaults ScopeDefaults) *Sessio
 	for _, sess := range cs.Sessions {
 		sess.Active = false
 	}
+	created := s.nextCreated()
 	sess := &Session{
 		Name:          name,
 		CWD:           cwd,
-		Created:       nextCreated(cs.Sessions),
+		Created:       created,
 		Active:        true,
 		Backend:       def.Backend,
 		ModelOverride: def.Model,
@@ -397,10 +437,11 @@ func (s *Store) New(chatID, name, cwd string, defaults ScopeDefaults) *Session {
 	for _, sess := range cs.Sessions {
 		sess.Active = false
 	}
+	created := s.nextCreated()
 	sess := &Session{
 		Name:          name,
 		CWD:           cwd,
-		Created:       nextCreated(cs.Sessions),
+		Created:       created,
 		Active:        true,
 		Backend:       def.Backend,
 		ModelOverride: def.Model,
@@ -412,18 +453,31 @@ func (s *Store) New(chatID, name, cwd string, defaults ScopeDefaults) *Session {
 	return cloneSession(sess)
 }
 
-// nextCreated returns a Created timestamp guaranteed to be unique within the
-// given slice. The Created field is the canonical key used by both UpdateSession
-// and the per-session runner map, so collisions (rapid back-to-back /new in the
-// same wall-clock second) would silently merge runs.
-func nextCreated(existing []*Session) int64 {
-	now := time.Now().Unix()
-	for _, sess := range existing {
-		if sess != nil && sess.Created >= now {
-			now = sess.Created + 1
-		}
+// Add inserts an ALREADY-FORMED session into a chat ATOMICALLY: under a single lock it deactivates
+// the current active session, assigns a unique Created, marks the new one active, and appends it. No
+// intermediate or partially-configured state is ever visible to a concurrent SessionsFor — the whole
+// session is published in one operation. The store takes ownership of `sess`; a clone is returned.
+func (s *Store) Add(chatID string, sess *Session) *Session {
+	return s.AddWithDefaults(chatID, sess, nil)
+}
+
+// AddWithDefaults atomically publishes an already-formed session AND, when defaults is non-nil,
+// records that same session's new-session template. Keeping both mutations under one lock means two
+// concurrent creates cannot leave the older session's defaults as the final template.
+func (s *Store) AddWithDefaults(chatID string, sess *Session, defaults *ScopeDefaults) *Session {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cs := s.chat(chatID)
+	for _, existing := range cs.Sessions {
+		existing.Active = false
 	}
-	return now
+	sess.Created = s.nextCreated()
+	sess.Active = true
+	cs.Sessions = append(cs.Sessions, sess)
+	if defaults != nil {
+		*s.scope(chatID) = *defaults
+	}
+	return cloneSession(sess)
 }
 
 func (s *Store) Delete(chatID string, idx int) bool {
@@ -434,6 +488,54 @@ func (s *Store) Delete(chatID string, idx int) bool {
 		return false
 	}
 	cs.Sessions = append(cs.Sessions[:idx], cs.Sessions[idx+1:]...)
+	return true
+}
+
+// Reorder rearranges a chat's sessions to match the given order of Created ids
+// (the tab strip's drag-and-drop). Ids not present are ignored; sessions omitted
+// from the list keep their relative order after the listed ones, so a partial or
+// stale order can never drop a tab. Returns true if the order actually changed.
+func (s *Store) Reorder(chatID string, order []int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cs := s.chat(chatID)
+	if len(cs.Sessions) < 2 {
+		return false
+	}
+	rank := make(map[int64]int, len(order))
+	for i, id := range order {
+		if _, seen := rank[id]; !seen {
+			rank[id] = i
+		}
+	}
+	orig := make(map[int64]int, len(cs.Sessions))
+	for i, sess := range cs.Sessions {
+		orig[sess.Created] = i
+	}
+	sorted := make([]*Session, len(cs.Sessions))
+	copy(sorted, cs.Sessions)
+	sort.SliceStable(sorted, func(a, b int) bool {
+		ra, oka := rank[sorted[a].Created]
+		rb, okb := rank[sorted[b].Created]
+		if oka && okb {
+			return ra < rb
+		}
+		if oka != okb {
+			return oka // ids present in the requested order come first
+		}
+		return orig[sorted[a].Created] < orig[sorted[b].Created]
+	})
+	changed := false
+	for i := range sorted {
+		if sorted[i] != cs.Sessions[i] {
+			changed = true
+			break
+		}
+	}
+	if !changed {
+		return false
+	}
+	cs.Sessions = sorted
 	return true
 }
 

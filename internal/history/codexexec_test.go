@@ -49,6 +49,18 @@ func TestDecodeCodexExecTools(t *testing.T) {
 			wantLabel: "🌐 Web",
 		},
 		{
+			name:      "write_stdin poll (empty chars) -> Exec wait, no session id",
+			input:     `const r = await tools.write_stdin({session_id: 12345, chars: ""}); text(r.output);`,
+			wantName:  "Exec",
+			wantLabel: "ожидание завершения команды",
+		},
+		{
+			name:      "write_stdin with input chars -> Exec input",
+			input:     `const r = await tools.write_stdin({session_id: 7, chars: "y\n"}); text(r.output);`,
+			wantName:  "Exec",
+			wantLabel: "ввод: y",
+		},
+		{
 			name:      "string-aware: tools.* inside the command is not a call",
 			input:     `const r = await tools.exec_command({cmd:"echo 'await tools.exec_command(fake)'"}); text(r.output);`,
 			wantName:  "Exec",
@@ -102,6 +114,38 @@ func TestReadCodexDecodesExecWrapper(t *testing.T) {
 	}
 	if tc := items[0].Tools[0]; tc.Name != "Exec" || !strings.Contains(tc.Label, "pwd") {
 		t.Fatalf("exec wrapper not decoded: %+v", tc)
+	}
+}
+
+// write_stdin polls (empty chars) render as a bare Exec wait row without the internal session id,
+// and a consecutive run of identical polls collapses into a single line; a real command in between
+// breaks the run so both wait rows survive.
+func TestReadCodexWriteStdinPollWaitAndCollapse(t *testing.T) {
+	poll := `{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"await tools.write_stdin({session_id: 9, chars: \"\"});"}}`
+	cmd := `{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"await tools.exec_command({cmd:\"ls\"});"}}`
+
+	// Three consecutive polls collapse to one wait row.
+	items, err := readCodex(writeLines(t, []string{poll, poll, poll}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || len(items[0].Tools) != 1 {
+		t.Fatalf("consecutive polls must collapse to 1 row, got %d: %+v", len(items), items)
+	}
+	if tc := items[0].Tools[0]; tc.Name != "Exec" || !strings.Contains(tc.Label, "ожидание завершения команды") {
+		t.Fatalf("want Exec wait row, got %+v", tc)
+	}
+	if lbl := items[0].Tools[0].Label; strings.Contains(lbl, "9") || strings.Contains(lbl, "session") {
+		t.Fatalf("wait row must not expose the internal session id: %q", lbl)
+	}
+
+	// A real command between polls breaks the run: two wait rows survive around it.
+	items, err = readCodex(writeLines(t, []string{poll, poll, cmd, poll}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("poll,poll,cmd,poll must yield wait+cmd+wait = 3 rows, got %d: %+v", len(items), items)
 	}
 }
 

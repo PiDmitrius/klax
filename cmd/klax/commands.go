@@ -388,6 +388,16 @@ func sessionNameArg(args []string) string {
 // createSession resolves the chat's CWD and scope defaults and creates a new
 // active session. Shared by /new and /nuke.
 func (d *daemon) createSession(chatID, sk, name string) (*session.Session, *session.ScopeDefaults) {
+	cwd := d.defaultSessionCWD(chatID, sk)
+	def := d.scopeDefaults(sk)
+	sess := d.store.New(sk, name, cwd, *def)
+	return sess, def
+}
+
+// defaultSessionCWD resolves the working directory a fresh session would inherit
+// (chat cwd → user default → config default → home), so the "new session" draft
+// dialog can preview the same value createSession would use.
+func (d *daemon) defaultSessionCWD(chatID, sk string) string {
 	cwd := d.sessionCWD(chatID)
 	if cwd == "" {
 		cwd = d.userDefaultCWD(sk)
@@ -398,9 +408,7 @@ func (d *daemon) createSession(chatID, sk, name string) (*session.Session, *sess
 	if cwd == "" {
 		cwd, _ = os.UserHomeDir()
 	}
-	def := d.scopeDefaults(sk)
-	sess := d.store.New(sk, name, cwd, *def)
-	return sess, def
+	return cwd
 }
 
 // deleteInactiveSessions aborts and removes every non-active session in the

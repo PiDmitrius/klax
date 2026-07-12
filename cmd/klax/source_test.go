@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/PiDmitrius/klax/internal/runner"
-	"github.com/PiDmitrius/klax/internal/sealref"
 	"github.com/PiDmitrius/klax/internal/session"
 )
 
@@ -122,11 +121,6 @@ func TestEnqueueToSessionRendersInboundImageAsMarkdown(t *testing.T) {
 	d.store = newStoreWithChat("user:alice", "one")
 	d.runners = make(map[runnerKey]*sessionRunner)
 	d.uiHub = newUIHub()
-	var err error
-	d.sealer, err = sealref.New()
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	sess := d.store.SessionsFor("user:alice")[0]
 	created := sess.Created

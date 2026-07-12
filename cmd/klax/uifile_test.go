@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/PiDmitrius/klax/internal/sealref"
 	"github.com/PiDmitrius/klax/internal/sessfiles"
 	"github.com/PiDmitrius/klax/internal/session"
 )
@@ -67,17 +66,12 @@ func TestHandleFileUsesDisplayNameForDownload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sealer, err := sealref.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	d.sealer = sealer
-	ref, err := d.mintFileRef("user:alice", sess.Created, store.Path(stored), "")
+	token, err := d.fileToken(store, "user:alice", sess.Created, stored, sessfiles.DisplayName(stored), "")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/file?ref="+ref, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/file?ref="+token, nil)
 	rec := httptest.NewRecorder()
 	(&uiServer{d: d}).handleFile(rec, req)
 
@@ -97,10 +91,6 @@ func TestInboundTextShowsAttachmentSize(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	d := newTestDeliveryDaemon(&fakeTransport{})
 	var err error
-	d.sealer, err = sealref.New()
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	store := sessfiles.Open("user:alice", 1)
 	_, _, _, _, err = store.Enqueue("user:alice", "", "nonce", "see attached", []sessfiles.NamedReader{{
@@ -124,5 +114,98 @@ func TestInboundTextShowsAttachmentSize(t *testing.T) {
 	}
 	if !strings.Contains(got, ") (9.8 KiB)") {
 		t.Fatalf("inboundText missing human size: %q", got)
+	}
+}
+
+// sessionStore must return ONE canonical Store per (sk,created), and after removeSessionStore no late
+// call (a different sessfiles.Open would have its own clean latch) may resurrect the session dir.
+func TestSessionStoreCanonicalNoResurrection(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	d := newTestDeliveryDaemon(&fakeTransport{})
+	sk, created := "user:alice", int64(1)
+
+	if s1, s2 := d.sessionStore(sk, created), d.sessionStore(sk, created); s1 != s2 {
+		t.Fatal("sessionStore must return one canonical instance")
+	}
+	if _, err := d.sessionStore(sk, created).EnsureLink("000001-01-a.png", "a.png", "image/png"); err != nil {
+		t.Fatal(err)
+	}
+	dir := sessfiles.WorkDir(sk, created)
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("session dir should exist after EnsureLink: %v", err)
+	}
+
+	d.removeSessionStore(sk, created)
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("dir should be gone after removeSessionStore: %v", err)
+	}
+	// A late EnsureLink through the canonical store must refuse and NOT re-create the directory.
+	if _, err := d.sessionStore(sk, created).EnsureLink("000001-01-b.png", "b.png", "image/png"); err != sessfiles.ErrRemoved {
+		t.Fatalf("late EnsureLink after remove = %v, want ErrRemoved", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("late EnsureLink must not resurrect the dir: stat=%v", err)
+	}
+}
+
+// After delete, a new session created the same second must get a DIFFERENT Created (never reused) and
+// therefore a FRESH, writable canonical Store — not the deleted session's removed one.
+func TestNewSessionAfterDeleteGetsFreshStore(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	d := newTestDeliveryDaemon(&fakeTransport{})
+	d.store = &session.Store{Chats: map[string]*session.ChatSessions{}, Scope: map[string]*session.ScopeDefaults{}}
+	sk := "user:alice"
+
+	a := d.store.New(sk, "a", "/tmp", session.ScopeDefaults{})
+	if _, err := d.sessionStore(sk, a.Created).EnsureLink("000001-01-x.png", "x.png", "image/png"); err != nil {
+		t.Fatal(err)
+	}
+	d.removeSessionStore(sk, a.Created) // marks a's canonical Store removed
+	if !d.store.Delete(sk, 0) {
+		t.Fatal("delete failed")
+	}
+
+	b := d.store.New(sk, "b", "/tmp", session.ScopeDefaults{})
+	if b.Created == a.Created {
+		t.Fatalf("Created reused after delete: %d", b.Created)
+	}
+	// The new session's canonical Store must be a fresh, writable one (not a's removed Store).
+	if _, err := d.sessionStore(sk, b.Created).EnsureLink("000001-01-y.png", "y.png", "image/png"); err != nil {
+		t.Fatalf("new session's store must be writable, got %v", err)
+	}
+}
+
+// A file token must be STABLE across read-model rebuilds and persist in links.json across a reopen
+// (restart) — otherwise the attachment's <img src> changes and the image re-decodes/flickers.
+func TestFileTokenStableAndPersisted(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	d := newTestDeliveryDaemon(&fakeTransport{})
+	store := sessfiles.Open("user:alice", 1)
+	t1, err := d.fileToken(store, "user:alice", 1, "000001-01-a.png", "a.png", "image/png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t2, err := d.fileToken(store, "user:alice", 1, "000001-01-a.png", "a.png", "image/png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if t1 != t2 {
+		t.Fatalf("token not stable across rebuilds: %q vs %q", t1, t2)
+	}
+	// A different file gets a distinct token.
+	t3, err := d.fileToken(store, "user:alice", 1, "000001-01-b.png", "b.png", "image/png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if t3 == t1 {
+		t.Fatal("distinct files must get distinct tokens")
+	}
+	// The token survives a fresh Store.Open (i.e. a restart) — it is durable in links.json.
+	links, err := sessfiles.Open("user:alice", 1).Links()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if links["000001-01-a.png"].Token != t1 {
+		t.Fatalf("token must persist in links.json across reopen: %q", links["000001-01-a.png"].Token)
 	}
 }

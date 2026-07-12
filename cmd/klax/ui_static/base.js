@@ -27,3 +27,29 @@ export function api(path, opts){
   opts.headers = Object.assign({ "Authorization": "Bearer " + getToken() }, opts.headers || {});
   return fetch(BASE() + (path[0] === "/" ? path.slice(1) : path), opts);
 }
+
+// --- click-to-copy: ONE implementation shared by every copyable surface (timeline code,
+// message body, the session UUID) so the copy behaviour AND its flash look identical everywhere.
+
+// fallbackCopy uses the legacy execCommand path for insecure/plain-HTTP origins where
+// navigator.clipboard is unavailable.
+function fallbackCopy(text, ok){
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select(); document.execCommand("copy"); document.body.removeChild(ta);
+    if(ok) ok();
+  } catch(e){}
+}
+export function copyText(text, ok){
+  if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(ok).catch(() => fallbackCopy(text, ok));
+  else fallbackCopy(text, ok);
+}
+// flashCopied replays the shared .copyflash animation on the copied element.
+export function flashCopied(el){
+  if(!el) return;
+  el.classList.remove("copyflash");
+  void el.offsetWidth;
+  el.classList.add("copyflash");
+  el.addEventListener("animationend", () => el.classList.remove("copyflash"), { once: true });
+}
