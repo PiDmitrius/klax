@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
-	"time"
 )
 
 type ScopeDefaults struct {
@@ -22,7 +21,7 @@ type Session struct {
 	ID            string `json:"id"`                       // session UUID (claude or codex thread_id)
 	Name          string `json:"name"`                     // user-friendly name
 	CWD           string `json:"cwd"`                      // working directory
-	Created       int64  `json:"created"`                  // unix timestamp
+	Created       int64  `json:"created"`                  // monotonic per-chat session key (never reused; not a timestamp for new sessions)
 	LastUsed      int64  `json:"last_used"`                // unix timestamp
 	Active        bool   `json:"active"`                   // currently selected
 	Backend       string `json:"backend,omitempty"`        // "claude" (default) or "codex"
@@ -50,28 +49,22 @@ type Session struct {
 }
 
 type ChatSessions struct {
-	Sessions []*Session `json:"sessions"`
-	// LastCreated is the high-water of every Created ever assigned in this chat. It SURVIVES deletion
-	// (unlike scanning Sessions), so a Created is never reused — reuse would hand a new session a deleted
-	// session's canonical (removed) durable Store. Persisted in sessions.json.
-	LastCreated int64 `json:"last_created,omitempty"`
+	// HighWater is a MONOTONIC per-chat counter: the highest session key ever handed out in this chat.
+	// It only increases and is NEVER reused, so a deleted session's key can't be reassigned — reuse
+	// would bind a new session to the deleted one's canonical (removed) durable Store (writes returning
+	// ErrRemoved) or merge runs. It survives deletion and is persisted in sessions.json; on load it is
+	// lifted to the max existing key (normalize) so migrated stores keep their keys and new ones simply
+	// continue above them.
+	HighWater int64      `json:"high_water,omitempty"`
+	Sessions  []*Session `json:"sessions"`
 }
 
-// nextCreated returns a Created strictly greater than LastCreated (the persisted high-water) AND every
-// currently-live session, so a Created is NEVER reused. Created is the canonical key for both the
-// runner map and the durable-store registry; a reused id would merge runs or bind a new session to a
-// deleted one's removed Store (writes returning ErrRemoved).
+// nextCreated advances the high-water and returns the new session key (Session.Created — the canonical
+// key for the runner map and the durable-store registry; despite the name it is a monotonic counter,
+// not a timestamp, for new sessions).
 func (cs *ChatSessions) nextCreated() int64 {
-	next := time.Now().Unix()
-	if cs.LastCreated >= next {
-		next = cs.LastCreated + 1
-	}
-	for _, sess := range cs.Sessions {
-		if sess != nil && sess.Created >= next {
-			next = sess.Created + 1
-		}
-	}
-	return next
+	cs.HighWater++
+	return cs.HighWater
 }
 
 type Store struct {
@@ -225,7 +218,7 @@ func (s *Store) Save() error {
 		Scope: make(map[string]*ScopeDefaults, len(s.Scope)),
 	}
 	for key, chat := range s.Chats {
-		payload.Chats[key] = &ChatSessions{Sessions: cloneSessions(chat.Sessions), LastCreated: chat.LastCreated}
+		payload.Chats[key] = &ChatSessions{Sessions: cloneSessions(chat.Sessions), HighWater: chat.HighWater}
 	}
 	for key, def := range s.Scope {
 		payload.Scope[key] = cloneDefaults(def)
@@ -277,12 +270,12 @@ func (s *Store) normalize() {
 			if sess == nil {
 				continue
 			}
-			// Legacy stores had no LastCreated: lift the high-water to at least the max live Created so a
-			// reused id can never predate a still-live session. (Deleted-session ids from before this field
-			// existed are unrecoverable, but a new process starts with an empty store registry, so a reused
-			// id there binds a fresh Store — harmless — while going forward LastCreated prevents reuse.)
-			if sess.Created > chat.LastCreated {
-				chat.LastCreated = sess.Created
+			// Legacy stores had no HighWater: lift it to at least the max existing key, so migrated stores
+			// keep their keys and new ones continue above them (deleted-session keys from before this field
+			// existed are unrecoverable, but a fresh process starts with an empty Store registry, so a reused
+			// key there binds a fresh Store — harmless — while going forward HighWater prevents reuse).
+			if sess.Created > chat.HighWater {
+				chat.HighWater = sess.Created
 			}
 			if sess.Backend == "" && sess.Messages > 0 {
 				sess.Backend = "claude"
@@ -412,7 +405,6 @@ func (s *Store) Ensure(chatID, name, cwd string, defaults ScopeDefaults) *Sessio
 		sess.Active = false
 	}
 	created := cs.nextCreated()
-	cs.LastCreated = created
 	sess := &Session{
 		Name:          name,
 		CWD:           cwd,
@@ -443,7 +435,6 @@ func (s *Store) New(chatID, name, cwd string, defaults ScopeDefaults) *Session {
 		sess.Active = false
 	}
 	created := cs.nextCreated()
-	cs.LastCreated = created
 	sess := &Session{
 		Name:          name,
 		CWD:           cwd,
@@ -471,7 +462,6 @@ func (s *Store) Add(chatID string, sess *Session) *Session {
 		existing.Active = false
 	}
 	sess.Created = cs.nextCreated()
-	cs.LastCreated = sess.Created
 	sess.Active = true
 	cs.Sessions = append(cs.Sessions, sess)
 	return cloneSession(sess)

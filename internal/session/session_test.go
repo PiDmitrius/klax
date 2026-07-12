@@ -276,9 +276,9 @@ func TestNewAssignsUniqueCreatedAcrossRapidCalls(t *testing.T) {
 	}
 }
 
-// Created must NEVER be reused after a delete, even in the same wall-clock second — otherwise a new
-// session would inherit a deleted one's canonical (removed) durable Store. The high-water enforces
-// this and must survive a save/reload (persisted in sessions.json).
+// The session key is a monotonic per-chat counter that is NEVER reused after a delete (reuse would
+// bind a new session to a deleted one's removed durable Store), and the high-water survives a
+// save/reload. Invariant: 1, 2, delete → 3 (not 2).
 func TestCreatedNeverReusedAfterDelete(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	store, err := LoadStore()
@@ -286,18 +286,19 @@ func TestCreatedNeverReusedAfterDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := store.New("user:alice", "a", "/tmp", ScopeDefaults{})
-	if !store.Delete("user:alice", 0) {
+	b := store.New("user:alice", "b", "/tmp", ScopeDefaults{})
+	if a.Created != 1 || b.Created != 2 {
+		t.Fatalf("keys must count 1,2, got a=%d b=%d", a.Created, b.Created)
+	}
+	// Delete the highest (b) — the high-water must NOT drop, so the next key is 3, not a reused 2.
+	if !store.Delete("user:alice", 1) {
 		t.Fatal("delete failed")
 	}
-	// The slice is now empty, but the high-water must still block reuse (same second → a.Created+1).
-	b := store.New("user:alice", "b", "/tmp", ScopeDefaults{})
-	if b.Created <= a.Created {
-		t.Fatalf("Created reused/decreased after delete: a=%d b=%d", a.Created, b.Created)
+	c := store.New("user:alice", "c", "/tmp", ScopeDefaults{})
+	if c.Created != 3 {
+		t.Fatalf("key reused after delete: want 3, got %d", c.Created)
 	}
 	// The high-water survives a save + reload.
-	if !store.Delete("user:alice", 0) { // b is now index 0
-		t.Fatal("delete b failed")
-	}
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -305,9 +306,8 @@ func TestCreatedNeverReusedAfterDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := reloaded.New("user:alice", "c", "/tmp", ScopeDefaults{})
-	if c.Created <= b.Created {
-		t.Fatalf("high-water not persisted across reload: b=%d c=%d", b.Created, c.Created)
+	if d := reloaded.New("user:alice", "d", "/tmp", ScopeDefaults{}); d.Created != 4 {
+		t.Fatalf("high-water not persisted across reload: want 4, got %d", d.Created)
 	}
 }
 
