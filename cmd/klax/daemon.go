@@ -26,6 +26,7 @@ import (
 	"github.com/PiDmitrius/klax/internal/tg"
 	"github.com/PiDmitrius/klax/internal/transport"
 	"github.com/PiDmitrius/klax/internal/vk"
+	"github.com/PiDmitrius/klax/internal/ym"
 )
 
 // sessionRunner holds a per-session runner and message queue.
@@ -75,6 +76,7 @@ type daemon struct {
 	identities   map[int64]string               // telegram userID -> canonical user ID
 	maxIdents    map[int64]string               // max userID -> canonical user ID
 	vkIdents     map[int]string                 // vk userID -> canonical user ID
+	ymIdents     map[string]string              // ym login (lowercased) -> canonical user ID
 	groupChats   map[string]string              // chatID -> CWD for group mode chats
 	groupVerb    map[string]bool                // chatID -> verbose progress output for group mode chats
 	tgRich       atomic.Bool                    // global: render Telegram replies as Rich Messages (/rich)
@@ -112,7 +114,7 @@ func isPermanentStartupError(err error) bool {
 		return false
 	}
 	switch apiErr.Platform {
-	case "tg", "max":
+	case "tg", "max", "ym":
 		return apiErr.Code == 400 || apiErr.Code == 401 || apiErr.Code == 403
 	case "vk":
 		return apiErr.Code == 5 || apiErr.Code == 15
@@ -122,7 +124,7 @@ func isPermanentStartupError(err error) bool {
 }
 
 func hasConfiguredTransport(cfg *config.Config) bool {
-	if cfg.TelegramToken != "" || cfg.MaxToken != "" || cfg.VKToken != "" {
+	if cfg.TelegramToken != "" || cfg.MaxToken != "" || cfg.VKToken != "" || cfg.YmToken != "" {
 		return true
 	}
 	// The web UI can be the only configured channel.
@@ -320,6 +322,15 @@ func (d *daemon) sessionKey(chatID string) string {
 					}
 				}
 			}
+		case "ym":
+			// ym DMs are addressed by login ("vasya@example.org"), groups/channels
+			// by chat_id ("0/0/<guid>") — ym.IsLogin/IsGroup is the single source
+			// of truth for telling them apart (see internal/ym).
+			if ym.IsLogin(raw) {
+				if canonical, ok := d.ymIdents[strings.ToLower(raw)]; ok {
+					return "user:" + canonical
+				}
+			}
 		case "ui":
 			// The UI authenticates as a canonical user, so raw is already that
 			// id. Share the session list with tg/mx/vk DMs for the same person.
@@ -467,6 +478,31 @@ func runDaemon() {
 		log.Printf("[OK] VK group: [%d] %s", group.ID, group.Name)
 	}
 
+	// --- Yandex Messenger ---
+	var ymBot *ym.Bot
+	if cfg.YmToken != "" {
+		ymBot = ym.New(cfg.YmToken)
+		var me *ym.SelfInfo
+		for attempt := 0; ; attempt++ {
+			var err error
+			me, err = ymBot.GetMe()
+			if err == nil {
+				break
+			}
+			if isPermanentStartupError(err) {
+				log.Fatalf("Yandex Messenger auth failed: %v", err)
+			}
+			wait := startupBackoff(attempt)
+			log.Printf("Yandex Messenger unreachable: %v (retry in %v)", err, wait)
+			time.Sleep(wait)
+		}
+		if err := ymBot.DrainUpdates(); err != nil {
+			log.Printf("warning: ym drain updates: %v", err)
+		}
+		transports["ym"] = ymBot
+		log.Printf("[OK] Yandex Messenger bot: [%s] %s", me.ID, me.Login)
+	}
+
 	store, err := session.LoadStore()
 	if err != nil {
 		log.Fatalf("cannot load sessions: %v", err)
@@ -476,6 +512,7 @@ func runDaemon() {
 	tgIdents := make(map[int64]string)
 	maxIdents := make(map[int64]string)
 	vkIdents := make(map[int]string)
+	ymIdents := make(map[string]string)
 	for _, u := range cfg.Users {
 		if u.TelegramID != 0 {
 			tgIdents[u.TelegramID] = u.ID
@@ -485,6 +522,9 @@ func runDaemon() {
 		}
 		if u.VKID != 0 {
 			vkIdents[int(u.VKID)] = u.ID
+		}
+		if u.YmLogin != "" {
+			ymIdents[strings.ToLower(u.YmLogin)] = u.ID
 		}
 	}
 
@@ -518,6 +558,9 @@ func runDaemon() {
 		if u.VKID != 0 {
 			oldKeys = append(oldKeys, fmt.Sprintf("vk:%d", u.VKID))
 		}
+		if u.YmLogin != "" {
+			oldKeys = append(oldKeys, fmt.Sprintf("ym:%s", u.YmLogin))
+		}
 		if store.MergeKeys(targetKey, oldKeys) {
 			if err := store.Save(); err != nil {
 				log.Printf("save sessions: %v", err)
@@ -542,7 +585,7 @@ func runDaemon() {
 		cfg:        cfg,
 		state:      session.LoadState(),
 		transports: transports,
-		formats:    map[string]string{"tg": "html", "mx": "html", "vk": ""},
+		formats:    map[string]string{"tg": "html", "mx": "html", "vk": "", "ym": ""},
 		disabled:   disabled,
 		pollCtx:    make(map[string]context.CancelFunc),
 		store:      store,
@@ -553,13 +596,14 @@ func runDaemon() {
 		identities: tgIdents,
 		maxIdents:  maxIdents,
 		vkIdents:   vkIdents,
+		ymIdents:   ymIdents,
 		groupChats: groupChats,
 		groupVerb:  groupVerb,
 	}
 
 	d.tgRich.Store(cfg.TelegramRich)
 
-	// Register inbound sources. tg/mx/vk are the legacy poll loops wrapped as
+	// Register inbound sources. tg/mx/vk/ym are the legacy poll loops wrapped as
 	// Sources; the web UI registers itself here too when configured.
 	d.sources = map[string]Source{}
 	if tgBot != nil {
@@ -570,6 +614,9 @@ func runDaemon() {
 	}
 	if vkBot != nil {
 		d.sources["vk"] = &legacySource{name: "vk", poll: d.pollVK}
+	}
+	if ymBot != nil {
+		d.sources["ym"] = &legacySource{name: "ym", poll: d.pollYM}
 	}
 
 	// Web UI source (HTTP/SSE), gated by config. It joins the same canonical
@@ -627,6 +674,9 @@ func runDaemon() {
 	}
 	if vkBot != nil && !disabled["vk"] {
 		d.startPoll("vk")
+	}
+	if ymBot != nil && !disabled["ym"] {
+		d.startPoll("ym")
 	}
 	if d.sources["ui"] != nil && !disabled["ui"] {
 		d.startPoll("ui")
@@ -699,6 +749,13 @@ func (d *daemon) notifyAllUsers(text string) map[string]uint64 {
 			d.sendMessage(chatID, "", text)
 		}
 	}
+	if _, ok := d.transports["ym"]; ok && !d.disabled["ym"] {
+		for _, login := range d.cfg.YmAllowedUsers {
+			chatID := fmt.Sprintf("ym:%s", login)
+			log.Printf("notify %s", chatID)
+			d.sendMessage(chatID, "", text)
+		}
+	}
 	return d.uiNotifyAll(text)
 }
 
@@ -717,7 +774,7 @@ func (d *daemon) startDrain(reason string) {
 	if readMarker() == nil {
 		writeMarker(reason)
 	}
-	uiNotice := d.notifyAllUsers("🔄 Ожидается перезапуск klax...")
+	uiNotice := d.notifyAllUsers("🔄 Сервис перезапускается...")
 
 	// Kick processing on all session runners that have queued messages.
 	d.runnersMu.Lock()
@@ -845,6 +902,40 @@ func (d *daemon) watchMarker() {
 	}
 }
 
+// dispatchInbound applies the allowed-user / group-trigger gating shared by
+// every messenger poll loop (tg/mx/vk/ym): an allowed user's message is queued
+// directly; in a group chat, group-commands and the trigger prefix apply;
+// anything else (a non-allowed DM, or a group message with no prefix/command)
+// is dropped silently. attachErrs (download failures noted by the caller) are
+// reported only once the message is actually going to be accepted, mirroring
+// each platform's previous inline behaviour.
+func (d *daemon) dispatchInbound(chatID, msgID, text string, attachments []attachment, attachErrs []string, allowed bool) {
+	notifyAttachErrs := func() {
+		if len(attachErrs) > 0 {
+			d.sendPlain(chatID, msgID, "Не удалось скачать:\n• "+strings.Join(attachErrs, "\n• "))
+		}
+	}
+	if allowed {
+		notifyAttachErrs()
+		d.handleMessageWithAttachments(chatID, msgID, text, attachments)
+		return
+	}
+	if !d.isGroupChat(chatID) {
+		return
+	}
+	if strings.HasPrefix(text, "/") && isGroupCommand(text) {
+		notifyAttachErrs()
+		d.ensureSessionWithCWD(d.sessionKey(chatID), d.sessionCWD(chatID))
+		d.handleCommand(chatID, msgID, text)
+		return
+	}
+	if prompt, ok := stripGroupTrigger(strings.TrimSpace(text)); ok {
+		notifyAttachErrs()
+		d.ensureSessionWithCWD(d.sessionKey(chatID), d.sessionCWD(chatID))
+		d.enqueueWithAttachments(chatID, msgID, prompt, attachments)
+	}
+}
+
 func (d *daemon) pollTG(ctx context.Context) {
 	bot := d.transports["tg"].(*tg.Bot)
 	for {
@@ -933,26 +1024,7 @@ func (d *daemon) pollTG(ctx context.Context) {
 				}
 			}
 
-			notifyAttachErrs := func() {
-				if len(attachErrs) > 0 {
-					d.sendPlain(chatID, msgID, "Не удалось скачать:\n• "+strings.Join(attachErrs, "\n• "))
-				}
-			}
-
-			if d.isTGAllowed(msg.From.ID) {
-				notifyAttachErrs()
-				d.handleMessageWithAttachments(chatID, msgID, text, attachments)
-			} else if d.isGroupChat(chatID) {
-				if strings.HasPrefix(text, "/") && isGroupCommand(text) {
-					notifyAttachErrs()
-					d.ensureSessionWithCWD(d.sessionKey(chatID), d.sessionCWD(chatID))
-					d.handleCommand(chatID, msgID, text)
-				} else if prompt, ok := stripGroupTrigger(strings.TrimSpace(text)); ok {
-					notifyAttachErrs()
-					d.ensureSessionWithCWD(d.sessionKey(chatID), d.sessionCWD(chatID))
-					d.enqueueWithAttachments(chatID, msgID, prompt, attachments)
-				}
-			}
+			d.dispatchInbound(chatID, msgID, text, attachments, attachErrs, d.isTGAllowed(msg.From.ID))
 		}
 	}
 }
@@ -1019,26 +1091,7 @@ func (d *daemon) pollMAX(ctx context.Context) {
 				continue
 			}
 
-			notifyAttachErrs := func() {
-				if len(attachErrs) > 0 {
-					d.sendPlain(chatID, msgID, "Не удалось скачать:\n• "+strings.Join(attachErrs, "\n• "))
-				}
-			}
-
-			if d.isMAXAllowed(senderID) {
-				notifyAttachErrs()
-				d.handleMessageWithAttachments(chatID, msgID, text, attachments)
-			} else if d.isGroupChat(chatID) {
-				if strings.HasPrefix(text, "/") && isGroupCommand(text) {
-					notifyAttachErrs()
-					d.ensureSessionWithCWD(d.sessionKey(chatID), d.sessionCWD(chatID))
-					d.handleCommand(chatID, msgID, text)
-				} else if prompt, ok := stripGroupTrigger(strings.TrimSpace(text)); ok {
-					notifyAttachErrs()
-					d.ensureSessionWithCWD(d.sessionKey(chatID), d.sessionCWD(chatID))
-					d.enqueueWithAttachments(chatID, msgID, prompt, attachments)
-				}
-			}
+			d.dispatchInbound(chatID, msgID, text, attachments, attachErrs, d.isMAXAllowed(senderID))
 		}
 	}
 }
@@ -1091,14 +1144,7 @@ func (d *daemon) pollVK(ctx context.Context) {
 				continue
 			}
 			msgID := strconv.Itoa(msg.ID)
-			if d.isVKAllowed(msg.FromID) {
-				d.handleMessage(chatID, msgID, msg.Text)
-			} else if d.isGroupChat(chatID) {
-				if prompt, ok := stripGroupTrigger(strings.TrimSpace(msg.Text)); ok {
-					d.ensureSessionWithCWD(d.sessionKey(chatID), d.sessionCWD(chatID))
-					d.enqueue(chatID, msgID, prompt)
-				}
-			}
+			d.dispatchInbound(chatID, msgID, msg.Text, nil, nil, d.isVKAllowed(msg.FromID))
 		}
 	}
 }
@@ -1121,6 +1167,124 @@ func (d *daemon) isMAXAllowed(id int64) bool {
 	return false
 }
 
+func (d *daemon) pollYM(ctx context.Context) {
+	bot := d.transports["ym"].(*ym.Bot)
+	for {
+		if !d.waitOutboundReady(ctx, "ym") {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		updates, err := bot.GetUpdates()
+		if err != nil {
+			log.Printf("ym: getUpdates error: %v (retry in 5s)", err)
+			if !sleepCtx(ctx, 5*time.Second) {
+				return
+			}
+			continue
+		}
+		if len(updates) == 0 {
+			// getUpdates has no server-side long-poll wait, unlike tg/mx/vk
+			// (see YM_API_NOTES.md) — pace client-side so an empty result
+			// doesn't hammer the API.
+			if !sleepCtx(ctx, 2*time.Second) {
+				return
+			}
+			continue
+		}
+		for _, upd := range updates {
+			// chat.type is the authoritative signal, NOT whether chat.id is
+			// empty: contrary to the documented shape, a private update's
+			// chat.id is NOT empty in practice — it's a composite per-dialog
+			// id ("<bot_id>_<user_id>"), neither a login nor a routable
+			// chat_id. Addressing a private chat must use the sender's login
+			// (see ym.IsLogin/IsGroup, and YM_API_NOTES.md).
+			var addr string
+			if upd.Chat.Type == "private" {
+				addr = upd.From.Login
+			} else {
+				addr = upd.Chat.ID
+			}
+			if addr == "" {
+				continue
+			}
+			chatID := fmt.Sprintf("ym:%s", addr)
+			d.bumpChatActivity(chatID)
+			// /id — respond to anyone, even unauthenticated
+			if strings.TrimSpace(upd.Text) == "/id" {
+				reply := fmt.Sprintf("login: %s\nid: %s", upd.From.Login, upd.From.ID)
+				if upd.Chat.Type != "private" {
+					reply += fmt.Sprintf("\nchat_id: %s", upd.Chat.ID)
+				}
+				d.sendPlain(chatID, "", reply)
+				continue
+			}
+			msgID := strconv.FormatInt(upd.MessageID, 10)
+			text := upd.Text
+
+			// Download attachments: images (best size variant per group) and
+			// generic files. Yandex Messenger has no separate voice/audio type
+			// (see YM_API_NOTES.md) — any non-image attachment arrives as File.
+			var attachments []attachment
+			var attachErrs []string
+			for _, group := range upd.Images {
+				img := ym.BestImage(group)
+				if img == nil {
+					continue
+				}
+				data, err := bot.DownloadFile(img.FileID)
+				if err != nil {
+					log.Printf("ym: download image: %v", err)
+					attachErrs = append(attachErrs, fmt.Sprintf("изображение: %v", err))
+					continue
+				}
+				name := img.Name
+				if name == "" {
+					name = "image.jpg"
+				}
+				attachments = append(attachments, attachment{filename: name, data: data})
+			}
+			if upd.File != nil {
+				data, err := bot.DownloadFile(upd.File.ID)
+				if err != nil {
+					log.Printf("ym: download file: %v", err)
+					label := "файл"
+					if upd.File.Name != "" {
+						label = fmt.Sprintf("файл %q", upd.File.Name)
+					}
+					attachErrs = append(attachErrs, fmt.Sprintf("%s: %v", label, err))
+				} else {
+					name := upd.File.Name
+					if name == "" {
+						name = "file"
+					}
+					attachments = append(attachments, attachment{filename: name, data: data})
+				}
+			}
+
+			if text == "" && len(attachments) == 0 && len(attachErrs) == 0 {
+				continue
+			}
+
+			d.dispatchInbound(chatID, msgID, text, attachments, attachErrs, d.isYMAllowed(upd.From.Login))
+		}
+	}
+}
+
+func (d *daemon) isYMAllowed(login string) bool {
+	if login == "" {
+		return false
+	}
+	login = strings.ToLower(login)
+	for _, l := range d.cfg.YmAllowedUsers {
+		if strings.ToLower(l) == login {
+			return true
+		}
+	}
+	return false
+}
+
 // isGroupChat returns true if the chat has group mode enabled.
 func (d *daemon) isGroupChat(chatID string) bool {
 	d.mu.Lock()
@@ -1131,6 +1295,7 @@ func (d *daemon) isGroupChat(chatID string) bool {
 
 // isGroupChatID returns true if the chatID refers to a group (not a DM).
 // TG: negative chat ID. MAX: negative chat ID. VK: peer_id >= 2000000000.
+// ym: chat_id ("0/0/<guid>") vs. login ("user@domain") — see ym.IsGroup.
 func isGroupChatID(chatID string) bool {
 	idx := strings.Index(chatID, ":")
 	if idx == -1 {
@@ -1138,13 +1303,17 @@ func isGroupChatID(chatID string) bool {
 	}
 	prefix := chatID[:idx]
 	raw := chatID[idx+1:]
-	if prefix == "vk" {
+	switch prefix {
+	case "vk":
 		if id, err := strconv.Atoi(raw); err == nil {
 			return id >= 2000000000
 		}
 		return false
+	case "ym":
+		return ym.IsGroup(raw)
+	default:
+		return len(raw) > 0 && raw[0] == '-'
 	}
-	return len(raw) > 0 && raw[0] == '-'
 }
 
 // groupCWD returns the CWD for a group chat, or "" if not a group.
@@ -1330,10 +1499,6 @@ func isGroupCommand(text string) bool {
 		return true
 	}
 	return false
-}
-
-func (d *daemon) handleMessage(chatID, msgID, text string) {
-	d.handleMessageWithAttachments(chatID, msgID, text, nil)
 }
 
 func (d *daemon) handleMessageWithAttachments(chatID, msgID, text string, attachments []attachment) {

@@ -216,9 +216,10 @@ func (b *Bot) SendMessageReturnID(chatID, text, replyTo, format string) (string,
 
 func (b *Bot) sendMsg(peerID, text, replyTo string) (string, error) {
 	params := url.Values{
-		"peer_id":   {peerID},
-		"message":   {text},
-		"random_id": {strconv.Itoa(rand.Intn(1e9))},
+		"peer_id":          {peerID},
+		"message":          {text},
+		"random_id":        {strconv.Itoa(rand.Intn(1e9))},
+		"dont_parse_links": {"1"}, // no auto-generated link preview snippet
 	}
 	if replyTo != "" {
 		params.Set("reply_to", replyTo)
@@ -239,9 +240,10 @@ func (b *Bot) sendMsg(peerID, text, replyTo string) (string, error) {
 // EditMessage edits an existing message.
 func (b *Bot) EditMessage(chatID, messageID, text, format string) error {
 	_, err := b.call("messages.edit", url.Values{
-		"peer_id":    {chatID},
-		"message_id": {messageID},
-		"message":    {text},
+		"peer_id":          {chatID},
+		"message_id":       {messageID},
+		"message":          {text},
+		"dont_parse_links": {"1"},
 	})
 	return err
 }

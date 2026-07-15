@@ -280,3 +280,26 @@ func TestSandboxTextListsOnBeforeOff(t *testing.T) {
 		t.Fatalf("sandbox_on should be listed before sandbox_off in %q", text)
 	}
 }
+
+func TestHtmlToYMMarkdownConvertsKnownTags(t *testing.T) {
+	in := "<b>/s6 KLAX-Yandex</b> (активна)\n<code>x</code>\n<pre>func x() {}</pre>\n<a href=\"https://ya.ru\">ya</a>\n<p>next</p>"
+	out := htmlToYMMarkdown(in)
+	for _, want := range []string{"**/s6 KLAX-Yandex**", "`x`", "```\nfunc x() {}\n```", "[ya](https://ya.ru)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("htmlToYMMarkdown(%q) = %q, missing %q", in, out, want)
+		}
+	}
+	if strings.ContainsAny(out, "<>") {
+		t.Errorf("htmlToYMMarkdown left raw HTML in %q", out)
+	}
+}
+
+func TestPlainRenderForChatDivergesYMFromVK(t *testing.T) {
+	in := "<b>bold</b>"
+	if got := plainRenderForChat("ym:vasya@example.org", in); got != "**bold**" {
+		t.Errorf("plainRenderForChat(ym) = %q, want **bold**", got)
+	}
+	if got := plainRenderForChat("vk:123", in); got != "bold" {
+		t.Errorf("plainRenderForChat(vk) = %q, want bold (VK has no formatting)", got)
+	}
+}

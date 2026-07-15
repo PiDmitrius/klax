@@ -433,3 +433,112 @@ func TestSyncMessageChainDoesNotReplyForAppendedChunkWhenReusingExistingMessageW
 		}
 	}
 }
+
+// countFences reports how many lines are a ``` fence marker (with or without
+// a language tag) — used to assert each chunk's fences are balanced (even
+// count) rather than one chunk ending mid-block.
+func countFences(chunk string) int {
+	n := 0
+	for _, line := range strings.Split(chunk, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			n++
+		}
+	}
+	return n
+}
+
+func TestSplitMessagePlainKeepsFenceBalanced(t *testing.T) {
+	var lines []string
+	for i := 0; i < 40; i++ {
+		lines = append(lines, strings.Repeat("x", 10)+" line")
+	}
+	text := "Ответ:\n```go\n" + strings.Join(lines, "\n") + "\n```\nхвост"
+	chunks := splitMessage(text, 100, "")
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+	for i, chunk := range chunks {
+		if len(chunk) > 100 {
+			t.Fatalf("chunk %d too large: %d bytes", i, len(chunk))
+		}
+		if n := countFences(chunk); n%2 != 0 {
+			t.Fatalf("chunk %d has unbalanced fence markers (%d): %q", i, n, chunk)
+		}
+	}
+	// The code content must survive the split (modulo the reopened ``` markers).
+	var rebuilt strings.Builder
+	for _, chunk := range chunks {
+		for _, line := range strings.Split(chunk, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "```") {
+				continue
+			}
+			rebuilt.WriteString(line)
+			rebuilt.WriteString("\n")
+		}
+	}
+	for _, l := range lines {
+		if !strings.Contains(rebuilt.String(), l) {
+			t.Fatalf("lost code line %q after split", l)
+		}
+	}
+}
+
+func TestSplitMessagePlainOversizedLineInsideFenceStaysBalanced(t *testing.T) {
+	huge := strings.Repeat("x", 3000)
+	text := "```\n" + huge + "\n```"
+	limit := 2048
+	chunks := splitMessage(text, limit, "")
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+	// maxMessageLen is a soft one-message target, not a hard API ceiling
+	// (real platform limits sit well above it) — a chunk may overshoot it by
+	// the reopened fence marker's own size (see splitPlainFencedMessage), so
+	// this only guards against something unbounded, not the deliberate slack.
+	const overshootBudget = 32
+	for i, chunk := range chunks {
+		if len(chunk) > limit+overshootBudget {
+			t.Fatalf("chunk %d way over budget: %d bytes", i, len(chunk))
+		}
+		if n := countFences(chunk); n%2 != 0 {
+			t.Fatalf("chunk %d has unbalanced fence markers (%d): %q", i, n, chunk)
+		}
+	}
+	var rebuilt strings.Builder
+	for _, chunk := range chunks {
+		for _, line := range strings.Split(chunk, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "```") {
+				continue
+			}
+			rebuilt.WriteString(line)
+		}
+	}
+	if rebuilt.String() != huge {
+		t.Fatalf("oversized line corrupted after split: got %d chars, want %d", len(rebuilt.String()), len(huge))
+	}
+}
+
+func TestSplitMessagePlainShortFenceStaysWhole(t *testing.T) {
+	text := "before\n```go\nfmt.Println(1)\n```\nafter"
+	chunks := splitMessage(text, 2048, "")
+	if len(chunks) != 1 || chunks[0] != text {
+		t.Fatalf("short fenced text should pass through unchanged, got %q", chunks)
+	}
+}
+
+func TestSplitMessagePlainNoFenceUsesFastPath(t *testing.T) {
+	text := strings.Repeat("no code here ", 30)
+	chunks := splitMessage(text, 50, "")
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+	var rebuilt strings.Builder
+	for _, c := range chunks {
+		rebuilt.WriteString(c)
+	}
+	// splitPlainMessage skips the newline it split on — none exists here, so
+	// a straight concatenation must reproduce the source exactly.
+	if rebuilt.String() != text {
+		t.Fatalf("text mismatch after fence-free split")
+	}
+}

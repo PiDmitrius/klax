@@ -207,6 +207,44 @@ func plainFallback(text, format string) string {
 	return text
 }
 
+var (
+	reYMBold = regexp.MustCompile(`(?is)<b>(.*?)</b>`)
+	reYMCode = regexp.MustCompile(`(?is)<code>(.*?)</code>`)
+	reYMPre  = regexp.MustCompile(`(?is)<pre>(.*?)</pre>`)
+	reYMLink = regexp.MustCompile(`(?is)<a href="([^"]*)">(.*?)</a>`)
+)
+
+// htmlToYMMarkdown converts klax's internal command-output HTML into Yandex
+// Messenger's own always-on markdown-like syntax (**bold**, `code`, fenced
+// code blocks, [text](url) links — see YM_API_NOTES.md), which the client
+// actually renders. This is why ym gets its own converter instead of sharing
+// VK's stripHTML: VK has no text formatting at all, so stripping is correct
+// there, but doing the same for ym would throw away real, confirmed-working
+// capability (e.g. the active-session bold marker in /sessions).
+func htmlToYMMarkdown(s string) string {
+	s = reYMPre.ReplaceAllString(s, "```\n$1\n```")
+	s = reYMBold.ReplaceAllString(s, "**$1**")
+	s = reYMCode.ReplaceAllString(s, "`$1`")
+	s = reYMLink.ReplaceAllString(s, "[$2]($1)")
+	s = reBlockClose.ReplaceAllString(s, "$0\n")
+	s = stripHTML(s)
+	for strings.Contains(s, "\n\n\n") {
+		s = strings.ReplaceAll(s, "\n\n\n", "\n\n")
+	}
+	return strings.TrimSpace(s)
+}
+
+// plainRenderForChat renders text for a chat whose transport format is ""
+// (no HTML/markdown parse_mode negotiated by klax): ym has real formatting
+// support of its own, so klax's internal HTML converts to ym's syntax instead
+// of being stripped like it is for VK (which has none).
+func plainRenderForChat(fullChatID, text string) string {
+	if transportPrefix(fullChatID) == "ym" {
+		return htmlToYMMarkdown(text)
+	}
+	return stripHTML(text)
+}
+
 type modelEntry struct {
 	alias string
 	model string // actual --model value
