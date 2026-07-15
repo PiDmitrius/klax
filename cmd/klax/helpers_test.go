@@ -336,6 +336,15 @@ func TestYMThreadChatIDInheritsParentGroupModeOnce(t *testing.T) {
 	parent := "ym:0/0/1ebc83a5-08e2-466e-ab2f-af7b22161adf"
 	parentCWD := d.sessionCWD(parent)
 	d.enableGroupChat(parent, parentCWD)
+	// The parent's own settings, as if set via /backend, /model, /think,
+	// /sandbox, /tty on the group before the thread was ever touched.
+	d.store.UpdateScopeDefaults(parent, func(def *session.ScopeDefaults) {
+		def.Backend = "codex"
+		def.Model = "gpt-5.6-sol"
+		def.Think = "xhigh"
+		def.Sandbox = "off"
+		def.ClaudeTTY = true
+	})
 
 	threadChatID := d.ymThreadChatID(parent, 1784109957039064)
 
@@ -345,9 +354,16 @@ func TestYMThreadChatIDInheritsParentGroupModeOnce(t *testing.T) {
 	if !d.isGroupChat(threadChatID) {
 		t.Fatalf("thread should inherit group mode from parent, chatID=%q", threadChatID)
 	}
+	// A thread continues its parent group — same working directory, not a
+	// fresh groups/<...> sibling.
 	threadCWD := d.groupCWD(threadChatID)
-	if threadCWD == "" || threadCWD == parentCWD {
-		t.Fatalf("thread should get its own distinct CWD, got %q (parent %q)", threadCWD, parentCWD)
+	if threadCWD != parentCWD {
+		t.Fatalf("thread should reuse the parent's CWD, got %q (parent %q)", threadCWD, parentCWD)
+	}
+	threadDef := d.scopeDefaults(threadChatID)
+	if threadDef.Backend != "codex" || threadDef.Model != "gpt-5.6-sol" || threadDef.Think != "xhigh" ||
+		threadDef.Sandbox != "off" || !threadDef.ClaudeTTY {
+		t.Fatalf("thread should inherit the parent's scope defaults, got %+v", threadDef)
 	}
 
 	// Simulate the thread having actually received its first message — what
@@ -366,6 +382,12 @@ func TestYMThreadChatIDInheritsParentGroupModeOnce(t *testing.T) {
 	again := d.ymThreadChatID(parent, 1784109957039064)
 	if d.isGroupChat(again) {
 		t.Fatal("re-encountering an already-independent thread must not re-inherit parent state")
+	}
+	// Changing the parent's settings AFTER the thread became independent
+	// must not leak into the thread either.
+	d.store.UpdateScopeDefaults(parent, func(def *session.ScopeDefaults) { def.Backend = "claude" })
+	if d.scopeDefaults(threadChatID).Backend != "codex" {
+		t.Fatal("thread scope defaults must not track later changes to the parent")
 	}
 }
 
