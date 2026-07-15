@@ -233,6 +233,7 @@ func (b *Bot) sendMsg(chatID, text, replyTo, format string) (string, error) {
 		payload["rich_message"] = map[string]interface{}{"html": text}
 	} else {
 		payload["text"] = text
+		payload["disable_web_page_preview"] = true
 		switch format {
 		case "markdown":
 			payload["parse_mode"] = "Markdown"
@@ -313,6 +314,7 @@ func (b *Bot) EditMessage(chatID, messageID, text, format string) error {
 		payload["rich_message"] = map[string]interface{}{"html": text}
 	} else {
 		payload["text"] = text
+		payload["disable_web_page_preview"] = true
 		switch format {
 		case "markdown":
 			payload["parse_mode"] = "Markdown"

@@ -13,6 +13,7 @@ type UserIdentity struct {
 	TelegramID int64  `json:"tg_id,omitempty"`    // Telegram user ID
 	MaxID      int64  `json:"mx_id,omitempty"`    // MAX user ID
 	VKID       int64  `json:"vk_id,omitempty"`    // VK user ID
+	YmLogin    string `json:"ym_login,omitempty"` // Yandex Messenger login (e.g. "vasya@example.org")
 	UIToken    string `json:"ui_token,omitempty"` // bearer token authenticating as this user in the web UI
 	CWD        string `json:"cwd,omitempty"`      // default working directory for this user's new DM/UI sessions
 }
@@ -43,6 +44,9 @@ type Config struct {
 
 	VKToken        string `json:"vk_token"`
 	VKAllowedUsers []int  `json:"vk_allowed_users"` // VK user IDs
+
+	YmToken        string   `json:"ym_token"`
+	YmAllowedUsers []string `json:"ym_allowed_users"` // Yandex Messenger logins (e.g. "vasya@example.org")
 
 	Users              []UserIdentity `json:"users"`               // cross-platform identity mapping
 	DisabledTransports []string       `json:"disabled_transports"` // transports disabled via /transports off
@@ -168,6 +172,9 @@ func normalize(c *Config) *Config {
 	}
 	if c.VKAllowedUsers == nil {
 		c.VKAllowedUsers = []int{}
+	}
+	if c.YmAllowedUsers == nil {
+		c.YmAllowedUsers = []string{}
 	}
 	if c.Users == nil {
 		c.Users = []UserIdentity{}

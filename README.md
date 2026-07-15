@@ -1,6 +1,6 @@
 # klax
 
-`klax` is a messenger bridge for coding agents. It connects Telegram, MAX, and VK chats to a local CLI backend and streams progress back into the chat.
+`klax` is a messenger bridge for coding agents. It connects Telegram, MAX, VK, and Yandex Messenger chats to a local CLI backend and streams progress back into the chat.
 
 Supported backends:
 
@@ -24,7 +24,7 @@ At a high level:
 
 ## Features
 
-- Telegram, MAX, and VK transports
+- Telegram, MAX, VK, and Yandex Messenger transports
 - `claude` and `codex` backends
 - Persistent sessions with resume support
 - Per-session backend, model, thinking level, and sandbox mode
@@ -106,6 +106,8 @@ Common fields:
 | `mx_allowed_users` | MAX whitelist |
 | `vk_token` | VK group token |
 | `vk_allowed_users` | VK whitelist |
+| `ym_token` | Yandex Messenger bot token |
+| `ym_allowed_users` | Yandex Messenger whitelist (logins, e.g. `vasya@example.org`) |
 | `default_cwd` | working directory for new direct-message sessions |
 | `default_backend` | default backend for new sessions: `claude` or `codex` |
 | `source_dir` | local klax source tree used by `klax update` for local builds |
@@ -214,4 +216,5 @@ internal/runner/    backend adapters, streaming parser, tool formatting
 internal/tg/        Telegram transport
 internal/max/       MAX transport
 internal/vk/        VK transport
+internal/ym/        Yandex Messenger transport
 ```

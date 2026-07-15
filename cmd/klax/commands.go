@@ -26,7 +26,7 @@ var tgMenuCommands = []tg.BotCommand{
 	{Command: "abort", Description: "Прервать"},
 }
 
-var transportOrder = []string{"tg", "mx", "vk"}
+var transportOrder = []string{"tg", "mx", "vk", "ym"}
 
 // sessionBusyText is shown when a setting that feeds into RunOptions is
 // changed while the session has work in flight. The current run captured the
@@ -828,6 +828,8 @@ func (d *daemon) handleTransports(chatID, msgID string, parts []string) {
 			name = "mx"
 		case "telegram":
 			name = "tg"
+		case "yandex":
+			name = "ym"
 		}
 
 		// The web UI is a transport for reply delivery but not a pollable
@@ -864,7 +866,7 @@ func (d *daemon) handleTransports(chatID, msgID string, parts []string) {
 			d.saveDisabled()
 			d.sendPlain(chatID, msgID, d.transportsText())
 		default:
-			d.sendMessage(chatID, msgID, "Использование: /transports [on|off <tg|max|vk>]")
+			d.sendMessage(chatID, msgID, "Использование: /transports [on|off <tg|max|vk|ym>]")
 		}
 		return
 	}

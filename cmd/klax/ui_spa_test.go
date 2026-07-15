@@ -89,13 +89,12 @@ import { noticeSeverity, noticeText, showNotice } from "./notices.js";
 function assert(c, m){ if(!c) throw new Error(m); }
 assert(noticeSeverity("Сеть недоступна — сообщение не отправлено") === "error", "send failure must be error");
 assert(noticeSeverity("Сообщение не принято") === "error", "rejected message must be error");
-assert(noticeSeverity("Ожидается перезапуск klax...") === "warning", "restart must be warning");
+assert(noticeSeverity("Сервис перезапускается...") === "warning", "restart must be warning");
 assert(noticeSeverity("klax обновился") === "info", "success must be info");
 assert(noticeSeverity("Устанавливается klax v1.2.3...") === "info", "install progress must be info");
-assert(noticeSeverity("Ожидается перезапуск klax...") === "warning", "restart wait must be warning");
 assert(noticeSeverity("Установлен klax v1.2.3") === "info", "installed must be info");
 assert(noticeSeverity("Не удалось установить klax v1.2.3") === "error", "install failure must be error");
-assert(noticeText("🔄 Ожидается перезапуск klax...") === "Ожидается перезапуск klax...", "UI must replace the transport icon with its own severity icon");
+assert(noticeText("🔄 Сервис перезапускается...") === "Сервис перезапускается...", "UI must replace the transport icon with its own severity icon");
 assert(noticeSeverity("plain", { error: true }) === "error", "explicit severity must win");
 
 class Classes { constructor(){ this.s = new Set(); } add(...v){ for(const x of v) this.s.add(x); } contains(v){ return this.s.has(v); } }
