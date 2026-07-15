@@ -264,25 +264,40 @@ func (d *daemon) processSessionQueue(sr *sessionRunner) {
 		msg := sr.queue[0]
 		sr.queue = sr.queue[1:]
 		lastSK = msg.sessKey
-		// Update queue position in remaining messages' progress notifications.
-		for i, qm := range sr.queue {
-			if qm.progressID != "" {
-				ctx, cancel := withDeliveryTimeout(context.Background())
-				_, _ = d.performTransportOp(ctx, transportOp{
-					fullChatID: qm.chatID,
-					messageID:  qm.progressID,
-					text:       fmt.Sprintf("⏳ В очереди: %d", i+1),
-					format:     "",
-				})
-				cancel()
-			}
-		}
+		// An independent copy, not a reslice of sr.queue's backing array — the
+		// notify below runs after unlock, so aliasing it would race with a
+		// concurrent enqueue appending to the same array (see clearSessionQueue,
+		// which copies for the same reason).
+		remaining := append([]queuedMsg(nil), sr.queue...)
 		sr.mu.Unlock()
+
+		d.notifyQueuePositions(remaining)
 
 		// A message just left the queue to run — refresh the queue depth.
 		d.broadcastSessions(msg.sessKey)
 
 		d.runBackend(msg)
+	}
+}
+
+// notifyQueuePositions edits each remaining queued message's "В очереди: N"
+// placeholder to reflect its new position after one message left the queue to
+// run. remaining must be an independent copy (see the caller), not a live
+// reslice of a sessionRunner's queue.
+func (d *daemon) notifyQueuePositions(remaining []queuedMsg) {
+	for i, qm := range remaining {
+		if qm.progressID == "" {
+			continue
+		}
+		ctx, cancel := withDeliveryTimeout(context.Background())
+		_, _ = d.performTransportOp(ctx, transportOp{
+			fullChatID: qm.chatID,
+			messageID:  qm.progressID,
+			replyTo:    qm.msgID,
+			text:       fmt.Sprintf("⏳ В очереди: %d", i+1),
+			format:     "",
+		})
+		cancel()
 	}
 }
 
@@ -353,6 +368,7 @@ func (d *daemon) abortQueuedMessages(msgs []queuedMsg) {
 		_, err := d.performTransportOp(ctx, transportOp{
 			fullChatID: qm.chatID,
 			messageID:  qm.progressID,
+			replyTo:    qm.msgID,
 			text:       "❌ Прервано.",
 			format:     "",
 		})

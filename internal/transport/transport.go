@@ -7,8 +7,12 @@ type Transport interface {
 	SendMessage(chatID, text, replyTo, format string) error
 	// SendMessageReturnID sends text and returns the message ID.
 	SendMessageReturnID(chatID, text, replyTo, format string) (string, error)
-	// EditMessage edits an existing message.
-	EditMessage(chatID, messageID, text, format string) error
+	// EditMessage edits an existing message. replyTo is the reply target used
+	// when the message was first created; tg/mx/vk ignore it (their edit
+	// never touches the reply relationship), but ym's "edit" is the same
+	// sendText call used to send — it must resend reply_message_id on every
+	// edit or the message silently loses its reply link.
+	EditMessage(chatID, messageID, text, replyTo, format string) error
 }
 
 // APIError represents a messenger API error with enough detail for retry decisions.

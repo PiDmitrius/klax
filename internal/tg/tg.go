@@ -303,7 +303,9 @@ func (b *Bot) DownloadFile(fileID string) ([]byte, string, error) {
 	return data, name, nil
 }
 
-func (b *Bot) EditMessage(chatID, messageID, text, format string) error {
+// EditMessage edits an existing message. replyTo is unused — Telegram's
+// editMessageText never touches the reply relationship set at creation.
+func (b *Bot) EditMessage(chatID, messageID, text, replyTo, format string) error {
 	msgID, _ := strconv.Atoi(messageID)
 	payload := map[string]interface{}{
 		"chat_id":    chatID,

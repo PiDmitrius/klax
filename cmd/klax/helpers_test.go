@@ -328,3 +328,56 @@ func TestSessionCWDFlattensYmGroupChatID(t *testing.T) {
 		t.Fatalf("expected sessionCWD to have created %q: %v", cwd, err)
 	}
 }
+
+func TestYMThreadChatIDInheritsParentGroupModeOnce(t *testing.T) {
+	t.Setenv("KLAX_CONFIG_DIR", t.TempDir())
+	d := newTestDaemon()
+	d.cfg.DefaultCWD = t.TempDir()
+	parent := "ym:0/0/1ebc83a5-08e2-466e-ab2f-af7b22161adf"
+	parentCWD := d.sessionCWD(parent)
+	d.enableGroupChat(parent, parentCWD)
+
+	threadChatID := d.ymThreadChatID(parent, 1784109957039064)
+
+	if !strings.HasSuffix(threadChatID, "#1784109957039064") {
+		t.Fatalf("ymThreadChatID = %q, want a #<thread_id> suffix", threadChatID)
+	}
+	if !d.isGroupChat(threadChatID) {
+		t.Fatalf("thread should inherit group mode from parent, chatID=%q", threadChatID)
+	}
+	threadCWD := d.groupCWD(threadChatID)
+	if threadCWD == "" || threadCWD == parentCWD {
+		t.Fatalf("thread should get its own distinct CWD, got %q (parent %q)", threadCWD, parentCWD)
+	}
+
+	// Simulate the thread having actually received its first message — what
+	// the real handleInbound path does via ensureSessionWithCWD. This is what
+	// makes ymThreadChatID's "first time" check monotonic afterward: it's
+	// keyed off session existence, not the current on/off toggle state.
+	d.ensureSessionWithCWD(threadChatID, threadCWD)
+
+	// From here on the thread is fully independent: turning its group mode
+	// off must not affect the parent, and re-encountering it must not
+	// re-inherit (no bouncing back to "on").
+	d.disableGroupChat(threadChatID)
+	if !d.isGroupChat(parent) {
+		t.Fatal("disabling the thread's group mode must not affect the parent")
+	}
+	again := d.ymThreadChatID(parent, 1784109957039064)
+	if d.isGroupChat(again) {
+		t.Fatal("re-encountering an already-independent thread must not re-inherit parent state")
+	}
+}
+
+func TestYMThreadChatIDNoInheritWhenParentGroupModeOff(t *testing.T) {
+	t.Setenv("KLAX_CONFIG_DIR", t.TempDir())
+	d := newTestDaemon()
+	d.cfg.DefaultCWD = t.TempDir()
+	parent := "ym:0/0/1ebc83a5-08e2-466e-ab2f-af7b22161adf" // /groups on never ran here
+
+	threadChatID := d.ymThreadChatID(parent, 42)
+
+	if d.isGroupChat(threadChatID) {
+		t.Fatalf("thread must not get group mode when the parent doesn't have it, chatID=%q", threadChatID)
+	}
+}

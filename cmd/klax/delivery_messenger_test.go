@@ -70,6 +70,61 @@ func TestMessengerDeliveryDeliversAnswer(t *testing.T) {
 	}
 }
 
+// A queued-progress placeholder is created (in enqueueToSession) as a reply to
+// the user's message; when nothing else happened in the chat, newMessengerDelivery
+// reuses it directly. Its edits (both the "..." placeholder and the final
+// answer) must resend that original replyTo — ym drops the reply link
+// otherwise, and it was silently missing until replyTos was seeded here too.
+func TestMessengerDeliveryReusedQueuedProgressKeepsReplyToOnEdit(t *testing.T) {
+	tp := &fakeTransport{}
+	d := newTestDeliveryDaemon(tp)
+	seq := d.bumpChatActivity("tg:1")
+	msg := queuedMsg{chatID: "tg:1", msgID: "100", progressID: "queued-1", progressSeq: seq, sessKey: "user:x", sessCreated: 1}
+
+	del := d.newMessengerDelivery(context.Background(), msg, true)
+	del.Final(runner.RunResult{Text: "pong"})
+
+	if tp.editCalls == 0 {
+		t.Fatalf("expected the answer to be delivered via an edit, got 0 edits")
+	}
+	for _, call := range tp.editLog {
+		if call.message != "queued-1" {
+			continue
+		}
+		if call.replyTo != "100" {
+			t.Errorf("edit of reused queued progress %q lost replyTo, got %q", call.message, call.replyTo)
+		}
+	}
+}
+
+// If chat activity moved on before the run started, the queued placeholder is
+// NOT reused as the progress message — it's redirected to a "↓" marker instead
+// (pointing at the new answer below). That redirect is itself an edit of a
+// message that was created as a reply, so it must resend replyTo too.
+func TestMessengerDeliveryRedirectMarkerKeepsReplyTo(t *testing.T) {
+	tp := &fakeTransport{}
+	d := newTestDeliveryDaemon(tp)
+	seq := d.bumpChatActivity("tg:1")
+	d.bumpChatActivity("tg:1") // more activity since queueing -> reuse condition fails
+	msg := queuedMsg{chatID: "tg:1", msgID: "100", progressID: "queued-1", progressSeq: seq, sessKey: "user:x", sessCreated: 1}
+
+	d.newMessengerDelivery(context.Background(), msg, true)
+
+	var found bool
+	for _, call := range tp.editLog {
+		if call.text != "↓" {
+			continue
+		}
+		found = true
+		if call.replyTo != "100" {
+			t.Errorf("redirect marker edit lost replyTo, got %q", call.replyTo)
+		}
+	}
+	if !found {
+		t.Fatal("expected a redirect-marker (\"↓\") edit for the unused queued placeholder")
+	}
+}
+
 // Final must use a fresh delivery context, not the run context: /abort cancels
 // the run ctx, yet the "❌ Прервано." result still has to reach the user.
 func TestMessengerDeliveryFinalSurvivesCancelledRunCtx(t *testing.T) {

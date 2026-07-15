@@ -237,8 +237,9 @@ func (b *Bot) sendMsg(peerID, text, replyTo string) (string, error) {
 	return strconv.Itoa(msgID), nil
 }
 
-// EditMessage edits an existing message.
-func (b *Bot) EditMessage(chatID, messageID, text, format string) error {
+// EditMessage edits an existing message. replyTo is unused — VK's
+// messages.edit never touches the reply relationship set at creation.
+func (b *Bot) EditMessage(chatID, messageID, text, replyTo, format string) error {
 	_, err := b.call("messages.edit", url.Values{
 		"peer_id":          {chatID},
 		"message_id":       {messageID},

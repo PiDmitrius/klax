@@ -80,6 +80,72 @@ func TestSendMsgAddressesLoginVsChatID(t *testing.T) {
 	if gotBody["chat_id"] != "0/0/guid" {
 		t.Errorf("expected chat_id field, got %+v", gotBody)
 	}
+	if _, ok := gotBody["thread_id"]; ok {
+		t.Errorf("thread_id should not be set for a plain chat_id, got %+v", gotBody)
+	}
+
+	// Thread within a group/channel: chat_id + thread_id, not folded into chat_id.
+	if _, err := b.SendMessageReturnID("0/0/guid#1784109957039064", "hi", "", ""); err != nil {
+		t.Fatalf("send to thread: %v", err)
+	}
+	if gotBody["chat_id"] != "0/0/guid" {
+		t.Errorf("expected chat_id=0/0/guid for thread address, got %+v", gotBody)
+	}
+	if gotBody["thread_id"] != float64(1784109957039064) {
+		t.Errorf("expected thread_id=1784109957039064, got %+v", gotBody["thread_id"])
+	}
+}
+
+func TestSplitThread(t *testing.T) {
+	cases := []struct {
+		raw        string
+		wantAddr   string
+		wantThread int64
+		wantHas    bool
+	}{
+		{"0/0/guid", "0/0/guid", 0, false},
+		{"0/0/guid#123", "0/0/guid", 123, true},
+		{"vasya@example.org", "vasya@example.org", 0, false},
+	}
+	for _, c := range cases {
+		addr, threadID, hasThread := splitThread(c.raw)
+		if addr != c.wantAddr || threadID != c.wantThread || hasThread != c.wantHas {
+			t.Errorf("splitThread(%q) = (%q, %d, %v), want (%q, %d, %v)",
+				c.raw, addr, threadID, hasThread, c.wantAddr, c.wantThread, c.wantHas)
+		}
+	}
+}
+
+// TestEncodeThreadChatIDRoundTripsPathologicalChatIDs proves splitThread
+// doesn't rely on an assumption that a real chat_id never contains "#"/"%" —
+// it's correct by construction (escaping), not by luck, even for chat_ids
+// engineered specifically to try to confuse the delimiter search.
+func TestEncodeThreadChatIDRoundTripsPathologicalChatIDs(t *testing.T) {
+	cases := []struct {
+		chatID   string
+		threadID int64
+	}{
+		{"0/0/guid", 123},
+		{"0/0/guid#456", 789},          // literal "#" in the chat_id itself
+		{"0/0/guid%23456", 789},        // literal "%23" (would decode wrong if unescaped blindly)
+		{"weird%25#chat#42", 999},      // both special chars, repeated
+		{"trailing-hash-digits#42", 1}, // chat_id that itself looks like "<x>#<digits>"
+		{"", 42},                       // empty chat_id
+		{"###", 42},                    // chat_id made entirely of the delimiter char
+		{"%%%", 42},                    // chat_id made entirely of the escape-marker char
+	}
+	for _, c := range cases {
+		encoded := EncodeThreadChatID(c.chatID, c.threadID)
+		addr, threadID, hasThread := splitThread(encoded)
+		if !hasThread {
+			t.Errorf("splitThread(%q) (from chatID=%q) reported no thread", encoded, c.chatID)
+			continue
+		}
+		if addr != c.chatID || threadID != c.threadID {
+			t.Errorf("round-trip for chatID=%q, threadID=%d: encoded=%q, decoded=(%q, %d)",
+				c.chatID, c.threadID, encoded, addr, threadID)
+		}
+	}
 }
 
 func TestEditMessageSetsMessageID(t *testing.T) {
@@ -90,7 +156,7 @@ func TestEditMessageSetsMessageID(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":true,"message_id":42}`))
 	})
 
-	if err := b.EditMessage("vasya@example.org", "1647523230504005", "updated", ""); err != nil {
+	if err := b.EditMessage("vasya@example.org", "1647523230504005", "updated", "", ""); err != nil {
 		t.Fatalf("EditMessage: %v", err)
 	}
 	if gotBody["message_id"] != float64(1647523230504005) {
@@ -98,6 +164,28 @@ func TestEditMessageSetsMessageID(t *testing.T) {
 	}
 	if gotBody["text"] != "updated" {
 		t.Errorf("text = %v", gotBody["text"])
+	}
+	if _, ok := gotBody["reply_message_id"]; ok {
+		t.Errorf("reply_message_id should not be set when replyTo is empty, got %+v", gotBody)
+	}
+}
+
+func TestEditMessageResendsReplyMessageID(t *testing.T) {
+	var gotBody map[string]interface{}
+	b := newTestBot(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"message_id":42}`))
+	})
+
+	// ym has no dedicated edit endpoint that preserves the reply link on its
+	// own — an edit must resend reply_message_id or the message silently
+	// loses it (confirmed empirically on a live bot).
+	if err := b.EditMessage("0/0/guid", "1647523230504005", "updated", "1647523230000000", ""); err != nil {
+		t.Fatalf("EditMessage: %v", err)
+	}
+	if gotBody["reply_message_id"] != float64(1647523230000000) {
+		t.Errorf("reply_message_id = %v, want 1647523230000000", gotBody["reply_message_id"])
 	}
 }
 

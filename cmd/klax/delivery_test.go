@@ -162,6 +162,7 @@ type fakeEditCall struct {
 	chatID  string
 	message string
 	text    string
+	replyTo string
 	format  string
 }
 
@@ -177,6 +178,7 @@ type fakeTransport struct {
 		chatID  string
 		message string
 		text    string
+		replyTo string
 		format  string
 	}
 }
@@ -208,12 +210,13 @@ func (f *fakeTransport) SendMessageReturnID(chatID, text, replyTo, format string
 	return id, nil
 }
 
-func (f *fakeTransport) EditMessage(chatID, messageID, text, format string) error {
+func (f *fakeTransport) EditMessage(chatID, messageID, text, replyTo, format string) error {
 	f.editCalls++
-	f.editLog = append(f.editLog, fakeEditCall{chatID: chatID, message: messageID, text: text, format: format})
+	f.editLog = append(f.editLog, fakeEditCall{chatID: chatID, message: messageID, text: text, replyTo: replyTo, format: format})
 	f.lastEdit.chatID = chatID
 	f.lastEdit.message = messageID
 	f.lastEdit.text = text
+	f.lastEdit.replyTo = replyTo
 	f.lastEdit.format = format
 	if f.editErr != nil && format != "" {
 		return f.editErr
@@ -235,7 +238,7 @@ func TestTryEditTreatsNotModifiedAsSuccess(t *testing.T) {
 	tp := &fakeTransport{
 		editErr: &transport.APIError{Platform: "tg", Code: 400, Description: "message is not modified"},
 	}
-	if err := tryEdit(context.Background(), tp, "chat", "msg", "same", "html"); err != nil {
+	if err := tryEdit(context.Background(), tp, "chat", "msg", "same", "", "html"); err != nil {
 		t.Fatalf("expected not modified to be ignored, got %v", err)
 	}
 	if tp.editCalls != 1 {
@@ -247,7 +250,7 @@ func TestTryEditFallsBackToPlainFormat(t *testing.T) {
 	tp := &fakeTransport{
 		editErr: &transport.APIError{Platform: "tg", Code: 400, Description: "bad format"},
 	}
-	err := tryEdit(context.Background(), tp, "chat", "msg", "<b>hello</b>", "html")
+	err := tryEdit(context.Background(), tp, "chat", "msg", "<b>hello</b>", "", "html")
 	if err != nil {
 		t.Fatalf("expected plain fallback to succeed, got %v", err)
 	}
@@ -358,6 +361,34 @@ func TestSyncMessageChainSkipsCachedEdits(t *testing.T) {
 	}
 }
 
+func TestSyncMessageChainResendsReplyToOnEdit(t *testing.T) {
+	tp := &fakeTransport{}
+	d := newTestDeliveryDaemon(tp)
+	ctx := context.Background()
+	chain := newMessageChain()
+
+	chain, err := d.syncMessageChain(ctx, "tg:1", "user-msg-1", chain, "hello", "html")
+	if err != nil {
+		t.Fatalf("first sync failed: %v", err)
+	}
+	if tp.sendLog[0].replyTo != "user-msg-1" {
+		t.Fatalf("expected first send to carry replyTo, got %+v", tp.sendLog[0])
+	}
+
+	// Editing the same message (e.g. progress placeholder -> final answer)
+	// must resend the original replyTo: ym's "edit" is the same sendText
+	// call used to send, and silently drops the reply link if it's omitted.
+	if _, err = d.syncMessageChain(ctx, "tg:1", "user-msg-1", chain, "hello, edited", "html"); err != nil {
+		t.Fatalf("edit sync failed: %v", err)
+	}
+	if tp.editCalls != 1 {
+		t.Fatalf("expected one edit call, got %d", tp.editCalls)
+	}
+	if tp.lastEdit.replyTo != "user-msg-1" {
+		t.Fatalf("edit should resend the original replyTo, got %q", tp.lastEdit.replyTo)
+	}
+}
+
 func TestSyncMessageChainKeepsFollowupChunkUnrepliedWithoutGap(t *testing.T) {
 	tp := &fakeTransport{sendIDs: []string{"first", "second"}}
 	d := newTestDeliveryDaemon(tp)
@@ -406,6 +437,45 @@ func TestSyncMessageChainRepliesAfterInboundGap(t *testing.T) {
 	}
 	if got := tp.sendLog[1].replyTo; got != "user-msg" {
 		t.Fatalf("expected appended chunk to reply after gap, got %q", got)
+	}
+}
+
+func TestSyncMessageChainResendsReplyToOnEditAfterGapAppend(t *testing.T) {
+	tp := &fakeTransport{sendIDs: []string{"first", "second"}}
+	d := newTestDeliveryDaemon(tp)
+	ctx := context.Background()
+
+	chain, err := d.syncMessageChainChunks(ctx, "tg:1", "user-msg", nil, []string{"chunk one"}, "html")
+	if err != nil {
+		t.Fatalf("first sync failed: %v", err)
+	}
+
+	d.bumpChatActivity("tg:1")
+
+	chain, err = d.syncMessageChainChunks(ctx, "tg:1", "user-msg", chain, []string{"chunk one", "chunk two"}, "html")
+	if err != nil {
+		t.Fatalf("second sync failed: %v", err)
+	}
+	if len(chain.ids) != 2 {
+		t.Fatalf("expected exactly 2 chain ids, got %v", chain.ids)
+	}
+	if chain.replyTos[chain.ids[1]] != "user-msg" {
+		t.Fatalf("expected the gap-appended second chunk to be recorded as a reply, got %+v", chain.replyTos)
+	}
+
+	// Edit both chunks (different content so neither hits the cache) — the
+	// second chunk was created as a reply too (append-after-gap), not just
+	// the first, so its edit must resend replyTo just the same.
+	if _, err = d.syncMessageChainChunks(ctx, "tg:1", "user-msg", chain, []string{"chunk one edited", "chunk two edited"}, "html"); err != nil {
+		t.Fatalf("third sync failed: %v", err)
+	}
+	if tp.editCalls != 2 {
+		t.Fatalf("expected 2 edit calls, got %d", tp.editCalls)
+	}
+	for _, call := range tp.editLog {
+		if call.replyTo != "user-msg" {
+			t.Errorf("edit of message %q lost replyTo, got %q", call.message, call.replyTo)
+		}
 	}
 }
 
