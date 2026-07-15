@@ -1079,7 +1079,7 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	}) {
 		// Dropped after our entry checks (drain flipped in the window) — tell the
 		// client so it restores the composer instead of silently losing the draft.
-		http.Error(w, "Ожидается перезапуск klax — попробуйте через минуту", http.StatusServiceUnavailable)
+		http.Error(w, "Сервис перезапускается — попробуйте через минуту", http.StatusServiceUnavailable)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
