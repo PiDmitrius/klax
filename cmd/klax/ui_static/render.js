@@ -279,7 +279,18 @@ function buildTurn(it, onAbort, old){
   put("u", userSig, () => bubble("user", userHTML, it.time, undefined, it.text),
     patchBubble("user", userHTML, it.time, undefined, it.text));
   for(const g of it.groups){
-    if(g.divider){ desired.push(divider()); continue; } // a fresh in-flow node; dismissal fades it via fadeOutDivider, then the next render drops it
+    if(g.divider){
+      // A fresh in-flow node every render (never reused via put() — it carries
+      // no content that could change) — dismissal fades it via fadeOutDivider,
+      // then the next render drops it. It still needs data-flip: beginShift/
+      // playShift only track children that have one, and without it the line
+      // snapped straight to its final layout position on every shift while
+      // everything else around it slid smoothly — the "out of sync" look.
+      const dv = divider();
+      dv.dataset.flip = "divider";
+      desired.push(dv);
+      continue;
+    }
     const fk = "g:" + g.startPos;
     const cls = g.cls + (g.joinPrev ? " join-prev" : "") + (g.joinNext ? " join-next" : "");
     const sig = childSig("g", { cls: g.cls, tool: g.tool, time: g.time, maxPos: g.maxPos, joinPrev: !!g.joinPrev, joinNext: !!g.joinNext,
