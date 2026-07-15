@@ -1168,6 +1168,33 @@ func (d *daemon) isMAXAllowed(id int64) bool {
 	return false
 }
 
+// ymThreadChatID returns the per-thread chatID for a ym group/channel
+// message: parentChatID ("ym:<chat_id>") with the thread id encoded onto it
+// via ym.EncodeThreadChatID (escaped, not just concatenated — see there for
+// why). A thread is a fully independent group from the moment it's first
+// seen — its own CWD, own session list, own /groups on|off — except for one
+// inherited starting fact: if the parent chat currently has group mode on,
+// that state (and its own auto-assigned CWD) is copied onto the thread once,
+// right here, the first time this thread's chatID is encountered. After that
+// the two evolve completely independently, same as any other two distinct
+// group chats. sendMsg/EditMessage parse the encoded suffix back out (see
+// ym.splitThread) so replies stay inside the thread instead of leaking to the
+// parent's main channel.
+//
+// "First time" is whether a session already exists for this thread, NOT
+// whether its group mode happens to be on right now — the latter flips back
+// to true after a manual /groups off + a later /groups on-less re-check, and
+// re-inheriting at that point would silently resurrect a state the user
+// deliberately turned off.
+func (d *daemon) ymThreadChatID(parentChatID string, threadID int64) string {
+	chatID := ym.EncodeThreadChatID(parentChatID, threadID)
+	firstSeen := d.store.Active(d.sessionKey(chatID)) == nil
+	if firstSeen && d.isGroupChat(parentChatID) {
+		d.enableGroupChat(chatID, d.sessionCWD(chatID))
+	}
+	return chatID
+}
+
 func (d *daemon) pollYM(ctx context.Context) {
 	bot := d.transports["ym"].(*ym.Bot)
 	for {
@@ -1211,12 +1238,21 @@ func (d *daemon) pollYM(ctx context.Context) {
 				continue
 			}
 			chatID := fmt.Sprintf("ym:%s", addr)
+			// A thread is its own independent group (own CWD, own session
+			// list, own /groups on|off) — it just inherits the parent
+			// group's on|off state once, the first time the thread is seen.
+			if upd.Chat.ThreadID != 0 && upd.Chat.Type != "private" {
+				chatID = d.ymThreadChatID(chatID, upd.Chat.ThreadID)
+			}
 			d.bumpChatActivity(chatID)
 			// /id — respond to anyone, even unauthenticated
 			if strings.TrimSpace(upd.Text) == "/id" {
 				reply := fmt.Sprintf("login: %s\nid: %s", upd.From.Login, upd.From.ID)
 				if upd.Chat.Type != "private" {
 					reply += fmt.Sprintf("\nchat_id: %s", upd.Chat.ID)
+				}
+				if upd.Chat.ThreadID != 0 {
+					reply += fmt.Sprintf("\nthread_id: %d", upd.Chat.ThreadID)
 				}
 				d.sendPlain(chatID, "", reply)
 				continue

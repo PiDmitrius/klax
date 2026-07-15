@@ -42,8 +42,9 @@ func New(token string) *Bot {
 // must be addressed by the sender's Sender.Login instead; group/channel by ID
 // (see IsLogin/IsGroup, and the caller in cmd/klax/daemon.go pollYM).
 type Chat struct {
-	Type string `json:"type"` // "private", "group", "channel"
-	ID   string `json:"id,omitempty"`
+	Type     string `json:"type"` // "private", "group", "channel"
+	ID       string `json:"id,omitempty"`
+	ThreadID int64  `json:"thread_id,omitempty"` // set when the message was posted inside a thread of this chat
 }
 
 type Sender struct {
@@ -269,13 +270,50 @@ func (b *Bot) GetUpdates() ([]Update, error) {
 	return r.Updates, nil
 }
 
+// EncodeThreadChatID returns the composite per-thread chat address the
+// daemon uses as both a session key and (via splitThread) a send/edit
+// address: chatID with any literal "%" and "#" percent-escaped, followed by
+// "#<threadID>". Escaping — not an assumption that chatID never contains "#"
+// — is what makes splitThread's reverse parse unambiguous regardless of what
+// characters a real chat_id happens to contain (matching the same whitelist
+// philosophy as sanitizeDirName's directory-name escaping, rather than
+// chasing which specific characters are "safe" this week).
+func EncodeThreadChatID(chatID string, threadID int64) string {
+	escaped := strings.ReplaceAll(chatID, "%", "%25") // escape existing percents first
+	escaped = strings.ReplaceAll(escaped, "#", "%23") // so the escape marker itself can't collide
+	return escaped + "#" + strconv.FormatInt(threadID, 10)
+}
+
+// splitThread reverses EncodeThreadChatID: splits a raw chat address into its
+// chat_id/login part and an optional thread id. A plain (non-thread) address
+// returns hasThread=false unchanged.
+func splitThread(raw string) (addr string, threadID int64, hasThread bool) {
+	idx := strings.LastIndex(raw, "#")
+	if idx == -1 {
+		return raw, 0, false
+	}
+	id, err := strconv.ParseInt(raw[idx+1:], 10, 64)
+	if err != nil {
+		return raw, 0, false
+	}
+	unescaped := strings.ReplaceAll(raw[:idx], "%23", "#") // reverse hash escape first
+	unescaped = strings.ReplaceAll(unescaped, "%25", "%")  // then reverse percent escape
+	return unescaped, id, true
+}
+
 // addressPayload sets the recipient field expected by sendText/getFile-family
-// endpoints: "login" for a private chat, "chat_id" for a group/channel.
+// endpoints: "login" for a private chat, "chat_id" for a group/channel — plus
+// "thread_id" when raw carries one, so a reply/edit stays inside the thread
+// instead of falling back to the parent chat's main channel.
 func addressPayload(raw string, payload map[string]interface{}) {
-	if IsLogin(raw) {
-		payload["login"] = raw
+	addr, threadID, hasThread := splitThread(raw)
+	if IsLogin(addr) {
+		payload["login"] = addr
 	} else {
-		payload["chat_id"] = raw
+		payload["chat_id"] = addr
+	}
+	if hasThread {
+		payload["thread_id"] = threadID
 	}
 }
 
@@ -314,11 +352,21 @@ func (b *Bot) sendMsg(chatID, text, replyTo string) (string, error) {
 
 // EditMessage edits an existing message. Yandex Messenger has no dedicated
 // edit endpoint — sendText itself edits when message_id is set (see notes).
-func (b *Bot) EditMessage(chatID, messageID, text, format string) error {
+// Unlike tg/mx/vk, the reply link is NOT preserved automatically across an
+// edit: it must be resent as reply_message_id on every call, or the message
+// silently loses it (confirmed empirically 2026-07-15 — a thread reply's
+// "..." placeholder kept its reply arrow, but editing it into the final
+// answer dropped it).
+func (b *Bot) EditMessage(chatID, messageID, text, replyTo, format string) error {
 	payload := map[string]interface{}{"text": text, "disable_web_page_preview": true}
 	addressPayload(chatID, payload)
 	if id, err := strconv.ParseInt(messageID, 10, 64); err == nil {
 		payload["message_id"] = id
+	}
+	if replyTo != "" {
+		if id, err := strconv.ParseInt(replyTo, 10, 64); err == nil {
+			payload["reply_message_id"] = id
+		}
 	}
 	_, err := b.do(http.MethodPost, "messages/sendText/", payload)
 	return err

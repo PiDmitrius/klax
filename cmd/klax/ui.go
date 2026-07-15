@@ -705,7 +705,7 @@ func (t *uiTransport) SendMessageReturnID(chatID, text, replyTo, format string) 
 	return "ui-notice", nil
 }
 
-func (t *uiTransport) EditMessage(chatID, messageID, text, format string) error {
+func (t *uiTransport) EditMessage(chatID, messageID, text, replyTo, format string) error {
 	t.d.uiEmit(t.d.uiUserForChat(chatID), uiEvent{Type: "notice", Text: text})
 	return nil
 }

@@ -289,8 +289,9 @@ func (b *Bot) DownloadURL(url string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
-// EditMessage edits an existing message by mid.
-func (b *Bot) EditMessage(chatID, messageID, text, format string) error {
+// EditMessage edits an existing message by mid. replyTo is unused — MAX's
+// edit is a dedicated endpoint that never touches the reply relationship.
+func (b *Bot) EditMessage(chatID, messageID, text, replyTo, format string) error {
 	payload := map[string]interface{}{
 		"text": text,
 	}

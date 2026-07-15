@@ -215,20 +215,58 @@ func TestAbortQueuedMessagesMarksAllQueueProgressAsAborted(t *testing.T) {
 	d := newTestDeliveryDaemon(tp)
 
 	d.abortQueuedMessages([]queuedMsg{
-		{chatID: "tg:1", progressID: "q1"},
-		{chatID: "tg:1", progressID: "q2"},
+		{chatID: "tg:1", msgID: "user-1", progressID: "q1"},
+		{chatID: "tg:1", msgID: "user-2", progressID: "q2"},
 		{chatID: "tg:1"},
 	})
 
 	if tp.editCalls != 2 {
 		t.Fatalf("expected 2 queued progress edits, got %d", tp.editCalls)
 	}
+	wantReply := map[string]string{"q1": "user-1", "q2": "user-2"}
 	for i, call := range tp.editLog {
 		if call.text != "❌ Прервано." {
 			t.Fatalf("edit %d text = %q, want %q", i, call.text, "❌ Прервано.")
 		}
-		if call.message != "q1" && call.message != "q2" {
+		want, ok := wantReply[call.message]
+		if !ok {
 			t.Fatalf("unexpected message id in edit %d: %q", i, call.message)
+		}
+		// The placeholder was created as a reply to its own message — the
+		// abort edit must resend that same replyTo (ym drops it otherwise).
+		if call.replyTo != want {
+			t.Fatalf("edit %d (message %q) replyTo = %q, want %q", i, call.message, call.replyTo, want)
+		}
+	}
+}
+
+func TestNotifyQueuePositionsUpdatesPositionAndReplyTo(t *testing.T) {
+	tp := &fakeTransport{}
+	d := newTestDeliveryDaemon(tp)
+
+	d.notifyQueuePositions([]queuedMsg{
+		{chatID: "tg:1", msgID: "user-1", progressID: "q1"},
+		{chatID: "tg:1", msgID: "user-2", progressID: "q2"},
+		{chatID: "tg:1"}, // no progressID — nothing to edit for this one
+	})
+
+	if tp.editCalls != 2 {
+		t.Fatalf("expected 2 position edits, got %d", tp.editCalls)
+	}
+	wantPos := map[string]string{"q1": "⏳ В очереди: 1", "q2": "⏳ В очереди: 2"}
+	wantReply := map[string]string{"q1": "user-1", "q2": "user-2"}
+	for i, call := range tp.editLog {
+		want, ok := wantPos[call.message]
+		if !ok {
+			t.Fatalf("unexpected message id in edit %d: %q", i, call.message)
+		}
+		if call.text != want {
+			t.Fatalf("edit %d (message %q) text = %q, want %q", i, call.message, call.text, want)
+		}
+		// The placeholder was created as a reply to its own message — the
+		// position-update edit must resend that same replyTo.
+		if call.replyTo != wantReply[call.message] {
+			t.Fatalf("edit %d (message %q) replyTo = %q, want %q", i, call.message, call.replyTo, wantReply[call.message])
 		}
 	}
 }

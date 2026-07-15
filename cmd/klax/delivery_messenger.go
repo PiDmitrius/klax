@@ -69,6 +69,10 @@ func (d *daemon) newMessengerDelivery(ctx context.Context, msg queuedMsg, verbos
 	needsRedirectMarker := !reuseQueuedProgress && msg.progressID != ""
 	if reuseQueuedProgress {
 		progressChain = newMessageChain(msg.progressID)
+		// The queued placeholder was created (in enqueueToSession) as a reply
+		// to msg.msgID — record that so its first edit here resends it too
+		// (ym needs reply_message_id on every edit or it drops the link).
+		progressChain.replyTos[msg.progressID] = msg.msgID
 		progressChain.lastCreateActivity = msg.progressSeq
 	}
 	if t != nil {
@@ -85,6 +89,7 @@ func (d *daemon) newMessengerDelivery(ctx context.Context, msg queuedMsg, verbos
 			_, _ = d.performTransportOp(markerCtx, transportOp{
 				fullChatID: msg.chatID,
 				messageID:  msg.progressID,
+				replyTo:    msg.msgID,
 				text:       "↓",
 				format:     "",
 			})

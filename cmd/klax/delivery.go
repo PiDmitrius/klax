@@ -748,9 +748,12 @@ func sendReturnIDWithFormatFallback(ctx context.Context, t transport.Transport, 
 
 // tryEdit edits text with format, retrying on transient errors.
 // Falls back to plain text if formatted edit fails with a permanent error.
-func tryEdit(ctx context.Context, t transport.Transport, chatID, msgID, text, format string) error {
+// replyTo is the reply target the message was first created with — most
+// transports ignore it on edit, but ym needs it resent every time (see
+// ym.Bot.EditMessage).
+func tryEdit(ctx context.Context, t transport.Transport, chatID, msgID, text, replyTo, format string) error {
 	err := retryDo(ctx, func() error {
-		return t.EditMessage(chatID, msgID, text, format)
+		return t.EditMessage(chatID, msgID, text, replyTo, format)
 	})
 	if err == nil {
 		return nil
@@ -763,7 +766,7 @@ func tryEdit(ctx context.Context, t transport.Transport, chatID, msgID, text, fo
 	if format != "" && ctx.Err() == nil {
 		log.Printf("edit error (%s): %v, retrying plain", format, err)
 		return retryDo(ctx, func() error {
-			return t.EditMessage(chatID, msgID, plainFallback(text, format), "")
+			return t.EditMessage(chatID, msgID, plainFallback(text, format), replyTo, "")
 		})
 	}
 	return err
@@ -806,7 +809,7 @@ func (d *daemon) performTransportOp(ctx context.Context, op transportOp) (transp
 		err error
 	)
 	if op.messageID != "" {
-		err = tryEdit(ctx, t, rawChatID, op.messageID, text, format)
+		err = tryEdit(ctx, t, rawChatID, op.messageID, text, op.replyTo, format)
 	} else if op.returnID {
 		res.messageID, err = trySendReturnID(ctx, t, rawChatID, op.replyTo, text, format)
 		if err == nil {
@@ -824,14 +827,20 @@ func (d *daemon) performTransportOp(ctx context.Context, op transportOp) (transp
 }
 
 type messageChain struct {
-	ids                []string
-	msgs               map[string]string
+	ids  []string
+	msgs map[string]string
+	// replyTos records, per message id, the replyTo it was actually created
+	// with (possibly ""). An edit must resend exactly that value — NOT just
+	// for ids[0]: a later chunk can also be created as a reply (see the
+	// "reply after gap" branch below), and ym needs reply_message_id resent
+	// on every edit or it silently drops the link.
+	replyTos           map[string]string
 	anchorReplyTo      string
 	lastCreateActivity uint64
 }
 
 func newMessageChain(ids ...string) *messageChain {
-	chain := &messageChain{msgs: make(map[string]string)}
+	chain := &messageChain{msgs: make(map[string]string), replyTos: make(map[string]string)}
 	for _, id := range ids {
 		if id == "" {
 			continue
@@ -847,6 +856,9 @@ func (mc *messageChain) ensure() *messageChain {
 	}
 	if mc.msgs == nil {
 		mc.msgs = make(map[string]string)
+	}
+	if mc.replyTos == nil {
+		mc.replyTos = make(map[string]string)
 	}
 	return mc
 }
@@ -881,9 +893,17 @@ func (d *daemon) syncMessageChainChunks(ctx context.Context, fullChatID, replyTo
 				sendCancel()
 				continue
 			}
+			// Resend exactly the replyTo this specific message was created
+			// with (not just chain.ids[0] — a later chunk can be a reply too,
+			// see the "reply after gap" branch below): ym needs it resent on
+			// every edit or it silently drops the link, and reusing the wrong
+			// value would either fabricate a reply that never existed or drop
+			// one that did.
+			editReplyTo := chain.replyTos[chain.ids[i]]
 			_, err = d.performTransportOp(sendCtx, transportOp{
 				fullChatID: fullChatID,
 				messageID:  chain.ids[i],
+				replyTo:    editReplyTo,
 				text:       chunk,
 				format:     format,
 			})
@@ -908,6 +928,7 @@ func (d *daemon) syncMessageChainChunks(ctx context.Context, fullChatID, replyTo
 			if err == nil {
 				chain.ids = append(chain.ids, res.messageID)
 				chain.msgs[res.messageID] = chunk + "\x00" + format
+				chain.replyTos[res.messageID] = chunkReplyTo
 				chain.lastCreateActivity = res.activity
 			}
 		}
