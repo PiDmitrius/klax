@@ -159,5 +159,9 @@ func verifyServiceUnit(unit string) error {
 func ignorableVerifyError(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "Operation not permitted") ||
-		strings.Contains(msg, "SO_PASSCRED failed")
+		strings.Contains(msg, "SO_PASSCRED failed") ||
+		// No systemd at all (e.g. a container running via `klax start
+		// --foreground` under a different supervisor, like Docker's own
+		// restart policy) — nothing to verify against, not an error.
+		strings.Contains(msg, "systemd-analyze not found")
 }
