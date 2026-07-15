@@ -1171,15 +1171,18 @@ func (d *daemon) isMAXAllowed(id int64) bool {
 // ymThreadChatID returns the per-thread chatID for a ym group/channel
 // message: parentChatID ("ym:<chat_id>") with the thread id encoded onto it
 // via ym.EncodeThreadChatID (escaped, not just concatenated — see there for
-// why). A thread is a fully independent group from the moment it's first
-// seen — its own CWD, own session list, own /groups on|off — except for one
-// inherited starting fact: if the parent chat currently has group mode on,
-// that state (and its own auto-assigned CWD) is copied onto the thread once,
-// right here, the first time this thread's chatID is encountered. After that
-// the two evolve completely independently, same as any other two distinct
-// group chats. sendMsg/EditMessage parse the encoded suffix back out (see
-// ym.splitThread) so replies stay inside the thread instead of leaking to the
-// parent's main channel.
+// why). A thread continues its parent group rather than starting a fresh
+// space — its own session list and own /groups on|off from the moment it's
+// first seen, but seeded from the parent: the SAME working directory (not a
+// new groups/<...> sibling) and the parent's current scope defaults (backend,
+// model, thinking, sandbox, tty — the exact set Store.New/Ensure already uses
+// to seed any brand-new session, just sourced from the parent chat here
+// instead of the built-in fallback). This happens once, right here, the
+// first time this thread's chatID is encountered; after that the two evolve
+// completely independently, same as any other two distinct group chats.
+// sendMsg/EditMessage parse the encoded suffix back out (see ym.splitThread)
+// so replies stay inside the thread instead of leaking to the parent's main
+// channel.
 //
 // "First time" is whether a session already exists for this thread, NOT
 // whether its group mode happens to be on right now — the latter flips back
@@ -1190,7 +1193,15 @@ func (d *daemon) ymThreadChatID(parentChatID string, threadID int64) string {
 	chatID := ym.EncodeThreadChatID(parentChatID, threadID)
 	firstSeen := d.store.Active(d.sessionKey(chatID)) == nil
 	if firstSeen && d.isGroupChat(parentChatID) {
-		d.enableGroupChat(chatID, d.sessionCWD(chatID))
+		cwd := d.groupCWD(parentChatID)
+		if cwd == "" {
+			cwd = d.sessionCWD(chatID) // defensive fallback; isGroupChat(parentChatID) implies groupCWD is already set
+		}
+		d.enableGroupChat(chatID, cwd)
+		parentDefaults := d.store.EnsureScopeDefaults(parentChatID, d.fallbackScopeDefaults())
+		d.store.UpdateScopeDefaults(chatID, func(def *session.ScopeDefaults) {
+			*def = *parentDefaults
+		})
 	}
 	return chatID
 }
