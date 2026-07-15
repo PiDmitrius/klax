@@ -391,6 +391,35 @@ func TestYMThreadChatIDInheritsParentGroupModeOnce(t *testing.T) {
 	}
 }
 
+// TestYMThreadChatIDUsesLiveCWDNotStaleGroupRegistry reproduces a real bug:
+// /cwd only ever updates the active session's own CWD (commands.go), never
+// groupChats[chatID] — so after an explicit /cwd override the registry still
+// holds the group's original auto-assigned directory. A new thread must
+// continue the group's ACTUAL current workspace, not that stale default.
+func TestYMThreadChatIDUsesLiveCWDNotStaleGroupRegistry(t *testing.T) {
+	t.Setenv("KLAX_CONFIG_DIR", t.TempDir())
+	d := newTestDaemon()
+	d.cfg.DefaultCWD = t.TempDir()
+	parent := "ym:0/0/1ebc83a5-08e2-466e-ab2f-af7b22161adf"
+	originalCWD := d.sessionCWD(parent)
+	d.enableGroupChat(parent, originalCWD) // registers groupChats[parent] = originalCWD
+	d.ensureSessionWithCWD(d.sessionKey(parent), originalCWD)
+
+	// Simulate /cwd <newdir>: only Session.CWD changes, groupChats is untouched.
+	newCWD := t.TempDir()
+	d.store.UpdateActive(d.sessionKey(parent), func(sess *session.Session) { sess.CWD = newCWD })
+	if d.groupCWD(parent) == newCWD {
+		t.Fatal("test setup invalid: groupChats registry should NOT track /cwd")
+	}
+
+	threadChatID := d.ymThreadChatID(parent, 999)
+
+	if got := d.groupCWD(threadChatID); got != newCWD {
+		t.Fatalf("thread CWD = %q, want the parent's live /cwd override %q (not the stale registry %q)",
+			got, newCWD, originalCWD)
+	}
+}
+
 func TestYMThreadChatIDNoInheritWhenParentGroupModeOff(t *testing.T) {
 	t.Setenv("KLAX_CONFIG_DIR", t.TempDir())
 	d := newTestDaemon()

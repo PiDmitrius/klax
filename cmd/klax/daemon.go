@@ -1193,9 +1193,21 @@ func (d *daemon) ymThreadChatID(parentChatID string, threadID int64) string {
 	chatID := ym.EncodeThreadChatID(parentChatID, threadID)
 	firstSeen := d.store.Active(d.sessionKey(chatID)) == nil
 	if firstSeen && d.isGroupChat(parentChatID) {
-		cwd := d.groupCWD(parentChatID)
+		// The parent's ACTIVE SESSION's own CWD is the live truth, not the
+		// groupChats registry: /cwd only ever updates Session.CWD (commands.go),
+		// never groupChats[parentChatID] — so after a /cwd override the
+		// registry still holds the group's original auto-assigned directory.
+		// Using it here would silently resurrect that stale default instead
+		// of continuing the group's actual, current workspace.
+		cwd := ""
+		if parentSess := d.store.Active(d.sessionKey(parentChatID)); parentSess != nil {
+			cwd = parentSess.CWD
+		}
 		if cwd == "" {
-			cwd = d.sessionCWD(chatID) // defensive fallback; isGroupChat(parentChatID) implies groupCWD is already set
+			cwd = d.groupCWD(parentChatID)
+		}
+		if cwd == "" {
+			cwd = d.sessionCWD(chatID) // defensive fallback; isGroupChat(parentChatID) implies one of the above is normally set
 		}
 		d.enableGroupChat(chatID, cwd)
 		parentDefaults := d.store.EnsureScopeDefaults(parentChatID, d.fallbackScopeDefaults())
