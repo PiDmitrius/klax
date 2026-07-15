@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1323,6 +1324,20 @@ func (d *daemon) groupCWD(chatID string) string {
 	return d.groupChats[chatID]
 }
 
+var reUnsafeDirChar = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
+
+// sanitizeDirName turns an arbitrary chatID into a safe, single flat
+// filesystem directory-name component: every character outside
+// [a-zA-Z0-9_-] becomes "_". A whitelist, not a blacklist of specific chars
+// (":", "/", "..", ...) — some transport's chat ids aren't just
+// colon-separated (ym's group/channel chat_id looks like "0/0/<guid>"), and a
+// blacklist would need to keep chasing every new transport's id shape.
+// Without this, filepath.Join treats an embedded "/" as a real path
+// separator and silently creates nested directories instead of one.
+func sanitizeDirName(s string) string {
+	return reUnsafeDirChar.ReplaceAllString(s, "_")
+}
+
 // sessionCWD returns the effective working directory for a chat session.
 // Group chats always use a dedicated group directory regardless of whether
 // group mode is enabled; /groups on/off only changes access policy.
@@ -1335,7 +1350,7 @@ func (d *daemon) sessionCWD(chatID string) string {
 		if base == "" {
 			base, _ = os.UserHomeDir()
 		}
-		dirName := strings.ReplaceAll(chatID, ":", "_")
+		dirName := sanitizeDirName(chatID)
 		cwd := filepath.Join(base, "groups", dirName)
 		if err := os.MkdirAll(cwd, 0755); err != nil {
 			log.Printf("group cwd mkdir failed for %s: %v", chatID, err)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -301,5 +302,29 @@ func TestPlainRenderForChatDivergesYMFromVK(t *testing.T) {
 	}
 	if got := plainRenderForChat("vk:123", in); got != "bold" {
 		t.Errorf("plainRenderForChat(vk) = %q, want bold (VK has no formatting)", got)
+	}
+}
+
+func TestSanitizeDirNameReplacesUnsafeChars(t *testing.T) {
+	got := sanitizeDirName("ym:0/0/1ebc83a5-08e2-466e-ab2f-af7b22161adf")
+	want := "ym_0_0_1ebc83a5-08e2-466e-ab2f-af7b22161adf"
+	if got != want {
+		t.Errorf("sanitizeDirName = %q, want %q", got, want)
+	}
+}
+
+func TestSessionCWDFlattensYmGroupChatID(t *testing.T) {
+	d := newTestDaemon()
+	d.cfg.DefaultCWD = t.TempDir()
+	chatID := "ym:0/0/1ebc83a5-08e2-466e-ab2f-af7b22161adf"
+
+	cwd := d.sessionCWD(chatID)
+
+	want := filepath.Join(d.cfg.DefaultCWD, "groups", "ym_0_0_1ebc83a5-08e2-466e-ab2f-af7b22161adf")
+	if cwd != want {
+		t.Fatalf("sessionCWD = %q, want %q (a single flat directory, not nested by the embedded /)", cwd, want)
+	}
+	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
+		t.Fatalf("expected sessionCWD to have created %q: %v", cwd, err)
 	}
 }
