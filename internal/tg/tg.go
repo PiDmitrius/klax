@@ -15,7 +15,8 @@ import (
 	"github.com/PiDmitrius/klax/internal/transport"
 )
 
-const apiBase = "https://api.telegram.org/bot"
+// apiBase is a var (not const) so tests can point it at an httptest.Server.
+var apiBase = "https://api.telegram.org/bot"
 
 type Bot struct {
 	token  string
@@ -161,10 +162,18 @@ func (b *Bot) call(method string, payload interface{}) (json.RawMessage, error) 
 	return result.Result, nil
 }
 
-// GetMe calls the getMe API to validate the bot token.
-func (b *Bot) GetMe() error {
-	_, err := b.call("getMe", struct{}{})
-	return err
+// GetMe calls the getMe API to validate the bot token and fetch its identity
+// (Username in particular — used to recognize an @mention as a group trigger).
+func (b *Bot) GetMe() (*User, error) {
+	raw, err := b.call("getMe", struct{}{})
+	if err != nil {
+		return nil, err
+	}
+	var u User
+	if err := json.Unmarshal(raw, &u); err != nil {
+		return nil, err
+	}
+	return &u, nil
 }
 
 // SetMyCommands sets the bot's command menu visible to users.

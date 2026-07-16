@@ -476,3 +476,65 @@ func TestYMThreadChatIDNoInheritWhenParentGroupModeOff(t *testing.T) {
 		t.Fatalf("thread must not get group mode when the parent doesn't have it, chatID=%q", threadChatID)
 	}
 }
+
+// registerSelfMentionTrigger makes an @mention of the bot behave exactly like typing
+// "Клакс": both YM and Telegram render a mention as literal "@<bot login/username> "
+// text (confirmed against a real raw YM update; Telegram entities are offsets into a
+// text that already contains the literal "@username" the same way), so registering
+// "@<login>" as one more groupTriggerPrefixes entry is enough for either transport — no
+// separate structured-entity parsing needed.
+func TestRegisterSelfMentionTriggerMakesMentionAGroupTrigger(t *testing.T) {
+	original := append([]string(nil), groupTriggerPrefixes...)
+	defer func() { groupTriggerPrefixes = original }()
+
+	registerSelfMentionTrigger("Yndx-Mssngr-jB6XY8NfmC-Bot")
+
+	rest, ok := stripGroupTrigger("@yndx-mssngr-jb6xy8nfmc-bot TEST123")
+	if !ok {
+		t.Fatal("a YM mention of the bot's own login must be recognized as a group trigger")
+	}
+	if rest != "TEST123" {
+		t.Fatalf("stripped prompt = %q, want %q", rest, "TEST123")
+	}
+}
+
+func TestRegisterSelfMentionTriggerWorksForTelegramUsername(t *testing.T) {
+	original := append([]string(nil), groupTriggerPrefixes...)
+	defer func() { groupTriggerPrefixes = original }()
+
+	registerSelfMentionTrigger("klax_dev_bot")
+
+	rest, ok := stripGroupTrigger("@klax_dev_bot TEST123")
+	if !ok {
+		t.Fatal("a Telegram mention of the bot's own username must be recognized as a group trigger")
+	}
+	if rest != "TEST123" {
+		t.Fatalf("stripped prompt = %q, want %q", rest, "TEST123")
+	}
+}
+
+func TestRegisterSelfMentionTriggerIgnoresEmptyLogin(t *testing.T) {
+	original := append([]string(nil), groupTriggerPrefixes...)
+	defer func() { groupTriggerPrefixes = original }()
+
+	registerSelfMentionTrigger("")
+
+	if len(groupTriggerPrefixes) != len(original) {
+		t.Fatalf("an empty login must not add a trigger, prefixes = %v", groupTriggerPrefixes)
+	}
+}
+
+// A mention of some OTHER, unrelated user/bot whose name happens to start with the same
+// letters must not false-trigger — stripGroupTrigger's existing separator requirement
+// (punctuation or whitespace right after the matched prefix) already guards this; this
+// just locks that guarantee in for the mention case specifically.
+func TestRegisterSelfMentionTriggerDoesNotMatchUnrelatedNameWithSamePrefix(t *testing.T) {
+	original := append([]string(nil), groupTriggerPrefixes...)
+	defer func() { groupTriggerPrefixes = original }()
+
+	registerSelfMentionTrigger("klax_dev_bot")
+
+	if _, ok := stripGroupTrigger("@klax_dev_bot_2 TEST123"); ok {
+		t.Fatal("a mention of a DIFFERENT bot whose username merely starts with the registered one must not trigger")
+	}
+}
