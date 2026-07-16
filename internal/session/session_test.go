@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -525,5 +526,71 @@ func TestLoadStoreKeepsEmptyScopeDefaultsAsExplicitDefault(t *testing.T) {
 	}
 	if def.Think != "" {
 		t.Fatalf("defaults think = %q, want explicit empty default", def.Think)
+	}
+}
+
+func TestSetCWDIfMessages0RejectsWhenMessagesAlreadyStarted(t *testing.T) {
+	store := &Store{Chats: map[string]*ChatSessions{}, Scope: map[string]*ScopeDefaults{}}
+	sess := store.New("tg:1", "one", "/original", ScopeDefaults{})
+	store.UpdateActive("tg:1", func(s *Session) { s.Messages = 1 })
+
+	got, ok := store.SetCWDIfMessages0("tg:1", sess.Created, "/new")
+
+	if ok {
+		t.Fatal("SetCWDIfMessages0 must refuse once Messages > 0")
+	}
+	if got == nil || got.CWD != "/original" {
+		t.Fatalf("session CWD = %+v, want unchanged /original", got)
+	}
+	if store.ScopeDefaults("tg:1").CWD == "/new" {
+		t.Fatal("ScopeDefaults.CWD must not change when the session-level write was refused")
+	}
+}
+
+func TestSetCWDIfMessages0SetsSessionAndScopeDefaultsTogether(t *testing.T) {
+	store := &Store{Chats: map[string]*ChatSessions{}, Scope: map[string]*ScopeDefaults{}}
+	sess := store.New("tg:1", "one", "/original", ScopeDefaults{})
+
+	got, ok := store.SetCWDIfMessages0("tg:1", sess.Created, "/new")
+
+	if !ok || got.CWD != "/new" {
+		t.Fatalf("SetCWDIfMessages0 = %+v, %v, want CWD=/new, true", got, ok)
+	}
+	if store.ScopeDefaults("tg:1").CWD != "/new" {
+		t.Fatal("ScopeDefaults.CWD must be set together with the session's CWD")
+	}
+}
+
+func TestUpdateSessionCheckedSkipsMutationWhenCheckFails(t *testing.T) {
+	store := &Store{Chats: map[string]*ChatSessions{}, Scope: map[string]*ScopeDefaults{}}
+	sess := store.New("tg:1", "one", "/original", ScopeDefaults{})
+	refuse := errors.New("refused")
+
+	got, err := store.UpdateSessionChecked(
+		"tg:1", sess.Created,
+		func(*Session) error { return refuse },
+		func(s *Session) { s.CWD = "/new" },
+	)
+
+	if err != refuse {
+		t.Fatalf("err = %v, want the check's error", err)
+	}
+	if got == nil || got.CWD != "/original" {
+		t.Fatalf("session = %+v, want unchanged /original (mutation must not run when check fails)", got)
+	}
+}
+
+func TestUpdateSessionCheckedAppliesMutationWhenCheckPasses(t *testing.T) {
+	store := &Store{Chats: map[string]*ChatSessions{}, Scope: map[string]*ScopeDefaults{}}
+	sess := store.New("tg:1", "one", "/original", ScopeDefaults{})
+
+	got, err := store.UpdateSessionChecked(
+		"tg:1", sess.Created,
+		func(*Session) error { return nil },
+		func(s *Session) { s.CWD = "/new" },
+	)
+
+	if err != nil || got == nil || got.CWD != "/new" {
+		t.Fatalf("got = %+v, err = %v, want CWD=/new, nil err", got, err)
 	}
 }

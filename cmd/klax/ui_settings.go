@@ -193,8 +193,18 @@ func (d *daemon) applyUISessionSettingsCore(sk string, created int64, p uiSettin
 	if err != nil {
 		return err
 	}
-	d.store.UpdateSession(sk, created, func(cur *session.Session) { applySettingsPatch(cur, r) })
-	return nil
+	// Re-check the cwd lock under the SAME lock as the mutation: a message could have
+	// started and finished running between the snapshot validated above and this call.
+	_, err = d.store.UpdateSessionChecked(sk, created,
+		func(cur *session.Session) error {
+			if p.CWD != nil && cur.Messages > 0 {
+				return &uiErr{http.StatusConflict, "Рабочую директорию нельзя изменить после первого сообщения."}
+			}
+			return nil
+		},
+		func(cur *session.Session) { applySettingsPatch(cur, r) },
+	)
+	return err
 }
 
 // resolvedPatch is a validated settings patch: the raw patch plus the resolved string values whose

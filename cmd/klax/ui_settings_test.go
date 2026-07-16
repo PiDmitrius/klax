@@ -35,6 +35,28 @@ func TestValidateSettingsPatchAllowsCWDBeforeFirstMessage(t *testing.T) {
 	}
 }
 
+// applyUISessionSettingsCore must re-check the cwd lock itself, not rely solely on the
+// snapshot validateSettingsPatch validated earlier — closing the gap where a message
+// starts and finishes between that snapshot and the actual mutation.
+func TestApplyUISessionSettingsCoreRejectsCWDOnceMessagesStarted(t *testing.T) {
+	d := newTestDaemon(t)
+	chatID := "tg:test"
+	sk := d.sessionKey(chatID)
+	sess := d.store.Ensure(sk, "default", t.TempDir(), d.fallbackScopeDefaults())
+	d.store.UpdateSession(sk, sess.Created, func(s *session.Session) { s.Messages = 1 })
+
+	newCWD := t.TempDir()
+	err := d.applyUISessionSettingsCore(sk, sess.Created, uiSettingsPatch{CWD: &newCWD})
+
+	uerr, ok := err.(*uiErr)
+	if !ok || uerr.status != 409 {
+		t.Fatalf("err = %v, want a 409 *uiErr conflict", err)
+	}
+	if got := d.store.Get(sk, sess.Created).CWD; got == newCWD {
+		t.Fatal("cwd must not have been applied once Messages > 0")
+	}
+}
+
 // createUISessionAtomic replaces the WHOLE ScopeDefaults record (Store.AddWithDefaults does
 // `*s.scope(chatID) = *defaults`) — an already-set /cwd default must survive confirming a
 // Web UI "new session" draft with no explicit cwd override, not get reset to "".

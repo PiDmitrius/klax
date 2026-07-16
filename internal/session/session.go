@@ -3,6 +3,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -359,6 +360,51 @@ func (s *Store) UpdateActive(chatID string, fn func(*Session)) *Session {
 		}
 	}
 	return nil
+}
+
+// UpdateSessionChecked applies fn to the session identified by created only if check
+// passes, both evaluated under the SAME lock — closing the gap between a precondition
+// verified earlier (e.g. Messages==0) and the mutation, during which a message could
+// have started and finished running. check may inspect but must not mutate sess; it
+// runs even when fn would be a no-op, so a failing check always short-circuits fn.
+// Returns the resulting session (unmodified if check failed) and check's error, or a
+// "session not found" error if created has no match.
+func (s *Store) UpdateSessionChecked(chatID string, created int64, check func(*Session) error, fn func(*Session)) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, sess := range s.chat(chatID).Sessions {
+		if sess.Created == created {
+			if check != nil {
+				if err := check(sess); err != nil {
+					return cloneSession(sess), err
+				}
+			}
+			fn(sess)
+			return cloneSession(sess), nil
+		}
+	}
+	return nil, errors.New("session not found")
+}
+
+// SetCWDIfMessages0 re-checks Messages==0 for the session identified by created and,
+// if still true, sets both its CWD and the chat's ScopeDefaults.CWD under one lock —
+// closing the same TOCTOU gap as UpdateSessionChecked, specifically for /cwd (which
+// writes both fields together, unlike a plain UI settings patch). Returns the updated
+// session and true, or the current session and false if Messages>0 by now.
+func (s *Store) SetCWDIfMessages0(chatID string, created int64, cwd string) (*Session, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, sess := range s.chat(chatID).Sessions {
+		if sess.Created == created {
+			if sess.Messages > 0 {
+				return cloneSession(sess), false
+			}
+			sess.CWD = cwd
+			s.scope(chatID).CWD = cwd
+			return cloneSession(sess), true
+		}
+	}
+	return nil, false
 }
 
 func (s *Store) UpdateSession(chatID string, created int64, fn func(*Session)) *Session {

@@ -361,6 +361,35 @@ func TestGroupsOnUsesScopeDefaultsCWDNotStaleRegistry(t *testing.T) {
 	}
 }
 
+// /groups on must judge "is there already a session with the group's cwd" by the
+// CURRENTLY ACTIVE session, not any historical (now inactive) one — otherwise it can
+// leave an unrelated active session in place while the group registry points
+// elsewhere, a divergence nothing reconciles afterward since Store no longer
+// re-derives an active session's CWD on its own.
+func TestGroupsOnReplacesActiveSessionWhenItDoesNotMatchGroupCWD(t *testing.T) {
+	d := newTestDaemon(t)
+	d.cfg.DefaultCWD = t.TempDir()
+	chatID := "tg:-1002"
+	sk := d.sessionKey(chatID)
+
+	groupCWD := d.sessionCWD(chatID)
+	d.enableGroupChat(chatID, groupCWD)
+	d.store.New(sk, "group", groupCWD, d.fallbackScopeDefaults())
+
+	// A second session (e.g. from the Web UI) takes over as active with an unrelated
+	// cwd, leaving the first (matching the group's cwd) inactive but not deleted.
+	otherCWD := t.TempDir()
+	d.store.New(sk, "other", otherCWD, d.fallbackScopeDefaults())
+
+	d.handleCommand(chatID, "m1", "/groups on")
+
+	active := d.store.Active(sk)
+	if active == nil || active.CWD != groupCWD {
+		t.Fatalf("active session after /groups on = %+v, want CWD=%q (the group's), not left on the unrelated %q",
+			active, groupCWD, otherCWD)
+	}
+}
+
 func TestCWDCommandLocksAfterFirstMessage(t *testing.T) {
 	d := newTestDaemon(t)
 	chatID := "tg:test"

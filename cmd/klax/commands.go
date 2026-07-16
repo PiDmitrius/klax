@@ -572,14 +572,11 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			d.sendMessage(chatID, msgID, fmt.Sprintf("❌ %s", html.EscapeString(err.Error())))
 			return
 		}
-		d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
-			def.CWD = cwd
-		})
-		sess := d.store.UpdateActive(sk, func(sess *session.Session) {
-			sess.CWD = cwd
-		})
-		if sess == nil {
-			d.sendMessage(chatID, msgID, "Нет активной сессии")
+		// Re-check Messages==0 atomically with the write: a message could have started
+		// and finished running between the snapshot check above and this call.
+		sess, ok := d.store.SetCWDIfMessages0(sk, active.Created, cwd)
+		if !ok {
+			d.sendMessage(chatID, msgID, "Рабочую директорию нельзя изменить после первого сообщения.")
 			return
 		}
 		d.saveStore()
@@ -754,18 +751,14 @@ func (d *daemon) handleGroups(chatID, msgID string, parts []string) {
 			return
 		}
 		d.enableGroupChat(chatID, cwd)
-		// Create a fresh session for group mode with the correct CWD.
-		// Any pre-existing sessions (from before group mode) are left inactive.
-		sessions := d.store.SessionsFor(sk)
-		// Check if there's already a session with group CWD.
-		hasGroupSession := false
-		for _, s := range sessions {
-			if s.CWD == cwd {
-				hasGroupSession = true
-				break
-			}
-		}
-		if !hasGroupSession {
+		// Create a fresh session for group mode with the correct CWD, unless the
+		// CURRENTLY ACTIVE session already has it — checking any historical (now
+		// inactive) session here would leave an unrelated active session in place
+		// while the group registry points elsewhere, a divergence nothing would
+		// ever reconcile afterward (Store no longer re-derives an active session's
+		// CWD on its own).
+		active := d.store.Active(sk)
+		if active == nil || active.CWD != cwd {
 			d.store.New(sk, "group", cwd, *d.scopeDefaults(sk))
 		}
 		d.saveStore()
