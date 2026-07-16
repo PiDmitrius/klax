@@ -364,7 +364,7 @@ function renderDraft(view){
   if(view) draftView = view;
   if(!draftView || !draft) return;
   const d = Object.assign({}, draftView, {
-    created: 0, busy: false, backend_locked: false,
+    created: 0, busy: false, backend_locked: false, cwd_locked: false,
     name: draft.name || "", backend: draft.backend, model: draft.model || "", think: draft.think || "",
     sandbox: draft.sandbox, tty: !!draft.tty, cwd: draft.cwd || "", prompt: draft.prompt || "",
     assigned_model: "", session_id: "", messages: 0, ctx_window: 0, ctx_used: 0,
@@ -495,13 +495,12 @@ function renderSettings(d, isDraft){
   if(lock) h += '<div class="sbusy">⏳ Сессия занята — параметры запуска нельзя менять до завершения.</div>';
   h += '<div class="srow"><label>Имя</label><div class="sctl"><input class="sname" type="text" maxlength="80" value="'+esc(d.name)+'"></div></div>';
   h += '<div class="srow"><label>Движок</label><div class="sctl">'+selectHTML("s-backend", d.backends, d.backend, false, !!(d.backend_locked || lock))+'</div></div>';
-  if(d.backend_locked) h += '<div class="shint">Движок зафиксирован после первого сообщения.</div>';
   h += '<div class="srow"><label>Модель</label><div class="sctl">'+selectHTML("s-model", d.models, d.model, true, !!lock)+'</div></div>';
   h += '<div class="srow"><label>Мышление</label><div class="sctl">'+selectHTML("s-think", d.efforts, d.think, true, !!lock)+'</div></div>';
   h += '<div class="srow"><label>Sandbox</label><div class="sctl"><label class="stoggle"><input type="checkbox" id="s-sandbox"'+(d.sandbox==="on"?" checked":"")+dis+'><span>'+(d.sandbox==="on"?"вкл":"выкл")+'</span></label></div></div>';
   if(d.tty_available)
     h += '<div class="srow"><label>TTY</label><div class="sctl"><label class="stoggle"><input type="checkbox" id="s-tty"'+(d.tty?" checked":"")+dis+'><span>'+(d.tty?"вкл":"выкл")+'</span></label></div></div>';
-  h += '<div class="sfield"><label>Рабочий каталог</label><input class="scwd" type="text"'+dis+' value="'+esc(d.cwd||"")+'"></div>';
+  h += '<div class="sfield"><label>Рабочий каталог</label><input class="scwd" type="text"'+((d.cwd_locked||lock)?" disabled":"")+' value="'+esc(d.cwd||"")+'"></div>';
   h += '<div class="sfield"><label>Системный промпт</label><textarea class="sprompt" rows="1"'+dis+' placeholder="добавляется к системному промпту">'+esc(d.prompt||"")+'</textarea></div>';
   // Read-only facts — the model the backend actually answered with (may differ from the selected
   // default) and the resolved session UUID. Only for a real session that has already answered (the

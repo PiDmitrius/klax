@@ -9,7 +9,7 @@ import (
 )
 
 func TestShouldReuseQueuedProgressWithoutGap(t *testing.T) {
-	d := newTestDaemon()
+	d := newTestDaemon(t)
 	d.chatEvents = map[string]uint64{"tg:1": 3}
 
 	msg := queuedMsg{
@@ -24,7 +24,7 @@ func TestShouldReuseQueuedProgressWithoutGap(t *testing.T) {
 }
 
 func TestShouldReuseQueuedProgressReturnsFalseAfterGap(t *testing.T) {
-	d := newTestDaemon()
+	d := newTestDaemon(t)
 	d.chatEvents = map[string]uint64{"tg:1": 4}
 
 	msg := queuedMsg{

@@ -480,6 +480,7 @@ func (d *daemon) createUISessionAtomic(sk, chatID string, patch uiSettingsPatch)
 		Think:     sess.ThinkOverride,
 		Sandbox:   sess.Sandbox,
 		ClaudeTTY: sess.ClaudeTTY,
+		CWD:       sess.CWD,
 	}
 	created := d.store.AddWithDefaults(sk, sess, &newDefaults) // session + its template: one store commit
 	d.saveStore()

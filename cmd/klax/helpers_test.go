@@ -11,7 +11,16 @@ import (
 	"github.com/PiDmitrius/klax/internal/session"
 )
 
-func newTestDaemon() *daemon {
+// newTestDaemon builds an in-memory daemon for unit tests. It ALWAYS isolates
+// KLAX_CONFIG_DIR to a fresh t.TempDir(): several code paths reachable from
+// commands (e.g. /groups on -> saveGroupChats -> config.Save) write straight
+// to config.Dir()/config.json with no injected override, so without this a
+// test exercising them clobbers the real ~/.config/klax/config.json on
+// whatever host runs `go test` — which happened for real and took down the
+// live klax service (2026-07-16). Every caller must pass its *testing.T so
+// t.Setenv can register the restore-on-cleanup.
+func newTestDaemon(t *testing.T) *daemon {
+	t.Setenv("KLAX_CONFIG_DIR", t.TempDir())
 	return &daemon{
 		cfg:        &config.Config{DefaultBackend: "codex", DefaultCWD: "/tmp"},
 		store:      &session.Store{Chats: map[string]*session.ChatSessions{}, Scope: map[string]*session.ScopeDefaults{}},
@@ -21,7 +30,7 @@ func newTestDaemon() *daemon {
 }
 
 func TestModelTextHighlightsSelectedModelWithoutDefaultSuffix(t *testing.T) {
-	d := newTestDaemon()
+	d := newTestDaemon(t)
 	chatID := "tg:test"
 	d.store.UpdateScopeDefaults(chatID, func(def *session.ScopeDefaults) {
 		def.Backend = "codex"
@@ -42,7 +51,7 @@ func TestModelTextHighlightsSelectedModelWithoutDefaultSuffix(t *testing.T) {
 }
 
 func TestThinkTextHighlightsSelectedEffortWithoutDefaultSuffix(t *testing.T) {
-	d := newTestDaemon()
+	d := newTestDaemon(t)
 	chatID := "tg:test"
 	d.store.UpdateScopeDefaults(chatID, func(def *session.ScopeDefaults) {
 		def.Backend = "codex"
@@ -63,7 +72,7 @@ func TestThinkTextHighlightsSelectedEffortWithoutDefaultSuffix(t *testing.T) {
 }
 
 func TestModelTextMarksDefaultWhenModelIsEmpty(t *testing.T) {
-	d := newTestDaemon()
+	d := newTestDaemon(t)
 	chatID := "tg:test"
 	d.store.UpdateScopeDefaults(chatID, func(def *session.ScopeDefaults) {
 		def.Backend = "codex"
@@ -78,7 +87,7 @@ func TestModelTextMarksDefaultWhenModelIsEmpty(t *testing.T) {
 }
 
 func TestThinkTextMarksDefaultWhenThinkIsEmpty(t *testing.T) {
-	d := newTestDaemon()
+	d := newTestDaemon(t)
 	chatID := "tg:test"
 	d.store.UpdateScopeDefaults(chatID, func(def *session.ScopeDefaults) {
 		def.Backend = "codex"
@@ -93,7 +102,7 @@ func TestThinkTextMarksDefaultWhenThinkIsEmpty(t *testing.T) {
 }
 
 func TestVerboseTextDefaultsOn(t *testing.T) {
-	d := newTestDaemon()
+	d := newTestDaemon(t)
 	chatID := "tg:-1001"
 	d.groupChats[chatID] = "/tmp/groups/tg_-1001"
 
@@ -105,7 +114,7 @@ func TestVerboseTextDefaultsOn(t *testing.T) {
 }
 
 func TestVerboseTextMarksOff(t *testing.T) {
-	d := newTestDaemon()
+	d := newTestDaemon(t)
 	chatID := "tg:-1001"
 	d.groupChats[chatID] = "/tmp/groups/tg_-1001"
 	d.groupVerb[chatID] = false
@@ -137,7 +146,7 @@ func TestTildePathsInTextHandlesQuotesAndSpaces(t *testing.T) {
 }
 
 func TestSettingsTextContainsBackendModelAndThinkSections(t *testing.T) {
-	d := newTestDaemon()
+	d := newTestDaemon(t)
 	chatID := "tg:test"
 	d.store.UpdateScopeDefaults(chatID, func(def *session.ScopeDefaults) {
 		def.Backend = "codex"
@@ -183,7 +192,7 @@ func TestSettingsTextContainsBackendModelAndThinkSections(t *testing.T) {
 }
 
 func TestSettingsTextShowsGroupModeSectionInGroupChat(t *testing.T) {
-	d := newTestDaemon()
+	d := newTestDaemon(t)
 	chatID := "tg:-1001"
 	d.groupChats[chatID] = "/tmp/groups/tg_-1001"
 	d.store.UpdateScopeDefaults(chatID, func(def *session.ScopeDefaults) {
@@ -217,7 +226,7 @@ func TestSettingsTextShowsGroupModeSectionInGroupChat(t *testing.T) {
 }
 
 func TestBackendTextDoesNotShowPinnedHint(t *testing.T) {
-	d := newTestDaemon()
+	d := newTestDaemon(t)
 	chatID := "tg:test"
 	d.store.UpdateScopeDefaults(chatID, func(def *session.ScopeDefaults) {
 		def.Backend = "codex"
@@ -264,7 +273,7 @@ func TestSessionCreatedTextIncludesSettingsHint(t *testing.T) {
 }
 
 func TestSandboxTextListsOnBeforeOff(t *testing.T) {
-	d := newTestDaemon()
+	d := newTestDaemon(t)
 	chatID := "tg:test"
 	d.store.UpdateScopeDefaults(chatID, func(def *session.ScopeDefaults) {
 		def.Sandbox = "off"
@@ -314,7 +323,7 @@ func TestSanitizeDirNameReplacesUnsafeChars(t *testing.T) {
 }
 
 func TestSessionCWDFlattensYmGroupChatID(t *testing.T) {
-	d := newTestDaemon()
+	d := newTestDaemon(t)
 	d.cfg.DefaultCWD = t.TempDir()
 	chatID := "ym:0/0/1ebc83a5-08e2-466e-ab2f-af7b22161adf"
 
@@ -331,7 +340,7 @@ func TestSessionCWDFlattensYmGroupChatID(t *testing.T) {
 
 func TestYMThreadChatIDInheritsParentGroupModeOnce(t *testing.T) {
 	t.Setenv("KLAX_CONFIG_DIR", t.TempDir())
-	d := newTestDaemon()
+	d := newTestDaemon(t)
 	d.cfg.DefaultCWD = t.TempDir()
 	parent := "ym:0/0/1ebc83a5-08e2-466e-ab2f-af7b22161adf"
 	parentCWD := d.sessionCWD(parent)
@@ -398,16 +407,17 @@ func TestYMThreadChatIDInheritsParentGroupModeOnce(t *testing.T) {
 // continue the group's ACTUAL current workspace, not that stale default.
 func TestYMThreadChatIDUsesLiveCWDNotStaleGroupRegistry(t *testing.T) {
 	t.Setenv("KLAX_CONFIG_DIR", t.TempDir())
-	d := newTestDaemon()
+	d := newTestDaemon(t)
 	d.cfg.DefaultCWD = t.TempDir()
 	parent := "ym:0/0/1ebc83a5-08e2-466e-ab2f-af7b22161adf"
 	originalCWD := d.sessionCWD(parent)
 	d.enableGroupChat(parent, originalCWD) // registers groupChats[parent] = originalCWD
 	d.ensureSessionWithCWD(d.sessionKey(parent), originalCWD)
 
-	// Simulate /cwd <newdir>: only Session.CWD changes, groupChats is untouched.
+	// Simulate /cwd <newdir>: Session.CWD and ScopeDefaults.CWD change, groupChats is untouched.
 	newCWD := t.TempDir()
 	d.store.UpdateActive(d.sessionKey(parent), func(sess *session.Session) { sess.CWD = newCWD })
+	d.store.UpdateScopeDefaults(d.sessionKey(parent), func(def *session.ScopeDefaults) { def.CWD = newCWD })
 	if d.groupCWD(parent) == newCWD {
 		t.Fatal("test setup invalid: groupChats registry should NOT track /cwd")
 	}
@@ -418,11 +428,45 @@ func TestYMThreadChatIDUsesLiveCWDNotStaleGroupRegistry(t *testing.T) {
 		t.Fatalf("thread CWD = %q, want the parent's live /cwd override %q (not the stale registry %q)",
 			got, newCWD, originalCWD)
 	}
+	if got := d.scopeDefaults(threadChatID).CWD; got != newCWD {
+		t.Fatalf("thread ScopeDefaults.CWD = %q, want the parent's override %q copied over", got, newCWD)
+	}
+
+	// The thread's own first session (created once its first message arrives) must
+	// also land on the override, not the stale registry value.
+	d.ensureSessionWithCWD(d.sessionKey(threadChatID), d.groupCWD(threadChatID))
+	if got := d.store.Active(d.sessionKey(threadChatID)).CWD; got != newCWD {
+		t.Fatalf("thread session CWD = %q, want the parent's override %q", got, newCWD)
+	}
+}
+
+func TestCWDOverrideSurvivesNextInboundMessageInGroup(t *testing.T) {
+	t.Setenv("KLAX_CONFIG_DIR", t.TempDir())
+	d := newTestDaemon(t)
+	d.cfg.DefaultCWD = t.TempDir()
+	group := "ym:0/0/1ebc83a5-08e2-466e-ab2f-af7b22161adf"
+	sk := d.sessionKey(group)
+	originalCWD := d.sessionCWD(group)
+	d.enableGroupChat(group, originalCWD) // "/groups on": registers groupChats[group] = originalCWD
+	d.ensureSessionWithCWD(sk, originalCWD)
+
+	// Simulate "/cwd <newdir>": only Session.CWD changes, groupChats registry is untouched.
+	newCWD := t.TempDir()
+	d.store.UpdateActive(sk, func(sess *session.Session) { sess.CWD = newCWD })
+
+	// Every inbound message in the group re-derives forceCWD from the (now stale)
+	// registry and passes it through ensureSessionWithCWD, exactly like handleInbound does.
+	d.ensureSessionWithCWD(sk, d.sessionCWD(group))
+
+	if got := d.store.Active(sk).CWD; got != newCWD {
+		t.Fatalf("session CWD = %q after next inbound message, want the /cwd override %q to survive (stale registry was %q)",
+			got, newCWD, originalCWD)
+	}
 }
 
 func TestYMThreadChatIDNoInheritWhenParentGroupModeOff(t *testing.T) {
 	t.Setenv("KLAX_CONFIG_DIR", t.TempDir())
-	d := newTestDaemon()
+	d := newTestDaemon(t)
 	d.cfg.DefaultCWD = t.TempDir()
 	parent := "ym:0/0/1ebc83a5-08e2-466e-ab2f-af7b22161adf" // /groups on never ran here
 

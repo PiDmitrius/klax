@@ -396,9 +396,12 @@ func (d *daemon) createSession(chatID, sk, name string) (*session.Session, *sess
 }
 
 // defaultSessionCWD resolves the working directory a fresh session would inherit
-// (chat cwd → user default → config default → home), so the "new session" draft
-// dialog can preview the same value createSession would use.
+// (explicit /cwd default → chat cwd → user default → config default → home), so
+// the "new session" draft dialog can preview the same value createSession would use.
 func (d *daemon) defaultSessionCWD(chatID, sk string) string {
+	if cwd := d.scopeDefaults(sk).CWD; cwd != "" {
+		return cwd
+	}
 	cwd := d.sessionCWD(chatID)
 	if cwd == "" {
 		cwd = d.userDefaultCWD(sk)
@@ -556,6 +559,10 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			d.sendMessage(chatID, msgID, "Нет активной сессии")
 			return
 		}
+		if active.Messages > 0 {
+			d.sendMessage(chatID, msgID, "Рабочую директорию нельзя изменить после первого сообщения.")
+			return
+		}
 		if d.isSessionBusy(sk, active.Created) {
 			d.sendMessage(chatID, msgID, sessionBusyText)
 			return
@@ -565,6 +572,9 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			d.sendMessage(chatID, msgID, fmt.Sprintf("❌ %s", html.EscapeString(err.Error())))
 			return
 		}
+		d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
+			def.CWD = cwd
+		})
 		sess := d.store.UpdateActive(sk, func(sess *session.Session) {
 			sess.CWD = cwd
 		})
@@ -737,7 +747,8 @@ func (d *daemon) handleGroups(chatID, msgID string, parts []string) {
 			d.sendMessage(chatID, msgID, "❌ Команда /groups on работает только в групповых чатах.")
 			return
 		}
-		cwd := d.sessionCWD(chatID)
+		sk := d.sessionKey(chatID)
+		cwd := d.defaultSessionCWD(chatID, sk)
 		if cwd == "" {
 			d.sendMessage(chatID, msgID, "❌ Не удалось определить директорию группы.")
 			return
@@ -745,7 +756,6 @@ func (d *daemon) handleGroups(chatID, msgID string, parts []string) {
 		d.enableGroupChat(chatID, cwd)
 		// Create a fresh session for group mode with the correct CWD.
 		// Any pre-existing sessions (from before group mode) are left inactive.
-		sk := d.sessionKey(chatID)
 		sessions := d.store.SessionsFor(sk)
 		// Check if there's already a session with group CWD.
 		hasGroupSession := false

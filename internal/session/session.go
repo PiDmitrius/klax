@@ -15,6 +15,7 @@ type ScopeDefaults struct {
 	Think     string `json:"think,omitempty"`
 	Sandbox   string `json:"sandbox,omitempty"`    // "on" | "off"
 	ClaudeTTY bool   `json:"claude_tty,omitempty"` // drive Claude through klax tty
+	CWD       string `json:"cwd,omitempty"`        // working directory for the next new session
 }
 
 type Session struct {
@@ -398,9 +399,6 @@ func (s *Store) Ensure(chatID, name, cwd string, defaults ScopeDefaults) *Sessio
 	}
 	for _, sess := range cs.Sessions {
 		if sess.Active {
-			if cwd != "" && sess.CWD != cwd {
-				sess.CWD = cwd
-			}
 			return cloneSession(sess)
 		}
 	}
