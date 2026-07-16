@@ -409,8 +409,10 @@ func runDaemon() {
 	var tgBot *tg.Bot
 	if cfg.TelegramToken != "" {
 		tgBot = tg.New(cfg.TelegramToken)
+		var me *tg.User
 		for attempt := 0; ; attempt++ {
-			err := tgBot.GetMe()
+			var err error
+			me, err = tgBot.GetMe()
 			if err == nil {
 				if err := tgBot.DrainUpdates(); err != nil {
 					log.Printf("warning: tg drain updates: %v", err)
@@ -426,6 +428,7 @@ func runDaemon() {
 			time.Sleep(wait)
 		}
 		transports["tg"] = tgBot
+		registerSelfMentionTrigger(me.Username)
 		log.Println("[OK] Telegram connected")
 	}
 
@@ -501,6 +504,7 @@ func runDaemon() {
 			log.Printf("warning: ym drain updates: %v", err)
 		}
 		transports["ym"] = ymBot
+		registerSelfMentionTrigger(me.Login)
 		log.Printf("[OK] Yandex Messenger bot: [%s] %s", me.ID, me.Login)
 	}
 
@@ -1521,6 +1525,25 @@ func (d *daemon) saveGroupChats() {
 var groupTriggerPrefixes = []string{
 	"klax", "клакс", "клэкс", "клац",
 	"kl", "кл",
+}
+
+// registerSelfMentionTrigger adds "@<login>" as one more recognized group trigger,
+// alongside "клакс"/"kl"/..., once the bot's own username/login on a transport is known
+// (GetMe at startup) — called for both Telegram (Username) and Yandex Messenger (Login).
+// An @mention insert has no separate structured-entity handling here: inspecting a real
+// raw YM update showed it already renders as plain "@<bot login> " text (in addition to
+// a structured mentioned_users field, deliberately ignored), and Telegram's entities are
+// likewise offsets into a text that already contains the literal "@username" — the bot's
+// own username is never used by anyone else, so this alone makes an @mention behave
+// exactly like typing the trigger word, with no new parsing path to keep in sync with
+// stripGroupTrigger. Called once per transport, before any poll loop starts (see
+// runDaemon) — no concurrent access to the slice at that point.
+func registerSelfMentionTrigger(login string) {
+	login = strings.ToLower(strings.TrimSpace(login))
+	if login == "" {
+		return
+	}
+	groupTriggerPrefixes = append(groupTriggerPrefixes, "@"+login)
 }
 
 // stripGroupTrigger checks if text starts with a group trigger prefix.

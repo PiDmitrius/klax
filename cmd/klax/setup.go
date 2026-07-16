@@ -36,7 +36,8 @@ func runSetup() {
 
 	// Show current values in prompts so the user knows what's already set.
 	cfg.TelegramToken = promptValidatedTokenKeep(reader, "Telegram bot token", cfg.TelegramToken, func(token string) error {
-		return tg.New(token).GetMe()
+		_, err := tg.New(token).GetMe()
+		return err
 	})
 	cfg.AllowedUsers = promptInt64ListKeep(reader, "Telegram allowed users", cfg.AllowedUsers)
 
