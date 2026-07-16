@@ -38,6 +38,7 @@ type uiSettings struct {
 	Prompt        string             `json:"prompt"` // append-system-prompt
 	Busy          bool               `json:"busy"`
 	BackendLocked bool               `json:"backend_locked"` // first message already sent
+	CWDLocked     bool               `json:"cwd_locked"`     // first message already sent
 	TTYAvailable  bool               `json:"tty_available"`  // backend == claude
 	Backends      []uiSettingsOption `json:"backends"`
 	Models        []uiSettingsOption `json:"models"`
@@ -113,6 +114,7 @@ func (d *daemon) uiSessionSettings(sk string, created int64) (*uiSettings, bool)
 		Prompt:        sess.AppendSystemPrompt,
 		Busy:          d.isSessionBusy(sk, created),
 		BackendLocked: sess.Messages > 0,
+		CWDLocked:     sess.Messages > 0,
 		TTYAvailable:  backend == "claude",
 		Backends:      []uiSettingsOption{{Value: "claude", Label: "Claude"}, {Value: "codex", Label: "Codex"}},
 		Models:        uiSettingsOptions(modelsForBackend(backend)),
@@ -164,9 +166,10 @@ func (d *daemon) uiDraftSettings(sk, chatID, backendOverride string) *uiSettings
 // applyUISessionSettings validates + applies a partial settings change to one session and PERSISTS it
 // (save + broadcast). Unlike the messenger /settings handlers it edits ONLY the per-session overrides
 // (never the scope defaults that seed new sessions): each UI tab is configured independently. The same
-// guards apply — a run-affecting change is refused while the session is busy, and the backend is
-// locked once the first message has been sent (model/think are backend-specific, so switching the
-// backend resets them).
+// guards apply — a run-affecting change is refused while the session is busy, and the backend and
+// cwd are locked once the first message has been sent (model/think are backend-specific, so
+// switching the backend resets them; cwd because a resumed run's transcript lookup is keyed by the
+// process's working directory, so changing it under a live session would orphan the resume).
 func (d *daemon) applyUISessionSettings(sk string, created int64, p uiSettingsPatch) error {
 	if err := d.applyUISessionSettingsCore(sk, created, p); err != nil {
 		return err
@@ -190,8 +193,28 @@ func (d *daemon) applyUISessionSettingsCore(sk string, created int64, p uiSettin
 	if err != nil {
 		return err
 	}
-	d.store.UpdateSession(sk, created, func(cur *session.Session) { applySettingsPatch(cur, r) })
-	return nil
+	// Re-check the cwd lock under the SAME lock as the mutation: a message could have
+	// started and finished running between the snapshot validated above and this call.
+	_, err = d.store.UpdateSessionChecked(sk, created,
+		func(cur *session.Session) error {
+			if p.CWD != nil && cur.Messages > 0 {
+				return &uiErr{http.StatusConflict, "Рабочую директорию нельзя изменить после первого сообщения."}
+			}
+			return nil
+		},
+		func(cur *session.Session) { applySettingsPatch(cur, r) },
+	)
+	return mapSessionStoreErr(err)
+}
+
+// mapSessionStoreErr translates a session.Store sentinel error into the uiErr the HTTP
+// handler expects (a bare error otherwise becomes a generic 500) — e.g. the session was
+// deleted (/nuke) between the Get above and the store mutation.
+func mapSessionStoreErr(err error) error {
+	if err == session.ErrSessionNotFound {
+		return &uiErr{http.StatusNotFound, "Сессия не найдена"}
+	}
+	return err
 }
 
 // resolvedPatch is a validated settings patch: the raw patch plus the resolved string values whose
@@ -244,6 +267,9 @@ func validateSettingsPatch(cur *session.Session, backend string, busy bool, p ui
 		return r, &uiErr{http.StatusBadRequest, "TTY доступен только для claude"}
 	}
 	if p.CWD != nil {
+		if cur.Messages > 0 {
+			return r, &uiErr{http.StatusConflict, "Рабочую директорию нельзя изменить после первого сообщения."}
+		}
 		cwd, err := resolveWorkingDir(*p.CWD)
 		if err != nil {
 			return r, &uiErr{http.StatusBadRequest, err.Error()}

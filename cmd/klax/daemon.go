@@ -1193,16 +1193,15 @@ func (d *daemon) ymThreadChatID(parentChatID string, threadID int64) string {
 	chatID := ym.EncodeThreadChatID(parentChatID, threadID)
 	firstSeen := d.store.Active(d.sessionKey(chatID)) == nil
 	if firstSeen && d.isGroupChat(parentChatID) {
-		// The parent's ACTIVE SESSION's own CWD is the live truth, not the
-		// groupChats registry: /cwd only ever updates Session.CWD (commands.go),
-		// never groupChats[parentChatID] — so after a /cwd override the
-		// registry still holds the group's original auto-assigned directory.
-		// Using it here would silently resurrect that stale default instead
-		// of continuing the group's actual, current workspace.
-		cwd := ""
-		if parentSess := d.store.Active(d.sessionKey(parentChatID)); parentSess != nil {
-			cwd = parentSess.CWD
-		}
+		// The parent's ScopeDefaults.CWD is the live truth (kept in sync by
+		// /cwd, same as Backend/Model/Think/Sandbox), not the groupChats
+		// registry: that registry is only seeded once at /groups on time and
+		// never updated afterwards, so after a /cwd override it still holds
+		// the group's original auto-assigned directory. Using it here would
+		// silently resurrect that stale default instead of continuing the
+		// group's actual, current workspace.
+		parentDefaults := d.store.EnsureScopeDefaults(parentChatID, d.fallbackScopeDefaults())
+		cwd := parentDefaults.CWD
 		if cwd == "" {
 			cwd = d.groupCWD(parentChatID)
 		}
@@ -1210,9 +1209,9 @@ func (d *daemon) ymThreadChatID(parentChatID string, threadID int64) string {
 			cwd = d.sessionCWD(chatID) // defensive fallback; isGroupChat(parentChatID) implies one of the above is normally set
 		}
 		d.enableGroupChat(chatID, cwd)
-		parentDefaults := d.store.EnsureScopeDefaults(parentChatID, d.fallbackScopeDefaults())
 		d.store.UpdateScopeDefaults(chatID, func(def *session.ScopeDefaults) {
 			*def = *parentDefaults
+			def.CWD = cwd
 		})
 	}
 	return chatID
@@ -1627,12 +1626,13 @@ func (d *daemon) ensureSession(sessionKey string) {
 }
 
 func (d *daemon) ensureSessionWithCWD(sessionKey, forceCWD string) {
-	if sess := d.store.Active(sessionKey); sess != nil {
-		if forceCWD == "" || sess.CWD == forceCWD {
-			return
-		}
+	if d.store.Active(sessionKey) != nil {
+		return
 	}
-	cwd := forceCWD
+	cwd := d.scopeDefaults(sessionKey).CWD
+	if cwd == "" {
+		cwd = forceCWD
+	}
 	if cwd == "" {
 		cwd = d.userDefaultCWD(sessionKey)
 	}
