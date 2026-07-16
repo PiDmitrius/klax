@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/PiDmitrius/klax/internal/session"
@@ -54,6 +55,49 @@ func TestApplyUISessionSettingsCoreRejectsCWDOnceMessagesStarted(t *testing.T) {
 	}
 	if got := d.store.Get(sk, sess.Created).CWD; got == newCWD {
 		t.Fatal("cwd must not have been applied once Messages > 0")
+	}
+}
+
+// A session already gone before the request is handled (stale created id) must 404 via
+// the top-of-function Get check — this does NOT exercise UpdateSessionChecked's
+// ErrSessionNotFound branch (see TestMapSessionStoreErrConvertsErrSessionNotFoundTo404 for
+// that; a real "deleted mid-flight, between Get and the store mutation" race can't be
+// reproduced deterministically without an injected barrier).
+func TestApplyUISessionSettingsCoreReturns404ForAlreadyDeletedSession(t *testing.T) {
+	d := newTestDaemon(t)
+	chatID := "tg:test"
+	sk := d.sessionKey(chatID)
+	sess := d.store.Ensure(sk, "default", t.TempDir(), d.fallbackScopeDefaults())
+	if !d.store.Delete(sk, 0) {
+		t.Fatal("test setup: could not delete the session")
+	}
+
+	newCWD := t.TempDir()
+	err := d.applyUISessionSettingsCore(sk, sess.Created, uiSettingsPatch{CWD: &newCWD})
+
+	uerr, ok := err.(*uiErr)
+	if !ok || uerr.status != 404 {
+		t.Fatalf("err = %v, want a 404 *uiErr, not a generic error that the HTTP handler would turn into a 500", err)
+	}
+}
+
+// mapSessionStoreErr is what actually converts UpdateSessionChecked's ErrSessionNotFound
+// (a session deleted between the initial Get and the store mutation) into a 404 uiErr —
+// tested directly since the real race can't be reproduced deterministically in-process.
+func TestMapSessionStoreErrConvertsErrSessionNotFoundTo404(t *testing.T) {
+	err := mapSessionStoreErr(session.ErrSessionNotFound)
+
+	uerr, ok := err.(*uiErr)
+	if !ok || uerr.status != 404 {
+		t.Fatalf("err = %v, want a 404 *uiErr", err)
+	}
+}
+
+func TestMapSessionStoreErrPassesThroughOtherErrors(t *testing.T) {
+	other := &uiErr{http.StatusConflict, "something else"}
+
+	if got := mapSessionStoreErr(other); got != other {
+		t.Fatalf("mapSessionStoreErr must pass through non-ErrSessionNotFound errors unchanged, got %v", got)
 	}
 }
 

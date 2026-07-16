@@ -204,6 +204,16 @@ func (d *daemon) applyUISessionSettingsCore(sk string, created int64, p uiSettin
 		},
 		func(cur *session.Session) { applySettingsPatch(cur, r) },
 	)
+	return mapSessionStoreErr(err)
+}
+
+// mapSessionStoreErr translates a session.Store sentinel error into the uiErr the HTTP
+// handler expects (a bare error otherwise becomes a generic 500) — e.g. the session was
+// deleted (/nuke) between the Get above and the store mutation.
+func mapSessionStoreErr(err error) error {
+	if err == session.ErrSessionNotFound {
+		return &uiErr{http.StatusNotFound, "Сессия не найдена"}
+	}
 	return err
 }
 

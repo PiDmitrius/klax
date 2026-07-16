@@ -362,13 +362,17 @@ func (s *Store) UpdateActive(chatID string, fn func(*Session)) *Session {
 	return nil
 }
 
+// ErrSessionNotFound is returned by UpdateSessionChecked when created has no match —
+// e.g. the session was deleted (/nuke, /new) between an earlier lookup and this call.
+var ErrSessionNotFound = errors.New("session not found")
+
 // UpdateSessionChecked applies fn to the session identified by created only if check
 // passes, both evaluated under the SAME lock — closing the gap between a precondition
 // verified earlier (e.g. Messages==0) and the mutation, during which a message could
 // have started and finished running. check may inspect but must not mutate sess; it
 // runs even when fn would be a no-op, so a failing check always short-circuits fn.
-// Returns the resulting session (unmodified if check failed) and check's error, or a
-// "session not found" error if created has no match.
+// Returns the resulting session (unmodified if check failed) and check's error, or
+// ErrSessionNotFound if created has no match.
 func (s *Store) UpdateSessionChecked(chatID string, created int64, check func(*Session) error, fn func(*Session)) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -383,7 +387,7 @@ func (s *Store) UpdateSessionChecked(chatID string, created int64, check func(*S
 			return cloneSession(sess), nil
 		}
 	}
-	return nil, errors.New("session not found")
+	return nil, ErrSessionNotFound
 }
 
 // SetCWDIfMessages0 re-checks Messages==0 for the session identified by created and,

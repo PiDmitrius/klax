@@ -594,3 +594,14 @@ func TestUpdateSessionCheckedAppliesMutationWhenCheckPasses(t *testing.T) {
 		t.Fatalf("got = %+v, err = %v, want CWD=/new, nil err", got, err)
 	}
 }
+
+func TestUpdateSessionCheckedReturnsErrSessionNotFoundForMissingCreated(t *testing.T) {
+	store := &Store{Chats: map[string]*ChatSessions{}, Scope: map[string]*ScopeDefaults{}}
+	store.New("tg:1", "one", "/tmp", ScopeDefaults{})
+
+	_, err := store.UpdateSessionChecked("tg:1", 999999, nil, func(*Session) {})
+
+	if err != ErrSessionNotFound {
+		t.Fatalf("err = %v, want ErrSessionNotFound", err)
+	}
+}
