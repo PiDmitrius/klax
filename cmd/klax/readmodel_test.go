@@ -3,8 +3,11 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/PiDmitrius/klax/internal/history"
+	"github.com/PiDmitrius/klax/internal/promptcanon"
+	"github.com/PiDmitrius/klax/internal/sessfiles"
 )
 
 func newReadModelDaemon(t *testing.T) (*daemon, int64) {
@@ -19,9 +22,23 @@ func newReadModelDaemon(t *testing.T) (*daemon, int64) {
 	return d, created
 }
 
+func bindReadModelTurn(t *testing.T, st *sessfiles.Store, seq, event int64, text string) history.Item {
+	t.Helper()
+	const backend, session = "claude", "session-test"
+	digest := promptcanon.Digest(text)
+	recordDigest := "record-" + digest
+	if err := st.MarkRunMeta(seq, backend, session, digest, event); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Bind(seq, backend, session, event, recordDigest); err != nil {
+		t.Fatal(err)
+	}
+	return history.Item{Role: "user", Text: text, Event: event, RecordDigest: recordDigest, PromptDigest: digest, Backend: backend, Session: session}
+}
+
 func testRM(d *daemon, created int64, items []history.Item, busy, latest bool) []uiTurn {
 	q, _ := d.sessionStore("user:alice", created).InboundLog()
-	return d.buildReadModel("user:alice", created, groupTurns(items), q, busy, 0, latest, 1_000_000)
+	return d.buildReadModel("user:alice", created, groupTurns(items), q, nil, busy, 0, latest, 1_000_000)
 }
 
 // A turn still queued (enq, never run) is surfaced on the latest page as state "enq" with
@@ -47,7 +64,7 @@ func TestReadModelQueuedSurfaced(t *testing.T) {
 func TestReadModelKeepsDurableUserTimeWhenTranscriptAppears(t *testing.T) {
 	d, created := newReadModelDaemon(t)
 	sr := d.getRunner("user:alice", created)
-	_, marker, _, _, err := sr.store.Enqueue("ui:alice", "", "n", "screenshot", nil)
+	seq, _, _, _, err := sr.store.Enqueue("ui:alice", "", "n", "screenshot", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,8 +72,10 @@ func TestReadModelKeepsDurableUserTimeWhenTranscriptAppears(t *testing.T) {
 	if len(queued) != 1 || queued[0].Time == "" {
 		t.Fatalf("queue-only turn missing durable time: %+v", queued)
 	}
+	user := bindReadModelTurn(t, sr.store, seq, 4, "screenshot")
+	user.Time = "2099-01-01T00:00:00Z"
 	fromTranscript := testRM(d, created, []history.Item{
-		{Role: "user", Text: "screenshot", Marker: marker, Time: "2099-01-01T00:00:00Z"},
+		user,
 		{Role: "assistant", Text: "answer"},
 	}, false, true)
 	if len(fromTranscript) != 1 {
@@ -74,15 +93,13 @@ func TestReadModelKeepsDurableUserTimeWhenTranscriptAppears(t *testing.T) {
 func TestReadModelRunningVsStale(t *testing.T) {
 	d, created := newReadModelDaemon(t)
 	sr := d.getRunner("user:alice", created)
-	seq, marker, _, _, err := sr.store.Enqueue("ui:alice", "", "n", "go", nil)
+	seq, _, _, _, err := sr.store.Enqueue("ui:alice", "", "n", "go", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sr.store.MarkRun(seq); err != nil {
-		t.Fatal(err)
-	}
+	user := bindReadModelTurn(t, sr.store, seq, 2, "go")
 	items := []history.Item{
-		{Role: "user", Text: "go", Marker: marker},
+		user,
 		{Role: "assistant", Text: "working"},
 		{Role: "assistant", Text: "here is the answer"},
 	}
@@ -110,15 +127,13 @@ func TestReadModelRunningVsStale(t *testing.T) {
 func TestReadModelRunningKeepsToolProgressVisible(t *testing.T) {
 	d, created := newReadModelDaemon(t)
 	sr := d.getRunner("user:alice", created)
-	seq, marker, _, _, err := sr.store.Enqueue("ui:alice", "", "n", "go", nil)
+	seq, _, _, _, err := sr.store.Enqueue("ui:alice", "", "n", "go", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sr.store.MarkRun(seq); err != nil {
-		t.Fatal(err)
-	}
+	user := bindReadModelTurn(t, sr.store, seq, 2, "go")
 	items := []history.Item{
-		{Role: "user", Text: "go", Marker: marker},
+		user,
 		{Role: "assistant", Text: "settled"},
 		{Role: "tool", Text: "🗜 Compaction: context compacted"},
 	}
@@ -143,6 +158,72 @@ func TestReadModelLegacyMarkerless(t *testing.T) {
 	turns := testRM(d, created, items, false, true)
 	if len(turns) != 1 || turns[0].Seq >= 0 || turns[0].State != "done" {
 		t.Fatalf("legacy markerless turn: %+v", turns)
+	}
+}
+
+func TestReadModelUnboundRecordPresentIsOneUnknownRow(t *testing.T) {
+	d, created := newReadModelDaemon(t)
+	sr := d.getRunner("user:alice", created)
+	seq, _, _, _, err := sr.store.Enqueue("ui:alice", "", "n", "go", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := promptcanon.Digest("go")
+	if err := sr.store.MarkRunMeta(seq, "claude", "S", digest, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := sr.store.MarkDone(seq); err != nil {
+		t.Fatal(err)
+	}
+	items := []history.Item{
+		{Role: "user", Text: "go", Event: 3, RecordDigest: "record", PromptDigest: digest, Backend: "claude", Session: "S"},
+		{Role: "assistant", Text: "answer"},
+	}
+	turns := testRM(d, created, items, false, true)
+	if len(turns) != 1 || turns[0].Seq != seq || turns[0].State != "unknown" {
+		t.Fatalf("unbound record rendered ambiguously: %+v", turns)
+	}
+}
+
+func TestReadModelUnboundRecordRemainsOnHistoricalPage(t *testing.T) {
+	d, created := newReadModelDaemon(t)
+	digest := promptcanon.Digest("go")
+	q := []sessfiles.Turn{{Seq: 1, Text: "go", TS: time.Now().UnixNano(), Last: "done", Backend: "claude", Session: "S", PromptDigest: digest, FromEvent: 2}}
+	items := []history.Item{
+		{Role: "user", Text: "go", Event: 3, RecordDigest: "record", PromptDigest: digest, Backend: "claude", Session: "S"},
+		{Role: "assistant", Text: "answer"},
+	}
+	turns := d.buildReadModel("user:alice", created, groupTurns(items), q, nil, false, 10, false, 1_000_000)
+	if len(turns) != 1 || turns[0].Seq >= 0 || len(turns[0].Blocks) != 1 || turns[0].Blocks[0].Text != "answer" {
+		t.Fatalf("historical transcript turn disappeared: %+v", turns)
+	}
+}
+
+func TestReadModelLatestDoesNotRepeatTurnsFromOlderPages(t *testing.T) {
+	d, created := newReadModelDaemon(t)
+	q := []sessfiles.Turn{
+		{Seq: 1, Text: "old", Marker: "1111111111111111", TS: time.Now().UnixNano(), Last: "done"},
+		{Seq: 2, Text: "new", Marker: "2222222222222222", TS: time.Now().UnixNano(), Last: "done"},
+	}
+	old := history.Item{Role: "user", Text: "old", Marker: q[0].Marker, Event: 3}
+	newer := history.Item{Role: "user", Text: "new", Marker: q[1].Marker, Event: 8}
+	all := []history.Item{old, {Role: "assistant", Text: "old answer"}, newer, {Role: "assistant", Text: "new answer"}}
+	presence := transcriptPresence(all, q)
+	page := groupTurns(all[2:])
+	turns := d.buildReadModel("user:alice", created, page, q, presence, false, 1, true, 1_000_000)
+	if len(turns) != 1 || turns[0].Seq != 2 {
+		t.Fatalf("latest page repeated historical turn: %+v", turns)
+	}
+}
+
+func TestReadModelLegacyMarkerWithoutTranscriptIsUnknown(t *testing.T) {
+	d, created := newReadModelDaemon(t)
+	for _, last := range []string{"run", "done"} {
+		q := []sessfiles.Turn{{Seq: 1, Text: "legacy", Marker: "0123456789abcdef", TS: time.Now().UnixNano(), Last: last}}
+		turns := d.buildReadModel("user:alice", created, nil, q, nil, false, 0, true, 1_000_000)
+		if len(turns) != 1 || turns[0].State != "unknown" {
+			t.Fatalf("legacy %s without match: %+v", last, turns)
+		}
 	}
 }
 
@@ -267,7 +348,7 @@ func TestErrBlockCanonicalReasons(t *testing.T) {
 func TestReadModelAbortedKeepsTurnOrder(t *testing.T) {
 	d, created := newReadModelDaemon(t)
 	sr := d.getRunner("user:alice", created)
-	seq1, marker1, _, _, err := sr.store.Enqueue("ui:alice", "", "n1", "first", nil)
+	seq1, _, _, _, err := sr.store.Enqueue("ui:alice", "", "n1", "first", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,10 +356,12 @@ func TestReadModelAbortedKeepsTurnOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	seq3, marker3, _, _, err := sr.store.Enqueue("ui:alice", "", "n3", "third", nil)
+	seq3, _, _, _, err := sr.store.Enqueue("ui:alice", "", "n3", "third", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	user1 := bindReadModelTurn(t, sr.store, seq1, 1, "first")
+	user3 := bindReadModelTurn(t, sr.store, seq3, 3, "third")
 	for _, seq := range []int64{seq1, seq3} {
 		if err := sr.store.MarkDone(seq); err != nil {
 			t.Fatal(err)
@@ -288,9 +371,9 @@ func TestReadModelAbortedKeepsTurnOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	turns := testRM(d, created, []history.Item{
-		{Role: "user", Text: "first", Marker: marker1},
+		user1,
 		{Role: "assistant", Text: "one"},
-		{Role: "user", Text: "third", Marker: marker3},
+		user3,
 		{Role: "assistant", Text: "three"},
 	}, false, true)
 	if len(turns) != 3 {

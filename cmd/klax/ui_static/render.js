@@ -109,7 +109,8 @@ export function renderModel(turns, watermark, holdSplits, joinHeldSplits){
     const ctxLine = (t.state === "done" || t.state === "err") ? finalCtx
       : t.state === "run" ? (finalCtx || contextText(lastCtxUsed, lastCtxWindow))
       : "";
-    const note = t.state === "enq" ? "в очереди · " + queuePos : undefined;
+    const note = t.state === "enq" ? "в очереди · " + queuePos
+      : t.state === "unknown" ? "статус неизвестен" : undefined;
     items.push({ kind: "turn", seq: t.seq, text: t.text || "", time: t.time, groups, state: t.state, note, ctxLine, ctxTime: lastGroupTime });
     if(t.ctx_used){ lastCtxUsed = t.ctx_used; lastCtxWindow = t.ctx_window; } // carry the known context forward to a later running turn
   }
@@ -154,7 +155,7 @@ function updateBubble(d, cls, html, time, dataPos, raw){
   return d;
 }
 // indicator is the per-turn tail dots: null for a settled turn (done/err — err shows its
-// error block); animated + ✕ for run; dim 'в очереди · N' for enq.
+// error block); animated + ✕ for run; dim note for enq/unknown.
 function indicator(state, note, onAbort){
   if(state === "done" || state === "err" || state === undefined) return null;
   const animated = state === "run";

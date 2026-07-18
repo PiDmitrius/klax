@@ -615,7 +615,7 @@ func (d *daemon) readModel(sk string, sess *session.Session) []uiTurn {
 	}
 	items, _ := history.Load(backend, sess.ID, sess.CWD)
 	queueTurns, _ := st.InboundLog()
-	rows := d.buildReadModel(sk, sess.Created, groupTurns(items), queueTurns, busy, 0, true, cw)
+	rows := d.buildReadModel(sk, sess.Created, groupTurns(items), queueTurns, nil, busy, 0, true, cw)
 	if d.uiHub != nil {
 		h := d.uiHub
 		h.rmMu.Lock()
@@ -637,7 +637,7 @@ func (d *daemon) sessionTail(sk string, sess *session.Session, throughTurn int64
 // follows (klax does not own the transcript write, and a stdout event can precede the file append).
 // A brand-new session has no transcript address (id) at run start, so it waits for idKnown first.
 // Polls history.Stat on a short tick until stop is closed (the run returns). No-op when UI is off.
-func (d *daemon) watchRunTranscript(stop <-chan struct{}, idKnown <-chan string, backendName, cwd, sk, initialID string) {
+func (d *daemon) watchRunTranscript(stop <-chan struct{}, idKnown <-chan string, backendName, cwd, sk string, created int64, initialID string) {
 	if d.uiHub == nil {
 		return
 	}
@@ -661,6 +661,7 @@ func (d *daemon) watchRunTranscript(stop <-chan struct{}, idKnown <-chan string,
 		case <-ticker.C:
 			if m, s, ok := history.Stat(backendName, id, cwd); ok && (s != lastS || !m.Equal(lastM)) {
 				lastM, lastS = m, s
+				d.reconcileBindings(sk, created, backendName, id, cwd)
 				d.uiPoke(user)
 			}
 		}
@@ -1353,7 +1354,8 @@ func (s *uiServer) handleTranscript(w http.ResponseWriter, r *http.Request) {
 		start = 0
 	}
 	queueTurns, _ := s.d.sessionStore(sk, created).InboundLog()
-	turns := s.d.buildReadModel(sk, created, grouped[start:end], queueTurns, s.d.isSessionBusy(sk, created), start, before == 0, sess.ContextWindow)
+	presence := transcriptPresence(items, queueTurns)
+	turns := s.d.buildReadModel(sk, created, grouped[start:end], queueTurns, presence, s.d.isSessionBusy(sk, created), start, before == 0, sess.ContextWindow)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {

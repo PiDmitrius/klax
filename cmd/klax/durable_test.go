@@ -3,10 +3,28 @@ package main
 import (
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/PiDmitrius/klax/internal/sessfiles"
 )
+
+func TestBuildTurnPromptContainsNoCorrelationMarker(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	d := newTestDeliveryDaemon(&fakeTransport{})
+	d.store = newStoreWithChat("user:alice", "one")
+	d.runners = make(map[runnerKey]*sessionRunner)
+	created := d.store.SessionsFor("user:alice")[0].Created
+	sr := d.getRunner("user:alice", created)
+	prompt, tmp, err := d.buildTurnPrompt(sr, queuedMsg{text: "literal text"})
+	_ = tmp
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prompt != "literal text" || strings.Contains(prompt, "klax-turn") {
+		t.Fatalf("prompt polluted: %q", prompt)
+	}
+}
 
 // removeSessionStore must latch the RUNNER-OWNED store (the instance the in-flight
 // run holds), so a late terminal Mark returns ErrRemoved and cannot resurrect the
@@ -61,8 +79,8 @@ func TestEnqueueToSessionPersistsDurably(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("queue len = %d, want 1", n)
 	}
-	if qm.turnSeq != 1 || qm.marker == "" || len(qm.files) != 1 {
-		t.Fatalf("queued ref wrong: turnSeq=%d marker=%q files=%v", qm.turnSeq, qm.marker, qm.files)
+	if qm.turnSeq != 1 || len(qm.files) != 1 {
+		t.Fatalf("queued ref wrong: turnSeq=%d files=%v", qm.turnSeq, qm.files)
 	}
 
 	// Durable: a fresh store (restart) sees the enq with text + file + marker, and
@@ -72,7 +90,7 @@ func TestEnqueueToSessionPersistsDurably(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(log) != 1 || log[0].Text != "look" || len(log[0].Files) != 1 || log[0].Marker != qm.marker {
+	if len(log) != 1 || log[0].Text != "look" || len(log[0].Files) != 1 || log[0].Marker != "" {
 		t.Fatalf("durable inbound log mismatch: %+v", log)
 	}
 	if b, _ := os.ReadFile(fresh.Path(log[0].Files[0])); string(b) != "PNG" {

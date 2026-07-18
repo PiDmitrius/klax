@@ -52,7 +52,7 @@ func TestRemovedStoreNotResurrected(t *testing.T) {
 
 func nr(name, data string) NamedReader { return NamedReader{Name: name, R: strings.NewReader(data)} }
 
-// Enqueue allocates an increasing turn_seq, returns a non-empty unique marker,
+// Enqueue allocates an increasing turn_seq without creating new prompt markers,
 // persists files + an enq record, and the seq survives a "restart" (fresh Store
 // reading the same log) — continuing from the log, not from 1.
 func TestEnqueueAllocatesAndSurvivesRestart(t *testing.T) {
@@ -66,8 +66,8 @@ func TestEnqueueAllocatesAndSurvivesRestart(t *testing.T) {
 	if seq1 != 1 || seq2 != 2 {
 		t.Fatalf("seqs = %d,%d want 1,2", seq1, seq2)
 	}
-	if m1 == "" || m2 == "" || m1 == m2 {
-		t.Fatalf("markers must be non-empty and distinct: %q %q", m1, m2)
+	if m1 != "" || m2 != "" {
+		t.Fatalf("new turns must be markerless: %q %q", m1, m2)
 	}
 	if len(f1) != 1 || f1[0] != "000001-01-a.png" {
 		t.Fatalf("stored = %v want [000001-01-a.png]", f1)
@@ -159,5 +159,71 @@ func TestTornTrailingLineSkipped(t *testing.T) {
 	}
 	if len(log) != 1 || log[0].Text != "good" {
 		t.Fatalf("InboundLog = %+v, want one clean 'good' turn", log)
+	}
+}
+
+func TestAppendAfterTornTailStartsCleanRecord(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	s := Open("user:alice", 2)
+	seq, _, _, _, _ := s.Enqueue("ui:alice", "", "n", "good", nil)
+	f, _ := os.OpenFile(s.queuePath(), os.O_APPEND|os.O_WRONLY, 0600)
+	_, _ = f.WriteString(`{"ev":"bind","seq":1`)
+	_ = f.Close()
+	if err := s.MarkDone(seq); err != nil {
+		t.Fatal(err)
+	}
+	turns, err := Open("user:alice", 2).InboundLog()
+	if err != nil || len(turns) != 1 || turns[0].Last != "done" {
+		t.Fatalf("valid append after torn tail was lost: %+v, %v", turns, err)
+	}
+}
+
+func TestRunMetadataAndBindingSurviveRestart(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	s := Open("user:alice", 5)
+	seq, _, _, _, _ := s.Enqueue("ui:alice", "", "n", "hello", nil)
+	if err := s.MarkRunMeta(seq, "claude", "S", "prompt", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Bind(seq, "claude", "S", 9, "record"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Bind(seq, "claude", "S", 9, "record"); err != nil {
+		t.Fatalf("idempotent bind: %v", err)
+	}
+	turns, err := Open("user:alice", 5).InboundLog()
+	if err != nil || len(turns) != 1 {
+		t.Fatalf("reload: %+v %v", turns, err)
+	}
+	got := turns[0]
+	if got.Backend != "claude" || got.Session != "S" || got.PromptDigest != "prompt" || got.FromEvent != 7 || !got.Bound || got.Event != 9 || got.RecordDigest != "record" {
+		t.Fatalf("folded turn: %+v", got)
+	}
+	if err := s.Bind(seq, "claude", "S", 10, "other"); !errors.Is(err, ErrBindConflict) {
+		t.Fatalf("conflicting bind = %v", err)
+	}
+}
+
+func TestBindingIsOneToOneAndIncreasing(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	s := Open("user:alice", 6)
+	a, _, _, _, _ := s.Enqueue("ui:alice", "", "a", "same", nil)
+	b, _, _, _, _ := s.Enqueue("ui:alice", "", "b", "same", nil)
+	for _, seq := range []int64{a, b} {
+		if err := s.MarkRunMeta(seq, "codex", "S", "p", seq); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Bind(a, "codex", "S", 4, "r4"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Bind(b, "codex", "S", 4, "r4"); !errors.Is(err, ErrBindConflict) {
+		t.Fatalf("coordinate reuse = %v", err)
+	}
+	if err := s.Bind(b, "codex", "S", 3, "r3"); !errors.Is(err, ErrBindConflict) {
+		t.Fatalf("non-increasing bind = %v", err)
+	}
+	if err := s.Bind(b, "codex", "S", 6, "r6"); err != nil {
+		t.Fatal(err)
 	}
 }
