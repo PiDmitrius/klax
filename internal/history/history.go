@@ -7,7 +7,11 @@ package history
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -15,6 +19,7 @@ import (
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/claudetty/transcript"
+	"github.com/PiDmitrius/klax/internal/promptcanon"
 	"github.com/PiDmitrius/klax/internal/runner"
 )
 
@@ -49,7 +54,38 @@ type Item struct {
 	// Pending drives the client's per-turn dots on reload: "" normal/done | "enq" still
 	// queued | "run" started-but-not-yet-flushed-to-transcript. Lets a full reload show a
 	// queued message exactly as it was instead of dropping it until it runs.
-	Pending string `json:"pending,omitempty"`
+	Pending      string `json:"pending,omitempty"`
+	Event        int64  `json:"-"` // zero-based complete physical JSONL record
+	RecordDigest string `json:"-"`
+	PromptDigest string `json:"-"` // canonical external-user payload, before display trimming
+	Backend      string `json:"-"`
+	Session      string `json:"-"`
+}
+
+type rawRecord struct {
+	Event  int64
+	Raw    []byte
+	Digest string
+}
+
+// completeRecords is the sole source of transcript event numbering. A final
+// unterminated fragment is deliberately omitted and retried after it is complete.
+func completeRecords(data []byte) []rawRecord {
+	var out []rawRecord
+	start := 0
+	for i, b := range data {
+		if b != '\n' {
+			continue
+		}
+		raw := data[start:i]
+		if len(raw) > 0 && raw[len(raw)-1] == '\r' {
+			raw = raw[:len(raw)-1]
+		}
+		sum := sha256.Sum256(raw)
+		out = append(out, rawRecord{Event: int64(len(out)), Raw: raw, Digest: hex.EncodeToString(sum[:])})
+		start = i + 1
+	}
+	return out
 }
 
 // turnMarkerRe matches ONLY klax's injected marker shape: the exact 16-hex token
@@ -72,21 +108,40 @@ func StripTurnMarker(text string) (clean, marker string) {
 // session id yields (nil, nil) so callers degrade to "live only" rather than
 // erroring.
 func Load(backend, sessionID, cwd string) ([]Item, error) {
-	if sessionID == "" {
+	items, _, err := Snapshot(backend, sessionID, cwd)
+	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
+	}
+	return items, err
+}
+
+// Snapshot returns rendered items and the next complete physical event number.
+func Snapshot(backend, sessionID, cwd string) ([]Item, int64, error) {
+	if sessionID == "" {
+		return nil, 0, nil
 	}
 	if backend == "codex" {
 		path := locateCodex(sessionID)
 		if path == "" {
-			return nil, nil
+			return nil, 0, fmt.Errorf("codex transcript %s: %w", sessionID, os.ErrNotExist)
 		}
-		return readCodex(path)
+		items, end, err := readCodexSnapshot(path)
+		stampCoordinates(items, backend, sessionID)
+		return items, end, err
 	}
 	path := locateClaude(sessionID, cwd)
 	if path == "" {
-		return nil, nil
+		return nil, 0, fmt.Errorf("claude transcript %s: %w", sessionID, os.ErrNotExist)
 	}
-	return readClaude(path)
+	items, end, err := readClaudeSnapshot(path)
+	stampCoordinates(items, backend, sessionID)
+	return items, end, err
+}
+
+func stampCoordinates(items []Item, backend, session string) {
+	for i := range items {
+		items[i].Backend, items[i].Session = backend, session
+	}
 }
 
 // LatestContext returns a session's current context (used tokens, window) from the
@@ -155,12 +210,19 @@ func encodeProjectDir(cwd string) string {
 }
 
 func readClaude(path string) ([]Item, error) {
+	items, _, err := readClaudeSnapshot(path)
+	return items, err
+}
+
+func readClaudeSnapshot(path string) ([]Item, int64, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	var items []Item
-	for _, raw := range bytes.Split(data, []byte("\n")) {
+	records := completeRecords(data)
+	for _, rec := range records {
+		raw := rec.Raw
 		line, ok := transcript.Parse(raw) // skips blanks and sidechains
 		if !ok {
 			continue
@@ -189,7 +251,7 @@ func readClaude(path string) ([]Item, error) {
 						continue
 					}
 				}
-				items = append(items, Item{Role: "user", Text: text, Marker: marker, Time: ts})
+				items = append(items, Item{Role: "user", Text: text, Marker: marker, Time: ts, Event: rec.Event, RecordDigest: rec.Digest, PromptDigest: claudeUserDigest(line.Raw)})
 			}
 		case "assistant":
 			text, tools, ctxUsed := claudeAssistant(line.Raw)
@@ -198,7 +260,47 @@ func readClaude(path string) ([]Item, error) {
 			}
 		}
 	}
-	return items, nil
+	return items, int64(len(records)), nil
+}
+
+func claudeUserDigest(raw json.RawMessage) string {
+	text, ok := claudeUserPayload(raw)
+	if !ok {
+		return ""
+	}
+	return promptcanon.Digest(text)
+}
+
+func claudeUserPayload(raw json.RawMessage) (string, bool) {
+	var w struct {
+		Message struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"message"`
+	}
+	if json.Unmarshal(raw, &w) != nil {
+		return "", false
+	}
+	var s string
+	if json.Unmarshal(w.Message.Content, &s) == nil {
+		return s, true
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(w.Message.Content, &blocks) != nil {
+		return "", false
+	}
+	var sb strings.Builder
+	for _, b := range blocks {
+		if b.Type == "text" {
+			sb.WriteString(b.Text)
+		}
+	}
+	if sb.Len() == 0 {
+		return "", false
+	}
+	return sb.String(), true
 }
 
 // claudeUserText pulls the real user text out of a user line. content is either
@@ -206,30 +308,11 @@ func readClaude(path string) ([]Item, error) {
 // array holds only tool_result blocks (tool output fed back to the model) has no
 // user text and is skipped.
 func claudeUserText(raw json.RawMessage) (clean, marker string) {
-	var w struct {
-		Message struct {
-			Content json.RawMessage `json:"content"`
-		} `json:"message"`
-	}
-	if json.Unmarshal(raw, &w) != nil {
+	s, ok := claudeUserPayload(raw)
+	if !ok {
 		return "", ""
 	}
-	var s string
-	if json.Unmarshal(w.Message.Content, &s) == nil {
-		return StripTurnMarker(s)
-	}
-	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	_ = json.Unmarshal(w.Message.Content, &blocks)
-	var sb strings.Builder
-	for _, b := range blocks {
-		if b.Type == "text" {
-			sb.WriteString(b.Text)
-		}
-	}
-	return StripTurnMarker(sb.String())
+	return StripTurnMarker(s)
 }
 
 // Claude writes its own compaction/resume summary as a role=user transcript
@@ -311,9 +394,14 @@ func locateCodex(threadID string) string {
 }
 
 func readCodex(path string) ([]Item, error) {
+	items, _, err := readCodexSnapshot(path)
+	return items, err
+}
+
+func readCodexSnapshot(path string) ([]Item, int64, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	var items []Item
 	lastAssistant := -1
@@ -337,7 +425,9 @@ func readCodex(path string) ([]Item, error) {
 		}
 		appendAssistant(Item{Role: "assistant", Tools: []ToolCall{tc}, Time: ts})
 	}
-	for _, raw := range bytes.Split(data, []byte("\n")) {
+	records := completeRecords(data)
+	for _, rec := range records {
+		raw := rec.Raw
 		raw = bytes.TrimSpace(raw)
 		if len(raw) == 0 {
 			continue
@@ -379,7 +469,7 @@ func readCodex(path string) ([]Item, error) {
 			lastCompacted = len(items) - 1
 		case entry.Type == "event_msg" && p.Type == "user_message":
 			if t, marker := StripTurnMarker(p.Message); t != "" {
-				items = append(items, Item{Role: "user", Text: t, Marker: marker, Time: ts})
+				items = append(items, Item{Role: "user", Text: t, Marker: marker, Time: ts, Event: rec.Event, RecordDigest: rec.Digest, PromptDigest: promptcanon.Digest(p.Message)})
 				lastAssistant = -1
 			}
 			lastWasCompacted = false
@@ -442,7 +532,7 @@ func readCodex(path string) ([]Item, error) {
 			}
 		}
 	}
-	return items, nil
+	return items, int64(len(records)), nil
 }
 
 type codexHistoryItem struct {

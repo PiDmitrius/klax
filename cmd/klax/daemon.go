@@ -357,10 +357,8 @@ type queuedMsg struct {
 	progressSeq uint64 // chat activity right after the queue message was created
 	// Durable-queue references (the bytes live in the session's durable store, not
 	// here): turnSeq is the queue/turn id, files are stored names under files/, and
-	// marker is the opaque token injected into the prompt for transcript correlation.
 	turnSeq int64
 	files   []string
-	marker  string
 	// sessKey + sessCreated identify the session this message is bound to.
 	// Captured at enqueue time so subsequent /switch or /new cannot redirect
 	// it to a different session.

@@ -86,6 +86,14 @@ func resolveTurnState(last string, busy, isNewestRun bool) string {
 	}
 }
 
+func resolvedTurnState(t sessfiles.Turn, busy bool, newestRun int64, legacyMatched bool) string {
+	confirmed := t.Bound || legacyMatched
+	if !confirmed && !busy && (t.Last == "run" || t.Last == "done") {
+		return "unknown"
+	}
+	return resolveTurnState(t.Last, busy, t.Seq == newestRun)
+}
+
 func newestRunSeq(turns []sessfiles.Turn) int64 {
 	var m int64
 	for _, t := range turns {
@@ -127,49 +135,145 @@ func groupTurns(items []history.Item) []groupedTurn {
 	return out
 }
 
-// buildReadModel turns one paginated page of grouped turns into read-model rows: it joins
-// each user turn to its durable queue record by marker (assigning seq + state), rewrites
-// text to durable text + file thumbnails, and gives every answer block its stable id.
-// On the latest page (`latest`) it also appends turns still queued (enq) or just-started
-// (run) that the transcript hasn't recorded yet, so a reload shows them. `startOrdinal`
-// is the absolute index of the first page unit, used to mint stable legacy ids.
-func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, queueTurns []sessfiles.Turn, busy bool, startOrdinal int, latest bool, ctxWindow int) []uiTurn {
-	store := d.sessionStore(sk, created)
-	byMarker := make(map[string]sessfiles.Turn, len(queueTurns))
+// transcriptPresence returns durable seqs whose user record is present in this
+// transcript projection. It uses durable coordinates, legacy markers, and the
+// same matcher as reconciliation for not-yet-bound records.
+func transcriptPresence(items []history.Item, queueTurns []sessfiles.Turn) map[int64]bool {
+	present := make(map[int64]bool)
+	byCoord := make(map[string]sessfiles.Turn)
+	byMarker := make(map[string]sessfiles.Turn)
+	transcripts := make(map[string][2]string)
+	var end int64
 	for _, t := range queueTurns {
+		if t.Bound {
+			byCoord[coordinateKey(t.Backend, t.Session, t.Event)] = t
+		}
 		if t.Marker != "" {
 			byMarker[t.Marker] = t
 		}
 	}
+	for _, it := range items {
+		if it.Event >= end {
+			end = it.Event + 1
+		}
+		if it.Backend != "" && it.Session != "" {
+			transcripts[it.Backend+"\x00"+it.Session] = [2]string{it.Backend, it.Session}
+		}
+		if t, ok := byCoord[coordinateKey(it.Backend, it.Session, it.Event)]; ok && t.RecordDigest == it.RecordDigest {
+			present[t.Seq] = true
+		}
+		if it.Marker != "" {
+			if t, ok := byMarker[it.Marker]; ok {
+				present[t.Seq] = true
+			}
+		}
+	}
+	for _, bs := range transcripts {
+		for _, p := range proposeBindings(queueTurns, items, bs[0], bs[1], end) {
+			present[p.Seq] = true
+		}
+	}
+	return present
+}
+
+// buildReadModel turns one paginated page of grouped turns into read-model rows: it joins
+// each user turn to its durable coordinate binding (or legacy marker), rewrites
+// text to durable text + file thumbnails, and gives every answer block its stable id.
+// On the latest page (`latest`) it also appends turns still queued (enq) or just-started
+// (run) that the transcript hasn't recorded yet, so a reload shows them. `startOrdinal`
+// startOrdinal is retained in the internal signature for page callers; physical
+// transcript event numbers mint stable native/legacy ids.
+func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, queueTurns []sessfiles.Turn, globalPresence map[int64]bool, busy bool, startOrdinal int, latest bool, ctxWindow int) []uiTurn {
+	store := d.sessionStore(sk, created)
+	byMarker := make(map[string]sessfiles.Turn, len(queueTurns))
+	byCoord := make(map[string]sessfiles.Turn, len(queueTurns))
+	for _, t := range queueTurns {
+		if t.Marker != "" {
+			byMarker[t.Marker] = t
+		}
+		if t.Bound {
+			byCoord[coordinateKey(t.Backend, t.Session, t.Event)] = t
+		}
+	}
+	// The only non-durable association allowed here is the newest active run,
+	// using the exact same matcher as persistence while its bind fsync is pending.
+	var pageItems []history.Item
+	var pageEnd int64
+	for _, g := range page {
+		pageItems = append(pageItems, g.lead)
+		pageItems = append(pageItems, g.blocks...)
+		if g.lead.Event >= pageEnd {
+			pageEnd = g.lead.Event + 1
+		}
+	}
+	pagePresence := transcriptPresence(pageItems, queueTurns)
+	if globalPresence == nil {
+		globalPresence = pagePresence
+	}
 	newestRun := newestRunSeq(queueTurns)
-	seen := make(map[string]bool, len(page))
+	suppressNative := make(map[string]bool)
+	transcripts := make(map[string][2]string)
+	for _, it := range pageItems {
+		if it.Backend != "" && it.Session != "" {
+			transcripts[it.Backend+"\x00"+it.Session] = [2]string{it.Backend, it.Session}
+		}
+	}
+	for _, bs := range transcripts {
+		for _, p := range proposeBindings(queueTurns, pageItems, bs[0], bs[1], pageEnd) {
+			if busy && p.Seq == newestRun {
+				for _, t := range queueTurns {
+					if t.Seq == p.Seq {
+						t.Bound, t.Event, t.RecordDigest = true, p.Event, p.RecordDigest
+						byCoord[coordinateKey(p.Backend, p.Session, p.Event)] = t
+					}
+				}
+			} else if latest {
+				// Idle/recovered turns are never provisionally promoted to a durable
+				// positive seq. On the latest page, where its queue replacement is
+				// emitted, suppress the duplicate native row. Historical pages keep
+				// the transcript row because they do not append queue-only turns.
+				suppressNative[coordinateKey(p.Backend, p.Session, p.Event)] = true
+			}
+		}
+	}
+	seen := make(map[int64]bool, len(page))
 
 	turns := make([]uiTurn, 0, len(page))
-	for i, g := range page {
+	for _, g := range page {
 		if g.lead.Role != "user" {
 			turns = append(turns, uiTurn{Role: g.lead.Role, Text: g.lead.Text, Kind: g.lead.Kind, Time: g.lead.Time})
 			continue
 		}
+		if suppressNative[coordinateKey(g.lead.Backend, g.lead.Session, g.lead.Event)] {
+			continue
+		}
 		var (
-			seq    = -int64(startOrdinal + i + 1) // stable absolute legacy id unless a durable seq is found
+			seq    = -(g.lead.Event + 1) // stable physical-record id unless a durable seq is found
 			state  = "done"
 			text   = g.lead.Text
 			turnAt = g.lead.Time
 			reason string
 		)
-		if m := g.lead.Marker; m != "" {
-			seen[m] = true
-			if t, ok := byMarker[m]; ok {
-				seq = t.Seq
-				state = resolveTurnState(t.Last, busy, t.Seq == newestRun)
-				reason = t.Reason
-				// The durable accept time is the ONE user-message timestamp. Before the backend transcript
-				// records this turn it is already shown from queue.jsonl; switching later to the transcript's
-				// slightly different timestamp changed the bubble signature and rebuilt an unchanged image.
-				turnAt = time.Unix(0, t.TS).Format(time.RFC3339)
-				if e := d.inboundText(store, t, sk, created); e != "" {
-					text = e
-				}
+		var matched sessfiles.Turn
+		var ok bool
+		if t, found := byCoord[coordinateKey(g.lead.Backend, g.lead.Session, g.lead.Event)]; found && t.RecordDigest == g.lead.RecordDigest {
+			matched, ok = t, true
+		}
+		if !ok && g.lead.Marker != "" {
+			matched, ok = byMarker[g.lead.Marker]
+		}
+		if ok {
+			t := matched
+			seen[t.Seq] = true
+			seq = t.Seq
+			state = resolvedTurnState(t, busy, newestRun, g.lead.Marker != "")
+			reason = t.Reason
+			// The durable accept time is the ONE user-message timestamp. Before the backend transcript
+			// records this turn it is already shown from queue.jsonl; switching later to the transcript's
+			// slightly different timestamp changed the bubble signature and rebuilt an unchanged image.
+			turnAt = time.Unix(0, t.TS).Format(time.RFC3339)
+			if e := d.inboundText(store, t, sk, created); e != "" {
+				text = e
 			}
 		}
 		ut := uiTurn{Seq: seq, Role: "user", Text: text, Time: turnAt, State: state}
@@ -220,12 +324,15 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 	if latest {
 		var missing []uiTurn
 		for _, t := range queueTurns {
-			if t.Marker == "" || seen[t.Marker] {
+			if seen[t.Seq] {
 				continue
+			}
+			if globalPresence[t.Seq] && !pagePresence[t.Seq] {
+				continue // its real transcript row lives on another page
 			}
 			ut := uiTurn{
 				Seq: t.Seq, Role: "user", Text: d.inboundText(store, t, sk, created),
-				Time: time.Unix(0, t.TS).Format(time.RFC3339), State: resolveTurnState(t.Last, busy, t.Seq == newestRun),
+				Time: time.Unix(0, t.TS).Format(time.RFC3339), State: resolvedTurnState(t, busy, newestRun, false),
 			}
 			switch t.Last {
 			case "enq", "run":
@@ -234,6 +341,11 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 				ut.State = "err"
 				ut.Blocks = append(ut.Blocks, errBlock(t.Seq, t.Reason))
 				missing = append(missing, ut)
+			case "done":
+				if !t.Bound {
+					ut.State = "unknown"
+					missing = append(missing, ut)
+				}
 			}
 		}
 		turns = mergeQueueOnlyTurns(turns, missing)
