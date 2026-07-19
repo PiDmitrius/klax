@@ -134,10 +134,12 @@ function ensureActiveVisible(smooth){
 
 function createTab(){
   const t = document.createElement("div");
+  let pointerSelected = false, pointerSelectTimer = 0;
   t.className = "tab";
   t.innerHTML = '<span class="dot"></span><span class="tname"></span><span class="badge hidden"></span><span class="tx" title="Закрыть">✕</span>';
   t.addEventListener("click", e => {
     if(didDrag){ didDrag = false; return; } // this click is the tail of a drop — don't also select
+    if(pointerSelected){ pointerSelected = false; clearTimeout(pointerSelectTimer); return; }
     if(e.target.classList.contains("tx")) return;
     const created = parseInt(t.dataset.created, 10);
     if(created && deps.select) deps.select(created);
@@ -155,6 +157,16 @@ function createTab(){
   });
   t.addEventListener("pointerdown", e => {
     if(e.button !== 0 || e.target.classList.contains("tx")) return; // left-button, not the close ✕
+    // On iPhone, dismissing the keyboard can move the tab between pointerdown and click, swallowing
+    // that click. Select touch tabs at the stable start of the gesture; consume its synthetic click.
+    if(e.pointerType === "touch"){
+      const created = parseInt(t.dataset.created, 10);
+      if(created && deps.select) deps.select(created);
+      pointerSelected = true;
+      clearTimeout(pointerSelectTimer);
+      pointerSelectTimer = setTimeout(() => { pointerSelected = false; }, 1200);
+      return;
+    }
     startDrag(e, t);
   });
   return t;
@@ -176,6 +188,7 @@ function startDrag(e, tab){
     lastClientX = e.clientX, autoRAF = 0;
 
   const begin = () => {
+    if(active) return;
     active = true; dragging = true;
     try { tab.setPointerCapture(e.pointerId); } catch(_){}
     document.body.classList.add("dragging-tab");
@@ -416,7 +429,10 @@ async function createFromDraft(){
 }
 
 async function closeSession(created, name){
-  if(!(await uiConfirm("Закрыть сессию «" + (name || ("#" + created)) + "»?", "Закрыть", true))) return;
+  // The close glyph is not a focusable control, so this flow supplies its canonical destination to
+  // the modal instead of running a second, competing focus-restoration timer after it resolves.
+  const confirmed = await uiConfirm("Закрыть сессию «" + (name || ("#" + created)) + "»?", "Закрыть", true, deps.focus);
+  if(!confirmed) return;
   try {
     const r = await api("/api/close", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: created }) });
     if(!r.ok){ notice((await r.text()).trim() || "Не удалось закрыть"); return; }

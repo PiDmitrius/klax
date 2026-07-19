@@ -6,7 +6,7 @@
 import { TurnModel } from "./model.js";
 import { renderSession, beginShift, playShift, fadeOutDivider, DIVIDER_FADE_MS, pos, parsePos, decodePos } from "./render.js";
 import { tailLoop } from "./events.js";
-import { api, getToken, setToken, copyText, flashCopied } from "./base.js";
+import { api, getToken, setToken, hasCoarsePointer, copyText, flashCopied } from "./base.js";
 import { selectionInLog } from "./scroll.js";
 import { initCompose, saveDraft, loadDraft, dropDraft, recoverOutbox } from "./compose.js";
 import { initTabs, reconcileSessions, renderTabs } from "./tabs.js";
@@ -68,16 +68,9 @@ const loadingOlder = {}; // created -> a loadOlder() is in flight (guards the au
 const KEEP_ABOVE = 60, CAP = 20, WIN_MAX = 120;
 const scrollTopFor = {}; // created -> last scrollTop, so tab switches do not snap by a pixel
 const watchedImages = new WeakSet();
-let composerH = 0; // observed #composer height — the bottom-anchor baseline (see start())
-
-function setComposerH(h){
-  composerH = h || 0;
-  const wrap = document.getElementById("logwrap");
-  if(wrap) wrap.style.setProperty("--composer-h", composerH + "px");
-}
-// syncComposerH re-baselines the composer observer after a deliberate height change
-// (tab switch swapping drafts), so only typing/chips growth shifts the bottom padding.
-function syncComposerH(){ const c = document.getElementById("composer"); if(c) setComposerH(c.offsetHeight); }
+// Assigned when start() wires the observer. A tab switch changes composer height programmatically;
+// re-baselining prevents that swap from being mistaken for user-driven textarea/chip growth.
+let rebaselineComposerResize = () => {};
 
 function logcol(){ return document.getElementById("logcol"); }
 function getActive(){ return active; }
@@ -177,7 +170,11 @@ function flushRead(created){
 function jumpToUnread(created){ if(created){ unreadJump[created] = true; startReadGrace(created); } }
 function focusComposer(){
   const input = document.getElementById("input");
-  if(input && documentVisible()) input.focus({ preventScroll: true });
+  // On a phone, programmatic focus is not equivalent to an open keyboard: depending on whether the
+  // call still belongs to a user gesture, Safari may open it, keep a hidden focus, or scroll the
+  // textarea under it. Only a real tap focuses the mobile composer. Desktop keeps its keyboard-first
+  // workflow and explicit focus restoration.
+  if(input && documentVisible() && !hasCoarsePointer()) input.focus({ preventScroll: true });
 }
 // settledDistance measures how far the view is from the SETTLED bottom of the timeline.
 // #logcol.offsetHeight is layout geometry: unlike log.scrollHeight it is NOT inflated by
@@ -185,9 +182,7 @@ function focusComposer(){
 // stick/pin decisions taken during a 180ms animation stay correct.
 function settledDistance(log){
   const col = logcol();
-  // The composer's height is a transparent bottom border on #log (see app.css), so it is
-  // NOT scrollable content — the settled height is just the column, and clientHeight already
-  // excludes the border. (That is why there is no +composerH here anymore.)
+  // The composer is a normal-flow sibling, so log.clientHeight already ends exactly at its top.
   const h = col ? col.offsetHeight : log.scrollHeight;
   return h - log.scrollTop - log.clientHeight;
 }
@@ -201,8 +196,7 @@ function stickToBottom(){
   const sc = document.getElementById("log");
   const col = logcol();
   // pin to the settled bottom, not the animation-inflated scrollHeight — pinning to the
-  // inflated max overshoots, then snaps back when the slide finishes. col.offsetHeight (no
-  // +composerH) because the composer is a bottom border on #log, not scrollable padding.
+  // inflated max overshoots, then snaps back when the slide finishes.
   if(sc) sc.scrollTop = Math.max(0, (col ? col.offsetHeight : sc.scrollHeight) - sc.clientHeight);
   toggleToBottom();
 }
@@ -232,6 +226,10 @@ function watchInlineImages(col){
 function applyTheme(t){
   document.documentElement.dataset.theme = t;
   try { localStorage.setItem("klax_theme2", t); } catch(e){}
+  // Safari uses theme-color for the browser/status-bar area outside the CSS viewport. Read the same
+  // canonical CSS value as #bar instead of maintaining a second set of theme colour literals here.
+  const tc = document.getElementById("theme-color");
+  if(tc) tc.content = getComputedStyle(document.documentElement).getPropertyValue("--panel").trim();
   const b = document.getElementById("theme"); if(b) b.textContent = t === "dark" ? "☀️" : "🌙";
 }
 
@@ -557,9 +555,9 @@ async function selectSession(created){
     markRead(active);
   }
   active = created;
-  // The composer travels with the tab: swap in this session's draft before any scroll
-  // math below, then re-baseline the resize observer so the swap itself doesn't anchor.
-  if(switching){ loadDraft(created); syncComposerH(); }
+  // The composer travels with the tab. Its draft swap is programmatic session state, not a reason to
+  // alter this session's scroll intent, so exclude that height change from composer resize anchoring.
+  if(switching){ loadDraft(created); rebaselineComposerResize(); }
   if(location.hash !== "#" + created) location.hash = String(created);
   // Persist the viewed tab per-browser so a FRESH open (no URL hash — bookmark, new tab, base URL)
   // restores it instead of falling back to the first tab. Cheap; survives reloads and restarts.
@@ -750,26 +748,39 @@ function start(){
   const lw = document.getElementById("log");
   if(lw) lw.addEventListener("click", e => {
     const target = e.target.closest && e.target.closest(".copy, .mcopy, .body code");
-    if(!target) return;
-    let text, flash;
-    if(target.classList.contains("mcopy")){
-      const msg = target.closest(".msg");
-      if(msg) text = msg._raw;
-      flash = msg;
-    } else if(target.classList.contains("copy")){
-      const pre = target.closest("pre");
-      const code = pre && pre.querySelector("code");
-      if(code) text = code.textContent || "";
-      flash = pre;
-    } else {
-      if(target.closest("pre")) return;
-      const sel = window.getSelection && window.getSelection();
-      if(sel && !sel.isCollapsed) return;
-      text = target.textContent || "";
-      flash = target;
+    if(target){
+      let text, flash;
+      if(target.classList.contains("mcopy")){
+        const msg = target.closest(".msg");
+        if(msg) text = msg._raw;
+        flash = msg;
+      } else if(target.classList.contains("copy")){
+        const pre = target.closest("pre");
+        const code = pre && pre.querySelector("code");
+        if(code) text = code.textContent || "";
+        flash = pre;
+      } else {
+        if(target.closest("pre")) return;
+        const sel = window.getSelection && window.getSelection();
+        if(sel && !sel.isCollapsed) return;
+        text = target.textContent || "";
+        flash = target;
+      }
+      if(text === undefined) return;
+      copyText(text, () => flashCopied(flash));
+      return;
     }
-    if(text === undefined) return;
-    copyText(text, () => flashCopied(flash));
+    const msg = e.target.closest && e.target.closest(".msg.has-actions");
+    const sel = window.getSelection && window.getSelection();
+    const interactive = e.target.closest && e.target.closest("a, button, input, textarea, select, label");
+    if(!msg || interactive || (sel && !sel.isCollapsed)) return;
+    const show = !msg.classList.contains("show-actions");
+    lw.querySelectorAll(".msg.show-actions").forEach(el => el.classList.remove("show-actions"));
+    if(show) msg.classList.add("show-actions");
+  });
+  document.addEventListener("click", e => {
+    if(e.target.closest && e.target.closest("#log .msg.has-actions")) return;
+    document.querySelectorAll("#log .msg.show-actions").forEach(el => el.classList.remove("show-actions"));
   });
   document.addEventListener("selectionchange", () => { if(pendingRender && !selectionInLog(logcol())){ pendingRender = false; commitLive(active); } });
   const log = document.getElementById("log");
@@ -808,20 +819,20 @@ function start(){
     }
     toggleToBottom();
   });
-  // Composer is an overlay, not a flex row that shrinks #log. Its height is reserved as a
-  // transparent bottom border on #log (so the scrollbar ends at the composer top): pinned
-  // re-pins here, a scrolled-up reader's top messages stay put (overflow-anchor:none). Tab
-  // switches re-baseline via syncComposerH().
+  // Composer is a normal-flow flex sibling, so layout itself reserves its exact height in the same
+  // frame. The observer only enforces the canonical `stick` decision; it must never turn sticking on
+  // itself, because unread navigation and history restoration deliberately turn it off.
   const composer = document.getElementById("composer");
   if(composer && log && typeof ResizeObserver !== "undefined"){
-    setComposerH(composer.offsetHeight);
+    let lastH = composer.offsetHeight;
+    rebaselineComposerResize = () => { lastH = composer.offsetHeight; };
     new ResizeObserver(() => {
-      const d = composer.offsetHeight - composerH;
-      setComposerH(composer.offsetHeight);
-      if(!d) return;
+      const h = composer.offsetHeight;
+      if(h === lastH) return;
+      lastH = h;
       if(stick) stickToBottom();
       else toggleToBottom();
-    }).observe(composer);
+    }).observe(composer, { box: "border-box" });
   }
   const th = document.getElementById("theme");
   if(th) th.addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));

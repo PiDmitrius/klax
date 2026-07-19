@@ -17,6 +17,12 @@ export function getToken(){
 }
 export function setToken(t){ _token = t; localStorage.setItem(TOKEN_KEY, t); }
 
+// Canonical input-modality capability used by composer and focus management. Keep this as a
+// capability check, not a user-agent/device-name branch: hybrid devices may also have a mouse.
+export function hasCoarsePointer(){
+  return typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches;
+}
+
 // apiHref prefixes our own root-absolute /api/... URLs with BASE so they resolve behind
 // the mount proxy; remote (http/https) URLs pass through untouched.
 export function apiHref(href){ return href.charAt(0) === "/" ? BASE() + href.slice(1) : href; }

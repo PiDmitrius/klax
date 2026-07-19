@@ -78,6 +78,9 @@ func TestHandleFileUsesDisplayNameForDownload(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("handleFile code = %d, want 200", rec.Code)
 	}
+	if got := rec.Header().Get("Cache-Control"); got != fileCacheControl {
+		t.Fatalf("Cache-Control = %q, want %q", got, fileCacheControl)
+	}
 	cd := rec.Header().Get("Content-Disposition")
 	if !strings.Contains(cd, `filename="report.md"`) {
 		t.Fatalf("Content-Disposition = %q, want display filename", cd)

@@ -145,7 +145,7 @@ function bubble(cls, html, time, dataPos, raw){
 
 function updateBubble(d, cls, html, time, dataPos, raw){
   const meta = metaHTML(time);
-  d.className = "msg " + cls + (meta ? " hasmeta" : "");
+  d.className = "msg " + cls + (meta || raw ? " has-actions" : "");
   if(dataPos) d.dataset.pos = String(dataPos); // encoded (turn,block) position — drives read-advance
   else delete d.dataset.pos;
   const copy = raw ? '<button class="mcopy block-copy" title="Копировать сообщение">⧉</button>' : "";
