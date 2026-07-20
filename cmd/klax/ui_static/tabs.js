@@ -17,6 +17,7 @@ let draft = null, draftView = null, draftSubmitting = false;
 // alone. didDrag = the click immediately after a drop must be swallowed (not treated as a select).
 let dragging = false, didDrag = false;
 const DRAG_SETTLE_MS = 180;
+const TOUCH_TAP_PX = 10;
 let renderedActive = "";
 let tabsResizeObserver = null;
 // The shell's <title> (product name, server-injected) — the base for the unread prefix.
@@ -134,7 +135,7 @@ function ensureActiveVisible(smooth){
 
 function createTab(){
   const t = document.createElement("div");
-  let pointerSelected = false, pointerSelectTimer = 0;
+  let pointerSelected = false, pointerSelectTimer = 0, touchPointer = 0, touchX = 0, touchY = 0;
   t.className = "tab";
   t.innerHTML = '<span class="dot"></span><span class="tname"></span><span class="badge hidden"></span><span class="tx" title="Закрыть">✕</span>';
   t.addEventListener("click", e => {
@@ -157,18 +158,26 @@ function createTab(){
   });
   t.addEventListener("pointerdown", e => {
     if(e.button !== 0 || e.target.classList.contains("tx")) return; // left-button, not the close ✕
-    // On iPhone, dismissing the keyboard can move the tab between pointerdown and click, swallowing
-    // that click. Select touch tabs at the stable start of the gesture; consume its synthetic click.
+    // Safari may swallow the later click when dismissing the keyboard moves the strip. Remember the
+    // touch here, but select only on pointerup with tap-sized movement so horizontal swipes remain
+    // native tab-strip scrolling gestures.
     if(e.pointerType === "touch"){
-      const created = parseInt(t.dataset.created, 10);
-      if(created && deps.select) deps.select(created);
-      pointerSelected = true;
-      clearTimeout(pointerSelectTimer);
-      pointerSelectTimer = setTimeout(() => { pointerSelected = false; }, 1200);
+      touchPointer = e.pointerId; touchX = e.clientX; touchY = e.clientY;
       return;
     }
     startDrag(e, t);
   });
+  t.addEventListener("pointerup", e => {
+    if(e.pointerType !== "touch" || e.pointerId !== touchPointer) return;
+    touchPointer = 0;
+    if(Math.hypot(e.clientX - touchX, e.clientY - touchY) > TOUCH_TAP_PX) return;
+    const created = parseInt(t.dataset.created, 10);
+    if(created && deps.select) deps.select(created);
+    pointerSelected = true;
+    clearTimeout(pointerSelectTimer);
+    pointerSelectTimer = setTimeout(() => { pointerSelected = false; }, 1200);
+  });
+  t.addEventListener("pointercancel", e => { if(e.pointerId === touchPointer) touchPointer = 0; });
   return t;
 }
 

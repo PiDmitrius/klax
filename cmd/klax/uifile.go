@@ -18,7 +18,7 @@ import (
 	_ "golang.org/x/image/webp"
 )
 
-const fileCacheControl = "private, max-age=31536000, immutable"
+const fileCacheControl = "private, max-age=86400, immutable"
 
 // inboundText rebuilds a turn's display text from its durable inbound record: the text
 // the user actually sent, plus a freshly-minted capability-URL image/link per attached

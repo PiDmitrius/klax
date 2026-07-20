@@ -62,8 +62,11 @@ func TestSPASystemControlsAndNoticeStack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(tabs), `e.pointerType === "touch"`) || !strings.Contains(string(tabs), "pointerSelected") {
-		t.Fatal("touch tab selection must happen on pointerdown and consume its synthetic click")
+	if !strings.Contains(string(tabs), `t.addEventListener("pointerup"`) ||
+		!strings.Contains(string(tabs), "Math.hypot") ||
+		!strings.Contains(string(tabs), "TOUCH_TAP_PX") ||
+		!strings.Contains(string(tabs), "pointerSelected") {
+		t.Fatal("touch tab selection must happen on a stationary pointerup and consume its synthetic click")
 	}
 	if strings.Contains(string(tabs), "tgrip") || strings.Contains(string(tabs), "TOUCH_HOLD") {
 		t.Fatal("touch UI must not expose or implement tab reordering")
@@ -92,8 +95,11 @@ func TestSPASystemControlsAndNoticeStack(t *testing.T) {
 	if !strings.Contains(string(css), "safe-area-inset-top") {
 		t.Fatal("header must account for the iPhone top safe area under viewport-fit=cover")
 	}
-	if !strings.Contains(string(css), "@media (pointer: coarse) { #composer:has(#input:focus) { padding-bottom: 10px; } }") {
-		t.Fatal("user-focused mobile composer must not stack Home Indicator clearance above the keyboard")
+	if strings.Count(string(css), "safe-area-inset-left") < 3 || strings.Count(string(css), "safe-area-inset-right") < 3 {
+		t.Fatal("header, timeline and composer must all account for landscape safe areas")
+	}
+	if !strings.Contains(string(css), "#composer:has(#input:focus)") {
+		t.Fatal("focused mobile composer must not stack Home Indicator clearance above the keyboard")
 	}
 	if strings.Contains(string(css), "--composer-h") || strings.Contains(string(app), "setComposerH") || strings.Contains(string(app), "syncComposerH") {
 		t.Fatal("composer height reservation must be normal-flow layout, not a JS mirror")
@@ -399,8 +405,10 @@ func TestComposerEnterContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(compose), `btn.addEventListener("pointerdown"`) || !strings.Contains(string(compose), "send(deps, true)") || !strings.Contains(string(compose), "blurOnSuccess") {
-		t.Fatal("touch send must submit before textarea blur moves the composer")
+	if !strings.Contains(string(compose), `btn.addEventListener("pointerdown"`) ||
+		!strings.Contains(string(compose), `ab.addEventListener("click"`) ||
+		!strings.Contains(string(compose), "send(deps, true)") || !strings.Contains(string(compose), "blurOnSuccess") {
+		t.Fatal("touch send must act before textarea blur moves the composer")
 	}
 	dir := t.TempDir()
 	for _, name := range []string{"base.js", "compose.js"} {

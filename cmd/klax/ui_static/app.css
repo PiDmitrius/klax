@@ -140,7 +140,9 @@
   #logwrap { flex: 1; min-height: 0; position: relative; display: flex; overflow-x: clip; }
   #log { flex: 1; overflow-y: auto; overscroll-behavior-y: contain; overflow-anchor: none; scrollbar-gutter: stable both-edges;
          display: flex; flex-direction: column; align-items: center; background: var(--chat); }
-  #logcol { width: 100%; max-width: 820px; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  #logcol { width: 100%; max-width: 820px;
+            padding: 16px calc(16px + env(safe-area-inset-right, 0px)) 16px calc(16px + env(safe-area-inset-left, 0px));
+            display: flex; flex-direction: column; gap: 10px; }
   /* One container per user turn: a flex column so .msg.user right-aligns and the answer
      bubbles + the state indicator stack under their own message (per-turn DOM, §B2). */
   .turn { display: flex; flex-direction: column; gap: 10px; align-self: stretch; }
@@ -244,9 +246,13 @@
   #tobottom:hover { filter: brightness(1.08); }
   #tobottom svg { display: block; }
   #composer { flex: none; display: flex; justify-content: center;
-              padding: 10px 16px calc(10px + env(safe-area-inset-bottom, 0px));
+              padding: 10px calc(16px + env(safe-area-inset-right, 0px))
+                       calc(10px + env(safe-area-inset-bottom, 0px))
+                       calc(16px + env(safe-area-inset-left, 0px));
               border-top: 1px solid var(--border); background: var(--panel); }
-  @media (pointer: coarse) { #composer:has(#input:focus) { padding-bottom: 10px; } }
+  @media (pointer: coarse) {
+    #composer:has(#input:focus) { padding-bottom: 10px; }
+  }
   #cbar { position: relative; width: 100%; max-width: 788px; display: grid; grid-template-columns: 1fr; grid-template-rows: auto auto; }
   #inputSizer, #cbar textarea {
     grid-column: 1; grid-row: 2; width: 100%; min-height: var(--compact-block-h); max-height: 240px;
@@ -292,7 +298,7 @@
             min-height: var(--compact-block-h);
             pointer-events: auto; cursor: pointer; max-height: 200px; overflow: hidden;
             display: grid; grid-template-columns: 20px minmax(0,1fr); align-items: center; gap: 9px;
-            overflow-wrap: anywhere; filter: drop-shadow(0 4px 8px rgba(0,0,0,.25));
+            overflow-wrap: anywhere; box-shadow: 0 4px 8px rgba(0,0,0,.25);
             opacity: 0; transform: translateX(30px); transition: opacity .35s ease, transform .35s ease; }
   .notify.visible { opacity: 1; transform: translateX(0); }
   .notify.info { border-color: var(--accent); }
