@@ -9,6 +9,7 @@ import (
 	"github.com/PiDmitrius/klax/internal/config"
 	"github.com/PiDmitrius/klax/internal/pathutil"
 	"github.com/PiDmitrius/klax/internal/session"
+	"github.com/PiDmitrius/klax/internal/ym"
 )
 
 // newTestDaemon builds an in-memory daemon for unit tests. It ALWAYS isolates
@@ -386,10 +387,15 @@ func TestYMThreadChatIDInheritsParentGroupModeOnce(t *testing.T) {
 		t.Fatalf("thread should inherit the parent's scope defaults, got %+v", threadDef)
 	}
 
-	// Simulate the thread having actually received its first message — what
-	// the real handleInbound path does via ensureSessionWithCWD. This is what
-	// makes ymThreadChatID's "first time" check monotonic afterward: it's
-	// keyed off session existence, not the current on/off toggle state.
+	// Even before the thread creates its first session, the durable marker must
+	// make inheritance one-shot and preserve an explicit off toggle.
+	d.disableGroupChat(threadChatID)
+	if d.isGroupChat(d.ymThreadChatID(parent, 1784109957039064)) {
+		t.Fatal("thread without a session must not re-inherit after an explicit off")
+	}
+	d.enableGroupChat(threadChatID, threadCWD)
+
+	// Simulate the thread having actually received its first message.
 	d.ensureSessionWithCWD(threadChatID, threadCWD)
 
 	// From here on the thread is fully independent: turning its group mode
@@ -402,6 +408,9 @@ func TestYMThreadChatIDInheritsParentGroupModeOnce(t *testing.T) {
 	if !d.isGroupChat(parent) {
 		t.Fatal("disabling the thread's group mode must not affect the parent")
 	}
+	if !d.store.Delete(d.sessionKey(threadChatID), 0) {
+		t.Fatal("failed to simulate nuking the thread's last session")
+	}
 	again := d.ymThreadChatID(parent, 1784109957039064)
 	if d.isGroupChat(again) {
 		t.Fatal("re-encountering an already-independent thread must not re-inherit parent state")
@@ -411,6 +420,31 @@ func TestYMThreadChatIDInheritsParentGroupModeOnce(t *testing.T) {
 	d.store.UpdateScopeDefaults(parent, func(def *session.ScopeDefaults) { def.Backend = "claude" })
 	if d.scopeDefaults(threadChatID).Backend != "codex" {
 		t.Fatal("thread scope defaults must not track later changes to the parent")
+	}
+}
+
+func TestYMThreadChatIDKeepsPreMarkerThreadIndependent(t *testing.T) {
+	t.Setenv("KLAX_CONFIG_DIR", t.TempDir())
+	d := newTestDaemon(t)
+	d.cfg.DefaultCWD = t.TempDir()
+	parent := "ym:0/0/1ebc83a5-08e2-466e-ab2f-af7b22161adf"
+	parentCWD := d.sessionCWD(parent)
+	d.enableGroupChat(parent, parentCWD)
+
+	threadChatID := ym.EncodeThreadChatID(parent, 77)
+	d.store.UpdateScopeDefaults(threadChatID, func(def *session.ScopeDefaults) {
+		def.Backend = "claude"
+		def.CWD = parentCWD
+	})
+	d.ensureSessionWithCWD(threadChatID, parentCWD)
+
+	d.ymThreadChatID(parent, 77)
+	def := d.scopeDefaults(threadChatID)
+	if def.GroupMode != nil {
+		t.Fatalf("existing pre-marker thread must not be treated as new, got %+v", def)
+	}
+	if def.Backend != "claude" {
+		t.Fatalf("existing pre-marker thread defaults were overwritten: %+v", def)
 	}
 }
 

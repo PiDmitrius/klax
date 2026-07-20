@@ -1211,14 +1211,14 @@ func (d *daemon) isMAXAllowed(id int64) bool {
 // so replies stay inside the thread instead of leaking to the parent's main
 // channel.
 //
-// "First time" is whether a session already exists for this thread, NOT
-// whether its group mode happens to be on right now — the latter flips back
-// to true after a manual /groups off + a later /groups on-less re-check, and
-// re-inheriting at that point would silently resurrect a state the user
-// deliberately turned off.
+// "First time" means neither a session nor a GroupMode marker exists. The
+// marker survives session removal, while the session check preserves the
+// already-independent state of threads created before the marker existed.
 func (d *daemon) ymThreadChatID(parentChatID string, threadID int64) string {
 	chatID := ym.EncodeThreadChatID(parentChatID, threadID)
-	firstSeen := d.store.Active(d.sessionKey(chatID)) == nil
+	sk := d.sessionKey(chatID)
+	threadDefaults := d.store.ScopeDefaults(sk)
+	firstSeen := (threadDefaults == nil || threadDefaults.GroupMode == nil) && d.store.Active(sk) == nil
 	if firstSeen && d.isGroupChat(parentChatID) {
 		// The parent's ScopeDefaults.CWD is the live truth (kept in sync by
 		// /cwd, same as Backend/Model/Think/Sandbox), not the groupChats
@@ -1235,7 +1235,7 @@ func (d *daemon) ymThreadChatID(parentChatID string, threadID int64) string {
 		if cwd == "" {
 			cwd = d.sessionCWD(chatID) // defensive fallback; isGroupChat(parentChatID) implies one of the above is normally set
 		}
-		d.store.UpdateScopeDefaults(chatID, func(def *session.ScopeDefaults) {
+		d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
 			*def = *parentDefaults
 			def.CWD = cwd
 			enabled := true

@@ -108,6 +108,14 @@ func cloneDefaults(def *ScopeDefaults) *ScopeDefaults {
 		return nil
 	}
 	cp := *def
+	if def.GroupMode != nil {
+		enabled := *def.GroupMode
+		cp.GroupMode = &enabled
+	}
+	if def.GroupVerbose != nil {
+		verbose := *def.GroupVerbose
+		cp.GroupVerbose = &verbose
+	}
 	return &cp
 }
 
