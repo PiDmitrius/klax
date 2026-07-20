@@ -363,6 +363,14 @@ func TestYMThreadChatIDInheritsParentGroupModeOnce(t *testing.T) {
 	if !d.isGroupChat(threadChatID) {
 		t.Fatalf("thread should inherit group mode from parent, chatID=%q", threadChatID)
 	}
+	if _, ok := d.groupChats[threadChatID]; ok {
+		t.Fatal("inherited thread must not be added to the explicit config-backed group registry")
+	}
+	for _, gc := range d.cfg.GroupChats {
+		if gc.ID == threadChatID {
+			t.Fatal("inherited thread must not be serialized into config.json")
+		}
+	}
 	// A thread continues its parent group — same working directory, not a
 	// fresh groups/<...> sibling.
 	threadCWD := d.groupCWD(threadChatID)
@@ -370,6 +378,9 @@ func TestYMThreadChatIDInheritsParentGroupModeOnce(t *testing.T) {
 		t.Fatalf("thread should reuse the parent's CWD, got %q (parent %q)", threadCWD, parentCWD)
 	}
 	threadDef := d.scopeDefaults(threadChatID)
+	if threadDef.GroupMode == nil || !*threadDef.GroupMode {
+		t.Fatalf("thread group mode must be persisted with its session scope, got %+v", threadDef)
+	}
 	if threadDef.Backend != "codex" || threadDef.Model != "gpt-5.6-sol" || threadDef.Think != "xhigh" ||
 		threadDef.Sandbox != "off" || !threadDef.ClaudeTTY {
 		t.Fatalf("thread should inherit the parent's scope defaults, got %+v", threadDef)
@@ -385,6 +396,9 @@ func TestYMThreadChatIDInheritsParentGroupModeOnce(t *testing.T) {
 	// off must not affect the parent, and re-encountering it must not
 	// re-inherit (no bouncing back to "on").
 	d.disableGroupChat(threadChatID)
+	if def := d.scopeDefaults(threadChatID); def.GroupMode == nil || *def.GroupMode {
+		t.Fatalf("disabled thread state must persist independently in session scope, got %+v", def)
+	}
 	if !d.isGroupChat(parent) {
 		t.Fatal("disabling the thread's group mode must not affect the parent")
 	}

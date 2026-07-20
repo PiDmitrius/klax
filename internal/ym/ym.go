@@ -138,6 +138,12 @@ func IsGroup(raw string) bool {
 	return !IsLogin(raw)
 }
 
+// IsThread reports whether raw is an encoded per-thread chat address.
+func IsThread(raw string) bool {
+	_, _, ok := splitThread(raw)
+	return ok
+}
+
 // --- API calls ---
 
 // APIError is returned when Yandex Messenger responds with ok=false.

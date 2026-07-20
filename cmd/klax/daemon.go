@@ -579,9 +579,34 @@ func runDaemon() {
 
 	groupChats := make(map[string]string)
 	groupVerb := make(map[string]bool)
+	configuredGroups := cfg.GroupChats[:0]
+	threadGroupsMigrated := false
 	for _, gc := range cfg.GroupChats {
+		if isYMThreadChatID(gc.ID) {
+			enabled := true
+			verbose := gc.Verbose == nil || *gc.Verbose
+			store.UpdateScopeDefaults(gc.ID, func(def *session.ScopeDefaults) {
+				def.GroupMode = &enabled
+				def.GroupVerbose = &verbose
+				if def.CWD == "" {
+					def.CWD = gc.CWD
+				}
+			})
+			threadGroupsMigrated = true
+			continue
+		}
+		configuredGroups = append(configuredGroups, gc)
 		groupChats[gc.ID] = gc.CWD
 		groupVerb[gc.ID] = gc.Verbose == nil || *gc.Verbose
+	}
+	if threadGroupsMigrated {
+		cfg.GroupChats = configuredGroups
+		if err := store.Save(); err != nil {
+			log.Printf("save migrated YM thread state: %v", err)
+		}
+		if err := config.Save(cfg); err != nil {
+			log.Printf("remove migrated YM threads from config: %v", err)
+		}
 	}
 
 	d := &daemon{
@@ -1210,11 +1235,15 @@ func (d *daemon) ymThreadChatID(parentChatID string, threadID int64) string {
 		if cwd == "" {
 			cwd = d.sessionCWD(chatID) // defensive fallback; isGroupChat(parentChatID) implies one of the above is normally set
 		}
-		d.enableGroupChat(chatID, cwd)
 		d.store.UpdateScopeDefaults(chatID, func(def *session.ScopeDefaults) {
 			*def = *parentDefaults
 			def.CWD = cwd
+			enabled := true
+			verbose := d.chatVerboseEnabled(parentChatID)
+			def.GroupMode = &enabled
+			def.GroupVerbose = &verbose
 		})
+		d.saveStore()
 	}
 	return chatID
 }
@@ -1348,10 +1377,18 @@ func (d *daemon) isYMAllowed(login string) bool {
 
 // isGroupChat returns true if the chat has group mode enabled.
 func (d *daemon) isGroupChat(chatID string) bool {
+	if isYMThreadChatID(chatID) {
+		def := d.store.ScopeDefaults(d.sessionKey(chatID))
+		return def != nil && def.GroupMode != nil && *def.GroupMode
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	_, ok := d.groupChats[chatID]
 	return ok
+}
+
+func isYMThreadChatID(chatID string) bool {
+	return strings.HasPrefix(chatID, "ym:") && ym.IsThread(strings.TrimPrefix(chatID, "ym:"))
 }
 
 // isGroupChatID returns true if the chatID refers to a group (not a DM).
@@ -1379,6 +1416,12 @@ func isGroupChatID(chatID string) bool {
 
 // groupCWD returns the CWD for a group chat, or "" if not a group.
 func (d *daemon) groupCWD(chatID string) string {
+	if isYMThreadChatID(chatID) {
+		if def := d.store.ScopeDefaults(d.sessionKey(chatID)); def != nil && def.GroupMode != nil && *def.GroupMode {
+			return def.CWD
+		}
+		return ""
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.groupChats[chatID]
@@ -1449,6 +1492,19 @@ func (d *daemon) userDefaultCWD(sk string) string {
 
 // enableGroupChat enables group mode for a chat with the given CWD.
 func (d *daemon) enableGroupChat(chatID, cwd string) {
+	if isYMThreadChatID(chatID) {
+		d.store.UpdateScopeDefaults(d.sessionKey(chatID), func(def *session.ScopeDefaults) {
+			enabled := true
+			def.GroupMode = &enabled
+			def.CWD = cwd
+			if def.GroupVerbose == nil {
+				verbose := true
+				def.GroupVerbose = &verbose
+			}
+		})
+		d.saveStore()
+		return
+	}
 	d.mu.Lock()
 	if d.groupVerb == nil {
 		d.groupVerb = make(map[string]bool)
@@ -1462,6 +1518,13 @@ func (d *daemon) enableGroupChat(chatID, cwd string) {
 }
 
 func (d *daemon) setGroupVerbose(chatID string, enabled bool) {
+	if isYMThreadChatID(chatID) {
+		d.store.UpdateScopeDefaults(d.sessionKey(chatID), func(def *session.ScopeDefaults) {
+			def.GroupVerbose = &enabled
+		})
+		d.saveStore()
+		return
+	}
 	d.mu.Lock()
 	if d.groupVerb == nil {
 		d.groupVerb = make(map[string]bool)
@@ -1475,6 +1538,12 @@ func (d *daemon) chatVerboseEnabled(chatID string) bool {
 	if !isGroupChatID(chatID) {
 		return true
 	}
+	if isYMThreadChatID(chatID) {
+		if def := d.store.ScopeDefaults(d.sessionKey(chatID)); def != nil && def.GroupVerbose != nil {
+			return *def.GroupVerbose
+		}
+		return true
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if enabled, ok := d.groupVerb[chatID]; ok {
@@ -1485,6 +1554,14 @@ func (d *daemon) chatVerboseEnabled(chatID string) bool {
 
 // disableGroupChat disables group mode for a chat.
 func (d *daemon) disableGroupChat(chatID string) {
+	if isYMThreadChatID(chatID) {
+		d.store.UpdateScopeDefaults(d.sessionKey(chatID), func(def *session.ScopeDefaults) {
+			enabled := false
+			def.GroupMode = &enabled
+		})
+		d.saveStore()
+		return
+	}
 	d.mu.Lock()
 	delete(d.groupChats, chatID)
 	delete(d.groupVerb, chatID)
