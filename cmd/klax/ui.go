@@ -475,12 +475,14 @@ func (d *daemon) createUISessionAtomic(sk, chatID string, patch uiSettingsPatch)
 		applySettingsPatch(sess, r)
 	}
 	newDefaults := session.ScopeDefaults{
-		Backend:   resolveSessionBackend(sess, def, d.cfg.GetDefaultBackend()),
-		Model:     sess.ModelOverride,
-		Think:     sess.ThinkOverride,
-		Sandbox:   sess.Sandbox,
-		ClaudeTTY: sess.ClaudeTTY,
-		CWD:       sess.CWD,
+		Backend:      resolveSessionBackend(sess, def, d.cfg.GetDefaultBackend()),
+		Model:        sess.ModelOverride,
+		Think:        sess.ThinkOverride,
+		Sandbox:      sess.Sandbox,
+		ClaudeTTY:    sess.ClaudeTTY,
+		CWD:          sess.CWD,
+		GroupMode:    def.GroupMode,
+		GroupVerbose: def.GroupVerbose,
 	}
 	created := d.store.AddWithDefaults(sk, sess, &newDefaults) // session + its template: one store commit
 	d.saveStore()

@@ -1,11 +1,20 @@
-// compose.js — the message composer: textarea (auto-grow, Enter-to-send), staged
+// compose.js — the message composer: textarea (desktop Enter-to-send; mobile Enter-to-newline), staged
 // attachments (paperclip / paste / drop, with chips), and send(). The composer never
 // mutates the read model: the server is authoritative, and the sent message appears only
 // when the live event / transcript reports it back. Composer state (text + staged files +
 // retry nonce) is PER SESSION: app.js stashes it on tab switch and restores it on return,
 // so a draft typed in one tab never shows up in another.
 
-import { api, getToken } from "./base.js";
+import { api, getToken, hasCoarsePointer } from "./base.js";
+
+// Phones have no practical Shift+Enter gesture, so their primary coarse pointer changes plain Enter
+// into a newline and leaves sending to the visible button. Ctrl/Cmd+Enter remains an explicit send
+// everywhere (including a physical keyboard attached to a phone/tablet).
+export function composerEnterSends(e, coarse){
+  if(!e || e.key !== "Enter" || e.isComposing) return false;
+  if(e.ctrlKey || e.metaKey) return true;
+  return !coarse && !e.shiftKey;
+}
 
 // A per-page-load tab id that seeds every nonce. It must be collision-resistant even without
 // crypto.randomUUID — a constant would make two tabs mint the same nonce (same per-key + server
@@ -116,7 +125,7 @@ export function initCompose(deps){
   if(ta){
     autoGrow(ta);
     ta.addEventListener("input", () => { syncRetry(ta.value); autoGrow(ta); });
-    ta.addEventListener("keydown", e => { if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); send(deps); } });
+    ta.addEventListener("keydown", e => { if(composerEnterSends(e, hasCoarsePointer())){ e.preventDefault(); send(deps); } });
     ta.addEventListener("paste", e => {
       let added = false;
       for(const it of (e.clipboardData && e.clipboardData.items) || []){
@@ -132,7 +141,24 @@ export function initCompose(deps){
     bar.addEventListener("drop", e => { for(const f of (e.dataTransfer && e.dataTransfer.files) || []) files.push({ file: f, name: f.name }); renderChips(); });
   }
   const btn = document.getElementById("sendbtn");
-  if(btn) btn.addEventListener("click", () => send(deps));
+  if(btn){
+    let touchSent = false, touchSentTimer = 0;
+    btn.addEventListener("pointerdown", e => {
+      if(e.pointerType !== "touch") return;
+      // Waiting for click lets the textarea blur first; that restores the iPhone bottom safe-area,
+      // moves the composer out from under the finger, and Safari drops the click. Submit on the
+      // stable pointerdown and keep textarea focus/keyboard by cancelling that default blur.
+      e.preventDefault();
+      touchSent = true;
+      clearTimeout(touchSentTimer);
+      touchSentTimer = setTimeout(() => { touchSent = false; }, 1200);
+      send(deps, true);
+    });
+    btn.addEventListener("click", () => {
+      if(touchSent){ touchSent = false; clearTimeout(touchSentTimer); return; }
+      send(deps);
+    });
+  }
   const ab = document.getElementById("attachbtn");
   if(ab && fileInput) ab.addEventListener("click", () => fileInput.click());
 }
@@ -194,7 +220,7 @@ function renderChips(){
   });
 }
 
-async function send(deps){
+async function send(deps, blurOnSuccess){
   const ta = document.getElementById("input");
   const text = (ta ? ta.value : "").trim();
   const staged = files.slice();
@@ -256,6 +282,10 @@ async function send(deps){
     // (and is shown again in the composer by rollback) until a successful resend clears it.
     if(!r.ok){ rollback(deps, created, text, staged, nonce, (await r.text()).trim() || "Сообщение не принято"); return; }
     outboxDrop(nonce); // server accepted & fsynced it — the browser copy is no longer needed
+    // A touch-button send keeps focus through pointerdown so Safari cannot move the button before
+    // click. Release it only after durable server acceptance; failures retain the keyboard/draft.
+    // Never blur a different session's composer if the user switched tabs while awaiting the POST.
+    if(blurOnSuccess && deps.getActive() === created && ta && document.activeElement === ta) ta.blur();
     showNextRecovered(created, deps);
   } catch(e){
     rollback(deps, created, text, staged, nonce, "Сеть недоступна — сообщение не отправлено"); // outbox copy stays

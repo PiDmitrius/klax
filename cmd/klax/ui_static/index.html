@@ -2,7 +2,8 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta id="theme-color" name="theme-color" content="#f5f6f8">
 <title>__KLAX_UI_TITLE__</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='%231ec21e'/><stop offset='0.5' stop-color='%2300b500'/><stop offset='1' stop-color='%23008e00'/></linearGradient></defs><rect x='1.25' y='1.25' width='29.5' height='29.5' rx='8' fill='url(%23g)' stroke='%23006400' stroke-width='0.8'/><text x='16' y='23' font-family='ui-monospace,monospace' font-size='21' font-weight='bold' fill='%23ffffff' text-anchor='middle'>k</text></svg>">
 <link rel="stylesheet" href="./app.css">
@@ -26,20 +27,20 @@
     <div id="log"><div id="logcol"></div></div>
     <button id="tobottom" class="hidden" title="Вниз" aria-label="Вниз"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M6 13l6 6 6-6"/></svg></button>
     <div id="notifications" role="status" aria-live="polite" aria-atomic="false"></div>
-    <div id="composer">
-      <div id="cbar">
-        <div id="chips" class="hidden"></div>
-        <div id="inputSizer" aria-hidden="true"></div>
-        <textarea id="input" rows="1" placeholder="Сообщение…"></textarea>
-        <button id="attachbtn" class="attach" title="Прикрепить файлы" aria-label="Прикрепить файлы"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
-        <button id="sendbtn" class="send" title="Отправить" aria-label="Отправить"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button>
-        <input id="file" type="file" multiple hidden>
-      </div>
+  </div>
+  <div id="composer">
+    <div id="cbar">
+      <div id="chips" class="hidden"></div>
+      <div id="inputSizer" aria-hidden="true"></div>
+      <textarea id="input" rows="1" placeholder="Сообщение…"></textarea>
+      <button id="attachbtn" class="attach" title="Прикрепить файлы" aria-label="Прикрепить файлы"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
+      <button id="sendbtn" class="send" title="Отправить" aria-label="Отправить"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button>
+      <input id="file" type="file" multiple hidden>
     </div>
   </div>
 </div>
-<div id="modal" class="hidden">
-  <div class="modal-box">
+<div id="modal" class="hidden" role="dialog" aria-modal="true">
+  <div class="modal-box" tabindex="-1">
     <div class="modal-msg"></div>
     <input class="modal-input hidden" type="text" autocomplete="off">
     <div class="modal-actions">

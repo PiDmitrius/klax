@@ -17,6 +17,11 @@ type ScopeDefaults struct {
 	Sandbox   string `json:"sandbox,omitempty"`    // "on" | "off"
 	ClaudeTTY bool   `json:"claude_tty,omitempty"` // drive Claude through klax tty
 	CWD       string `json:"cwd,omitempty"`        // working directory for the next new session
+	// YM threads inherit group mode once, then evolve independently. Keep that
+	// per-thread state with the thread's sessions instead of materializing every
+	// discovered thread in config.json's explicit group_chats registry.
+	GroupMode    *bool `json:"group_mode,omitempty"`
+	GroupVerbose *bool `json:"group_verbose,omitempty"`
 }
 
 type Session struct {
@@ -103,6 +108,14 @@ func cloneDefaults(def *ScopeDefaults) *ScopeDefaults {
 		return nil
 	}
 	cp := *def
+	if def.GroupMode != nil {
+		enabled := *def.GroupMode
+		cp.GroupMode = &enabled
+	}
+	if def.GroupVerbose != nil {
+		verbose := *def.GroupVerbose
+		cp.GroupVerbose = &verbose
+	}
 	return &cp
 }
 

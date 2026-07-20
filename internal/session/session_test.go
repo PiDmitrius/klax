@@ -416,6 +416,27 @@ func TestAddWithDefaultsCommitsSessionAndTemplateTogether(t *testing.T) {
 	}
 }
 
+func TestScopeDefaultsReturnsIndependentGroupState(t *testing.T) {
+	enabled, verbose := true, false
+	store := &Store{Chats: map[string]*ChatSessions{}, Scope: map[string]*ScopeDefaults{}}
+	store.UpdateScopeDefaults("ym:group#thread", func(def *ScopeDefaults) {
+		def.GroupMode = &enabled
+		def.GroupVerbose = &verbose
+	})
+
+	got := store.ScopeDefaults("ym:group#thread")
+	if got.GroupMode == nil || got.GroupVerbose == nil {
+		t.Fatalf("group state missing from clone: %+v", got)
+	}
+	*got.GroupMode = false
+	*got.GroupVerbose = true
+
+	again := store.ScopeDefaults("ym:group#thread")
+	if !*again.GroupMode || *again.GroupVerbose {
+		t.Fatalf("mutating a clone changed stored defaults: %+v", again)
+	}
+}
+
 func TestReorderRearrangesAndToleratesPartialOrder(t *testing.T) {
 	store := &Store{
 		Chats: make(map[string]*ChatSessions),

@@ -58,12 +58,73 @@ func TestSPASystemControlsAndNoticeStack(t *testing.T) {
 			t.Fatalf("missing embedded %s: %v", name, err)
 		}
 	}
+	tabs, err := moduleFS.ReadFile("ui_static/tabs.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(tabs), `t.addEventListener("pointerup"`) ||
+		!strings.Contains(string(tabs), "Math.hypot") ||
+		!strings.Contains(string(tabs), "TOUCH_TAP_PX") ||
+		!strings.Contains(string(tabs), "pointerSelected") {
+		t.Fatal("touch tab selection must happen on a stationary pointerup and consume its synthetic click")
+	}
+	if strings.Contains(string(tabs), "tgrip") || strings.Contains(string(tabs), "TOUCH_HOLD") {
+		t.Fatal("touch UI must not expose or implement tab reordering")
+	}
 	css, err := moduleFS.ReadFile("ui_static/app.css")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(css), "flex-direction: column; gap: 8px") {
 		t.Fatal("notification stack must append newest at the bottom and grow upward")
+	}
+	if !strings.Contains(string(app), `querySelectorAll(".msg.show-actions")`) ||
+		!strings.Contains(string(css), ".msg.show-actions > .meta") ||
+		!strings.Contains(string(css), ".msg.show-actions > .block-copy") {
+		t.Fatal("message time and copy action must be revealed together by clicking the bubble")
+	}
+	if strings.Contains(string(css), "left: calc(100% + 6px)") {
+		t.Fatal("timestamps outside bubbles create horizontal timeline overflow")
+	}
+	if !strings.Contains(string(css), "#bar, #bar * { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }") {
+		t.Fatal("tab drag must not select text on Safari")
+	}
+	if !strings.Contains(page, "viewport-fit=cover") || !strings.Contains(page, `name="theme-color"`) {
+		t.Fatal("SPA shell must opt into and colour the iPhone safe area")
+	}
+	if !strings.Contains(string(css), "safe-area-inset-top") {
+		t.Fatal("header must account for the iPhone top safe area under viewport-fit=cover")
+	}
+	if strings.Count(string(css), "safe-area-inset-left") < 3 || strings.Count(string(css), "safe-area-inset-right") < 3 {
+		t.Fatal("header, timeline and composer must all account for landscape safe areas")
+	}
+	if !strings.Contains(string(css), "#composer:has(#input:focus)") {
+		t.Fatal("focused mobile composer must not stack Home Indicator clearance above the keyboard")
+	}
+	if strings.Contains(string(css), "--composer-h") || strings.Contains(string(app), "setComposerH") || strings.Contains(string(app), "syncComposerH") {
+		t.Fatal("composer height reservation must be normal-flow layout, not a JS mirror")
+	}
+	if strings.Contains(string(app), "initBottomInset") || strings.Contains(string(css), "--kb-inset") {
+		t.Fatal("unsupported Safari viewport inference must not compete with the mobile focus contract")
+	}
+	if !strings.Contains(string(app), `box: "border-box"`) {
+		t.Fatal("composer scroll observer must see padding changes")
+	}
+	if !strings.Contains(string(app), "rebaselineComposerResize()") || !strings.Contains(string(app), "if(stick) stickToBottom();") {
+		t.Fatal("composer resize must obey canonical scroll intent and ignore programmatic draft swaps")
+	}
+	if strings.Contains(string(app), "settledDistance(log) - d < 80") {
+		t.Fatal("composer observer must not independently infer and enable bottom sticking")
+	}
+	logwrapClose := strings.Index(page, "</div>\n  <div id=\"composer\">")
+	if logwrapClose < 0 {
+		t.Fatal("composer must be a normal-flow sibling after logwrap")
+	}
+	if !strings.Contains(string(css), "body:has(#app.active) { background: var(--panel); }") {
+		t.Fatal("Safari 26 body canvas must use the unchanged header/footer panel colour while the app is active")
+	}
+	if !strings.Contains(string(app), `getPropertyValue("--panel")`) {
+		t.Fatal("browser chrome and header must read the same canonical theme background")
 	}
 }
 
@@ -333,5 +394,51 @@ console.log("ok");
 	out, err := exec.Command("node", scriptPath).CombinedOutput()
 	if err != nil {
 		t.Fatalf("node outbox test failed: %v\n%s", err, out)
+	}
+}
+
+func TestComposerEnterContract(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not found")
+	}
+	compose, err := moduleFS.ReadFile("ui_static/compose.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(compose), `btn.addEventListener("pointerdown"`) ||
+		!strings.Contains(string(compose), `ab.addEventListener("click"`) ||
+		!strings.Contains(string(compose), "send(deps, true)") || !strings.Contains(string(compose), "blurOnSuccess") {
+		t.Fatal("touch send must act before textarea blur moves the composer")
+	}
+	dir := t.TempDir()
+	for _, name := range []string{"base.js", "compose.js"} {
+		body, err := moduleFS.ReadFile("ui_static/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), body, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"type":"module"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	script := `
+import { composerEnterSends } from "./compose.js";
+function check(want, event, coarse, name){ const got = composerEnterSends(event, coarse); if(got !== want) throw new Error(name + ": got " + got); }
+check(true,  {key:"Enter"}, false, "desktop Enter sends");
+check(false, {key:"Enter", shiftKey:true}, false, "desktop Shift+Enter is newline");
+check(false, {key:"Enter"}, true, "mobile Enter is newline");
+check(true,  {key:"Enter", ctrlKey:true}, true, "mobile Ctrl+Enter sends");
+check(true,  {key:"Enter", metaKey:true}, true, "mobile Cmd+Enter sends");
+check(false, {key:"Enter", isComposing:true}, false, "IME composition does not send");
+check(false, {key:"a"}, false, "other key does not send");
+`
+	path := filepath.Join(dir, "enter_test.mjs")
+	if err := os.WriteFile(path, []byte(script), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("node", path).CombinedOutput(); err != nil {
+		t.Fatalf("node composer Enter test failed: %v\n%s", err, out)
 	}
 }

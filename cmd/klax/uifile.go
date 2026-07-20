@@ -18,6 +18,8 @@ import (
 	_ "golang.org/x/image/webp"
 )
 
+const fileCacheControl = "private, max-age=86400, immutable"
+
 // inboundText rebuilds a turn's display text from its durable inbound record: the text
 // the user actually sent, plus a freshly-minted capability-URL image/link per attached
 // file (contract §5/§6 — refs are per-response, never persisted).
@@ -220,7 +222,9 @@ func (s *uiServer) handleFile(w http.ResponseWriter, r *http.Request) {
 	// Inert serving: only well-known raster images render inline; everything else is
 	// downloaded as an opaque octet-stream, never executed as same-origin content.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-store")
+	// Stored session files are immutable and their capability URL is stable. Let the user's browser
+	// retain them across tab switches; `private` keeps bearer-protected content out of shared caches.
+	w.Header().Set("Cache-Control", fileCacheControl)
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Content-Security-Policy", "sandbox") // blocks active content if opened as a document
 	ct := entry.ContentType
