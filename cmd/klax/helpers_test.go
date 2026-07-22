@@ -627,6 +627,18 @@ func TestGroupPromptAttachmentModes(t *testing.T) {
 	}
 }
 
+func TestAttachmentsTextHasNoRedundantDescriptions(t *testing.T) {
+	d := newTestDaemon(t)
+	chatID := "ym:0/0/group"
+	d.groupChats[chatID] = "/tmp/group"
+	d.setGroupAttachmentMode(chatID, "any")
+
+	want := "/attachments_on\n<b>/attachments_any ✅</b>\n/attachments_off"
+	if got := d.attachmentsText(chatID); got != want {
+		t.Fatalf("attachmentsText = %q, want %q", got, want)
+	}
+}
+
 func TestLegacyGroupAttachmentsTrueMigratesToAny(t *testing.T) {
 	d := newTestDaemon(t)
 	chatID := "ym:0/0/group"

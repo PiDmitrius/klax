@@ -420,17 +420,17 @@ func (d *daemon) verboseText(chatID string) string {
 
 func (d *daemon) attachmentsText(chatID string) string {
 	mode := d.groupAttachmentMode(chatID)
-	line := func(value, label string) string {
-		text := "/attachments_" + value + " " + label
+	line := func(value string) string {
+		text := "/attachments_" + value
 		if mode == value {
 			return "<b>" + text + " ✅</b>"
 		}
 		return text
 	}
 	return strings.Join([]string{
-		line("on", "с обычным триггером"),
-		line("any", "любой файл — триггер"),
-		line("off", "выключены"),
+		line("on"),
+		line("any"),
+		line("off"),
 	}, "\n")
 }
 
