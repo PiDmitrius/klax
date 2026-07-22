@@ -261,6 +261,56 @@ func TestNormalizeCommandVerboseAliases(t *testing.T) {
 	}
 }
 
+func TestNormalizeCommandAttachmentsAliases(t *testing.T) {
+	for _, tt := range []struct {
+		inCmd, wantArg string
+	}{
+		{inCmd: "/attachments_on", wantArg: "on"},
+		{inCmd: "/attachments_off", wantArg: "off"},
+		{inCmd: "/attachments_any", wantArg: "any"},
+	} {
+		gotCmd, gotArgs := normalizeCommand(tt.inCmd, nil)
+		if gotCmd != "/attachments" || len(gotArgs) != 1 || gotArgs[0] != tt.wantArg {
+			t.Fatalf("%s normalized to %q %v, want /attachments %s", tt.inCmd, gotCmd, gotArgs, tt.wantArg)
+		}
+	}
+}
+
+func TestAttachmentsAnyCommandPersistsMode(t *testing.T) {
+	d := newTestDaemon(t)
+	chatID := "ym:0/0/group"
+	sk := d.sessionKey(chatID)
+	d.groupChats[chatID] = t.TempDir()
+	d.store.Ensure(sk, "group", t.TempDir(), d.fallbackScopeDefaults())
+
+	d.handleCommand(chatID, "m1", "/attachments any")
+
+	if got := d.groupAttachmentMode(chatID); got != "any" {
+		t.Fatalf("/attachments any left mode %q, want any", got)
+	}
+}
+
+func TestSandboxAnyIsRejected(t *testing.T) {
+	d := newTestDaemon(t)
+	chatID := "tg:test"
+	sk := d.sessionKey(chatID)
+	d.store.Ensure(sk, "default", t.TempDir(), d.fallbackScopeDefaults())
+
+	d.handleCommand(chatID, "m1", "/sandbox any")
+
+	if got := d.store.Active(sk).Sandbox; got == "any" {
+		t.Fatal("/sandbox any must not persist an unsupported sandbox mode")
+	}
+}
+
+func TestAttachmentsCommandsRequireAllowListedGroupUser(t *testing.T) {
+	for _, command := range []string{"/attachments", "/attachments any", "/attachments_any"} {
+		if isGroupCommand(command) {
+			t.Fatalf("%q must not be available to a non-allow-listed group member", command)
+		}
+	}
+}
+
 func TestNormalizeCommandTTYAliases(t *testing.T) {
 	tests := []struct {
 		inCmd   string

@@ -354,6 +354,7 @@ func TestYMThreadChatIDInheritsParentGroupModeOnce(t *testing.T) {
 		def.Think = "xhigh"
 		def.Sandbox = "off"
 		def.ClaudeTTY = true
+		def.GroupAttachmentMode = "any"
 	})
 
 	threadChatID := d.ymThreadChatID(parent, 1784109957039064)
@@ -381,6 +382,9 @@ func TestYMThreadChatIDInheritsParentGroupModeOnce(t *testing.T) {
 	threadDef := d.scopeDefaults(threadChatID)
 	if threadDef.GroupMode == nil || !*threadDef.GroupMode {
 		t.Fatalf("thread group mode must be persisted with its session scope, got %+v", threadDef)
+	}
+	if threadDef.GroupAttachmentMode != "any" {
+		t.Fatalf("thread must inherit the parent's attachment trigger setting, got %+v", threadDef)
 	}
 	if threadDef.Backend != "codex" || threadDef.Model != "gpt-5.6-sol" || threadDef.Think != "xhigh" ||
 		threadDef.Sandbox != "off" || !threadDef.ClaudeTTY {
@@ -584,5 +588,53 @@ func TestRegisterSelfMentionTriggerDoesNotMatchUnrelatedNameWithSamePrefix(t *te
 
 	if _, ok := stripGroupTrigger("@klax_dev_bot_2 TEST123"); ok {
 		t.Fatal("a mention of a DIFFERENT bot whose username merely starts with the registered one must not trigger")
+	}
+}
+
+func TestGroupPromptAttachmentModes(t *testing.T) {
+	d := newTestDaemon(t)
+	chatID := "ym:0/0/group"
+	d.groupChats[chatID] = "/tmp/group"
+
+	if d.groupAttachmentMode(chatID) != "on" {
+		t.Fatal("attachments must default to on")
+	}
+	if _, ok := d.groupPrompt(chatID, "", true); ok {
+		t.Fatal("on must still require the explicit group trigger")
+	}
+	d.setGroupAttachmentMode(chatID, "any")
+	if prompt, ok := d.groupPrompt(chatID, "", true); !ok || prompt != "" {
+		t.Fatalf("attachment-only prompt = %q, %v; want empty accepted prompt", prompt, ok)
+	}
+	if prompt, ok := d.groupPrompt(chatID, "describe this", true); !ok || prompt != "describe this" {
+		t.Fatalf("attachment caption = %q, %v; want preserved caption", prompt, ok)
+	}
+	if _, ok := d.groupPrompt(chatID, "ordinary group chatter", false); ok {
+		t.Fatal("text without attachment must still require the explicit trigger")
+	}
+	if prompt, ok := d.groupPrompt(chatID, "Клакс explicit", false); !ok || prompt != "explicit" {
+		t.Fatalf("explicit trigger = %q, %v; want existing trigger semantics", prompt, ok)
+	}
+	d.setGroupAttachmentMode(chatID, "off")
+	if d.groupAttachmentMode(chatID) != "off" {
+		t.Fatal("attachment mode must persist off")
+	}
+	if blocked, addressed := d.groupAttachmentsBlocked(chatID, "ordinary group chatter", true); !blocked || addressed {
+		t.Fatalf("ambient off-mode attachment = blocked %v, addressed %v; want true, false", blocked, addressed)
+	}
+	if blocked, addressed := d.groupAttachmentsBlocked(chatID, "Клакс analyze", true); !blocked || !addressed {
+		t.Fatalf("addressed off-mode attachment = blocked %v, addressed %v; want true, true", blocked, addressed)
+	}
+}
+
+func TestLegacyGroupAttachmentsTrueMigratesToAny(t *testing.T) {
+	d := newTestDaemon(t)
+	chatID := "ym:0/0/group"
+	legacy := true
+	d.store.UpdateScopeDefaults(chatID, func(def *session.ScopeDefaults) {
+		def.LegacyGroupAttachments = &legacy
+	})
+	if got := d.groupAttachmentMode(chatID); got != "any" {
+		t.Fatalf("legacy true mode = %q, want any", got)
 	}
 }
