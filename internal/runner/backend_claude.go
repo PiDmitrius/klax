@@ -204,6 +204,16 @@ func (b *ClaudeBackend) ParseEvent(line []byte) ([]Event, bool) {
 	case "user":
 		return nil, false
 
+	case "tool_progress":
+		// Periodic heartbeat frame Claude streams for a long-running tool
+		// (Bash/PowerShell/REPL): tool_use_id, tool_name, elapsed_time_seconds,
+		// throttled per parent tool-use id. It carries no new user-visible
+		// signal — the `tool_use` block already surfaced the tool — so we
+		// swallow it, mirroring how the codex backend ignores in-flight
+		// `item.updated` progress (see backend_codex.go). Without this it
+		// would fall through to EventUnknown and render as "❓ tool_progress".
+		return nil, false
+
 	case "rate_limit_event":
 		if ev.RateLimitInfo != nil {
 			return []Event{{
