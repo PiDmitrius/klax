@@ -20,8 +20,12 @@ type ScopeDefaults struct {
 	// YM threads inherit group mode once, then evolve independently. Keep that
 	// per-thread state with the thread's sessions instead of materializing every
 	// discovered thread in config.json's explicit group_chats registry.
-	GroupMode    *bool `json:"group_mode,omitempty"`
-	GroupVerbose *bool `json:"group_verbose,omitempty"`
+	GroupMode           *bool  `json:"group_mode,omitempty"`
+	GroupVerbose        *bool  `json:"group_verbose,omitempty"`
+	GroupAttachmentMode string `json:"group_attachment_mode,omitempty"` // "off" | "on" (default) | "any"
+	// Deprecated development-build shape. Read only for a compatible migration:
+	// true meant today's "any"; false meant the old/default "on" behaviour.
+	LegacyGroupAttachments *bool `json:"group_attachments,omitempty"`
 }
 
 type Session struct {
@@ -115,6 +119,10 @@ func cloneDefaults(def *ScopeDefaults) *ScopeDefaults {
 	if def.GroupVerbose != nil {
 		verbose := *def.GroupVerbose
 		cp.GroupVerbose = &verbose
+	}
+	if def.LegacyGroupAttachments != nil {
+		attachments := *def.LegacyGroupAttachments
+		cp.LegacyGroupAttachments = &attachments
 	}
 	return &cp
 }

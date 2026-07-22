@@ -417,22 +417,25 @@ func TestAddWithDefaultsCommitsSessionAndTemplateTogether(t *testing.T) {
 }
 
 func TestScopeDefaultsReturnsIndependentGroupState(t *testing.T) {
-	enabled, verbose := true, false
+	enabled, verbose, legacyAttachments := true, false, true
 	store := &Store{Chats: map[string]*ChatSessions{}, Scope: map[string]*ScopeDefaults{}}
 	store.UpdateScopeDefaults("ym:group#thread", func(def *ScopeDefaults) {
 		def.GroupMode = &enabled
 		def.GroupVerbose = &verbose
+		def.GroupAttachmentMode = "any"
+		def.LegacyGroupAttachments = &legacyAttachments
 	})
 
 	got := store.ScopeDefaults("ym:group#thread")
-	if got.GroupMode == nil || got.GroupVerbose == nil {
+	if got.GroupMode == nil || got.GroupVerbose == nil || got.LegacyGroupAttachments == nil || got.GroupAttachmentMode != "any" {
 		t.Fatalf("group state missing from clone: %+v", got)
 	}
 	*got.GroupMode = false
 	*got.GroupVerbose = true
+	*got.LegacyGroupAttachments = false
 
 	again := store.ScopeDefaults("ym:group#thread")
-	if !*again.GroupMode || *again.GroupVerbose {
+	if !*again.GroupMode || *again.GroupVerbose || !*again.LegacyGroupAttachments || again.GroupAttachmentMode != "any" {
 		t.Fatalf("mutating a clone changed stored defaults: %+v", again)
 	}
 }

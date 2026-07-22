@@ -931,8 +931,9 @@ func (d *daemon) watchMarker() {
 }
 
 // dispatchInbound applies the allowed-user / group-trigger gating shared by
-// every messenger poll loop (tg/mx/vk/ym): an allowed user's message is queued
-// directly; in a group chat, group-commands and the trigger prefix apply;
+// every messenger poll loop (tg/mx/vk/ym): an allowed user's DM is queued
+// directly; in a group chat, group commands, trigger prefixes, and the
+// configured attachment mode apply;
 // anything else (a non-allowed DM, or a group message with no prefix/command)
 // is dropped silently. attachErrs (download failures noted by the caller) are
 // reported only once the message is actually going to be accepted, mirroring
@@ -943,22 +944,32 @@ func (d *daemon) dispatchInbound(chatID, msgID, text string, attachments []attac
 			d.sendPlain(chatID, msgID, "Не удалось скачать:\n• "+strings.Join(attachErrs, "\n• "))
 		}
 	}
-	if allowed {
+	if !d.isGroupChat(chatID) {
+		if !allowed {
+			return
+		}
 		notifyAttachErrs()
 		d.handleMessageWithAttachments(chatID, msgID, text, attachments)
 		return
 	}
-	if !d.isGroupChat(chatID) {
-		return
-	}
-	if strings.HasPrefix(text, "/") && isGroupCommand(text) {
+	if strings.HasPrefix(text, "/") && (allowed || isGroupCommand(text)) {
 		notifyAttachErrs()
 		d.ensureSessionWithCWD(d.sessionKey(chatID), d.sessionCWD(chatID))
 		d.handleCommand(chatID, msgID, text)
 		return
 	}
-	if prompt, ok := stripGroupTrigger(strings.TrimSpace(text)); ok {
+	hadAttachment := len(attachments) > 0 || len(attachErrs) > 0
+	if blocked, addressed := d.groupAttachmentsBlocked(chatID, text, hadAttachment); blocked {
+		if addressed {
+			d.sendPlain(chatID, msgID, "📎 Вложения выключены: /attachments on")
+		}
+		return
+	}
+	if prompt, ok := d.groupPrompt(chatID, text, hadAttachment); ok {
 		notifyAttachErrs()
+		if prompt == "" && len(attachments) == 0 {
+			return
+		}
 		d.ensureSessionWithCWD(d.sessionKey(chatID), d.sessionCWD(chatID))
 		d.enqueueWithAttachments(chatID, msgID, prompt, attachments)
 	}
@@ -1235,6 +1246,7 @@ func (d *daemon) ymThreadChatID(parentChatID string, threadID int64) string {
 		if cwd == "" {
 			cwd = d.sessionCWD(chatID) // defensive fallback; isGroupChat(parentChatID) implies one of the above is normally set
 		}
+		attachmentMode := d.groupAttachmentMode(parentChatID)
 		d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
 			*def = *parentDefaults
 			def.CWD = cwd
@@ -1242,6 +1254,8 @@ func (d *daemon) ymThreadChatID(parentChatID string, threadID int64) string {
 			verbose := d.chatVerboseEnabled(parentChatID)
 			def.GroupMode = &enabled
 			def.GroupVerbose = &verbose
+			def.GroupAttachmentMode = attachmentMode
+			def.LegacyGroupAttachments = nil
 		})
 		d.saveStore()
 	}
@@ -1534,6 +1548,32 @@ func (d *daemon) setGroupVerbose(chatID string, enabled bool) {
 	d.saveGroupChats()
 }
 
+func (d *daemon) setGroupAttachmentMode(chatID, mode string) {
+	d.store.UpdateScopeDefaults(d.sessionKey(chatID), func(def *session.ScopeDefaults) {
+		def.GroupAttachmentMode = mode
+		def.LegacyGroupAttachments = nil
+	})
+	d.saveStore()
+}
+
+func (d *daemon) groupAttachmentMode(chatID string) string {
+	if !isGroupChatID(chatID) {
+		return "on"
+	}
+	def := d.store.ScopeDefaults(d.sessionKey(chatID))
+	if def == nil {
+		return "on"
+	}
+	switch def.GroupAttachmentMode {
+	case "off", "on", "any":
+		return def.GroupAttachmentMode
+	}
+	if def.LegacyGroupAttachments != nil && *def.LegacyGroupAttachments {
+		return "any"
+	}
+	return "on"
+}
+
 func (d *daemon) chatVerboseEnabled(chatID string) bool {
 	if !isGroupChatID(chatID) {
 		return true
@@ -1647,6 +1687,28 @@ func stripGroupTrigger(text string) (string, bool) {
 	return "", false
 }
 
+// groupPrompt is the single group-trigger policy. An explicit trigger always
+// wins; with /attachments any, carrying a file supplies it implicitly.
+func (d *daemon) groupPrompt(chatID, text string, hasAttachment bool) (string, bool) {
+	if prompt, ok := stripGroupTrigger(strings.TrimSpace(text)); ok {
+		return prompt, true
+	}
+	if hasAttachment && d.groupAttachmentMode(chatID) == "any" {
+		return strings.TrimSpace(text), true
+	}
+	return "", false
+}
+
+// groupAttachmentsBlocked is the single off-mode policy. Ambient group files
+// are ignored silently; an explicitly addressed file can receive a rejection.
+func (d *daemon) groupAttachmentsBlocked(chatID, text string, hasAttachment bool) (blocked, addressed bool) {
+	if !hasAttachment || d.groupAttachmentMode(chatID) != "off" {
+		return false, false
+	}
+	_, addressed = stripGroupTrigger(strings.TrimSpace(text))
+	return true, addressed
+}
+
 // isGroupCommand checks if text starts with a command allowed for non-admin group members.
 func isGroupCommand(text string) bool {
 	cmd := strings.Fields(text)[0]
@@ -1678,7 +1740,7 @@ func (d *daemon) handleMessageWithAttachments(chatID, msgID, text string, attach
 
 // handleInbound is the unified intake for every source. It trims, ensures a
 // session, then routes: a "/"-command goes to handleCommand; in group mode the
-// trigger prefix is required; otherwise the message is queued. TargetCreated is
+// trigger/attachment policy is applied; otherwise the message is queued. TargetCreated is
 // threaded to the enqueue so a UI tab can address a specific session (0 = the
 // active one, which every messenger uses).
 // handleInbound routes one inbound message; it returns whether an actual message
@@ -1706,9 +1768,12 @@ func (d *daemon) handleInbound(in Inbound) bool {
 		return true
 	}
 
-	// In group mode, require trigger prefix for all users
+	// In group mode, require a trigger prefix unless attachments supply it.
 	if d.isGroupChat(in.ChatID) {
-		if prompt, ok := stripGroupTrigger(text); ok {
+		if blocked, _ := d.groupAttachmentsBlocked(in.ChatID, text, len(in.Attachments) > 0); blocked {
+			return false
+		}
+		if prompt, ok := d.groupPrompt(in.ChatID, text, len(in.Attachments) > 0); ok {
 			return d.enqueueToSession(in.ChatID, in.MsgID, prompt, in.Attachments, in.TargetCreated, in.Nonce)
 		}
 		// No prefix — ignore silently

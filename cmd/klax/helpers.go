@@ -418,6 +418,22 @@ func (d *daemon) verboseText(chatID string) string {
 	return sb.String()
 }
 
+func (d *daemon) attachmentsText(chatID string) string {
+	mode := d.groupAttachmentMode(chatID)
+	line := func(value string) string {
+		text := "/attachments_" + value
+		if mode == value {
+			return "<b>" + text + " ✅</b>"
+		}
+		return text
+	}
+	return strings.Join([]string{
+		line("on"),
+		line("any"),
+		line("off"),
+	}, "\n")
+}
+
 func (d *daemon) groupModeText(chatID string) string {
 	if !isGroupChatID(chatID) {
 		return ""
@@ -445,6 +461,7 @@ func (d *daemon) settingsText(chatID, sk string, sess *session.Session) string {
 	if groupText := d.groupModeText(chatID); groupText != "" {
 		sections = append(sections, groupText)
 		sections = append(sections, "🗣 Verbose:\n"+strings.TrimSuffix(d.verboseText(chatID), "\n"))
+		sections = append(sections, "📎 Вложения:\n"+strings.TrimSuffix(d.attachmentsText(chatID), "\n"))
 	}
 	return strings.Join(sections, "\n\n")
 }
@@ -522,6 +539,7 @@ func helpText() string {
 /prompt [текст] — системный промпт
 /groups — режим группы
 /verbose — промежуточный вывод группы
+/attachments — режим вложений в группе (off/on/any)
 /rich — Rich-форматирование Telegram (глобально)
 /transports — управление транспортами
 /bypass — прямая команда

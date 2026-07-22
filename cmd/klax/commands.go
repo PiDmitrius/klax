@@ -47,6 +47,8 @@ func normalizeCommand(cmd string, args []string) (string, []string) {
 		return "/groups", append([]string{cmd[len("/group_"):]}, args...)
 	case strings.HasPrefix(cmd, "/verbose_") && len(cmd) > len("/verbose_"):
 		return "/verbose", append([]string{cmd[len("/verbose_"):]}, args...)
+	case strings.HasPrefix(cmd, "/attachments_") && len(cmd) > len("/attachments_"):
+		return "/attachments", append([]string{cmd[len("/attachments_"):]}, args...)
 	case strings.HasPrefix(cmd, "/m_") && len(cmd) > len("/m_"):
 		return "/__set_model", []string{cmd[len("/m_"):]}
 	case strings.HasPrefix(cmd, "/t_") && len(cmd) > len("/t_"):
@@ -329,6 +331,28 @@ func (d *daemon) handleVerboseSet(chatID, msgID, sk, mode string) {
 	d.setGroupVerbose(chatID, mode == "on")
 	if sess == nil {
 		d.sendMessage(chatID, msgID, d.verboseText(chatID))
+		return
+	}
+	d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
+}
+
+func (d *daemon) handleAttachmentsSet(chatID, msgID, sk, mode string) {
+	if !isGroupChatID(chatID) {
+		d.sendMessage(chatID, msgID, "❌ Команда /attachments работает только в групповых чатах.")
+		return
+	}
+	if !d.isGroupChat(chatID) {
+		d.sendMessage(chatID, msgID, "❌ Сначала включи режим группы: /group_on")
+		return
+	}
+	if mode != "on" && mode != "off" && mode != "any" {
+		d.sendMessage(chatID, msgID, d.attachmentsText(chatID))
+		return
+	}
+	d.setGroupAttachmentMode(chatID, mode)
+	sess := d.store.Active(sk)
+	if sess == nil {
+		d.sendMessage(chatID, msgID, d.attachmentsText(chatID))
 		return
 	}
 	d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
@@ -647,6 +671,13 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			mode = strings.ToLower(args[0])
 		}
 		d.handleVerboseSet(chatID, msgID, sk, mode)
+
+	case "/attachments":
+		mode := ""
+		if len(args) > 0 {
+			mode = strings.ToLower(args[0])
+		}
+		d.handleAttachmentsSet(chatID, msgID, sk, mode)
 
 	case "/settings", "/setting":
 		sess := d.store.Active(sk)
