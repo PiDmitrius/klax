@@ -22,3 +22,14 @@ func TestClaudeParseCompactBoundary(t *testing.T) {
 		t.Fatalf("init parse: ok=%v evs=%#v", ok2, evs2)
 	}
 }
+
+// TestClaudeParseToolProgress guards that Claude's periodic tool_progress
+// heartbeat frames are swallowed (like codex's in-flight item.updated), not
+// rendered as "❓ tool_progress" via the EventUnknown fallthrough.
+func TestClaudeParseToolProgress(t *testing.T) {
+	b := &ClaudeBackend{}
+	evs, ok := b.ParseEvent([]byte(`{"type":"tool_progress","tool_use_id":"toolu_1","tool_name":"Bash","parent_tool_use_id":"toolu_1","elapsed_time_seconds":12,"task_id":"t1"}`))
+	if ok || evs != nil {
+		t.Fatalf("tool_progress must be ignored: ok=%v evs=%#v", ok, evs)
+	}
+}
