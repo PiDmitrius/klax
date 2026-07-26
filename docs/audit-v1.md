@@ -15,8 +15,8 @@ The v1 protocol defines two events:
 
 - `turn.start`: klax has durably accepted and prepared the turn and is about to
   invoke the backend.
-- `turn.finish`: klax has completed and persisted the backend turn and is about
-  to perform its final delivery step.
+- `turn.finish`: the backend computation has completed, klax has formed the
+  final turn result, and final delivery is about to begin.
 
 Neither event asserts that the final result was delivered to a transport.
 

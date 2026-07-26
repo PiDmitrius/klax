@@ -48,7 +48,7 @@
         "finish_at": {
           "type": "string",
           "format": "date-time",
-          "description": "UTC time when internal completion and persistence reached the turn.finish boundary, before the finish hook and final delivery."
+          "description": "UTC time when klax formed the final turn result at the turn.finish boundary, before the finish hook and final delivery."
         },
         "origin": {"$ref": "#/$defs/origin"},
         "routing": {"$ref": "#/$defs/routing"},
