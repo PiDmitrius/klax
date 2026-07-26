@@ -33,7 +33,7 @@
         "turn_seq": {
           "type": "integer",
           "minimum": 1,
-          "description": "Durable monotonically increasing turn sequence within the klax state store."
+          "description": "Durable monotonically increasing turn sequence within this session incarnation's queue."
         },
         "accepted_at": {
           "type": "string",

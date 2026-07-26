@@ -101,12 +101,16 @@ The pre-run transcript cursor bounds the later binding search; it is not
 `turn.finish` is emitted after all of the following:
 
 1. the backend call has returned;
-2. the terminal queue state, session changes, usage, and context are persisted;
+2. klax has formed the final result, usage, and context snapshot;
 3. the final delivery-prepared result and trace snapshot are complete.
 
 It is emitted before klax performs its final delivery step. Streaming surfaces
 and the durable web read model may already have shown intermediate or complete
 backend content.
+
+`turn.finish` attests completion of the backend computation and construction of
+the final klax turn result. It does not attest that every internal terminal
+queue or session-metadata write succeeded.
 
 A process crash or failed start hook may leave a `turn.start` attempt without a
 `turn.finish`. A backend turn that passed its durable run fence is never
@@ -130,8 +134,8 @@ Uniqueness is scoped to one uninterrupted klax state store. An aggregator that
 combines independent installations keys records by its own
 `(installation_id, turn_id)`.
 
-`turn_seq` is the durable monotonically increasing turn sequence in the klax
-state store.
+`turn_seq` is the durable monotonically increasing turn sequence within this
+session incarnation's queue.
 
 ## Snapshot monotonicity
 
