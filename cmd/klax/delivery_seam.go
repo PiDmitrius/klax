@@ -18,6 +18,10 @@ type Delivery interface {
 	// stdout-scanner goroutine under narrationBuffer.mu, so it MUST NOT block
 	// on the network — hand work to a worker/mailbox and return immediately.
 	Progress(ev runner.ProgressEvent)
+	// Warning adds a klax system warning that must accompany the final result.
+	// Durable UI rendering reads the same warning from queue.jsonl; messenger
+	// delivery includes it in the final message chain.
+	Warning(text string)
 	// Final delivers the completed turn (answer or error). It first stops the
 	// progress stream (barrier), then renders and sends the result. Called once
 	// per turn, after the caller has persisted the session record.
@@ -33,6 +37,7 @@ type Delivery interface {
 type teeDelivery struct{ a, b Delivery }
 
 func (t teeDelivery) Progress(ev runner.ProgressEvent) { t.a.Progress(ev); t.b.Progress(ev) }
+func (t teeDelivery) Warning(text string)              { t.a.Warning(text); t.b.Warning(text) }
 func (t teeDelivery) Final(res runner.RunResult)       { t.a.Final(res); t.b.Final(res) }
 func (t teeDelivery) Close()                           { t.a.Close(); t.b.Close() }
 

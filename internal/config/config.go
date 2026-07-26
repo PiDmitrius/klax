@@ -25,6 +25,21 @@ type BackendConfig struct {
 	FullAuto       bool   `json:"full_auto"`       // codex: --full-auto shortcut
 }
 
+// AuditHookConfig is one synchronous audit boundary executable. Command is
+// executed directly (never through a shell) and receives one JSON event on stdin.
+type AuditHookConfig struct {
+	Command []string `json:"command"`
+}
+
+type AuditConfig struct {
+	Turn *AuditTurnConfig `json:"turn,omitempty"`
+}
+
+type AuditTurnConfig struct {
+	Start  *AuditHookConfig `json:"start,omitempty"`
+	Finish *AuditHookConfig `json:"finish,omitempty"`
+}
+
 // Config is stored at ~/.config/klax/config.json
 type Config struct {
 	TelegramToken string  `json:"tg_token"`
@@ -64,6 +79,10 @@ type Config struct {
 	// UITitle is the product name shown in the web UI (browser tab title and the
 	// login screen heading). Empty falls back to "klax".
 	UITitle string `json:"ui_title,omitempty"`
+
+	// Audit, when configured, observes the two synchronous turn boundaries.
+	// Start failure blocks backend execution; finish failure is a durable warning.
+	Audit *AuditConfig `json:"audit,omitempty"`
 }
 
 // GroupChat stores group mode settings for a chat.

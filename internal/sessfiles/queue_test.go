@@ -204,6 +204,45 @@ func TestRunMetadataAndBindingSurviveRestart(t *testing.T) {
 	}
 }
 
+func TestHookFailuresFoldWithoutDuplicatingTerminalState(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	s := Open("user:alice", 12)
+
+	startSeq, _, _, _, _ := s.Enqueue("ui:alice", "", "start", "blocked", nil)
+	if err := s.MarkRun(startSeq); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkHookError(startSeq, "audit.turn.start", "audit-start-failed"); err != nil {
+		t.Fatal(err)
+	}
+
+	finishSeq, _, _, _, _ := s.Enqueue("ui:alice", "", "finish", "completed", nil)
+	if err := s.MarkRun(finishSeq); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkDone(finishSeq); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkHookError(finishSeq, "audit.turn.finish", "audit-finish-failed"); err != nil {
+		t.Fatal(err)
+	}
+
+	turns, err := Open("user:alice", 12).InboundLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turns[0].Last != "err" || turns[0].Reason != "audit-start-failed" || len(turns[0].HookFailures) != 1 {
+		t.Fatalf("start hook fold = %+v", turns[0])
+	}
+	if turns[1].Last != "done" || turns[1].Reason != "" || len(turns[1].HookFailures) != 1 {
+		t.Fatalf("finish hook fold = %+v", turns[1])
+	}
+	reenqueue, recover, err := Open("user:alice", 12).Replay()
+	if err != nil || len(reenqueue) != 0 || len(recover) != 0 {
+		t.Fatalf("hook failures replayed: enq=%v recover=%v err=%v", reenqueue, recover, err)
+	}
+}
+
 func TestBindingIsOneToOneAndIncreasing(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	s := Open("user:alice", 6)

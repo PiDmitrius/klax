@@ -20,12 +20,14 @@ import (
 
 	"github.com/PiDmitrius/klax/internal/claudetty/hook"
 	"github.com/PiDmitrius/klax/internal/config"
+	"github.com/PiDmitrius/klax/internal/inbound"
 	"github.com/PiDmitrius/klax/internal/max"
 	"github.com/PiDmitrius/klax/internal/runner"
 	"github.com/PiDmitrius/klax/internal/sessfiles"
 	"github.com/PiDmitrius/klax/internal/session"
 	"github.com/PiDmitrius/klax/internal/tg"
 	"github.com/PiDmitrius/klax/internal/transport"
+	"github.com/PiDmitrius/klax/internal/turnaudit"
 	"github.com/PiDmitrius/klax/internal/vk"
 	"github.com/PiDmitrius/klax/internal/ym"
 )
@@ -350,11 +352,12 @@ type attachment struct {
 }
 
 type queuedMsg struct {
-	chatID      string
-	msgID       string // user's message ID (for replyTo)
-	text        string
-	progressID  string // ID of "В очереди" message to reuse as progress
-	progressSeq uint64 // chat activity right after the queue message was created
+	chatID       string
+	msgID        string // user's message ID (for replyTo)
+	text         string
+	originalText string
+	progressID   string // ID of "В очереди" message to reuse as progress
+	progressSeq  uint64 // chat activity right after the queue message was created
 	// Durable-queue references (the bytes live in the session's durable store, not
 	// here): turnSeq is the queue/turn id, files are stored names under files/, and
 	turnSeq int64
@@ -364,6 +367,8 @@ type queuedMsg struct {
 	// it to a different session.
 	sessKey     string
 	sessCreated int64
+	acceptedAt  int64
+	origin      inbound.Origin
 }
 
 // ensurePath makes sure PATH includes the directory of the running binary.
@@ -938,7 +943,7 @@ func (d *daemon) watchMarker() {
 // is dropped silently. attachErrs (download failures noted by the caller) are
 // reported only once the message is actually going to be accepted, mirroring
 // each platform's previous inline behaviour.
-func (d *daemon) dispatchInbound(chatID, msgID, text string, attachments []attachment, attachErrs []string, allowed bool) {
+func (d *daemon) dispatchInbound(chatID, msgID, text string, attachments []attachment, attachErrs []string, allowed bool, origin inbound.Origin) {
 	notifyAttachErrs := func() {
 		if len(attachErrs) > 0 {
 			d.sendPlain(chatID, msgID, "Не удалось скачать:\n• "+strings.Join(attachErrs, "\n• "))
@@ -949,7 +954,7 @@ func (d *daemon) dispatchInbound(chatID, msgID, text string, attachments []attac
 			return
 		}
 		notifyAttachErrs()
-		d.handleMessageWithAttachments(chatID, msgID, text, attachments)
+		d.handleInbound(Inbound{ChatID: chatID, MsgID: msgID, Text: text, Attachments: attachments, Origin: origin})
 		return
 	}
 	if strings.HasPrefix(text, "/") && (allowed || isGroupCommand(text)) {
@@ -971,7 +976,7 @@ func (d *daemon) dispatchInbound(chatID, msgID, text string, attachments []attac
 			return
 		}
 		d.ensureSessionWithCWD(d.sessionKey(chatID), d.sessionCWD(chatID))
-		d.enqueueWithAttachments(chatID, msgID, prompt, attachments)
+		d.enqueueToSessionOrigin(chatID, msgID, prompt, text, attachments, 0, "", origin)
 	}
 }
 
@@ -1063,7 +1068,12 @@ func (d *daemon) pollTG(ctx context.Context) {
 				}
 			}
 
-			d.dispatchInbound(chatID, msgID, text, attachments, attachErrs, d.isTGAllowed(msg.From.ID))
+			d.dispatchInbound(chatID, msgID, text, attachments, attachErrs, d.isTGAllowed(msg.From.ID), inbound.Origin{
+				Transport: "tg",
+				Chat:      inbound.Chat{ID: strconv.FormatInt(msg.Chat.ID, 10), Type: msg.Chat.Type, Title: msg.Chat.Title},
+				Message:   inbound.Message{ID: msgID, SentAt: turnaudit.UnixSeconds(int64(msg.Date))},
+				Sender:    inbound.Sender{ID: strconv.FormatInt(msg.From.ID, 10), Username: msg.From.Username, DisplayName: strings.TrimSpace(msg.From.FirstName + " " + msg.From.LastName)},
+			})
 		}
 	}
 }
@@ -1130,7 +1140,12 @@ func (d *daemon) pollMAX(ctx context.Context) {
 				continue
 			}
 
-			d.dispatchInbound(chatID, msgID, text, attachments, attachErrs, d.isMAXAllowed(senderID))
+			d.dispatchInbound(chatID, msgID, text, attachments, attachErrs, d.isMAXAllowed(senderID), inbound.Origin{
+				Transport: "mx",
+				Chat:      inbound.Chat{ID: strings.TrimPrefix(chatID, "mx:"), Type: upd.Message.Recipient.ChatType},
+				Message:   inbound.Message{ID: msgID, SentAt: turnaudit.UnixMillis(upd.Message.Timestamp)},
+				Sender:    inbound.Sender{ID: strconv.FormatInt(senderID, 10), Username: upd.Message.Sender.Username, DisplayName: upd.Message.Sender.Name},
+			})
 		}
 	}
 }
@@ -1183,7 +1198,12 @@ func (d *daemon) pollVK(ctx context.Context) {
 				continue
 			}
 			msgID := strconv.Itoa(msg.ID)
-			d.dispatchInbound(chatID, msgID, msg.Text, nil, nil, d.isVKAllowed(msg.FromID))
+			d.dispatchInbound(chatID, msgID, msg.Text, nil, nil, d.isVKAllowed(msg.FromID), inbound.Origin{
+				Transport: "vk",
+				Chat:      inbound.Chat{ID: strconv.Itoa(msg.PeerID)},
+				Message:   inbound.Message{ID: msgID},
+				Sender:    inbound.Sender{ID: strconv.Itoa(msg.FromID)},
+			})
 		}
 	}
 }
@@ -1371,7 +1391,12 @@ func (d *daemon) pollYM(ctx context.Context) {
 				continue
 			}
 
-			d.dispatchInbound(chatID, msgID, text, attachments, attachErrs, d.isYMAllowed(upd.From.Login))
+			d.dispatchInbound(chatID, msgID, text, attachments, attachErrs, d.isYMAllowed(upd.From.Login), inbound.Origin{
+				Transport: "ym",
+				Chat:      inbound.Chat{ID: addr, Type: upd.Chat.Type, ThreadID: turnaudit.UnixID(upd.Chat.ThreadID)},
+				Message:   inbound.Message{ID: msgID, SentAt: turnaudit.UnixSeconds(upd.Timestamp)},
+				Sender:    inbound.Sender{ID: upd.From.ID, Username: upd.From.Login, DisplayName: upd.From.DisplayName},
+			})
 		}
 	}
 }
@@ -1774,14 +1799,14 @@ func (d *daemon) handleInbound(in Inbound) bool {
 			return false
 		}
 		if prompt, ok := d.groupPrompt(in.ChatID, text, len(in.Attachments) > 0); ok {
-			return d.enqueueToSession(in.ChatID, in.MsgID, prompt, in.Attachments, in.TargetCreated, in.Nonce)
+			return d.enqueueToSessionOrigin(in.ChatID, in.MsgID, prompt, in.Text, in.Attachments, in.TargetCreated, in.Nonce, in.Origin)
 		}
 		// No prefix — ignore silently
 		return false
 	}
 
 	// Queue for Claude
-	return d.enqueueToSession(in.ChatID, in.MsgID, text, in.Attachments, in.TargetCreated, in.Nonce)
+	return d.enqueueToSessionOrigin(in.ChatID, in.MsgID, text, in.Text, in.Attachments, in.TargetCreated, in.Nonce, in.Origin)
 }
 
 func (d *daemon) ensureSession(sessionKey string) {

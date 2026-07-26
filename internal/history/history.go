@@ -42,19 +42,19 @@ func compactToolText(trigger string, preTokens, postTokens int) string {
 
 // Item is one entry in a rendered transcript.
 type Item struct {
-	Role      string     `json:"role"`             // "user" | "assistant" | "system" | "tool"
-	Text      string     `json:"text,omitempty"`   // message text (Markdown)
-	Marker    string     `json:"marker,omitempty"` // user turns: the klax-turn correlation token
+	Role      string     `json:"role"`           // "user" | "assistant" | "system" | "tool"
+	Text      string     `json:"text,omitempty"` // message text (Markdown)
+	Marker    string     `json:"-"`              // user turns: the klax-turn correlation token
 	Tools     []ToolCall `json:"tools,omitempty"`
 	Kind      string     `json:"kind,omitempty"` // "" | "error"
 	Time      string     `json:"time,omitempty"` // RFC3339, empty when unknown
 	CtxUsed   int        `json:"ctx_used,omitempty"`
 	CtxWindow int        `json:"ctx_window,omitempty"`
-	Seq       int64      `json:"seq,omitempty"` // durable turn_seq, set on pending turns surfaced from the queue
+	Seq       int64      `json:"-"` // durable turn_seq, set on pending turns surfaced from the queue
 	// Pending drives the client's per-turn dots on reload: "" normal/done | "enq" still
 	// queued | "run" started-but-not-yet-flushed-to-transcript. Lets a full reload show a
 	// queued message exactly as it was instead of dropping it until it runs.
-	Pending      string `json:"pending,omitempty"`
+	Pending      string `json:"-"`
 	Event        int64  `json:"-"` // zero-based complete physical JSONL record
 	RecordDigest string `json:"-"`
 	PromptDigest string `json:"-"` // canonical external-user payload, before display trimming
@@ -64,12 +64,19 @@ type Item struct {
 
 type rawRecord struct {
 	Event  int64
+	Start  int
+	End    int
 	Raw    []byte
 	Digest string
 }
 
-// completeRecords is the sole source of transcript event numbering. A final
-// unterminated fragment is deliberately omitted and retried after it is complete.
+// completeRecords is the sole source of transcript event numbering: Event is
+// the zero-based physical JSONL record index, regardless of record type or its
+// embedded timestamp. Claude compact_boundary is an ordinary appended record
+// in this same sequence; preserved summary/input rows written after it may
+// carry earlier timestamps, so timestamps must never define turn ranges.
+// A final unterminated fragment is deliberately omitted and retried after it
+// is complete.
 func completeRecords(data []byte) []rawRecord {
 	var out []rawRecord
 	start := 0
@@ -82,7 +89,10 @@ func completeRecords(data []byte) []rawRecord {
 			raw = raw[:len(raw)-1]
 		}
 		sum := sha256.Sum256(raw)
-		out = append(out, rawRecord{Event: int64(len(out)), Raw: raw, Digest: hex.EncodeToString(sum[:])})
+		out = append(out, rawRecord{
+			Event: int64(len(out)), Start: start, End: i + 1,
+			Raw: raw, Digest: hex.EncodeToString(sum[:]),
+		})
 		start = i + 1
 	}
 	return out
@@ -136,6 +146,107 @@ func Snapshot(backend, sessionID, cwd string) ([]Item, int64, error) {
 	items, end, err := readClaudeSnapshot(path)
 	stampCoordinates(items, backend, sessionID)
 	return items, end, err
+}
+
+// AuditSnapshot reads one backend transcript exactly once and derives every
+// finish-side audit projection from those same bytes: the whole-session
+// context, the normalized turn slice, its physical coordinates, and the exact
+// contiguous-byte digest.
+type AuditSnapshot struct {
+	Path          string
+	FromEvent     int64
+	ToEvent       int64
+	SHA256        string
+	Blocks        []Item
+	ContextUsed   int
+	ContextWindow int
+}
+
+func TurnAuditSnapshot(backend, sessionID, cwd string, fromEvent int64) (AuditSnapshot, error) {
+	session, err := ReadAuditSession(backend, sessionID, cwd)
+	if err != nil {
+		return AuditSnapshot{}, err
+	}
+	return session.Turn(fromEvent)
+}
+
+// AuditSession is one immutable physical transcript read used for binding,
+// context, and turn-trace construction.
+type AuditSession struct {
+	Path          string
+	ToEvent       int64
+	Items         []Item
+	ContextUsed   int
+	ContextWindow int
+
+	backend   string
+	sessionID string
+	data      []byte
+	records   []rawRecord
+}
+
+func ReadAuditSession(backend, sessionID, cwd string) (*AuditSession, error) {
+	if sessionID == "" {
+		return nil, errors.New("backend session id is empty")
+	}
+	var path string
+	if backend == "codex" {
+		path = locateCodex(sessionID)
+	} else {
+		path = locateClaude(sessionID, cwd)
+	}
+	if path == "" {
+		return nil, fmt.Errorf("%s transcript %s: %w", backend, sessionID, os.ErrNotExist)
+	}
+	return readAuditSessionFile(backend, sessionID, path)
+}
+
+func readAuditSessionFile(backend, sessionID, path string) (*AuditSession, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	records := completeRecords(data)
+	parse := parseClaudeRecords
+	if backend == "codex" {
+		parse = parseCodexRecords
+	}
+	all := parse(records)
+	stampCoordinates(all, backend, sessionID)
+	var used, window int
+	for _, it := range all {
+		if it.Role == "assistant" && it.CtxUsed > 0 {
+			used, window = it.CtxUsed, it.CtxWindow
+		}
+	}
+	return &AuditSession{
+		Path: path, ToEvent: int64(len(records)), Items: all,
+		ContextUsed: used, ContextWindow: window,
+		backend: backend, sessionID: sessionID, data: data, records: records,
+	}, nil
+}
+
+func (s *AuditSession) Turn(fromEvent int64) (AuditSnapshot, error) {
+	if fromEvent < 0 || fromEvent >= int64(len(s.records)) {
+		return AuditSnapshot{}, fmt.Errorf("bound event %d outside transcript [0,%d)", fromEvent, len(s.records))
+	}
+	parse := parseClaudeRecords
+	if s.backend == "codex" {
+		parse = parseCodexRecords
+	}
+	blocks := parse(s.records[fromEvent:])
+	if len(blocks) == 0 || blocks[0].Role != "user" || blocks[0].Event != fromEvent {
+		return AuditSnapshot{}, fmt.Errorf("event %d is not a normalized backend user record", fromEvent)
+	}
+	stampCoordinates(blocks, s.backend, s.sessionID)
+	start := s.records[fromEvent].Start
+	end := s.records[len(s.records)-1].End
+	sum := sha256.Sum256(s.data[start:end])
+	return AuditSnapshot{
+		Path: s.Path, FromEvent: fromEvent, ToEvent: s.ToEvent,
+		SHA256: hex.EncodeToString(sum[:]), Blocks: blocks,
+		ContextUsed: s.ContextUsed, ContextWindow: s.ContextWindow,
+	}, nil
 }
 
 func stampCoordinates(items []Item, backend, session string) {
@@ -219,8 +330,12 @@ func readClaudeSnapshot(path string) ([]Item, int64, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	var items []Item
 	records := completeRecords(data)
+	return parseClaudeRecords(records), int64(len(records)), nil
+}
+
+func parseClaudeRecords(records []rawRecord) []Item {
+	var items []Item
 	for _, rec := range records {
 		raw := rec.Raw
 		line, ok := transcript.Parse(raw) // skips blanks and sidechains
@@ -260,7 +375,7 @@ func readClaudeSnapshot(path string) ([]Item, int64, error) {
 			}
 		}
 	}
-	return items, int64(len(records)), nil
+	return items
 }
 
 func claudeUserDigest(raw json.RawMessage) string {
@@ -403,6 +518,11 @@ func readCodexSnapshot(path string) ([]Item, int64, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+	records := completeRecords(data)
+	return parseCodexRecords(records), int64(len(records)), nil
+}
+
+func parseCodexRecords(records []rawRecord) []Item {
 	var items []Item
 	lastAssistant := -1
 	lastWasCompacted := false
@@ -416,7 +536,6 @@ func readCodexSnapshot(path string) ([]Item, int64, error) {
 	appendCodexTool := func(tc ToolCall, ts string) {
 		appendAssistant(Item{Role: "assistant", Tools: []ToolCall{tc}, Time: ts})
 	}
-	records := completeRecords(data)
 	for _, rec := range records {
 		raw := rec.Raw
 		raw = bytes.TrimSpace(raw)
@@ -523,7 +642,7 @@ func readCodexSnapshot(path string) ([]Item, int64, error) {
 			}
 		}
 	}
-	return items, int64(len(records)), nil
+	return items
 }
 
 type codexHistoryItem struct {

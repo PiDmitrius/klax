@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/PiDmitrius/klax/internal/inbound"
 )
 
 // ErrRemoved is returned by Enqueue/append after the session store has been removed
@@ -24,22 +26,26 @@ var ErrRemoved = errors.New("sessfiles: session store removed")
 // may carry a prompt marker; new runs bind to physical transcript coordinates.
 
 type record struct {
-	Ev           string   `json:"ev"` // enq|run|done|err
-	Seq          int64    `json:"seq"`
-	ChatID       string   `json:"chat,omitempty"` // originating chat, for replay delivery
-	MsgID        string   `json:"msg,omitempty"`
-	Nonce        string   `json:"nonce,omitempty"`
-	Text         string   `json:"text,omitempty"`
-	Files        []string `json:"files,omitempty"`
-	Marker       string   `json:"marker,omitempty"`
-	TS           int64    `json:"ts,omitempty"`
-	Reason       string   `json:"reason,omitempty"`
-	Backend      string   `json:"backend,omitempty"`
-	Session      string   `json:"session,omitempty"`
-	PromptDigest string   `json:"prompt_digest,omitempty"`
-	FromEvent    int64    `json:"from_event,omitempty"`
-	Event        *int64   `json:"event,omitempty"`
-	RecordDigest string   `json:"record_digest,omitempty"`
+	Ev           string         `json:"ev"` // enq|run|run_session|bind|done|err|hook
+	Seq          int64          `json:"seq"`
+	ChatID       string         `json:"chat,omitempty"` // originating chat, for replay delivery
+	MsgID        string         `json:"msg,omitempty"`
+	Nonce        string         `json:"nonce,omitempty"`
+	Text         string         `json:"text,omitempty"`
+	OriginalText string         `json:"original_text,omitempty"`
+	Files        []string       `json:"files,omitempty"`
+	Marker       string         `json:"marker,omitempty"`
+	TS           int64          `json:"ts,omitempty"`
+	Reason       string         `json:"reason,omitempty"`
+	Hook         string         `json:"hook,omitempty"`
+	Status       string         `json:"status,omitempty"`
+	Backend      string         `json:"backend,omitempty"`
+	Session      string         `json:"session,omitempty"`
+	PromptDigest string         `json:"prompt_digest,omitempty"`
+	FromEvent    int64          `json:"from_event,omitempty"`
+	Event        *int64         `json:"event,omitempty"`
+	RecordDigest string         `json:"record_digest,omitempty"`
+	Origin       inbound.Origin `json:"origin,omitempty"`
 }
 
 // Turn is a reconstructed inbound message: its enq fields plus its latest state.
@@ -49,11 +55,13 @@ type Turn struct {
 	MsgID        string
 	Nonce        string
 	Text         string
+	OriginalText string
 	Files        []string // stored names (files/<name>)
 	Marker       string
 	TS           int64
 	Last         string // enq|run|done|err
 	Reason       string
+	HookFailures []HookFailure
 	Backend      string
 	Session      string
 	PromptDigest string
@@ -61,7 +69,18 @@ type Turn struct {
 	Bound        bool
 	Event        int64
 	RecordDigest string
+	Origin       inbound.Origin
 	enqueued     bool
+}
+
+// HookFailure is a durable hook diagnostic associated with a turn. Start-hook
+// failure is terminal; finish-hook failure is an additive warning and does not
+// rewrite the completed backend result.
+type HookFailure struct {
+	Hook   string
+	Status string
+	Reason string
+	TS     int64
 }
 
 // NamedReader is one streaming file for Enqueue.
@@ -89,6 +108,14 @@ func (s *Store) QueueStat() (time.Time, int64) {
 // Holds the durable-store lock across the whole acceptance, so turn_seq allocation,
 // file writes and the enq append are one atomic unit.
 func (s *Store) Enqueue(chatID, msgID, nonce, text string, files []NamedReader) (seq int64, marker string, stored []string, duplicate bool, err error) {
+	seq, marker, stored, duplicate, _, err = s.EnqueueOrigin(chatID, msgID, nonce, text, text, files, inbound.Origin{})
+	return
+}
+
+// EnqueueOrigin is Enqueue plus the normalized immutable message origin needed
+// by consumers at run time, including after durable replay. acceptedAt is the
+// exact timestamp written to the enq record.
+func (s *Store) EnqueueOrigin(chatID, msgID, nonce, text, originalText string, files []NamedReader, origin inbound.Origin) (seq int64, marker string, stored []string, duplicate bool, acceptedAt int64, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.removed {
@@ -105,7 +132,7 @@ func (s *Store) Enqueue(chatID, msgID, nonce, text string, files []NamedReader) 
 		}
 		for _, t := range turns {
 			if t.Nonce == nonce {
-				return t.Seq, t.Marker, append([]string(nil), t.Files...), true, nil
+				return t.Seq, t.Marker, append([]string(nil), t.Files...), true, t.TS, nil
 			}
 		}
 	}
@@ -118,7 +145,8 @@ func (s *Store) Enqueue(chatID, msgID, nonce, text string, files []NamedReader) 
 		}
 		stored = append(stored, name)
 	}
-	err = s.appendRecord(record{Ev: "enq", Seq: seq, ChatID: chatID, MsgID: msgID, Nonce: nonce, Text: text, Files: stored, Marker: marker, TS: time.Now().UnixNano()})
+	acceptedAt = time.Now().UnixNano()
+	err = s.appendRecord(record{Ev: "enq", Seq: seq, ChatID: chatID, MsgID: msgID, Nonce: nonce, Text: text, OriginalText: originalText, Files: stored, Marker: marker, TS: acceptedAt, Origin: origin})
 	return
 }
 
@@ -173,6 +201,9 @@ func (s *Store) Bind(seq int64, backend, session string, event int64, recordDige
 func (s *Store) MarkDone(seq int64) error { return s.mark(record{Ev: "done", Seq: seq}) }
 func (s *Store) MarkErr(seq int64, reason string) error {
 	return s.mark(record{Ev: "err", Seq: seq, Reason: reason})
+}
+func (s *Store) MarkHookError(seq int64, hook, reason string) error {
+	return s.mark(record{Ev: "hook", Seq: seq, Hook: hook, Status: "error", Reason: reason})
 }
 
 func (s *Store) mark(rec record) error {
@@ -230,6 +261,11 @@ func (s *Store) turns() ([]Turn, error) {
 		case "enq":
 			t.ChatID, t.MsgID, t.Nonce, t.Text, t.Files, t.Marker, t.TS, t.Last =
 				r.ChatID, r.MsgID, r.Nonce, r.Text, r.Files, r.Marker, r.TS, "enq"
+			t.OriginalText = r.OriginalText
+			if t.OriginalText == "" {
+				t.OriginalText = r.Text
+			}
+			t.Origin = r.Origin
 			t.enqueued = true
 		case "run":
 			t.Last, t.Reason = r.Ev, r.Reason
@@ -245,6 +281,16 @@ func (s *Store) turns() ([]Turn, error) {
 			}
 		case "done", "err":
 			t.Last, t.Reason = r.Ev, r.Reason
+		case "hook":
+			if r.Status != "error" {
+				continue
+			}
+			t.HookFailures = append(t.HookFailures, HookFailure{
+				Hook: r.Hook, Status: r.Status, Reason: r.Reason, TS: r.TS,
+			})
+			if r.Hook == "audit.turn.start" {
+				t.Last, t.Reason = "err", r.Reason
+			}
 		}
 	}
 	out := make([]Turn, 0, len(byseq))

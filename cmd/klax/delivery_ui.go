@@ -22,5 +22,6 @@ func (d *daemon) newUIDelivery(_ context.Context, msg queuedMsg) *uiDelivery {
 }
 
 func (u *uiDelivery) Progress(runner.ProgressEvent) { u.d.uiPoke(u.user) }
+func (u *uiDelivery) Warning(string)                { u.d.uiPoke(u.user) }
 func (u *uiDelivery) Final(runner.RunResult)        { u.d.uiPoke(u.user) }
 func (u *uiDelivery) Close()                        {}

@@ -6,8 +6,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/PiDmitrius/klax/internal/inbound"
 	"github.com/PiDmitrius/klax/internal/sessfiles"
 )
+
+func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []attachment, targetCreated int64, nonce string) bool {
+	return d.enqueueToSessionOrigin(chatID, msgID, text, text, attachments, targetCreated, nonce, inbound.Origin{})
+}
 
 func TestBuildTurnPromptContainsNoCorrelationMarker(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())

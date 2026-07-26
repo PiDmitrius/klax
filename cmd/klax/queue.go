@@ -12,10 +12,12 @@ import (
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/history"
+	"github.com/PiDmitrius/klax/internal/inbound"
 	"github.com/PiDmitrius/klax/internal/promptcanon"
 	"github.com/PiDmitrius/klax/internal/runner"
 	"github.com/PiDmitrius/klax/internal/sessfiles"
 	"github.com/PiDmitrius/klax/internal/session"
+	"github.com/PiDmitrius/klax/internal/turnaudit"
 )
 
 // progressEditInterval is the minimum gap between two Telegram edits of the
@@ -63,6 +65,9 @@ func formatRunFailure(logItems []runner.ProgressEvent, format string, err error)
 		}
 		return mark("❌ Прервано.")
 	}
+	if err.Error() == turnErrAuditStartFailed {
+		return mark("❌ Ошибка инфраструктуры аудита: запрос не был запущен.")
+	}
 
 	head := mark("...")
 	if len(logItems) > 0 {
@@ -77,15 +82,7 @@ func (d *daemon) syncFinalMessageChain(fullChatID, replyTo string, chain *messag
 	return d.syncMessageChain(ctx, fullChatID, replyTo, chain, text, format)
 }
 
-func (d *daemon) enqueue(chatID, msgID, text string) {
-	d.enqueueWithAttachments(chatID, msgID, text, nil)
-}
-
-func (d *daemon) enqueueWithAttachments(chatID, msgID, text string, attachments []attachment) {
-	d.enqueueToSession(chatID, msgID, text, attachments, 0, "")
-}
-
-// enqueueToSession queues a message against a session in the chat. targetCreated
+// enqueueToSessionOrigin queues a message against a session in the chat. targetCreated
 // selects which: 0 binds to whichever session is active right now (every
 // messenger path — /switch and /new after this only affect future messages),
 // while a positive value binds to exactly that session (a web-UI tab), validated
@@ -95,7 +92,7 @@ func (d *daemon) enqueueWithAttachments(chatID, msgID, text string, attachments 
 // persisted-for-replay while draining), false if it was dropped (empty text and no
 // files, no such session, or a durable-write failure) — the web UI's handleSend
 // uses this to answer success vs restore the composer.
-func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []attachment, targetCreated int64, nonce string) bool {
+func (d *daemon) enqueueToSessionOrigin(chatID, msgID, text, originalText string, attachments []attachment, targetCreated int64, nonce string, origin inbound.Origin) bool {
 	if text == "" && len(attachments) == 0 {
 		d.sendMessage(chatID, msgID, "∅")
 		return false
@@ -131,7 +128,7 @@ func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []atta
 	for _, a := range attachments {
 		readers = append(readers, sessfiles.NamedReader{Name: a.filename, R: bytes.NewReader(a.data)})
 	}
-	turnSeq, _, files, duplicate, err := sr.store.Enqueue(chatID, msgID, nonce, text, readers)
+	turnSeq, _, files, duplicate, acceptedAt, err := sr.store.EnqueueOrigin(chatID, msgID, nonce, text, originalText, readers, origin)
 	if err != nil {
 		log.Printf("durable enqueue (%s/%d): %v", sk, sess.Created, err)
 		d.sendMessage(chatID, msgID, "❌ Не удалось сохранить сообщение, попробуйте снова.")
@@ -156,7 +153,7 @@ func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []atta
 	}
 
 	sr.mu.Lock()
-	qm := queuedMsg{chatID: chatID, msgID: msgID, text: text, turnSeq: turnSeq, files: files, sessKey: sk, sessCreated: sess.Created}
+	qm := queuedMsg{chatID: chatID, msgID: msgID, text: text, originalText: originalText, turnSeq: turnSeq, files: files, sessKey: sk, sessCreated: sess.Created, acceptedAt: acceptedAt, origin: origin}
 	busy := sr.runner.IsBusy()
 	// The "В очереди" notice is a messenger placeholder later reused as the progress
 	// message; the UI streams independently, so skip it there.
@@ -221,8 +218,10 @@ func (d *daemon) replayDurableQueues() {
 			for _, t := range reenq {
 				sr.queue = append(sr.queue, queuedMsg{
 					chatID: t.ChatID, msgID: t.MsgID, text: t.Text,
-					turnSeq: t.Seq, files: t.Files,
+					originalText: t.OriginalText,
+					turnSeq:      t.Seq, files: t.Files,
 					sessKey: sk, sessCreated: sess.Created,
+					acceptedAt: t.TS, origin: t.Origin,
 				})
 			}
 			n := len(sr.queue)
@@ -487,6 +486,39 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	// first progress block. The state-coded tail cursor carries the state change with no new block.
 	d.broadcastSessions(sk)
 
+	// This is the exact pre-execution audit boundary: every klax check and the
+	// durable run fence have succeeded, the final prompt and launch options are
+	// known, and no backend process has been started yet.
+	var runStarted time.Time
+	var auditTurn *turnaudit.Turn
+	if d.auditEnabled() {
+		snapshotAt := time.Now()
+		turn, auditErr := newAuditTurn(msg, sr.store, sess, prompt, backend.Name(), snapshotAt)
+		if auditErr != nil {
+			log.Printf("audit turn.start snapshot (%s/%d): %v", sk, sess.Created, auditErr)
+			if mErr := sr.store.MarkHookError(msg.turnSeq, "audit.turn.start", turnErrAuditStartFailed); mErr != nil && !errors.Is(mErr, sessfiles.ErrRemoved) {
+				log.Printf("durable audit.turn.start error (%s/%d): %v", sk, sess.Created, mErr)
+			}
+			d.broadcastSessions(sk)
+			del.Final(runner.RunResult{Error: errors.New(turnErrAuditStartFailed)})
+			return
+		}
+		runStarted = time.Now()
+		turn.StartAt = turnaudit.Time(runStarted)
+		auditTurn = &turn
+		if auditErr := d.invokeAudit(startAuditEvent(turn)); auditErr != nil {
+			if mErr := sr.store.MarkHookError(msg.turnSeq, "audit.turn.start", turnErrAuditStartFailed); mErr != nil && !errors.Is(mErr, sessfiles.ErrRemoved) {
+				log.Printf("durable audit.turn.start error (%s/%d): %v", sk, sess.Created, mErr)
+			}
+			d.broadcastSessions(sk)
+			del.Final(runner.RunResult{Error: errors.New(turnErrAuditStartFailed)})
+			return
+		}
+	} else {
+		runStarted = time.Now()
+	}
+	backendStarted := time.Now()
+
 	// Durable-tail content comes from the backend's transcript FILE, which klax does not own the
 	// write timing of. Two consequences we cover here: (a) a brand-new session has no transcript
 	// address (sess.ID) until the run ends, so its first turn could not be tail-rendered mid-run —
@@ -538,6 +570,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		SuppressNarrationProgress: !verbose,
 		OnSessionID:               onSessionID,
 	}, del.Progress)
+	backendFinished := time.Now()
 	if sessionFenceErr != nil {
 		result.Error = errors.New(turnErrRunStartFailed)
 	}
@@ -545,7 +578,19 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	if effBindID == "" {
 		effBindID = sess.ID
 	}
-	d.reconcileBindings(sk, sess.Created, backend.Name(), effBindID, sess.CWD)
+	var auditSession *history.AuditSession
+	if auditTurn != nil && effBindID != "" {
+		var snapshotErr error
+		auditSession, snapshotErr = history.ReadAuditSession(backend.Name(), effBindID, sess.CWD)
+		if snapshotErr != nil {
+			log.Printf("audit transcript snapshot (%s/%d): %v", sk, sess.Created, snapshotErr)
+		} else {
+			d.reconcileBindingsSnapshot(sk, sess.Created, backend.Name(), effBindID, auditSession.Items, auditSession.ToEvent)
+		}
+	}
+	if auditSession == nil {
+		d.reconcileBindings(sk, sess.Created, backend.Name(), effBindID, sess.CWD)
+	}
 
 	// Record the turn's terminal state in the durable queue so a future replay skips
 	// it. A failed append is logged, not fatal: ErrRemoved means a concurrent close
@@ -565,12 +610,25 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	// the settings modal and the messenger, never a second parallel count off the stream. The
 	// stream's window is kept only as the window (Claude's transcript carries none) and fallback.
 	var ctxUsed, ctxWindow int
-	if result.Error == nil {
-		effID := result.SessionID
-		if effID == "" {
-			effID = sess.ID
+	var trace *turnaudit.Trace
+	effID := result.SessionID
+	if effID == "" {
+		effID = sess.ID
+	}
+	var traceCtxUsed, traceCtxWindow int
+	if auditTurn != nil && effID != "" && auditSession != nil {
+		traceCtxUsed, traceCtxWindow = auditSession.ContextUsed, auditSession.ContextWindow
+		var traceErr error
+		trace, traceErr = auditTrace(sr.store, msg.turnSeq, backend.Name(), effID, auditSession)
+		if traceErr != nil {
+			log.Printf("audit trace (%s/%d): %v", sk, sess.Created, traceErr)
 		}
-		ctxUsed, ctxWindow = history.LatestContext(backend.Name(), effID, sess.CWD)
+	}
+	if result.Error == nil {
+		ctxUsed, ctxWindow = traceCtxUsed, traceCtxWindow
+		if auditSession == nil {
+			ctxUsed, ctxWindow = history.LatestContext(backend.Name(), effID, sess.CWD)
+		}
 		if ctxWindow == 0 {
 			ctxWindow = result.Usage.ContextWindow
 		}
@@ -601,6 +659,29 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		d.saveRateLimit(backend.Name(), result.RateLimit)
 	}
 	d.saveStore()
+
+	// Audit the completed computation synchronously before final delivery. The
+	// hook sees the answer klax is about to release, not transport-specific
+	// chunks or a later reconstruction from the transcript.
+	runFinished := time.Now()
+	if auditTurn != nil && result.SessionID != "" {
+		if auditTurn.Execution.BackendSessionID == "" {
+			auditTurn.Execution.BackendSessionID = result.SessionID
+		} else if auditTurn.Execution.BackendSessionID != result.SessionID {
+			log.Printf("audit backend session changed (%s/%d): %s -> %s", sk, sess.Created, auditTurn.Execution.BackendSessionID, result.SessionID)
+			trace = nil
+		}
+	}
+	if auditTurn != nil {
+		event := finishAuditEvent(*auditTurn, result, trace, ctxUsed, ctxWindow, runStarted, backendStarted, backendFinished, runFinished)
+		if auditErr := d.invokeAudit(event); auditErr != nil {
+			if mErr := sr.store.MarkHookError(msg.turnSeq, "audit.turn.finish", turnWarnAuditFinishFailed); mErr != nil && !errors.Is(mErr, sessfiles.ErrRemoved) {
+				log.Printf("durable audit.turn.finish error (%s/%d): %v", sk, sess.Created, mErr)
+			}
+			d.broadcastSessions(sk)
+			del.Warning("Не удалось записать событие завершения хода в аудит")
+		}
+	}
 
 	del.Final(result)
 }

@@ -1,0 +1,271 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/PiDmitrius/klax/docs/audit-v1.schema.json",
+  "title": "klax audit event v1",
+  "description": "A synchronous event in the klax audit protocol. turn.start is an execution gate; turn.finish reports a completed turn. Stream consumers ignore unknown properties and unknown v1 event names; a command bound to one exact event may reject a different event.",
+  "type": "object",
+  "required": ["schema", "event"],
+  "properties": {
+    "schema": {
+      "const": "klax.audit/v1",
+      "description": "Protocol name and major version."
+    },
+    "event": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$",
+      "description": "Namespaced event type. Known v1 values are turn.start and turn.finish. Stream consumers ignore unknown values; a command bound to one exact event may reject a different event."
+    },
+    "turn": {
+      "$ref": "#/$defs/turn",
+      "description": "Self-contained snapshot of the turn. turn.finish repeats the turn.start fields so it can be processed independently."
+    }
+  },
+  "$defs": {
+    "turn": {
+      "type": "object",
+      "required": ["turn_id", "turn_seq", "accepted_at", "start_at", "origin", "routing", "request", "execution"],
+      "properties": {
+        "turn_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$",
+          "description": "Lowercase hex of the first 20 bytes of SHA-256 over the exact compact Go encoding/json byte sequence [\"klax.turn/v1\", session_key, session_created, turn_seq]. Go's default HTML escaping applies. Unique within one uninterrupted klax state store; independent stores can produce the same value and aggregators key by their own (installation_id, turn_id)."
+        },
+        "turn_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Durable monotonically increasing turn sequence within this session incarnation's queue."
+        },
+        "accepted_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "UTC time when klax durably accepted the inbound request."
+        },
+        "start_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "UTC time when the turn.start audit boundary was reached, before the start hook and backend."
+        },
+        "finish_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "UTC time when klax formed the final turn result at the turn.finish boundary, before the finish hook and final delivery."
+        },
+        "origin": {"$ref": "#/$defs/origin"},
+        "routing": {"$ref": "#/$defs/routing"},
+        "request": {"$ref": "#/$defs/request"},
+        "execution": {"$ref": "#/$defs/execution"},
+        "result": {"$ref": "#/$defs/result"},
+        "trace": {"$ref": "#/$defs/trace"}
+      }
+    },
+    "origin": {
+      "type": "object",
+      "description": "Immutable transport coordinates of the accepted inbound request.",
+      "required": ["transport", "chat", "message", "sender"],
+      "properties": {
+        "transport": {"type": "string", "minLength": 1, "description": "Public audit transport name, currently tg, max, vk, ym, or ui. Internal routing prefixes such as mx can differ."},
+        "chat": {
+          "type": "object",
+          "description": "Transport-native chat and optional thread.",
+          "required": ["id"],
+          "properties": {
+            "id": {"type": "string", "description": "Transport-native chat identifier without the klax transport prefix."},
+            "type": {"type": "string", "description": "Transport-reported chat kind, when available."},
+            "title": {"type": "string", "description": "Transport-reported chat title, when available."},
+            "thread_id": {"type": "string", "description": "Transport-native topic or thread identifier, when available."}
+          }
+        },
+        "message": {
+          "type": "object",
+          "description": "Transport-native message identity. For UI requests, id is the client nonce.",
+          "properties": {
+            "id": {"type": "string", "description": "Message identifier or UI request nonce."},
+            "sent_at": {"type": "string", "format": "date-time", "description": "Transport-reported send time, when available."}
+          }
+        },
+        "sender": {
+          "type": "object",
+          "description": "Transport-native sender identity, as known at acceptance time.",
+          "properties": {
+            "id": {"type": "string", "description": "Transport-native sender identifier."},
+            "username": {"type": "string", "description": "Transport username or login."},
+            "display_name": {"type": "string", "description": "Human-readable transport display name."}
+          }
+        }
+      }
+    },
+    "routing": {
+      "type": "object",
+      "description": "The durable klax session selected for this turn.",
+      "required": ["session_key", "session_created"],
+      "properties": {
+        "session_key": {"type": "string", "description": "Canonical klax routing key. It can represent a transport chat or a cross-transport mapped user."},
+        "session_created": {"type": "integer", "minimum": 1, "description": "Opaque persisted store-wide session incarnation, not a timestamp. Together with session_key and turn_seq it forms turn_id."},
+        "session_name": {"type": "string", "description": "User-visible session name at the turn.start boundary."}
+      }
+    },
+    "request": {
+      "type": "object",
+      "description": "The received request and the exact prompt submitted to the backend.",
+      "required": ["original_text", "effective_prompt"],
+      "properties": {
+        "original_text": {"type": "string", "description": "Text as accepted from the transport, before group-trigger removal and prompt canonicalization."},
+        "effective_prompt": {"type": "string", "description": "Exact prompt passed to the backend after trigger processing, canonicalization, and attachment path materialization."},
+        "attachments": {
+          "type": "array",
+          "description": "Files materialized for this turn, in stable inbound attachment order (the NN component of the durable filename).",
+          "items": {
+            "type": "object",
+            "required": ["name", "path", "size", "sha256"],
+            "properties": {
+              "name": {"type": "string", "description": "Run-view basename visible to the backend after collision disambiguation."},
+              "path": {"type": "string", "description": "Absolute path to the durable session-store file. It was readable by klax at snapshot construction but consumers must handle concurrent removal."},
+              "size": {"type": "integer", "minimum": 0, "description": "File size in bytes."},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Lowercase SHA-256 of the durable file bytes."}
+            }
+          }
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "description": "Backend launch configuration fixed at the turn.start boundary.",
+      "required": ["backend", "cwd", "tty"],
+      "properties": {
+        "backend": {"type": "string", "description": "Selected backend implementation."},
+        "backend_session_id": {"type": "string", "description": "Backend session identifier. turn.finish can populate it when it became known during the run."},
+        "cwd": {"type": "string", "description": "Backend working directory."},
+        "model_requested": {"type": "string", "description": "Explicit per-session model override, when configured."},
+        "effort": {"type": "string", "description": "Explicit reasoning or thinking override, when configured."},
+        "sandbox": {"type": "string", "description": "Requested backend sandbox mode, when configured."},
+        "tty": {"type": "boolean", "description": "Whether klax launched the backend through its TTY integration."},
+        "append_system_prompt": {"type": "string", "description": "Additional system prompt supplied by the operator."}
+      }
+    },
+    "result": {
+      "type": "object",
+      "description": "Terminal result, present only in turn.finish events.",
+      "required": ["status", "tokens", "context_after", "elapsed_ms"],
+      "properties": {
+        "status": {"enum": ["success", "error", "aborted"], "description": "Terminal klax classification."},
+        "output": {
+          "type": "object",
+          "description": "Final answer prepared for delivery, when present. Partial output can accompany an error or aborted result.",
+          "required": ["text", "format"],
+          "properties": {
+            "text": {"type": "string", "description": "Final answer text."},
+            "format": {"type": "string", "description": "Answer markup format."}
+          }
+        },
+        "error": {
+          "type": "object",
+          "description": "Terminal error details for error or aborted results.",
+          "required": ["stage", "code", "message"],
+          "properties": {
+            "stage": {"type": "string", "description": "Subsystem that produced the error. Known v1 values are klax and backend."},
+            "code": {"type": "string", "description": "Stable machine-readable error classification. Known v1 values are aborted, run-start-failed, and backend-failed; consumers treat unknown future v1 values as generic errors."},
+            "message": {"type": "string", "description": "Diagnostic error text."}
+          }
+        },
+        "model_used": {"type": "string", "description": "Model reported by the completed backend run."},
+        "tokens": {
+          "type": "object",
+          "description": "Token accounting reported for this backend turn.",
+          "properties": {
+            "input": {"type": "integer", "minimum": 0, "description": "Input tokens."},
+            "output": {"type": "integer", "minimum": 0, "description": "Output tokens."},
+            "cache_read": {"type": "integer", "minimum": 0, "description": "Cache-read input tokens."},
+            "cache_creation": {"type": "integer", "minimum": 0, "description": "Cache-creation input tokens."}
+          }
+        },
+        "context_after": {
+          "type": "object",
+          "description": "Canonical session context snapshot after a successful turn.",
+          "properties": {
+            "used": {"type": "integer", "minimum": 0, "description": "Context tokens in use after the turn."},
+            "window": {"type": "integer", "minimum": 0, "description": "Known model context window."}
+          }
+        },
+        "elapsed_ms": {
+          "type": "object",
+          "description": "Non-negative phase durations in milliseconds. total is exactly queued + start_hook + backend + finalize, not an independently measured wall-clock span.",
+          "required": ["queued", "start_hook", "backend", "finalize", "total"],
+          "properties": {
+            "queued": {"type": "integer", "minimum": 0, "description": "Acceptance to the turn.start boundary."},
+            "start_hook": {"type": "integer", "minimum": 0, "description": "Time spent in the synchronous turn.start hook."},
+            "backend": {"type": "integer", "minimum": 0, "description": "Backend Run call duration."},
+            "finalize": {"type": "integer", "minimum": 0, "description": "Backend return to the turn.finish boundary, including klax persistence."},
+            "total": {"type": "integer", "minimum": 0, "description": "Exact sum of queued, start_hook, backend, and finalize."}
+          }
+        }
+      }
+    },
+    "trace": {
+      "type": "object",
+      "description": "Optional turn.finish trace. blocks is the ordinary klax UI normalization of the exact raw range.",
+      "required": ["blocks", "raw"],
+      "properties": {
+        "blocks": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/block"}
+        },
+        "raw": {"$ref": "#/$defs/raw"}
+      }
+    },
+    "block": {
+      "type": "object",
+      "required": ["role"],
+      "properties": {
+        "role": {"enum": ["user", "assistant", "system", "tool"]},
+        "text": {"type": "string"},
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": {"type": "string", "description": "Stable normalized tool identifier."},
+              "label": {"type": "string", "description": "Unstable human-readable UI presentation; consumers must not parse it."}
+            }
+          }
+        },
+        "kind": {"enum": ["error"]},
+        "time": {"type": "string", "format": "date-time"},
+        "ctx_used": {"type": "integer", "minimum": 0},
+        "ctx_window": {"type": "integer", "minimum": 0}
+      }
+    },
+    "raw": {
+      "type": "object",
+      "required": ["path", "from_event", "to_event", "sha256"],
+      "properties": {
+        "path": {"type": "string", "description": "Absolute path to the backend JSONL transcript read by klax for this snapshot."},
+        "from_event": {"type": "integer", "minimum": 0, "description": "Zero-based physical event index of the backend user record durably bound to this klax turn."},
+        "to_event": {"type": "integer", "minimum": 0, "description": "Exclusive physical event index after the last complete record observed for the turn."},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Lowercase SHA-256 of the exact contiguous physical JSONL bytes for [from_event,to_event), including original line terminators."}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"event": {"pattern": "^turn\\."}}, "required": ["event"]},
+      "then": {"required": ["turn"]}
+    },
+    {
+      "if": {"properties": {"event": {"const": "turn.start"}}, "required": ["event"]},
+      "then": {
+        "properties": {
+          "turn": {
+            "not": {"anyOf": [{"required": ["finish_at"]}, {"required": ["result"]}, {"required": ["trace"]}]}
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"event": {"const": "turn.finish"}}, "required": ["event"]},
+      "then": {
+        "properties": {"turn": {"required": ["finish_at", "result"]}}
+      }
+    }
+  ]
+}

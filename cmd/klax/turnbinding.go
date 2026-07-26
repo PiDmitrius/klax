@@ -66,6 +66,10 @@ func (d *daemon) reconcileBindings(sk string, created int64, backend, sessionID,
 		log.Printf("turn binding transcript %s/%d: %v", sk, created, err)
 		return
 	}
+	d.reconcileBindingsSnapshot(sk, created, backend, sessionID, items, end)
+}
+
+func (d *daemon) reconcileBindingsSnapshot(sk string, created int64, backend, sessionID string, items []history.Item, end int64) {
 	st := d.sessionStore(sk, created)
 	turns, err := st.InboundLog()
 	if err != nil {
