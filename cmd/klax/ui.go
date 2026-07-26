@@ -18,6 +18,7 @@ import (
 
 	"github.com/PiDmitrius/klax/internal/config"
 	"github.com/PiDmitrius/klax/internal/history"
+	"github.com/PiDmitrius/klax/internal/inbound"
 	"github.com/PiDmitrius/klax/internal/pathutil"
 	"github.com/PiDmitrius/klax/internal/session"
 )
@@ -1080,6 +1081,12 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		TargetCreated: targetCreated,
 		Nonce:         nonce,
 		RawMessage:    true, // the UI has no chat commands — "/"-text is a message
+		Origin: inbound.Origin{
+			Transport: "ui",
+			Chat:      inbound.Chat{ID: user, Type: "private"},
+			Message:   inbound.Message{ID: nonce},
+			Sender:    inbound.Sender{ID: user, Username: user},
+		},
 	}) {
 		// Dropped after our entry checks (drain flipped in the window) — tell the
 		// client so it restores the composer instead of silently losing the draft.

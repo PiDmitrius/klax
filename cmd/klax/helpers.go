@@ -542,7 +542,6 @@ func helpText() string {
 /attachments — режим вложений в группе (off/on/any)
 /rich — Rich-форматирование Telegram (глобально)
 /transports — управление транспортами
-/bypass — прямая команда
 /abort — прервать исполнение
 /backend — backend (claude/codex)
 /usage — лимиты backend

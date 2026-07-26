@@ -189,6 +189,17 @@ func stripPrefix(name string) string { return storedPrefix.ReplaceAllString(name
 // stripped), e.g. "000001-01-photo.png" -> "photo.png", for showing in the UI.
 func DisplayName(stored string) string { return stripPrefix(stored) }
 
+// RunNames returns the collision-free basenames Materialize exposes to the
+// backend, in the same stable input order.
+func RunNames(stored []string) []string {
+	used := map[string]bool{}
+	out := make([]string, 0, len(stored))
+	for _, name := range stored {
+		out = append(out, dedup(stripPrefix(name), used))
+	}
+	return out
+}
+
 // Materialize presents stored files to the agent under a clean per-turn dir: the
 // "<seq>-<NN>-" prefix is stripped and within-dir name clashes get a "-N" suffix
 // (image.png → image-2.png). It copies the bytes (not a symlink, whose realpath
@@ -198,10 +209,10 @@ func (s *Store) Materialize(stored []string, dst string) ([]string, error) {
 	if err := os.MkdirAll(dst, 0700); err != nil {
 		return nil, err
 	}
-	used := map[string]bool{}
+	names := RunNames(stored)
 	out := make([]string, 0, len(stored))
-	for _, name := range stored {
-		dstPath := filepath.Join(dst, dedup(stripPrefix(name), used))
+	for i, name := range stored {
+		dstPath := filepath.Join(dst, names[i])
 		if err := copyFile(s.Path(name), dstPath); err != nil {
 			return out, err
 		}

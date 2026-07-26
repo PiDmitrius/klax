@@ -62,8 +62,26 @@ func errBlock(seq int64, reason string) uiBlock {
 		reason = "Вложения недоступны, сообщение не обработано"
 	case turnErrRunStartFailed:
 		reason = "Не удалось зафиксировать запуск, сообщение не обработано"
+	case turnErrAuditStartFailed:
+		reason = "Ошибка инфраструктуры аудита: запрос не был запущен"
+	case turnErrBackendFailed:
+		reason = "Ошибка backend"
 	}
 	return uiBlock{ID: blockID(seq, "error", reason, nil), Role: "error", Text: reason}
+}
+
+func appendHookWarnings(blocks []uiBlock, seq int64, failures []sessfiles.HookFailure) []uiBlock {
+	for _, failure := range failures {
+		if failure.Hook != "audit.turn.finish" || failure.Status != "error" {
+			continue
+		}
+		text := "Не удалось записать событие завершения хода в аудит"
+		blocks = append(blocks, uiBlock{
+			ID: blockID(seq, "system", failure.Reason, nil), Role: "system",
+			Text: text, Kind: "error", Time: time.Unix(0, failure.TS).Format(time.RFC3339),
+		})
+	}
+	return blocks
 }
 
 // resolveTurnState maps a durable queue Last + liveness to the per-turn render state.
@@ -311,6 +329,9 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 		if state == "err" {
 			ut.Blocks = append(ut.Blocks, errBlock(seq, reason))
 		}
+		if ok {
+			ut.Blocks = appendHookWarnings(ut.Blocks, seq, matched.HookFailures)
+		}
 		// While the turn is still RUNNING, hold back only the most-recent assistant text block:
 		// the message currently being generated is represented by the working dots, not shown as
 		// a settled bubble. Tool/progress blocks are already discrete events and must remain
@@ -344,6 +365,7 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 			case "done":
 				if !t.Bound {
 					ut.State = "unknown"
+					ut.Blocks = appendHookWarnings(ut.Blocks, t.Seq, t.HookFailures)
 					missing = append(missing, ut)
 				}
 			}

@@ -1,6 +1,10 @@
 package main
 
-import "context"
+import (
+	"context"
+
+	"github.com/PiDmitrius/klax/internal/inbound"
+)
 
 // Inbound is a normalized incoming message from any channel (tg/mx/vk/ui). A
 // Source produces it after its platform-specific gating (allow-list, /id,
@@ -16,6 +20,7 @@ type Inbound struct {
 	// tab's Created so a message lands in that tab even when it is not active.
 	TargetCreated int64
 	FromID        int64 // sender ID (platform-scoped), for diagnostics
+	Origin        inbound.Origin
 	// RawMessage suppresses "/"-command dispatch: the text is always queued as a
 	// message, never parsed as a slash command. The web UI sets this — it has no
 	// chat commands (every action is a native control), so a message that starts

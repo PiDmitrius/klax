@@ -332,6 +332,8 @@ func TestErrBlockCanonicalReasons(t *testing.T) {
 		{turnErrAborted, "Прервано"},
 		{turnErrAttachmentsMissing, "Вложения недоступны, сообщение не обработано"},
 		{turnErrRunStartFailed, "Не удалось зафиксировать запуск, сообщение не обработано"},
+		{turnErrAuditStartFailed, "Ошибка инфраструктуры аудита: запрос не был запущен"},
+		{turnErrBackendFailed, "Ошибка backend"},
 		{"backend failed", "backend failed"},
 	}
 	for _, tt := range tests {
@@ -342,6 +344,17 @@ func TestErrBlockCanonicalReasons(t *testing.T) {
 		if wantID := blockID(11, "error", tt.want, nil); got.ID != wantID {
 			t.Fatalf("errBlock(%q).ID = %q, want %q", tt.reason, got.ID, wantID)
 		}
+	}
+}
+
+func TestAppendHookWarningsOnlyAddsFinishFailure(t *testing.T) {
+	failures := []sessfiles.HookFailure{
+		{Hook: "audit.turn.start", Status: "error", Reason: turnErrAuditStartFailed},
+		{Hook: "audit.turn.finish", Status: "error", Reason: turnWarnAuditFinishFailed, TS: time.Now().UnixNano()},
+	}
+	blocks := appendHookWarnings(nil, 7, failures)
+	if len(blocks) != 1 || blocks[0].Role != "system" || blocks[0].Kind != "error" {
+		t.Fatalf("hook warnings = %+v", blocks)
 	}
 }
 

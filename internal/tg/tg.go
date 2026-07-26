@@ -108,13 +108,16 @@ type Audio struct {
 }
 
 type User struct {
-	ID       int64  `json:"id"`
-	Username string `json:"username"`
+	ID        int64  `json:"id"`
+	Username  string `json:"username"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
 }
 
 type Chat struct {
-	ID   int64  `json:"id"`
-	Type string `json:"type"`
+	ID    int64  `json:"id"`
+	Type  string `json:"type"`
+	Title string `json:"title"`
 }
 
 // --- API calls ---

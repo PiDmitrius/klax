@@ -183,6 +183,13 @@ func (m *messengerDelivery) Progress(ev runner.ProgressEvent) {
 	}
 }
 
+func (m *messengerDelivery) Warning(text string) {
+	m.logItems = append(m.logItems, runner.ProgressEvent{
+		Kind: runner.ProgressKindTool,
+		Text: "⚠️ " + text,
+	})
+}
+
 // stopWorker flushes the progress worker: the worker mutates chain, so any
 // final-delivery path that reads chain must run this barrier first. Idempotent.
 func (m *messengerDelivery) stopWorker() {

@@ -1,11 +1,45 @@
 package history
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestTurnAuditSnapshotUsesBoundRecordAndExactBytes(t *testing.T) {
+	lines := []string{
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"previous"}]}}`,
+		`{"type":"user","message":{"content":"current"}}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"answer"}],"usage":{"input_tokens":7,"cache_read_input_tokens":3}}}`,
+	}
+	data := strings.Join(lines, "\r\n") + "\r\n"
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := readAuditSessionFile("claude", "session", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := session.Turn(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBytes := []byte(strings.Join(lines[1:], "\r\n") + "\r\n")
+	sum := sha256.Sum256(wantBytes)
+	if snap.FromEvent != 1 || snap.ToEvent != 3 || snap.SHA256 != hex.EncodeToString(sum[:]) {
+		t.Fatalf("raw snapshot = %+v", snap)
+	}
+	if len(snap.Blocks) != 2 || snap.Blocks[0].Role != "user" || snap.Blocks[0].Text != "current" || snap.Blocks[1].Text != "answer" {
+		t.Fatalf("blocks = %+v", snap.Blocks)
+	}
+	if snap.ContextUsed != 10 {
+		t.Fatalf("context used = %d, want 10", snap.ContextUsed)
+	}
+}
 
 func writeLines(t *testing.T, lines []string) string {
 	t.Helper()

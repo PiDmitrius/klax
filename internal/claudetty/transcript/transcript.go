@@ -234,7 +234,11 @@ func (t *Tailer) Freeze() {
 // Pump reads newly-appended bytes and returns each complete line (without
 // the trailing newline). Returns nil when nothing new is available.
 func (t *Tailer) Pump() [][]byte {
-	// Auto-compact can rewrite the transcript shorter. If the file is now
+	// Production compact_boundary is an ordinary append-only JSONL record; it
+	// does not renumber the physical event sequence consumed by history. This
+	// shrink branch is only defensive live-tail recovery if the CLI unexpectedly
+	// truncates/replaces the path under an open tailer. It must not be treated as
+	// the persistence contract for normal compaction. If the file is now
 	// smaller than our read offset it was truncated/replaced under us;
 	// ReadAt would otherwise sit past EOF forever and never see the new
 	// content. Restart from the top so we can re-find this turn's prompt

@@ -112,8 +112,71 @@ Common fields:
 | `default_backend` | default backend for new sessions: `claude` or `codex` |
 | `source_dir` | local klax source tree used by `klax update` for local builds |
 | `users` | optional cross-platform identity mapping for shared DM sessions |
+| `audit` | optional synchronous per-turn JSON audit hook |
 
 Runtime backend settings such as backend selection, model, thinking level, and sandbox mode are configured per session from chat via `/settings`.
+
+### Turn audit hook
+
+Configure a local executable as an argument array:
+
+```json
+{
+  "audit": {
+    "turn": {
+      "start": {
+        "command": ["/usr/local/bin/audit-turn-start"]
+      },
+      "finish": {
+        "command": ["/usr/local/bin/audit-turn-finish"]
+      }
+    }
+  }
+}
+```
+
+The executable is started directly, without a shell. It receives one JSON
+document on stdin and must exit before processing continues. Klax invokes it
+twice per executed turn:
+
+- `turn.start` after the final prompt and launch options are known, immediately
+  before the backend starts;
+- `turn.finish` after the result and session state are complete, immediately
+  before final delivery.
+
+The stable protocol is defined by
+[`docs/audit-v1.md`](docs/audit-v1.md) and its machine-readable companion
+[`docs/audit-v1.schema.json`](docs/audit-v1.schema.json).
+The same deterministic 160-bit `turn.turn_id` correlates both calls.
+Klax does not impose a timeout and does not cancel a running hook: a hook that
+needs either behavior must implement it itself or configure a wrapper in
+`command`. A stuck hook therefore blocks that turn by design.
+
+The start hook is an execution gate: if it fails, klax records a durable
+`audit-start-failed` system error and does not invoke the backend. The finish
+hook reports an already completed computation: if it fails, klax records and
+shows a durable system warning, logs the diagnostic, and still performs final
+delivery.
+
+The `turn.finish` boundary precedes the final rendered delivery, but it is not a
+release gate: transport progress edits and the web transcript can already have
+shown partial or complete content.
+
+Audit documents are highly sensitive. They can contain raw messages, effective
+prompts, answers, sender identities, working directories, system prompts, and
+attachment metadata. The configured executable also inherits the klax process
+environment. On failure, its bounded stderr is included in the klax log, so a
+hook must never echo its input there. Treat the command and its destination as
+part of the trusted klax deployment.
+
+Klax constructs and hashes the audit snapshot only when at least one audit
+command is explicitly configured. Event consumers, including storage and
+forwarding integrations, live outside this repository.
+
+A process crash after `turn.start` can leave that event without a matching
+`turn.finish`; klax does not replay a backend turn after its durable run fence.
+Consumers should treat an old unmatched `turn.start` as an interrupted turn,
+not as proof that it is still running.
 
 ## Chat Commands
 
@@ -131,7 +194,6 @@ Primary commands available in messenger chats:
 | `/prompt [text]` | show or set append system prompt |
 | `/groups` | list or manage group mode |
 | `/transports` | list or enable/disable transports |
-| `/bypass ...` | send a direct backend command |
 | `/abort` | stop the current run and clear the queue |
 | `/update` | trigger daemon update |
 | `/help` | show built-in help |
