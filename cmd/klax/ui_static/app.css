@@ -92,7 +92,13 @@
   #tabswrap::before { left: -4px; background: linear-gradient(90deg, var(--panel), transparent); }
   #tabswrap::after { right: -4px; background: linear-gradient(270deg, var(--panel), transparent); }
   #tabswrap.overflow-left::before, #tabswrap.overflow-right::after { opacity: 1; }
-  #bar > button { flex: none; padding: 4px 10px; font-size: 15px; line-height: 1; }
+  /* +/theme share the brand mark's 26px square footprint and corner radius, so the bar reads as one
+     row of equal controls instead of three shapes. The glyph is centred by flex, not by padding —
+     a fixed box must not depend on how wide the character happens to render. */
+  #bar > button:not(.logo-btn) { flex: none; width: 26px; height: 26px; padding: 0; border-radius: 8px;
+                                 display: flex; align-items: center; justify-content: center;
+                                 font-size: 15px; line-height: 1; }
+  #theme { font-size: 13px; }
   .tab { padding: 6px 12px; border-radius: 8px; white-space: nowrap; cursor: pointer;
          border: 1px solid transparent; display: flex; align-items: center; gap: 6px; }
   .tab.active {
