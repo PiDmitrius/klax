@@ -927,7 +927,11 @@ function start(){
       if(keep) writeHash(active);
       return;
     }
-    if(p.created && p.created !== active && sessionList.some(s => s.created === p.created && inScope(s))) selectSession(p.created);
+    // Same scope, no tab named: the menu's root link is a bare `#`, so landing here from root means
+    // the address stopped identifying the viewed tab. Put it back rather than leave a URL that no
+    // longer points at what is on screen.
+    if(!p.created){ writeHash(active); return; }
+    if(p.created !== active && sessionList.some(s => s.created === p.created && inScope(s))) selectSession(p.created);
   });
   document.addEventListener("keydown", e => {
     if(["ArrowDown","PageDown","End"," "].includes(e.key)) allowReadOnScroll();
