@@ -114,10 +114,11 @@
      whether it stands alone (root) or a group name follows it. Nothing about the label may move it:
      padding lives on the label, never on the button. */
   /* The ≡ is OUR drawing (scope.js SCOPE_GLYPH) and is laid out as if it were a lowercase letter of
-     the neighbouring text: sized in `ex` (the font's real x-height) and sitting on the BASELINE, so
-     its top edge is the x-line and its bottom edge the baseline. The container therefore carries the
-     SAME font as the text beside it — identical line box, identical baseline — instead of centring
-     the mark in a box, which would place it against the em box's middle and read too high. */
+     the neighbouring text: it sits on the BASELINE rather than being centred in a box, which would
+     place it against the em box's middle and read too high. The container therefore carries the SAME
+     font as the text beside it — identical line box, identical baseline. (An earlier version also
+     SIZED the mark in `ex`; that is gone, because a font metric resolves differently per zoom level.
+     The size is now whole pixels, see .scopeicon.) */
   .scopeglyph { flex: none; width: 26px; text-align: center; font: 12px/1 ui-monospace, monospace; }
   /* Size in whole CSS px and NO fractional offset here: sub-pixel tuning lives inside the drawing,
      on the SVG's own half-pixel grid (see SCOPE_GLYPH in scope.js), so the CSS side stays integer.

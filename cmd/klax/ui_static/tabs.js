@@ -6,7 +6,7 @@
 import { api, copyText, flashCopied } from "./base.js";
 import { esc } from "./markdown.js";
 import { uiConfirm } from "./modal.js";
-import { titlePrefix, currentScope, isRoot } from "./scope.js";
+import { titlePrefix, currentScope, isRoot, knownGroups } from "./scope.js";
 
 let sessions = [], deps = {}, settingsFor = 0, settingsAutofocused = false;
 // draft (non-null) = the "new session" dialog is open for a session that does NOT exist yet.
@@ -536,7 +536,11 @@ function renderSettings(d, isDraft){
   h += '<div class="srow"><label>Sandbox</label><div class="sctl"><label class="stoggle"><input type="checkbox" id="s-sandbox"'+(d.sandbox==="on"?" checked":"")+dis+'><span>'+(d.sandbox==="on"?"вкл":"выкл")+'</span></label></div></div>';
   // Groups are picked, not typed as prose: each one is a chip you can drop with ✕, and "+" offers
   // the groups this session is not in yet plus an explicit "new group" entry.
-  const curGroups = d.groups || [], freeGroups = (d.known_groups || []).filter(g => curGroups.indexOf(g) === -1);
+  // Suggestions come from the ONE client-side derivation the scope menu also uses (deps.allSessions
+   // is the unfiltered list), so the settings dialog and the menu can never show a different set or a
+   // different order.
+  const curGroups = d.groups || [];
+  const freeGroups = knownGroups(deps.allSessions ? deps.allSessions() : []).filter(g => curGroups.indexOf(g) === -1);
   h += '<div class="sfield"><label>Группы</label><div class="sgroups">'
     + curGroups.map(g => '<span class="sgroup">'+esc(g)+'<button type="button" class="sgroupx" data-group="'+esc(g)+'" title="Убрать">✕</button></span>').join("")
     + (groupAdding

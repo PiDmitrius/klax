@@ -2,7 +2,6 @@ package session
 
 import (
 	"errors"
-	"sort"
 	"strings"
 	"unicode"
 )
@@ -74,32 +73,4 @@ func NormalizeGroups(groups []string) ([]string, error) {
 		return nil, nil
 	}
 	return out, nil
-}
-
-// KnownGroups is the chat's group set: distinct names across its sessions, sorted for a stable list.
-// There is no group registry — a group exists exactly as long as some session carries it.
-func (s *Store) KnownGroups(chatID string) []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cs := s.chat(chatID)
-	seen := map[string]bool{}
-	out := []string{}
-	for _, sess := range cs.Sessions {
-		for _, group := range sess.Groups {
-			if !seen[group] {
-				seen[group] = true
-				out = append(out, group)
-			}
-		}
-	}
-	// Case-insensitive: "Klax" and "dev" should read as one alphabet, not as two blocks. The
-	// case-sensitive tiebreaker keeps names that differ only by case in a stable order.
-	sort.Slice(out, func(i, j int) bool {
-		li, lj := strings.ToLower(out[i]), strings.ToLower(out[j])
-		if li != lj {
-			return li < lj
-		}
-		return out[i] < out[j]
-	})
-	return out
 }

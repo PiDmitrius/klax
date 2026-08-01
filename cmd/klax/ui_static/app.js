@@ -15,6 +15,7 @@ import { injectEmojiFont } from "./emoji.js";
 import { showNotice } from "./notices.js";
 import { initSystem, systemRestartNotice } from "./system.js";
 import { parseHash, setScope, currentScope, sameScope, inScope, filterScope, storageKey, writeHash, renderChip, closeChipMenu } from "./scope.js";
+import { neighborIn } from "./selection.js";
 import { initDebug } from "./debug.js";
 
 const model = new TurnModel();
@@ -582,10 +583,15 @@ async function selectSession(created){
   focusComposer();
 }
 
-// onSessionsList is the SINGLE reconcile path for both /api/sessions and the live
-// `sessions` event: it redraws the strip and, if the active session vanished (closed here
-// or from another client), drops it and selects a replacement so the tab is never stuck
-// on a dead session.
+// onSessionsList is the SINGLE reconcile path for both /api/sessions and the live `sessions` event:
+// it redraws the strip and, if the active session left this window (closed anywhere, or dropped out
+// of the current group), picks a replacement so the tab is never stuck on a session it cannot show.
+// It NEVER awaits: `selectSession` assigns the active session synchronously and only awaits the
+// transcript fetch, which nothing here depends on. That keeps the whole reconcile one uninterrupted
+// transaction — a generation counter would not have been enough, because the loop below mutates the
+// shared read watermark BEFORE any await, so a stale invocation bailing out afterwards would leave
+// that advance applied but never animated (the next invocation sees the watermark already raised and
+// no longer treats it as a change).
 async function onSessionsList(list){
   list = list || [];
   const oldList = sessionList;
@@ -626,9 +632,9 @@ async function onSessionsList(list){
     // order: the same rule as closing a tab here, now shared by every way a tab can leave.
     const gone = !list.some(s => s.created === active);
     const next = neighborIn(filterScope(oldList), active, visible);
-    if(gone){ model.drop(active); delete loaded[active]; markRead(active); dropDraft(active); }
-    active = 0;
-    if(next) await selectSession(next);
+    if(gone) dropActive();
+    else leaveActive(); // still exists elsewhere: bank what is in the composer before letting go
+    if(next) selectLater(next); // not awaited: `active` is set synchronously, the transcript follows
   }
   reconcileSessions(visible, active);
   renderChip(list, badgeCount);
@@ -645,9 +651,30 @@ async function onSessionsList(list){
     try { stored = parseInt(localStorage.getItem(storageKey()), 10) || 0; } catch(e){}
     const want = parseHash().created || stored;
     const a = visible.find(s => s.created === want) || visible.find(s => s.active) || visible[0];
-    if(a) await selectSession(a.created);
+    if(a) selectLater(a.created);
   }
   setEmptyScope(!visible.length);
+}
+
+// selectLater starts a selection without making the caller wait for the transcript. The selection
+// itself (which tab is active, its draft, the address bar) happens synchronously inside; only the
+// fetch is left running, and its own render path is guarded on the session still being active.
+function selectLater(created){ selectSession(created).catch(() => {}); }
+
+// leaveActive / dropActive are the TWO ways this window stops showing the active session, and the
+// difference between them is what survives. A session that merely left the current scope still
+// exists — another window may be typing in it — so its scroll position and, above all, the text
+// sitting in the composer are banked first; `selectSession` cannot do it for us, since it only saves
+// while `active` is still set. A session that is genuinely gone is torn down instead.
+function leaveActive(){
+  if(!active) return;
+  rememberScroll(active); saveDraft(active);
+  active = 0;
+}
+function dropActive(){
+  if(!active) return;
+  model.drop(active); delete loaded[active]; markRead(active); dropDraft(active);
+  active = 0;
 }
 
 // setEmptyScope: an empty group view stays put instead of teleporting to root, which would be
@@ -746,19 +773,8 @@ const host = {
 function refreshStrip(){ renderTabs(active); renderChip(sessionList, badgeCount); }
 
 async function onNewSession(created){ await syncSessions(); await selectSession(created); }
-// neighborIn is the ONE rule for "the tab you were on left this window": focus the one to its LEFT
-// (like a browser), else the one to its RIGHT, read from the OLD order of the scope you are in. All
-// four ways a tab can leave use it — closed here, closed in another window, removed from this
-// view, and (later) swept out of a computed view — so they cannot drift apart. `survivors`, when
-// given, filters candidates to sessions that still qualify.
-function neighborIn(order, gone, survivors){
-  const idx = (order || []).findIndex(s => s.created === gone);
-  if(idx < 0) return 0;
-  const ok = c => !survivors || survivors.some(s => s.created === c);
-  for(let i = idx - 1; i >= 0; i--) if(ok(order[i].created)) return order[i].created;
-  for(let i = idx + 1; i < order.length; i++) if(ok(order[i].created)) return order[i].created;
-  return 0;
-}
+// The neighbour rule itself lives in selection.js so it can be tested without the UI; here it is
+// only ever applied to the CURRENT scope's order.
 function neighborCreated(closed){ return neighborIn(filterScope(sessionList), closed); }
 async function afterClose(created){
   // Closing the ACTIVE tab focuses its neighbor (left, else right) — not a jump to the first tab.
@@ -785,7 +801,8 @@ function start(){
     isLive: c => sessionList.some(s => s.created === c),
     onAfterSend: () => { stick = true; markRead(active, true); refreshStrip(); stickToBottom(); },
   });
-  initTabs({ select: selectSession, onNew: onNewSession, afterClose, notice: showNotice, unread: badgeCount, focus: focusComposer });
+  initTabs({ select: selectSession, onNew: onNewSession, afterClose, notice: showNotice, unread: badgeCount,
+             focus: focusComposer, allSessions: () => sessionList });
   // Delegated copy affordances: the copied object flashes, not the button.
   const lw = document.getElementById("log");
   if(lw) lw.addEventListener("click", e => {
@@ -887,11 +904,13 @@ function start(){
     if(!sameScope(p.scope, currentScope())){
       closeChipMenu();
       setScope(p.scope);
-      // Keep the viewed session when the new scope also holds it (root always does) — moving between
-      // a group and root should not lose your place. Otherwise the ordinary reconcile picks this
-      // scope's own remembered tab.
-      const keep = !!active && sessionList.some(s => s.created === active && inScope(s));
-      if(!keep) active = 0;
+      // An explicit tab in the address outranks everything: `#work/<created>` means THAT tab, even
+      // when the session we are already on also belongs to the new scope. Otherwise keep the current
+      // session if the new scope holds it (root always does), so moving between a group and root
+      // does not lose your place; failing both, the reconcile picks this scope's remembered tab.
+      const explicit = !!p.created && sessionList.some(s => s.created === p.created && inScope(s));
+      const keep = !explicit && !!active && sessionList.some(s => s.created === active && inScope(s));
+      if(!keep) leaveActive();
       await onSessionsList(sessionList);
       if(keep) writeHash(active);
       return;

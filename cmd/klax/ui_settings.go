@@ -43,10 +43,11 @@ type uiSettings struct {
 	Backends      []uiSettingsOption `json:"backends"`
 	Models        []uiSettingsOption `json:"models"`
 	Efforts       []uiSettingsOption `json:"efforts"`
-	// Groups this session belongs to, and the chat's existing group names as suggestions.
-	// KnownGroups is derived from the sessions, not a registry.
-	Groups      []string `json:"groups"`
-	KnownGroups []string `json:"known_groups,omitempty"`
+	// Groups this session belongs to. The set of EXISTING names is deliberately not sent: the client
+	// already derives it from the sessions snapshot for the scope menu, and a second derivation here
+	// would order Cyrillic differently (Go lowercases and compares bytes; the browser uses
+	// localeCompare), so the two surfaces would disagree.
+	Groups []string `json:"groups"`
 }
 
 // uiSettingsPatch is a partial update: only non-nil fields are applied. The UI
@@ -127,7 +128,6 @@ func (d *daemon) uiSessionSettings(sk string, created int64) (*uiSettings, bool)
 		Models:        uiSettingsOptions(modelsForBackend(backend)),
 		Efforts:       uiSettingsOptions(effortsForBackend(backend)),
 		Groups:        sess.Groups,
-		KnownGroups:   d.store.KnownGroups(sk),
 	}, true
 }
 
@@ -169,7 +169,6 @@ func (d *daemon) uiDraftSettings(sk, chatID, backendOverride string) *uiSettings
 		Backends:     []uiSettingsOption{{Value: "claude", Label: "Claude"}, {Value: "codex", Label: "Codex"}},
 		Models:       uiSettingsOptions(modelsForBackend(backend)),
 		Efforts:      uiSettingsOptions(effortsForBackend(backend)),
-		KnownGroups:  d.store.KnownGroups(sk),
 	}
 }
 

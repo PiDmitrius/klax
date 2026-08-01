@@ -91,8 +91,7 @@ func (s *Session) UnmarshalJSON(data []byte) error {
 	type alias Session
 	var payload struct {
 		alias
-		LegacyEffortOverride string   `json:"effort_override,omitempty"`
-		LegacyTags           []string `json:"tags,omitempty"` // groups were briefly called tags in development
+		LegacyEffortOverride string `json:"effort_override,omitempty"`
 	}
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return err
@@ -100,9 +99,6 @@ func (s *Session) UnmarshalJSON(data []byte) error {
 	*s = Session(payload.alias)
 	if s.ThinkOverride == "" {
 		s.ThinkOverride = payload.LegacyEffortOverride
-	}
-	if len(s.Groups) == 0 {
-		s.Groups = payload.LegacyTags
 	}
 	return nil
 }

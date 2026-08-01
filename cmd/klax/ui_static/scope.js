@@ -86,8 +86,12 @@ export function titlePrefix(){ return scope.kind === "root" ? "" : scope.name + 
 export function knownGroups(list){
   const seen = new Set();
   for(const s of list || []) for(const g of s.groups || []) seen.add(g);
-  // Case-insensitive, matching the server's KnownGroups ordering, with a case-sensitive tiebreaker so
-  // names differing only by case keep a stable order.
+  // This is the ONLY place the group set is derived — both the scope menu and the settings dialog's
+  // suggestions read it, so they cannot show a different set or a different order. (The server used
+  // to derive it too; Go lowercases and compares bytes while the browser uses localeCompare, so the
+  // two disagreed on Cyrillic. The server side was removed rather than kept in sync.)
+  // Case-insensitive, with a case-sensitive tiebreaker so names differing only by case keep a
+  // stable order.
   return Array.from(seen).sort((a, b) =>
     a.localeCompare(b, undefined, { sensitivity: "base" }) || (a < b ? -1 : a > b ? 1 : 0));
 }
