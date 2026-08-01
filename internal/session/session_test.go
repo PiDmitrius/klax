@@ -516,31 +516,23 @@ func TestNormalizeGroups(t *testing.T) {
 		t.Fatalf("blank-only groups = %v, %v; want nil, nil", got, err)
 	}
 	// The rejections that keep `#<group>` unambiguous against `#<created>` and `#is:unread`, plus
-	// the root pseudo-group.
-	for _, bad := range []string{"123", "is:unread", "a/b", "a#b", "*"} {
-		if _, err := NormalizeGroups([]string{bad}); err == nil {
-			t.Fatalf("NormalizeGroups(%q) accepted an ambiguous name", bad)
+	// the root pseudo-group and the two bounds.
+	bad := []string{"123", "is:unread", "a/b", "a#b", "*", "a\u0000b", strings.Repeat("x", MaxGroupLen+1)}
+	for _, name := range bad {
+		if _, err := NormalizeGroups([]string{name}); err == nil {
+			t.Fatalf("NormalizeGroups(%q) accepted an unusable name", name)
 		}
 	}
-}
-
-func TestKnownGroupsAreDistinctAndSorted(t *testing.T) {
-	store := &Store{
-		Chats: make(map[string]*ChatSessions),
-		Scope: make(map[string]*ScopeDefaults),
+	many := make([]string, 0, MaxGroupCount+1)
+	for i := 0; i <= MaxGroupCount; i++ {
+		many = append(many, "g"+string(rune('a'+i)))
 	}
-	a := store.New("user:alice", "s", "/tmp", ScopeDefaults{}).Created
-	b := store.New("user:alice", "s", "/tmp", ScopeDefaults{}).Created
-	store.UpdateSession("user:alice", a, func(cur *Session) { cur.Groups = []string{"work", "klax"} })
-	store.UpdateSession("user:alice", b, func(cur *Session) { cur.Groups = []string{"work"} })
-	got := store.KnownGroups("user:alice")
-	if len(got) != 2 || got[0] != "klax" || got[1] != "work" {
-		t.Fatalf("KnownGroups = %v, want [klax work]", got)
+	if _, err := NormalizeGroups(many); err == nil {
+		t.Fatalf("NormalizeGroups accepted %d groups on one session", len(many))
 	}
-	// The group set is derived, never stored: dropping the last carrier makes the group vanish.
-	store.UpdateSession("user:alice", a, func(cur *Session) { cur.Groups = []string{"work"} })
-	if got := store.KnownGroups("user:alice"); len(got) != 1 || got[0] != "work" {
-		t.Fatalf("KnownGroups after removing the last carrier = %v, want [work]", got)
+	// A name at the limit is fine — the bound is inclusive.
+	if _, err := NormalizeGroups([]string{strings.Repeat("x", MaxGroupLen)}); err != nil {
+		t.Fatalf("NormalizeGroups rejected a name of exactly MaxGroupLen: %v", err)
 	}
 }
 

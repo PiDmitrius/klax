@@ -13,3 +13,17 @@ jobs:
           go-version: '1.22'
 
       - run: go build ./cmd/klax
+
+      - run: go vet ./...
+
+      - run: go test ./...
+
+      # The SPA has no toolchain and no dependencies: node's own runner covers the pure modules
+      # (scope/selection), and --check parses every module so a syntax error cannot reach a release.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - run: node --test cmd/klax/ui_static/*.test.mjs
+
+      - run: for f in cmd/klax/ui_static/*.js; do node --check "$f"; done
