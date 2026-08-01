@@ -6,7 +6,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
 )
 
@@ -44,6 +43,11 @@ type Session struct {
 	ContextWindow int    `json:"ctx_window,omitempty"`
 	ContextUsed   int    `json:"ctx_used,omitempty"`
 	Messages      int    `json:"messages"` // user message count
+	// Groups label a session for the UI's filtered views (one browser tab per group). A pure view
+	// filter: never a second source of order or session state, and never a place for computed
+	// "is:*" views, which are derived from live facts instead of stored here. A session may belong
+	// to several groups.
+	Groups []string `json:"groups,omitempty"`
 	// UI read-through watermark — the durable per-session unread cursor: the highest
 	// (turn_seq, block index) the user has read. Absent on legacy stores ⇒ 0 ("nothing read
 	// yet"). Consumed by the UI so the unread divider/badge/title survive a page reload
@@ -104,6 +108,9 @@ func cloneSession(sess *Session) *Session {
 		return nil
 	}
 	cp := *sess
+	if len(sess.Groups) > 0 { // a shared backing array would let a caller mutate the stored session
+		cp.Groups = append([]string(nil), sess.Groups...)
+	}
 	return &cp
 }
 
@@ -560,10 +567,18 @@ func (s *Store) Delete(chatID string, idx int) bool {
 	return true
 }
 
-// Reorder rearranges a chat's sessions to match the given order of Created ids
-// (the tab strip's drag-and-drop). Ids not present are ignored; sessions omitted
-// from the list keep their relative order after the listed ones, so a partial or
-// stale order can never drop a tab. Returns true if the order actually changed.
+// Reorder rearranges a chat's sessions to match the given order of Created ids (the tab strip's
+// drag-and-drop). The order may be a SUBSET — a filtered group view drags only the tabs it shows — so
+// the permutation is SLOT-PRESERVING: the positions the listed sessions occupied are refilled in the
+// requested order, and every session not listed keeps its exact index.
+//
+// That is what makes one global order enough for every view: the relative order of any pair changes
+// only if BOTH of them were listed, so dragging inside one group cannot disturb another group whose
+// members it does not share. With a FULL list the occupied slots are all positions, so the result is
+// simply the requested order — the root strip's behaviour is unchanged.
+//
+// Unknown ids are ignored, so a stale client order can never drop or resurrect a tab. Returns true
+// if the order actually changed.
 func (s *Store) Reorder(chatID string, order []int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -571,29 +586,29 @@ func (s *Store) Reorder(chatID string, order []int64) bool {
 	if len(cs.Sessions) < 2 {
 		return false
 	}
-	rank := make(map[int64]int, len(order))
-	for i, id := range order {
-		if _, seen := rank[id]; !seen {
-			rank[id] = i
-		}
+	byID := make(map[int64]*Session, len(cs.Sessions))
+	for _, sess := range cs.Sessions {
+		byID[sess.Created] = sess
 	}
-	orig := make(map[int64]int, len(cs.Sessions))
-	for i, sess := range cs.Sessions {
-		orig[sess.Created] = i
+	seq := make([]*Session, 0, len(order)) // listed sessions that really exist, request order, deduped
+	listed := make(map[int64]bool, len(order))
+	for _, id := range order {
+		sess := byID[id]
+		if sess == nil || listed[id] {
+			continue
+		}
+		listed[id] = true
+		seq = append(seq, sess)
 	}
 	sorted := make([]*Session, len(cs.Sessions))
 	copy(sorted, cs.Sessions)
-	sort.SliceStable(sorted, func(a, b int) bool {
-		ra, oka := rank[sorted[a].Created]
-		rb, okb := rank[sorted[b].Created]
-		if oka && okb {
-			return ra < rb
+	k := 0
+	for i, sess := range cs.Sessions {
+		if listed[sess.Created] {
+			sorted[i] = seq[k]
+			k++
 		}
-		if oka != okb {
-			return oka // ids present in the requested order come first
-		}
-		return orig[sorted[a].Created] < orig[sorted[b].Created]
-	})
+	}
 	changed := false
 	for i := range sorted {
 		if sorted[i] != cs.Sessions[i] {

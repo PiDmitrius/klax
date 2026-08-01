@@ -66,6 +66,9 @@ type uiSessionInfo struct {
 	// for a tab the client has not loaded (a loaded tab counts precisely client-side).
 	ReadThrough string `json:"read_through,omitempty"`
 	Unread      int    `json:"unread,omitempty"`
+	// Groups the session belongs to. The client filters the strip and derives the whole group list
+	// from this — there is no group registry and no /api/groups.
+	Groups []string `json:"groups,omitempty"`
 }
 
 // uiEvent is one server-sent event. The client multiplexes all tabs over a
@@ -576,6 +579,7 @@ func (d *daemon) sessionsSnapshot(sk string) []uiSessionInfo {
 			CtxWindow:   s.ContextWindow,
 			ReadThrough: fmt.Sprintf("%d.%d", s.ReadThroughTurn, s.ReadThroughBlock),
 			Unread:      unread,
+			Groups:      s.Groups,
 		})
 	}
 	return out

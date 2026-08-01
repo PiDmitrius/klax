@@ -43,6 +43,11 @@ type uiSettings struct {
 	Backends      []uiSettingsOption `json:"backends"`
 	Models        []uiSettingsOption `json:"models"`
 	Efforts       []uiSettingsOption `json:"efforts"`
+	// Groups this session belongs to. The set of EXISTING names is deliberately not sent: the client
+	// already derives it from the sessions snapshot for the scope menu, and a second derivation here
+	// would order Cyrillic differently (Go lowercases and compares bytes; the browser uses
+	// localeCompare), so the two surfaces would disagree.
+	Groups []string `json:"groups"`
 }
 
 // uiSettingsPatch is a partial update: only non-nil fields are applied. The UI
@@ -57,6 +62,9 @@ type uiSettingsPatch struct {
 	TTY     *bool   `json:"tty"`
 	CWD     *string `json:"cwd"`
 	Prompt  *string `json:"prompt"`
+	// Groups is a whole-set replacement (the settings field edits the list as one value), so an
+	// empty non-nil slice clears every group.
+	Groups *[]string `json:"groups"`
 }
 
 // uiErr carries an HTTP status alongside a user-facing message so the settings
@@ -72,7 +80,7 @@ func (e *uiErr) Error() string { return e.msg }
 // apply after creation (an all-nil patch means "just create with defaults").
 func draftHasFields(p uiSettingsPatch) bool {
 	return p.Name != nil || p.Backend != nil || p.Model != nil || p.Think != nil ||
-		p.Sandbox != nil || p.TTY != nil || p.CWD != nil || p.Prompt != nil
+		p.Sandbox != nil || p.TTY != nil || p.CWD != nil || p.Prompt != nil || p.Groups != nil
 }
 
 func uiSettingsOptions(entries []modelEntry) []uiSettingsOption {
@@ -119,6 +127,7 @@ func (d *daemon) uiSessionSettings(sk string, created int64) (*uiSettings, bool)
 		Backends:      []uiSettingsOption{{Value: "claude", Label: "Claude"}, {Value: "codex", Label: "Codex"}},
 		Models:        uiSettingsOptions(modelsForBackend(backend)),
 		Efforts:       uiSettingsOptions(effortsForBackend(backend)),
+		Groups:        sess.Groups,
 	}, true
 }
 
@@ -226,6 +235,7 @@ type resolvedPatch struct {
 	name, cwd, prompt string
 	backend           string
 	backendChanged    bool
+	groups            []string
 }
 
 // validateSettingsPatch validates `p` against `cur`'s current state (`backend` = its effective
@@ -279,6 +289,14 @@ func validateSettingsPatch(cur *session.Session, backend string, busy bool, p ui
 	if p.Prompt != nil {
 		r.prompt = strings.TrimSpace(*p.Prompt) // empty clears the append-prompt
 	}
+	if p.Groups != nil {
+		// A group is a view label, not a run parameter: free to change at any time, busy or not.
+		groups, err := session.NormalizeGroups(*p.Groups)
+		if err != nil {
+			return r, &uiErr{http.StatusBadRequest, err.Error()}
+		}
+		r.groups = groups
+	}
 	return r, nil
 }
 
@@ -317,6 +335,9 @@ func applySettingsPatch(cur *session.Session, r resolvedPatch) {
 	}
 	if p.Prompt != nil {
 		cur.AppendSystemPrompt = r.prompt
+	}
+	if p.Groups != nil {
+		cur.Groups = r.groups
 	}
 }
 

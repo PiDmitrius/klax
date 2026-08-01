@@ -1,10 +1,36 @@
 package runner
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestMain puts stub `claude` and `codex` executables at the head of PATH for this package.
+//
+// These tests assert the SHAPE of the command line BuildCmd constructs — flags, argument order,
+// process-group attributes — and nothing about what the backend does when run. Resolving the real
+// CLIs only decided which absolute path landed in argv[0], so requiring them made the package fail
+// anywhere they are not installed, which is every clean CI runner. Stubs keep the assertions
+// identical and the suite hermetic; installing the real backends in CI would be slow, external, and
+// prove nothing these tests are about.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "klax-stub-bin")
+	if err != nil {
+		panic(err)
+	}
+	for _, name := range []string{"claude", "codex"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			panic(err)
+		}
+	}
+	os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 func assertSetpgid(t *testing.T, cmd *exec.Cmd) {
 	t.Helper()
