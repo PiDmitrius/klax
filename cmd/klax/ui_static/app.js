@@ -5,6 +5,7 @@
 
 import { TurnModel } from "./model.js";
 import { renderSession, beginShift, playShift, fadeOutDivider, DIVIDER_FADE_MS, pos, parsePos, decodePos } from "./render.js";
+import { esc } from "./markdown.js";
 import { tailLoop } from "./events.js";
 import { api, getToken, setToken, hasCoarsePointer, copyText, flashCopied } from "./base.js";
 import { selectionInLog } from "./scroll.js";
@@ -13,6 +14,7 @@ import { initTabs, reconcileSessions, renderTabs } from "./tabs.js";
 import { injectEmojiFont } from "./emoji.js";
 import { showNotice } from "./notices.js";
 import { initSystem, systemRestartNotice } from "./system.js";
+import { parseHash, setScope, currentScope, sameScope, inScope, filterScope, storageKey, writeHash, renderChip, closeChipMenu } from "./scope.js";
 import { initDebug } from "./debug.js";
 
 const model = new TurnModel();
@@ -120,7 +122,7 @@ function startReadGrace(created){
     clearReadGrace(created);
     if(active === created && documentVisible() && atBottom() && rawUnreadCount(created) > 0){
       markRead(created, true);
-      renderTabs(active);
+      refreshStrip();
       commitLive(created); // the unread line fades out, messages close the gap, then split bubbles merge.
     }
   }, READ_GRACE_MS + 40);
@@ -393,7 +395,7 @@ async function loadTranscript(created){
     if(created === active){
       if(rawUnreadCount(created) > 0){ stick = false; jumpToUnread(created); }
       else { markRead(created); stick = true; }
-      renderTabs(active);
+      refreshStrip();
     }
     rerenderStructural(created, true);
     // (No explicit capWindow here: positioning above fires a scroll event that re-caps once the DOM
@@ -558,10 +560,11 @@ async function selectSession(created){
   // The composer travels with the tab. Its draft swap is programmatic session state, not a reason to
   // alter this session's scroll intent, so exclude that height change from composer resize anchoring.
   if(switching){ loadDraft(created); rebaselineComposerResize(); }
-  if(location.hash !== "#" + created) location.hash = String(created);
-  // Persist the viewed tab per-browser so a FRESH open (no URL hash — bookmark, new tab, base URL)
-  // restores it instead of falling back to the first tab. Cheap; survives reloads and restarts.
-  try { localStorage.setItem("klax_active", String(created)); } catch(e){}
+  writeHash(created);
+  // Persist the viewed tab per-browser AND per-scope so a FRESH open (no URL hash — bookmark, new
+  // tab, base URL) restores it instead of falling back to the first tab, and so a root window and a
+  // group window don't fight over one remembered tab. Cheap; survives reloads and restarts.
+  try { localStorage.setItem(storageKey(), String(created)); } catch(e){}
   if(!loaded[created]){
     // Not yet loaded: load first (loadTranscript seeds readThrough from the server and then
     // positions the view — jump to the divider if unread, else the bottom).
@@ -572,7 +575,7 @@ async function selectSession(created){
     if(hadUnread) jumpToUnread(created);
     else markRead(created);
     stick = !hadUnread;
-    renderTabs(active);
+    refreshStrip();
     rerenderStructural(created, true);
     if(!hadUnread) restoreScroll(created);
   }
@@ -614,26 +617,52 @@ async function onSessionsList(list){
       }
     }
   }
-  if(active && !list.some(s => s.created === active)){
-    model.drop(active); delete loaded[active]; markRead(active); dropDraft(active);
+  const visible = filterScope(list);
+  if(active && !visible.some(s => s.created === active)){
+    // The viewed session left THIS window's scope. Two different events land here and they are not
+    // the same loss: a session closed anywhere is gone for good (tear its state down), while one
+    // that merely lost the group still exists and another window may be working in it — so keep its
+    // model and, above all, its composer draft. Either way focus its neighbour in the OLD visible
+    // order: the same rule as closing a tab here, now shared by every way a tab can leave.
+    const gone = !list.some(s => s.created === active);
+    const next = neighborIn(filterScope(oldList), active, visible);
+    if(gone){ model.drop(active); delete loaded[active]; markRead(active); dropDraft(active); }
     active = 0;
+    if(next) await selectSession(next);
   }
-  reconcileSessions(list, active);
+  reconcileSessions(visible, active);
+  renderChip(list, badgeCount);
   // A cross-tab read advance is a DISCRETE change: start the live animation immediately so the
   // marker never lags the badge. commitLive owns the full divider-collapse sequence, including the
   // post-fade merge when the unread line used to split one bubble.
   if(activeReadAdvanced && loaded[active]) commitLive(active);
   else if(affected.has(active) && loaded[active]) scheduleLiveRerender(active);
-  if(!active && list.length){
-    // Restore priority: explicit URL hash → this browser's last-viewed tab (localStorage) →
+  if(!active && visible.length){
+    // Restore priority: explicit URL hash → this scope's last-viewed tab (localStorage) →
     // the server's active flag → first tab. Both remembered ids fall through if that session
     // was since closed (find returns undefined), so a stale value can never strand the UI.
     let stored = 0;
-    try { stored = parseInt(localStorage.getItem("klax_active"), 10) || 0; } catch(e){}
-    const want = parseInt(location.hash.slice(1), 10) || stored;
-    const a = list.find(s => s.created === want) || list.find(s => s.active) || list[0];
+    try { stored = parseInt(localStorage.getItem(storageKey()), 10) || 0; } catch(e){}
+    const want = parseHash().created || stored;
+    const a = visible.find(s => s.created === want) || visible.find(s => s.active) || visible[0];
     if(a) await selectSession(a.created);
   }
+  setEmptyScope(!visible.length);
+}
+
+// setEmptyScope: an empty group view stays put instead of teleporting to root, which would be
+// surprising; an unknown group in the URL is just an empty view, not an error. It only
+// TOGGLES visibility — the log DOM is left intact so returning to a populated scope re-renders from
+// the model instead of rebuilding from scratch.
+function setEmptyScope(on){
+  document.body.classList.toggle("emptyscope", !!on);
+  const box = document.getElementById("scopeempty");
+  if(!box) return;
+  const name = currentScope().name;
+  box.innerHTML = !on ? "" :
+    (currentScope().kind === "builtin"
+      ? 'Вид «' + esc(name) + '» ещё не реализован.'
+      : 'В группе «' + esc(name) + '» нет сессий.');
 }
 
 async function syncSessions(){
@@ -700,7 +729,7 @@ const host = {
         capWindow(c); // background loaded tab: no viewport → bound its model (read rows only) so switching to it is cheap
       }
     }
-    renderTabs(active);
+    refreshStrip();
   },
   onAuthFail: () => { const a = document.getElementById("app"); if(a) a.classList.remove("active"); const g = document.getElementById("gate"); if(g) g.classList.remove("hidden"); },
   onRestart: (kind, version) => showNotice(systemRestartNotice(kind, version)),
@@ -710,15 +739,27 @@ const host = {
   onHealth: (ok, fails) => setDegraded(!ok && fails >= 2),
 };
 
+// refreshStrip repaints BOTH surfaces that display unread counts — the tab badges and the scope
+// chip (its outside-this-group counter and the menu's per-group numbers) — from the same
+// client-side count, in one call. Repainting only the strip made the two disagree until the next
+// server broadcast: badges dropped the moment you read, the chip kept the stale number.
+function refreshStrip(){ renderTabs(active); renderChip(sessionList, badgeCount); }
+
 async function onNewSession(created){ await syncSessions(); await selectSession(created); }
-// neighborCreated returns the tab to focus after `closed` is removed: the one to its LEFT (like a
-// browser), or the one to its RIGHT if it was the leftmost. Read from the current strip order.
-function neighborCreated(closed){
-  const idx = sessionList.findIndex(s => s.created === closed);
+// neighborIn is the ONE rule for "the tab you were on left this window": focus the one to its LEFT
+// (like a browser), else the one to its RIGHT, read from the OLD order of the scope you are in. All
+// four ways a tab can leave use it — closed here, closed in another window, removed from this
+// view, and (later) swept out of a computed view — so they cannot drift apart. `survivors`, when
+// given, filters candidates to sessions that still qualify.
+function neighborIn(order, gone, survivors){
+  const idx = (order || []).findIndex(s => s.created === gone);
   if(idx < 0) return 0;
-  const n = sessionList[idx - 1] || sessionList[idx + 1];
-  return n ? n.created : 0;
+  const ok = c => !survivors || survivors.some(s => s.created === c);
+  for(let i = idx - 1; i >= 0; i--) if(ok(order[i].created)) return order[i].created;
+  for(let i = idx + 1; i < order.length; i++) if(ok(order[i].created)) return order[i].created;
+  return 0;
 }
+function neighborCreated(closed){ return neighborIn(filterScope(sessionList), closed); }
 async function afterClose(created){
   // Closing the ACTIVE tab focuses its neighbor (left, else right) — not a jump to the first tab.
   // Closing a background tab never moves focus. Compute the neighbor while `closed` is still in the
@@ -734,6 +775,7 @@ async function afterClose(created){
 }
 
 function start(){
+  setScope(parseHash().scope); // the address bar decides the scope before the first strip render
   document.getElementById("gate").classList.add("hidden");
   const app = document.getElementById("app"); if(app) app.classList.add("active");
   initSystem({ notice: showNotice });
@@ -741,7 +783,7 @@ function start(){
   initCompose({
     getActive, notice: showNotice,
     isLive: c => sessionList.some(s => s.created === c),
-    onAfterSend: () => { stick = true; markRead(active, true); renderTabs(active); stickToBottom(); },
+    onAfterSend: () => { stick = true; markRead(active, true); refreshStrip(); stickToBottom(); },
   });
   initTabs({ select: selectSession, onNew: onNewSession, afterClose, notice: showNotice, unread: badgeCount, focus: focusComposer });
   // Delegated copy affordances: the copied object flashes, not the button.
@@ -806,12 +848,12 @@ function start(){
         const read = markRead(active);
         const capped = capWindow(active) > 0; // back at the bottom → evict the older rows scrolled up to read (they reload on the next scroll up)
         if(read || advanced || capped){
-          renderTabs(active);
+          refreshStrip();
           if(capped) rerenderStructural(active); // structural when we evicted: drop the off-screen DOM cleanly
           else commitLive(active); // animate divider collapse and finish any split-bubble merge
         }
       } else if(advanced){
-        renderTabs(active);
+        refreshStrip();
         rerenderStructural(active);
         log.scrollTop = oldTop + (log.scrollHeight - oldHeight);
         scrollTopFor[active] = log.scrollTop;
@@ -837,8 +879,25 @@ function start(){
   const th = document.getElementById("theme");
   if(th) th.addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
   const tb = document.getElementById("tobottom");
-  if(tb) tb.addEventListener("click", () => { stick = true; markRead(active, true); renderTabs(active); rerenderStructural(active); }); // rerender's stickToBottom fires a scroll event → scroll handler re-caps with a current DOM
-  window.addEventListener("hashchange", () => { const w = parseInt(location.hash.slice(1), 10); if(w && w !== active && sessionList.some(s => s.created === w)) selectSession(w); });
+  if(tb) tb.addEventListener("click", () => { stick = true; markRead(active, true); refreshStrip(); rerenderStructural(active); }); // rerender's stickToBottom fires a scroll event → scroll handler re-caps with a current DOM
+  // The hash is the window's address: a changed SCOPE is real navigation (re-filter the strip and
+  // re-pick a tab), a changed tab within the same scope is just a selection.
+  window.addEventListener("hashchange", async () => {
+    const p = parseHash();
+    if(!sameScope(p.scope, currentScope())){
+      closeChipMenu();
+      setScope(p.scope);
+      // Keep the viewed session when the new scope also holds it (root always does) — moving between
+      // a group and root should not lose your place. Otherwise the ordinary reconcile picks this
+      // scope's own remembered tab.
+      const keep = !!active && sessionList.some(s => s.created === active && inScope(s));
+      if(!keep) active = 0;
+      await onSessionsList(sessionList);
+      if(keep) writeHash(active);
+      return;
+    }
+    if(p.created && p.created !== active && sessionList.some(s => s.created === p.created && inScope(s))) selectSession(p.created);
+  });
   document.addEventListener("keydown", e => {
     if(["ArrowDown","PageDown","End"," "].includes(e.key)) allowReadOnScroll();
   });

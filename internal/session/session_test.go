@@ -449,13 +449,13 @@ func TestReorderRearrangesAndToleratesPartialOrder(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		ids = append(ids, store.New("user:alice", "s", "/tmp", ScopeDefaults{Backend: "claude"}).Created)
 	}
-	// ids is [a,b,c,d] in creation order. Move d to the front, c after it.
+	// ids is [a,b,c,d] in creation order. A filtered (group) strip showing only c and d drags them
+	// into the order [d,c]: the SLOTS they occupied (2 and 3) are refilled, and a/b never move.
 	if !store.Reorder("user:alice", []int64{ids[3], ids[2]}) {
 		t.Fatal("Reorder returned false for a real change")
 	}
 	got := store.SessionsFor("user:alice")
-	// Listed ids come first in the requested order; the rest keep their relative order.
-	want := []int64{ids[3], ids[2], ids[0], ids[1]}
+	want := []int64{ids[0], ids[1], ids[3], ids[2]}
 	for i, w := range want {
 		if got[i].Created != w {
 			t.Fatalf("Reorder order[%d]=%d, want %d (full: %v)", i, got[i].Created, w, createds(got))
@@ -465,8 +465,98 @@ func TestReorderRearrangesAndToleratesPartialOrder(t *testing.T) {
 	if store.Reorder("user:alice", []int64{99999}) {
 		t.Fatal("Reorder must be a no-op (false) when nothing moves")
 	}
-	if got2 := store.SessionsFor("user:alice"); createds(got2)[0] != ids[3] {
+	if got2 := store.SessionsFor("user:alice"); createds(got2)[0] != ids[0] {
 		t.Fatalf("no-op Reorder disturbed the order: %v", createds(got2))
+	}
+	// A FULL list is the same operation with every slot occupied: the result is exactly the request,
+	// so the unfiltered root strip keeps behaving as it always did.
+	if !store.Reorder("user:alice", []int64{ids[2], ids[0], ids[3], ids[1]}) {
+		t.Fatal("Reorder returned false for a real full-list change")
+	}
+	if got3 := createds(store.SessionsFor("user:alice")); got3[0] != ids[2] || got3[1] != ids[0] || got3[2] != ids[3] || got3[3] != ids[1] {
+		t.Fatalf("full-list Reorder did not apply verbatim: %v", got3)
+	}
+}
+
+// A group drag must not disturb a DIFFERENT group whose members it does not share — the guarantee
+// that lets one global order serve every filtered view.
+func TestReorderWithinOneGroupLeavesDisjointGroupUntouched(t *testing.T) {
+	store := &Store{
+		Chats: make(map[string]*ChatSessions),
+		Scope: make(map[string]*ScopeDefaults),
+	}
+	var ids []int64
+	for i := 0; i < 4; i++ {
+		ids = append(ids, store.New("user:alice", "s", "/tmp", ScopeDefaults{Backend: "claude"}).Created)
+	}
+	// Interleaved membership: x = {a, c}, y = {b, d}.
+	store.Reorder("user:alice", []int64{ids[2], ids[0]}) // drag inside x: c before a
+	got := createds(store.SessionsFor("user:alice"))
+	want := []int64{ids[2], ids[1], ids[0], ids[3]}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("slot-preserving order = %v, want %v", got, want)
+		}
+	}
+	// y's members kept both their absolute positions and their relative order.
+	if got[1] != ids[1] || got[3] != ids[3] {
+		t.Fatalf("a disjoint group's members moved: %v", got)
+	}
+}
+
+func TestNormalizeGroups(t *testing.T) {
+	got, err := NormalizeGroups([]string{" work ", "work", "", "дом"})
+	if err != nil {
+		t.Fatalf("NormalizeGroups: %v", err)
+	}
+	if len(got) != 2 || got[0] != "work" || got[1] != "дом" {
+		t.Fatalf("NormalizeGroups = %v, want [work дом]", got)
+	}
+	if got, err := NormalizeGroups([]string{"  "}); err != nil || got != nil {
+		t.Fatalf("blank-only groups = %v, %v; want nil, nil", got, err)
+	}
+	// The rejections that keep `#<group>` unambiguous against `#<created>` and `#is:unread`, plus
+	// the root pseudo-group.
+	for _, bad := range []string{"123", "is:unread", "a/b", "a#b", "*"} {
+		if _, err := NormalizeGroups([]string{bad}); err == nil {
+			t.Fatalf("NormalizeGroups(%q) accepted an ambiguous name", bad)
+		}
+	}
+}
+
+func TestKnownGroupsAreDistinctAndSorted(t *testing.T) {
+	store := &Store{
+		Chats: make(map[string]*ChatSessions),
+		Scope: make(map[string]*ScopeDefaults),
+	}
+	a := store.New("user:alice", "s", "/tmp", ScopeDefaults{}).Created
+	b := store.New("user:alice", "s", "/tmp", ScopeDefaults{}).Created
+	store.UpdateSession("user:alice", a, func(cur *Session) { cur.Groups = []string{"work", "klax"} })
+	store.UpdateSession("user:alice", b, func(cur *Session) { cur.Groups = []string{"work"} })
+	got := store.KnownGroups("user:alice")
+	if len(got) != 2 || got[0] != "klax" || got[1] != "work" {
+		t.Fatalf("KnownGroups = %v, want [klax work]", got)
+	}
+	// The group set is derived, never stored: dropping the last carrier makes the group vanish.
+	store.UpdateSession("user:alice", a, func(cur *Session) { cur.Groups = []string{"work"} })
+	if got := store.KnownGroups("user:alice"); len(got) != 1 || got[0] != "work" {
+		t.Fatalf("KnownGroups after removing the last carrier = %v, want [work]", got)
+	}
+}
+
+// A returned session must not share its group slice with the store, or a caller's append/edit would
+// silently mutate stored state.
+func TestGetReturnsDetachedGroups(t *testing.T) {
+	store := &Store{
+		Chats: make(map[string]*ChatSessions),
+		Scope: make(map[string]*ScopeDefaults),
+	}
+	c := store.New("user:alice", "s", "/tmp", ScopeDefaults{}).Created
+	store.UpdateSession("user:alice", c, func(cur *Session) { cur.Groups = []string{"work"} })
+	got := store.Get("user:alice", c)
+	got.Groups[0] = "hacked"
+	if again := store.Get("user:alice", c); again.Groups[0] != "work" {
+		t.Fatalf("stored groups were mutated through a returned copy: %v", again.Groups)
 	}
 }
 

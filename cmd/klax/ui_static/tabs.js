@@ -6,6 +6,7 @@
 import { api, copyText, flashCopied } from "./base.js";
 import { esc } from "./markdown.js";
 import { uiConfirm } from "./modal.js";
+import { titlePrefix, currentScope, isRoot } from "./scope.js";
 
 let sessions = [], deps = {}, settingsFor = 0, settingsAutofocused = false;
 // draft (non-null) = the "new session" dialog is open for a session that does NOT exist yet.
@@ -16,6 +17,9 @@ let draft = null, draftView = null, draftSubmitting = false;
 // dragging = a tab reorder drag/settle is in progress; while true renderTabs leaves the strip DOM
 // alone. didDrag = the click immediately after a drop must be swallowed (not treated as a select).
 let dragging = false, didDrag = false;
+// groupAdding = the inline "new group" input is open in the settings dialog. It survives the
+// re-renders that follow every applied change, so typing a name is not interrupted by a refresh.
+let groupAdding = false;
 const DRAG_SETTLE_MS = 180;
 const TOUCH_TAP_PX = 10;
 let renderedActive = "";
@@ -109,7 +113,10 @@ export function renderTabs(active){
     if(activeChanged) ensureActiveVisible(true);
   });
   const mark = (totalUnread || "") + "*".repeat(busyCount); // unread count + one * per busy session
-  document.title = mark ? "(" + mark + ") " + BASE_TITLE : BASE_TITLE;
+  // "(3*) work — klax": the counter leads because browsers truncate the TAIL, and the product name
+  // is the droppable part. Counts are over the VISIBLE sessions, the same set the badges use, so
+  // title and strip can never disagree.
+  document.title = (mark ? "(" + mark + ") " : "") + titlePrefix() + BASE_TITLE;
 }
 
 function updateTabOverflow(){
@@ -368,7 +375,7 @@ function fetchDraft(backend){
 // openDraft opens the deferred-creation dialog. No session exists yet — settingsFor stays 0 and
 // `draft` holds the pending field values; nothing is created until onModalOk/createFromDraft.
 function openDraft(){
-  settingsFor = 0; settingsAutofocused = false;
+  settingsFor = 0; settingsAutofocused = false; groupAdding = false;
   draft = {}; draftView = null; draftSubmitting = false;
   const tt = document.querySelector(".smodal-title"); if(tt) tt.textContent = "Новая сессия";
   const ok = document.querySelector(".smodal-ok"); if(ok){ ok.textContent = "Создать"; ok.disabled = false; }
@@ -376,7 +383,10 @@ function openDraft(){
   document.getElementById("sbody").innerHTML = '<div class="shint">Загрузка…</div>';
   fetchDraft("").then(d => {
     if(!draft) return; // dialog was dismissed while loading
-    draft = { name: "", backend: d.backend, model: d.model || "", think: d.think || "", sandbox: d.sandbox, tty: !!d.tty, cwd: d.cwd || "", prompt: d.prompt || "" };
+    // Creating a session INSIDE a group view must not produce a session invisible in that very view,
+    // so the draft is pre-seeded with the current group (only that one, not the neighbours' groups).
+    const seed = isRoot() || currentScope().kind !== "group" ? [] : [currentScope().name];
+    draft = { name: "", backend: d.backend, model: d.model || "", think: d.think || "", sandbox: d.sandbox, tty: !!d.tty, cwd: d.cwd || "", prompt: d.prompt || "", groups: seed };
     renderDraft(d);
   }).catch(() => { if(draft) document.getElementById("sbody").innerHTML = '<div class="shint">Не удалось загрузить настройки</div>'; });
 }
@@ -388,7 +398,7 @@ function renderDraft(view){
   const d = Object.assign({}, draftView, {
     created: 0, busy: false, backend_locked: false, cwd_locked: false,
     name: draft.name || "", backend: draft.backend, model: draft.model || "", think: draft.think || "",
-    sandbox: draft.sandbox, tty: !!draft.tty, cwd: draft.cwd || "", prompt: draft.prompt || "",
+    sandbox: draft.sandbox, tty: !!draft.tty, cwd: draft.cwd || "", prompt: draft.prompt || "", groups: draft.groups || [],
     assigned_model: "", session_id: "", messages: 0, ctx_window: 0, ctx_used: 0,
   });
   renderSettings(d, true);
@@ -421,6 +431,7 @@ async function createFromDraft(){
   if(trim(d.name)) body.name = trim(d.name);
   if(trim(d.cwd)) body.cwd = trim(d.cwd);
   body.prompt = trim(d.prompt);
+  if((d.groups || []).length) body.groups = d.groups;
   // Keep `draft` intact until the server accepts: on a rejected draft (e.g. an inaccessible working
   // directory) the server creates nothing and returns the reason, so we surface THAT and leave the
   // dialog open with the user's values to fix — instead of a generic error and a lost draft.
@@ -491,7 +502,7 @@ function wireSelect(id, onPick){
 }
 
 export function openSettings(created, title){
-  settingsFor = created; settingsAutofocused = false;
+  settingsFor = created; settingsAutofocused = false; groupAdding = false;
   draft = null; draftView = null; // opening a real session's settings supersedes any stale draft state
   const tt = document.querySelector(".smodal-title"); if(tt) tt.textContent = title || "Настройки сессии";
   const ok = document.querySelector(".smodal-ok"); if(ok) ok.textContent = "OK";
@@ -501,7 +512,7 @@ export function openSettings(created, title){
     .catch(() => { if(settingsFor === created) document.getElementById("sbody").innerHTML = '<div class="shint">Не удалось загрузить настройки</div>'; });
 }
 function closeSettings(){
-  settingsFor = 0; settingsAutofocused = false;
+  settingsFor = 0; settingsAutofocused = false; groupAdding = false;
   draft = null; draftView = null; draftSubmitting = false; // discard any pending "new session" draft — closing creates nothing
   const ok = document.querySelector(".smodal-ok"); if(ok) ok.disabled = false;
   document.getElementById("smodal").classList.add("hidden");
@@ -523,8 +534,18 @@ function renderSettings(d, isDraft){
   h += '<div class="srow"><label>Модель</label><div class="sctl">'+selectHTML("s-model", d.models, d.model, true, !!lock)+'</div></div>';
   h += '<div class="srow"><label>Мышление</label><div class="sctl">'+selectHTML("s-think", d.efforts, d.think, true, !!lock)+'</div></div>';
   h += '<div class="srow"><label>Sandbox</label><div class="sctl"><label class="stoggle"><input type="checkbox" id="s-sandbox"'+(d.sandbox==="on"?" checked":"")+dis+'><span>'+(d.sandbox==="on"?"вкл":"выкл")+'</span></label></div></div>';
-  if(d.tty_available)
-    h += '<div class="srow"><label>TTY</label><div class="sctl"><label class="stoggle"><input type="checkbox" id="s-tty"'+(d.tty?" checked":"")+dis+'><span>'+(d.tty?"вкл":"выкл")+'</span></label></div></div>';
+  // Groups are picked, not typed as prose: each one is a chip you can drop with ✕, and "+" offers
+  // the groups this session is not in yet plus an explicit "new group" entry.
+  const curGroups = d.groups || [], freeGroups = (d.known_groups || []).filter(g => curGroups.indexOf(g) === -1);
+  h += '<div class="sfield"><label>Группы</label><div class="sgroups">'
+    + curGroups.map(g => '<span class="sgroup">'+esc(g)+'<button type="button" class="sgroupx" data-group="'+esc(g)+'" title="Убрать">✕</button></span>').join("")
+    + (groupAdding
+        ? '<input class="sgroupnew" type="text" maxlength="32" placeholder="…">'
+        : '<div class="sselect sgroupadd" id="s-groupadd"><button type="button" class="sselect-btn" title="Добавить группу">+</button>'
+          + '<div class="sselect-menu hidden">'
+          + freeGroups.map(g => '<div class="sselect-opt" data-value="'+esc(g)+'">'+esc(g)+'</div>').join("")
+          + '<div class="sselect-opt sgroupnewopt" data-value="">…</div></div></div>')
+    + '</div></div>';
   h += '<div class="sfield"><label>Рабочий каталог</label><input class="scwd" type="text"'+((d.cwd_locked||lock)?" disabled":"")+' value="'+esc(d.cwd||"")+'"></div>';
   h += '<div class="sfield"><label>Системный промпт</label><textarea class="sprompt" rows="1"'+dis+' placeholder="добавляется к системному промпту">'+esc(d.prompt||"")+'</textarea></div>';
   // Read-only facts — the model the backend actually answered with (may differ from the selected
@@ -563,7 +584,6 @@ function renderSettings(d, isDraft){
   wireSelect("s-think",   v => apply({ think: v }));
   const wire = (sel, fn) => { const el = b.querySelector(sel); if(el) el.onchange = fn; };
   wire("#s-sandbox", e => apply({ sandbox: e.target.checked ? "on" : "off" }));
-  wire("#s-tty",     e => apply({ tty: e.target.checked }));
   const cwd = b.querySelector(".scwd");
   if(cwd){
     const applyCwd = () => {
@@ -573,6 +593,52 @@ function renderSettings(d, isDraft){
     };
     cwd.addEventListener("keydown", e => { if(e.key === "Enter"){ e.preventDefault(); cwd.blur(); } });
     cwd.addEventListener("blur", applyCwd);
+  }
+  // A group is a label, not a run parameter: applying it is free at any time, busy or not. A draft
+  // holds the list locally (nothing exists to PATCH yet) and re-paints itself.
+  const applyGroups = list => {
+    groupAdding = false;
+    if(isDraft){ draftApply({ groups: list }); return; }
+    if(list.join("\u0000") !== (d.groups||[]).join("\u0000")) patchSettings(d.created, { groups: list });
+    else renderSettings(d, isDraft);
+  };
+  b.querySelectorAll(".sgroupx").forEach(x => x.addEventListener("click", () => {
+    applyGroups(curGroups.filter(g => g !== x.dataset.group));
+  }));
+  const addRoot = b.querySelector("#s-groupadd");
+  if(addRoot){
+    // Reuse the .sselect open/close vocabulary so the existing outside-click and Escape handlers
+    // apply to this menu too, instead of a second, competing dismissal rule.
+    const btn = addRoot.querySelector(".sselect-btn"), menu = addRoot.querySelector(".sselect-menu");
+    btn.addEventListener("click", e => {
+      e.stopPropagation();
+      const willOpen = menu.classList.contains("hidden");
+      closeAllSelects();
+      if(willOpen){ menu.classList.remove("hidden"); addRoot.classList.add("open"); }
+    });
+    menu.addEventListener("click", e => e.stopPropagation());
+    menu.querySelectorAll(".sselect-opt").forEach(opt => opt.addEventListener("click", e => {
+      e.stopPropagation();
+      menu.classList.add("hidden"); addRoot.classList.remove("open");
+      const v = opt.dataset.value;
+      if(!v){ groupAdding = true; renderSettings(d, isDraft); return; } // "…" → inline input
+      applyGroups(curGroups.concat(v));
+    }));
+  }
+  const groupNew = b.querySelector(".sgroupnew");
+  if(groupNew){
+    groupNew.focus();
+    const commit = () => {
+      const v = groupNew.value.trim();
+      if(!v){ groupAdding = false; renderSettings(d, isDraft); return; }
+      applyGroups(curGroups.indexOf(v) === -1 ? curGroups.concat(v) : curGroups);
+    };
+    groupNew.addEventListener("keydown", e => {
+      if(e.key === "Enter"){ e.preventDefault(); commit(); return; }
+      // Escape cancels only the input — the dialog's own Escape must not fire behind it.
+      if(e.key === "Escape"){ e.preventDefault(); e.stopPropagation(); groupAdding = false; renderSettings(d, isDraft); }
+    });
+    groupNew.addEventListener("blur", commit);
   }
   const prompt = b.querySelector(".sprompt");
   if(prompt) prompt.addEventListener("blur", () => {

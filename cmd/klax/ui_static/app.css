@@ -99,6 +99,83 @@
                                  display: flex; align-items: center; justify-content: center;
                                  font-size: 15px; line-height: 1; }
   #theme { font-size: 13px; }
+  /* Scope chip — the group indicator AND the group switcher in ONE element, shaped like a tab so it
+     introduces no new visual vocabulary. It is absent entirely until the first group exists, so an
+     ungrouped klax keeps exactly the bar it always had. It sits BEFORE the strip (never inside it):
+     inside, it would scroll out of reach exactly when many tabs make it most useful. */
+  #scope { flex: none; position: relative; }
+  #scope.hidden { display: none; }
+  /* A distinctly greyer fill than the bar so the chip reads as a control, not as a label. */
+  .scopebtn { display: flex; align-items: center; gap: 0; max-width: 40vw; height: 26px; padding: 0;
+              border-radius: 8px; border: 1px solid var(--border); background: var(--tool-bg);
+              color: var(--fg); font: inherit; line-height: 1; cursor: pointer; }
+  .scopebtn:hover { border-color: var(--accent); }
+  /* The glyph is a FIXED 26px box at the chip's head — the same square as +, at the same position
+     whether it stands alone (root) or a group name follows it. Nothing about the label may move it:
+     padding lives on the label, never on the button. */
+  /* The ≡ is OUR drawing (scope.js SCOPE_GLYPH) and is laid out as if it were a lowercase letter of
+     the neighbouring text: sized in `ex` (the font's real x-height) and sitting on the BASELINE, so
+     its top edge is the x-line and its bottom edge the baseline. The container therefore carries the
+     SAME font as the text beside it — identical line box, identical baseline — instead of centring
+     the mark in a box, which would place it against the em box's middle and read too high. */
+  .scopeglyph { flex: none; width: 26px; text-align: center; font: 12px/1 ui-monospace, monospace; }
+  /* Size in whole CSS px and NO fractional offset here: sub-pixel tuning lives inside the drawing,
+     on the SVG's own half-pixel grid (see SCOPE_GLYPH in scope.js), so the CSS side stays integer.
+     --scope-lift shifts the mark in whole pixels; anything finer belongs in the viewBox. */
+  .scopeicon { display: inline-block; width: 8px; height: 8px; fill: currentColor;
+               vertical-align: var(--scope-lift, 0px); }
+  /* Group names are identifiers, not prose: the same monospace face the tool blocks use. */
+  /* The glyph's 26px box leaves ~8px of side bearing before the name, which reads as a double space.
+     Pull the LABEL back instead of narrowing the box — the box is what keeps the glyph in one fixed
+     position with and without a name. */
+  .scopename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+               margin-left: -4px; padding-right: 8px; font: 12px/1 ui-monospace, monospace; }
+  /* Group counters are TECHNICAL: "how much is over there", not the green "finished, N new" of a
+     session badge. Different meaning ⇒ deliberately different colour — a flat grey pill, no
+     gradient and no stroke, so the two can never be misread for each other. */
+  .scopecount { margin-right: 8px; background: var(--muted); color: var(--panel);
+                font: 700 11px/1 ui-monospace, monospace; min-width: 17px; height: 17px;
+                padding: 0 4px; border-radius: 5px; display: inline-flex; align-items: center; justify-content: center; }
+  /* The chip gives its width back on a narrow VIEWPORT — the case that motivated collapsing at all.
+     It must never key off the strip's own scroll/overflow state: collapsing widens the strip, which
+     clamps scrollLeft and wakes the strip's ResizeObserver → ensureActiveVisible scrolls back →
+     the class returns → the width changes again. Trigger and effect on the same element's size is
+     an oscillator, not a hysteresis problem. The viewport cannot be moved by the chip. */
+  @media (max-width: 560px) {
+    .scopename { display: none; }
+    .scopecount { margin-right: 6px; }
+  }
+  .scopemenu { position: absolute; z-index: 60; top: calc(100% + 6px); left: 0; min-width: 180px; max-height: 60vh;
+               overflow-y: auto; padding: 4px; border-radius: 10px; border: 1px solid var(--border);
+               background: var(--panel); box-shadow: 0 8px 24px rgba(0,0,0,.18); }
+  .scopemenu.hidden { display: none; }
+  /* No left padding on a row, deliberately: it is what would push the bullets out of line with the
+     chip's glyph. The columns line up by construction —
+       chip:  1px button border + 26px glyph box / 2      = 14px
+       menu:  1px menu border + 4px menu padding + 18px bullet box / 2 = 14px
+     The menu's own 4px padding still keeps the row fill off the border. */
+  .scopeopt { display: flex; align-items: center; gap: 0; padding: 7px 10px 7px 0; border-radius: 7px;
+              color: var(--fg); text-decoration: none; font: 12px/1.4 ui-monospace, monospace; }
+  /* ≡ bullets every row: root is the bare bullet, a group is the bullet plus its name. Same drawn
+     glyph as the chip and the same baseline rule; the font here matches the ROW's, so the bullet and
+     the group name share one baseline. */
+  .scopebullet { flex: none; width: 18px; text-align: center; font: 12px/1.4 ui-monospace, monospace; }
+  /* The gap before the count lives on the NAME, never inside the count: the pill centres its digit
+     with symmetric padding, so touching one side of it moves the digit off-centre. */
+  .scopeoptname { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+                  padding-right: 8px; }
+  /* The count is pinned right whatever the row holds, so the column of numbers stays a column. */
+  .scopeopt .scopecount { margin-left: auto; margin-right: 0; }
+  .scopeopt:hover { background: var(--tool-bg); color: var(--fg); }
+  /* The current scope is marked by a fill, not by weight: bold reflows the monospace column and
+     reads as emphasis rather than as state. */
+  .scopeopt.sel { background: var(--chat); }
+  /* An empty scope explains itself; the scope chip remains the navigation back. The log is only
+     HIDDEN, never rebuilt, so returning to a populated scope re-renders from the model. */
+  #scopeempty { display: none; position: absolute; inset: 0; z-index: 30; background: var(--chat); }
+  body.emptyscope #scopeempty { display: flex; flex-direction: column; align-items: center; justify-content: center;
+                                gap: 8px; padding: 24px; text-align: center; color: var(--muted); }
+  body.emptyscope #composer, body.emptyscope #tobottom { display: none; }
   .tab { padding: 6px 12px; border-radius: 8px; white-space: nowrap; cursor: pointer;
          border: 1px solid transparent; display: flex; align-items: center; gap: 6px; }
   .tab.active {
@@ -394,6 +471,32 @@
                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .sselect-opt:hover { background: var(--tool-bg); }
   .sselect-opt.sel { color: var(--accent); font-weight: 600; }
+  /* Groups: a row of chips plus one "+" that opens the existing groups. Nothing is typed as prose,
+     so there is no comma syntax to get wrong and no ambiguity about what is already applied. */
+  /* One height for EVERY child of the row (chip, +, the inline input) so replacing + with the input
+     cannot change the row's height — the dialog is vertically centred, so any height change moves
+     the whole box under the cursor. */
+  .sgroups { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-height: 28px; }
+  .sgroup { height: 28px; display: inline-flex; align-items: center; gap: 5px; padding: 0 5px 0 9px;
+          font: 12px/1 ui-monospace, monospace;
+          border-radius: 8px; border: 1px solid var(--border); background: var(--tool-bg); }
+  .sgroupx { width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center;
+           border: 0; background: transparent; color: var(--muted); padding: 0; font-size: 11px;
+           line-height: 1; border-radius: 4px; }
+  .sgroupx:hover { color: var(--error-fg); border-color: transparent; }
+  .sgroupadd { width: auto; height: 28px; }       /* not the 240px of a settings dropdown */
+  /* The + is a bare text node, so it cannot be transformed on its own — and transforming the BUTTON
+     would drag its border out of the row. A 2px bottom padding shrinks the content box inside the
+     fixed 28px square instead, lifting the centred glyph by one pixel. */
+  .sgroupadd .sselect-btn { width: 28px; height: 28px; padding: 0 0 2px; justify-content: center;
+                          font-size: 15px; line-height: 1; }
+  .sgroupadd .sselect-menu { left: 0; right: auto; min-width: 160px; }
+  .sgroupadd .sselect-opt { font: 12px/1.4 ui-monospace, monospace; }
+  /* The "new group" affordance is just "…" — an ellipsis reads as "type it yourself" without
+     spending a line of prose in a column of identifiers. */
+  .sgroupnewopt { color: var(--muted); font-family: inherit; font-size: 13px; }
+  .sgroupnew { height: 28px; width: auto !important; min-width: 140px; padding: 0 9px !important;
+             font: 12px/1 ui-monospace, monospace; }
   .stoggle { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; font-size: 13px; }
   .stoggle input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
   .shint { color: var(--muted); font-size: 11px; margin: 0 0 8px; }
