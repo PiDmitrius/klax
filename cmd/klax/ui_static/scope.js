@@ -150,9 +150,9 @@ export function renderChip(list, unreadOf){
   // ≡ names the root the same way in both places — as the chip's opener and as the menu's first
   // entry — so "the whole list" has one symbol rather than two competing ones.
   // Every menu row is bulleted with the same ≡: "the whole list" for root, "the list filtered by X"
-  // for a group. So root's row is the bare bullet — its name IS the glyph, and printing it twice would
-  // only be noise.
-  const items = [{ href: "#", label: "", on: isRoot(), n: total }]
+  // for a group. Root's label is `*` — the name group validation already reserves for it, so the
+  // name that exists in the code is the name the user sees, and no row is left without one.
+  const items = [{ href: "#", label: "*", on: isRoot(), n: total }]
     .concat(groups.map(g => ({ href: "#" + encodeScope(g), label: g, on: scope.kind === "group" && scope.name === g, n: perGroup.get(g) || 0 })));
   host.innerHTML =
     '<button type="button" class="scopebtn' + (isRoot() ? " root" : "") + '" title="Группы">'
