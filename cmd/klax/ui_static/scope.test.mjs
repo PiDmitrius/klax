@@ -59,10 +59,11 @@ test("parseHash decodes percent-encoded names and survives a malformed escape", 
   at("#" + encodeURIComponent("дом") + "/42");
   assert.deepEqual(parseHash(), { scope: { kind: "group", name: "дом" }, created: 42 });
 
-  // A hand-mangled address must not throw; it degrades to the raw segment.
+  // A hand-mangled address must not throw, and must degrade to the RAW segment — asserting the name
+  // itself, so an implementation that truncated or substituted it could not pass.
   at("#%E0%A4%A");
   assert.doesNotThrow(parseHash);
-  assert.equal(parseHash().scope.kind, "group");
+  assert.deepEqual(parseHash(), { scope: { kind: "group", name: "%E0%A4%A" }, created: 0 });
 });
 
 test("a non-numeric second segment is not a session id", () => {
@@ -145,11 +146,11 @@ test("knownGroups derives the set from the sessions and orders it case-insensiti
   assert.deepEqual(knownGroups([sess(1), sess(2)]), []);
   assert.deepEqual(knownGroups(undefined), []);
 
-  // Case-insensitive: the two spellings of klax are adjacent rather than split by case, and the
-  // case-sensitive tiebreaker keeps their relative order stable across renders.
-  const [a, b] = [got.indexOf("Klax"), got.indexOf("klax")];
-  assert.equal(Math.abs(a - b), 1, `expected Klax/klax adjacent in ${JSON.stringify(got)}`);
-  assert.deepEqual(knownGroups(list), got);
+  // One discriminating case proves BOTH rules at once and needs no locale assumption: a
+  // case-sensitive comparator would put "Alpha" before "alpha" before "zulu" only by accident of
+  // adjacency, so assert the exact sequence. Case-insensitively alpha precedes zulu; between the two
+  // spellings of alpha the raw-case tiebreaker decides, and uppercase sorts first.
+  assert.deepEqual(knownGroups([sess(1, "zulu", "Alpha", "alpha")]), ["Alpha", "alpha", "zulu"]);
 
   // No assertion on cross-alphabet collation: localeCompare uses the runtime's locale, so the order
   // of Cyrillic against Latin is not ours to pin. What must hold is that it is total and stable.

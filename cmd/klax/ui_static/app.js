@@ -381,6 +381,11 @@ async function loadTranscript(created){
     const r = await api("/api/transcript?session=" + created + "&limit=" + CAP);
     if(!r.ok) return;
     const data = await r.json();
+    // The session may have been CLOSED while this was in flight. `dropActive` already tore its state
+    // down; repopulating it here would leave a dead session with a live model and a `loaded` flag,
+    // which nothing would ever clear. Leaving a group is different — the session still exists, so
+    // its state is deliberately kept.
+    if(!sessionList.some(s => s.created === created)) return;
     model.reconcile(created, data.turns || []);
     loaded[created] = true;
     offsetFor[created] = data.offset || 0;
@@ -636,6 +641,19 @@ async function onSessionsList(list){
     else leaveActive(); // still exists elsewhere: bank what is in the composer before letting go
     if(next) selectLater(next); // not awaited: `active` is set synchronously, the transcript follows
   }
+  if(!active && visible.length){
+    // Restore priority: explicit URL hash → this scope's last-viewed tab (localStorage) →
+    // the server's active flag → first tab. Both remembered ids fall through if that session
+    // was since closed (find returns undefined), so a stale value can never strand the UI.
+    // This runs BEFORE the strip is drawn: selection assigns `active` synchronously and only the
+    // transcript is fetched afterwards, so drawing first would paint a strip with no active tab and
+    // leave it that way until the fetch returned — or forever, if it never did.
+    let stored = 0;
+    try { stored = parseInt(localStorage.getItem(storageKey()), 10) || 0; } catch(e){}
+    const want = parseHash().created || stored;
+    const a = visible.find(s => s.created === want) || visible.find(s => s.active) || visible[0];
+    if(a) selectLater(a.created);
+  }
   reconcileSessions(visible, active);
   renderChip(list, badgeCount);
   // A cross-tab read advance is a DISCRETE change: start the live animation immediately so the
@@ -643,23 +661,17 @@ async function onSessionsList(list){
   // post-fade merge when the unread line used to split one bubble.
   if(activeReadAdvanced && loaded[active]) commitLive(active);
   else if(affected.has(active) && loaded[active]) scheduleLiveRerender(active);
-  if(!active && visible.length){
-    // Restore priority: explicit URL hash → this scope's last-viewed tab (localStorage) →
-    // the server's active flag → first tab. Both remembered ids fall through if that session
-    // was since closed (find returns undefined), so a stale value can never strand the UI.
-    let stored = 0;
-    try { stored = parseInt(localStorage.getItem(storageKey()), 10) || 0; } catch(e){}
-    const want = parseHash().created || stored;
-    const a = visible.find(s => s.created === want) || visible.find(s => s.active) || visible[0];
-    if(a) selectLater(a.created);
-  }
   setEmptyScope(!visible.length);
 }
 
 // selectLater starts a selection without making the caller wait for the transcript. The selection
 // itself (which tab is active, its draft, the address bar) happens synchronously inside; only the
 // fetch is left running, and its own render path is guarded on the session still being active.
-function selectLater(created){ selectSession(created).catch(() => {}); }
+function selectLater(created){
+  // Transcript and API failures are already absorbed inside loadTranscript, so anything surfacing
+  // here is a programming or DOM error — swallowing it silently would hide a real bug.
+  selectSession(created).catch(e => console.error("klax: select session", created, e));
+}
 
 // leaveActive / dropActive are the TWO ways this window stops showing the active session, and the
 // difference between them is what survives. A session that merely left the current scope still
