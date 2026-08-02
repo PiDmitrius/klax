@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/png"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -458,9 +461,11 @@ func TestHandleSPAManifestUsesConfiguredTitle(t *testing.T) {
 		Scope      string `json:"scope"`
 		Display    string `json:"display"`
 		ThemeColor string `json:"theme_color"`
+		Background string `json:"background_color"`
 		Icons      []struct {
 			Src     string `json:"src"`
 			Sizes   string `json:"sizes"`
+			Type    string `json:"type"`
 			Purpose string `json:"purpose"`
 		} `json:"icons"`
 	}
@@ -473,11 +478,41 @@ func TestHandleSPAManifestUsesConfiguredTitle(t *testing.T) {
 	if manifest.StartURL != "." || manifest.Scope != "." || manifest.Display != "standalone" {
 		t.Fatalf("manifest routing/display = %+v", manifest)
 	}
-	if manifest.ThemeColor != "#006400" || len(manifest.Icons) != 3 {
+	if manifest.ThemeColor != "#f5f6f8" || manifest.Background != "#f5f6f8" || len(manifest.Icons) != 4 {
 		t.Fatalf("manifest theme/icons = %+v", manifest)
 	}
-	if manifest.Icons[2].Purpose != "maskable" || manifest.Icons[2].Sizes != "512x512" {
-		t.Fatalf("maskable icon = %+v", manifest.Icons[2])
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw manifest: %v", err)
+	}
+	if _, ok := raw["id"]; ok {
+		t.Fatal("manifest must omit id: a relative id resolves at the origin and loses a reverse-proxy prefix")
+	}
+	maskable := 0
+	for _, icon := range manifest.Icons {
+		if icon.Type != "image/png" {
+			t.Fatalf("icon %s type = %q", icon.Src, icon.Type)
+		}
+		if icon.Purpose == "maskable" {
+			maskable++
+		}
+		path := "/" + strings.TrimPrefix(icon.Src, "./")
+		iconRec := httptest.NewRecorder()
+		s.handleSPA(iconRec, httptest.NewRequest("GET", path, nil))
+		if iconRec.Code != http.StatusOK || iconRec.Header().Get("Content-Type") != "image/png" {
+			t.Fatalf("icon %s: code %d, content-type %q", icon.Src, iconRec.Code, iconRec.Header().Get("Content-Type"))
+		}
+		cfg, _, err := image.DecodeConfig(bytes.NewReader(iconRec.Body.Bytes()))
+		if err != nil {
+			t.Fatalf("decode icon %s: %v", icon.Src, err)
+		}
+		actual := fmt.Sprintf("%dx%d", cfg.Width, cfg.Height)
+		if actual != icon.Sizes {
+			t.Fatalf("icon %s declares %s, actual %s", icon.Src, icon.Sizes, actual)
+		}
+	}
+	if maskable != 1 {
+		t.Fatalf("manifest has %d maskable icons, want 1", maskable)
 	}
 }
 

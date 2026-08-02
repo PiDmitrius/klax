@@ -1,12 +1,11 @@
 {
-  "id": ".",
   "name": __KLAX_UI_TITLE_JSON__,
   "short_name": __KLAX_UI_TITLE_JSON__,
   "start_url": ".",
   "scope": ".",
   "display": "standalone",
-  "theme_color": "#006400",
-  "background_color": "#006400",
+  "theme_color": "#f5f6f8",
+  "background_color": "#f5f6f8",
   "icons": [
     {
       "src": "./app-icon-any-192.png",
@@ -17,6 +16,12 @@
     {
       "src": "./app-icon-any-512.png",
       "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./app-icon-1024.png",
+      "sizes": "1024x1024",
       "type": "image/png",
       "purpose": "any"
     },
