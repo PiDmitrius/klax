@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -437,6 +438,46 @@ func TestHandleSPAInjectsUITitle(t *testing.T) {
 
 	if esc := serve("<b>"); strings.Contains(esc, "<title><b></title>") || !strings.Contains(esc, "&lt;b&gt;") {
 		t.Fatal("ui_title must be HTML-escaped")
+	}
+}
+
+func TestHandleSPAManifestUsesConfiguredTitle(t *testing.T) {
+	s := &uiServer{d: &daemon{cfg: &config.Config{UITitle: `KLODIN "mobile"`}}}
+	rec := httptest.NewRecorder()
+	s.handleSPA(rec, httptest.NewRequest("GET", "/manifest.webmanifest", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("manifest code=%d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/manifest+json" {
+		t.Fatalf("manifest content-type=%q", ct)
+	}
+	var manifest struct {
+		Name       string `json:"name"`
+		ShortName  string `json:"short_name"`
+		StartURL   string `json:"start_url"`
+		Scope      string `json:"scope"`
+		Display    string `json:"display"`
+		ThemeColor string `json:"theme_color"`
+		Icons      []struct {
+			Src     string `json:"src"`
+			Sizes   string `json:"sizes"`
+			Purpose string `json:"purpose"`
+		} `json:"icons"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &manifest); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if manifest.Name != `KLODIN "mobile"` || manifest.ShortName != manifest.Name {
+		t.Fatalf("manifest names = %q / %q", manifest.Name, manifest.ShortName)
+	}
+	if manifest.StartURL != "." || manifest.Scope != "." || manifest.Display != "standalone" {
+		t.Fatalf("manifest routing/display = %+v", manifest)
+	}
+	if manifest.ThemeColor != "#006400" || len(manifest.Icons) != 3 {
+		t.Fatalf("manifest theme/icons = %+v", manifest)
+	}
+	if manifest.Icons[2].Purpose != "maskable" || manifest.Icons[2].Sizes != "512x512" {
+		t.Fatalf("maskable icon = %+v", manifest.Icons[2])
 	}
 }
 
