@@ -1403,7 +1403,11 @@ func (s *uiServer) handleEmoji(w http.ResponseWriter, r *http.Request) {
 // at "/<name>.js" / "/<name>.css". /api/* and /emoji/ are more-specific routes and never
 // reach here. Any other path 404s (no SPA-deep-link routing — the UI is one page).
 func (s *uiServer) handleSPA(w http.ResponseWriter, r *http.Request) {
-	if p := r.URL.Path; strings.HasSuffix(p, ".js") || strings.HasSuffix(p, ".css") {
+	if r.URL.Path == "/manifest.webmanifest" {
+		s.serveManifest(w)
+		return
+	}
+	if p := r.URL.Path; strings.HasSuffix(p, ".js") || strings.HasSuffix(p, ".css") || strings.HasSuffix(p, ".png") {
 		s.serveModule(w, r, p)
 		return
 	}
@@ -1415,6 +1419,14 @@ func (s *uiServer) handleSPA(w http.ResponseWriter, r *http.Request) {
 	page := bytes.ReplaceAll(spaHTML, []byte("__KLAX_UI_TITLE__"), []byte(html.EscapeString(s.d.cfg.GetUITitle())))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(page)
+}
+
+func (s *uiServer) serveManifest(w http.ResponseWriter) {
+	title, _ := json.Marshal(s.d.cfg.GetUITitle())
+	data := bytes.ReplaceAll(manifestJSON, []byte("__KLAX_UI_TITLE_JSON__"), title)
+	w.Header().Set("Content-Type", "application/manifest+json")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(data)
 }
 
 // serveModule serves one SPA ES module / stylesheet from the embedded ui_static dir. The
@@ -1435,6 +1447,8 @@ func (s *uiServer) serveModule(w http.ResponseWriter, r *http.Request, p string)
 	ct := "text/javascript; charset=utf-8"
 	if strings.HasSuffix(name, ".css") {
 		ct = "text/css; charset=utf-8"
+	} else if strings.HasSuffix(name, ".png") {
+		ct = "image/png"
 	}
 	w.Header().Set("Content-Type", ct)
 	w.Header().Set("Cache-Control", "no-cache")

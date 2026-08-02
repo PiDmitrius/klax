@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -11,6 +12,12 @@ import (
 
 func TestSPASystemControlsAndNoticeStack(t *testing.T) {
 	page := string(spaHTML)
+	if !strings.Contains(page, `rel="apple-touch-icon" sizes="180x180" href="./apple-touch-icon-180-v7.png"`) {
+		t.Fatal("Apple touch icon must use a relative URL so reverse-proxy path prefixes are preserved")
+	}
+	if !strings.Contains(page, `rel="manifest" href="./manifest.webmanifest"`) {
+		t.Fatal("web app manifest must use a relative URL so reverse-proxy path prefixes are preserved")
+	}
 	for _, want := range []string{`id="sysbtn"`, `id="sysmodal"`, `id="notifications"`} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("SPA shell missing %s", want)
@@ -187,7 +194,7 @@ assert(notifications.children[9].children[1].textContent === "notice 12", "newes
 }
 
 // serveModule serves an embedded ES module with the right MIME and rejects traversal /
-// missing files; handleSPA dispatches *.js / *.css to it without needing auth or a daemon.
+// missing files; handleSPA dispatches static assets to it without needing auth or a daemon.
 func TestServeModule(t *testing.T) {
 	s := &uiServer{}
 
@@ -201,6 +208,15 @@ func TestServeModule(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "TurnModel") {
 		t.Fatal("model.js body missing TurnModel")
+	}
+
+	rec = httptest.NewRecorder()
+	s.serveModule(rec, httptest.NewRequest("GET", "/apple-touch-icon-180-v7.png", nil), "/apple-touch-icon-180-v7.png")
+	if rec.Code != 200 || rec.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("app icon: code %d, content-type %q", rec.Code, rec.Header().Get("Content-Type"))
+	}
+	if body := rec.Body.Bytes(); len(body) < 24 || !bytes.Equal(body[:8], []byte("\x89PNG\r\n\x1a\n")) {
+		t.Fatal("app icon body is not a PNG")
 	}
 
 	rec = httptest.NewRecorder()
