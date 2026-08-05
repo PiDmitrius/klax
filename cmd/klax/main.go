@@ -8,10 +8,12 @@ import (
 	"os"
 )
 
-const version = "0.7.365"
+const version = "0.7.385"
 
 func main() {
 	log.SetPrefix("klax: ")
+	// Every log line leaves through here; see redactSecrets.
+	log.SetOutput(redactingWriter{w: log.Writer()})
 
 	if len(os.Args) < 2 {
 		printUsage()

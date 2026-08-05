@@ -858,7 +858,7 @@ func (d *daemon) handleTransports(chatID, msgID string, parts []string) {
 			delete(d.disabled, name)
 			d.mu.Unlock()
 			d.saveDisabled()
-			d.startPoll(name)
+			d.connect(name) // revalidate: the transport may never have passed its handshake
 			d.sendPlain(chatID, msgID, d.transportsText())
 		case "off":
 			if name == current {
