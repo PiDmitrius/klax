@@ -62,7 +62,7 @@ func TestHandleFileUsesDisplayNameForDownload(t *testing.T) {
 	d.store = &session.Store{Chats: map[string]*session.ChatSessions{}, Scope: map[string]*session.ScopeDefaults{}}
 	sess := d.store.New("user:alice", "one", cwd, session.ScopeDefaults{})
 	store := sessfiles.Open("user:alice", sess.Created)
-	stored, err := store.Adopt(filepath.Base(src), src)
+	stored, _, err := store.Adopt(filepath.Base(src), src)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,24 +130,24 @@ func TestSessionStoreCanonicalNoResurrection(t *testing.T) {
 	if s1, s2 := d.sessionStore(sk, created), d.sessionStore(sk, created); s1 != s2 {
 		t.Fatal("sessionStore must return one canonical instance")
 	}
-	if _, err := d.sessionStore(sk, created).EnsureLink("000001-01-a.png", "a.png", "image/png"); err != nil {
+	if _, err := d.sessionStore(sk, created).Commit(sessfiles.LinkRecord{Blob: "000001-01-a.png", Name: "a.png", ContentType: "image/png"}); err != nil {
 		t.Fatal(err)
 	}
 	dir := sessfiles.WorkDir(sk, created)
 	if _, err := os.Stat(dir); err != nil {
-		t.Fatalf("session dir should exist after EnsureLink: %v", err)
+		t.Fatalf("session dir should exist after Commit: %v", err)
 	}
 
 	d.removeSessionStore(sk, created)
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("dir should be gone after removeSessionStore: %v", err)
 	}
-	// A late EnsureLink through the canonical store must refuse and NOT re-create the directory.
-	if _, err := d.sessionStore(sk, created).EnsureLink("000001-01-b.png", "b.png", "image/png"); err != sessfiles.ErrRemoved {
-		t.Fatalf("late EnsureLink after remove = %v, want ErrRemoved", err)
+	// A late Commit through the canonical store must refuse and NOT re-create the directory.
+	if _, err := d.sessionStore(sk, created).Commit(sessfiles.LinkRecord{Blob: "000001-01-b.png", Name: "b.png", ContentType: "image/png"}); err != sessfiles.ErrRemoved {
+		t.Fatalf("late Commit after remove = %v, want ErrRemoved", err)
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Fatalf("late EnsureLink must not resurrect the dir: stat=%v", err)
+		t.Fatalf("late Commit must not resurrect the dir: stat=%v", err)
 	}
 }
 
@@ -160,7 +160,7 @@ func TestNewSessionAfterDeleteGetsFreshStore(t *testing.T) {
 	sk := "user:alice"
 
 	a := d.store.New(sk, "a", "/tmp", session.ScopeDefaults{})
-	if _, err := d.sessionStore(sk, a.Created).EnsureLink("000001-01-x.png", "x.png", "image/png"); err != nil {
+	if _, err := d.sessionStore(sk, a.Created).Commit(sessfiles.LinkRecord{Blob: "000001-01-x.png", Name: "x.png", ContentType: "image/png"}); err != nil {
 		t.Fatal(err)
 	}
 	d.removeSessionStore(sk, a.Created) // marks a's canonical Store removed
@@ -173,7 +173,7 @@ func TestNewSessionAfterDeleteGetsFreshStore(t *testing.T) {
 		t.Fatalf("Created reused after delete: %d", b.Created)
 	}
 	// The new session's canonical Store must be a fresh, writable one (not a's removed Store).
-	if _, err := d.sessionStore(sk, b.Created).EnsureLink("000001-01-y.png", "y.png", "image/png"); err != nil {
+	if _, err := d.sessionStore(sk, b.Created).Commit(sessfiles.LinkRecord{Blob: "000001-01-y.png", Name: "y.png", ContentType: "image/png"}); err != nil {
 		t.Fatalf("new session's store must be writable, got %v", err)
 	}
 }

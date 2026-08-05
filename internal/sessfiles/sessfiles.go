@@ -25,6 +25,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/PiDmitrius/klax/internal/session"
 )
@@ -64,11 +66,14 @@ func WorkDir(key string, created int64) string {
 // per (key, created); the daemon keeps it on the sessionRunner. The durable-store
 // lock (mu) is DISTINCT from the runner's sr.mu — never held across runner waits.
 type Store struct {
-	dir     string
-	mu      sync.Mutex
-	seq     int64 // turn_seq high-water, lazily loaded from queue.jsonl
-	loaded  bool
-	removed bool // set by Remove; afterwards Enqueue/append return ErrRemoved (no resurrection)
+	dir        string
+	mu         sync.Mutex
+	seq        int64 // turn_seq high-water, lazily loaded from queue.jsonl
+	loaded     bool
+	removed    bool       // set by Remove; afterwards Enqueue/append return ErrRemoved (no resurrection)
+	links      *linksFile // see links.go
+	linksMtime time.Time
+	linksSize  int64
 }
 
 // Open binds a Store to a session. No I/O — directories are created lazily.
@@ -94,31 +99,123 @@ func (s *Store) WriteFile(turnSeq int64, idx int, name string, r io.Reader) (str
 	return s.putDurable(storedName(turnSeq, idx, name), r)
 }
 
-// Adopt copies an agent-produced output file into the durable store under a
-// content-addressed name "out-<hash>-name.ext" (immutable + dedup'd), so the served
-// copy survives the agent later rewriting or deleting the original. Returns the
-// stored base name. Holds the durable-store lock (so a concurrent close latch is
-// honored: a removed store returns ErrRemoved rather than being resurrected).
-func (s *Store) Adopt(name, srcPath string) (string, error) {
+// Adopt stores an agent-produced file under its content hash, in three steps, each avoiding the work
+// of the next: the identity index answers for an unchanged file without reading it; a read-only probe
+// recognises content that is already stored without writing it; otherwise the source is copied and
+// hashed in one pass, and the blob's name comes from the bytes actually written.
+//
+// The probe costs a second full read of genuinely new content. That is the deliberate trade: the
+// alternative — stage the copy first and discard it on a duplicate — writes the whole file to disk
+// every time content is already stored, which for the multi-gigabyte outputs this handles is far
+// worse than reading it twice once.
+//
+// Returns the blob and the stat to record for it, nil when the identity index already answered.
+// Adopt never writes links.json; the caller commits the whole link in one write.
+func (s *Store) Adopt(name, srcPath string) (string, os.FileInfo, error) {
+	s.mu.Lock()
+	removed := s.removed
+	s.mu.Unlock()
+	if removed {
+		return "", nil, ErrRemoved
+	}
+	dir := s.filesDir()
+
+	if fi, err := os.Stat(srcPath); err == nil {
+		if blob, ok := s.SeenBlob(srcPath, fi); ok {
+			return blob, nil, nil
+		}
+	}
+
 	src, err := os.Open(srcPath)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	defer src.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, src); err != nil {
-		return "", err
+	fi, statErr := src.Stat() // before the read, so the recorded identity describes the bytes read
+	if statErr != nil {
+		fi = nil
+	}
+
+	if stored, ok, err := s.adoptProbe(name, src); err != nil {
+		return "", nil, err
+	} else if ok {
+		return stored, fi, nil
 	}
 	if _, err := src.Seek(0, io.SeekStart); err != nil {
-		return "", err
+		return "", nil, err
+	}
+	if err := mkdirAllSync(dir); err != nil {
+		return "", nil, err
+	}
+	tmp, err := os.CreateTemp(dir, ".adopt-*")
+	if err != nil {
+		return "", nil, err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // cleans the temp on error and after a successful link
+
+	h := sha256.New()
+	_, err = io.Copy(io.MultiWriter(tmp, h), src)
+	if err != nil {
+		tmp.Close()
+		return "", nil, err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return "", nil, err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", nil, err
 	}
 	stored := "out-" + hex.EncodeToString(h.Sum(nil)[:16]) + "-" + Sanitize(name) // 128-bit, collision-safe
+
+	if err := s.publish(dir, tmpName, stored); err != nil {
+		return "", nil, err
+	}
+	return stored, fi, nil
+}
+
+// publish links the staged temp into place.
+func (s *Store) publish(dir, tmpName, stored string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.removed {
-		return "", ErrRemoved
+		return ErrRemoved
 	}
-	return s.putDurable(stored, src)
+	final := filepath.Join(dir, stored)
+	if _, err := os.Lstat(final); err == nil {
+		return nil
+	}
+	// EEXIST means a concurrent writer published the same content first.
+	if err := os.Link(tmpName, final); err != nil {
+		if os.IsExist(err) {
+			return nil
+		}
+		return err
+	}
+	return fsyncDir(dir)
+}
+
+// sourceProbes counts probe passes over an agent-produced source, so a test can assert that an
+// unchanged file was not read at all — an assertion nothing observable in the result can make.
+var sourceProbes atomic.Int64
+
+// adoptProbe reports whether this content is already published, by hashing it read-only. Equal blob
+// names mean equal content, since a blob's name comes from the bytes stored in it. It hashes the
+// caller's OPEN descriptor — reopening the path would let the probe and the copy see two different
+// files, and the blob returned here is the one the caller then renders.
+func (s *Store) adoptProbe(name string, src io.Reader) (string, bool, error) {
+	sourceProbes.Add(1)
+	h := sha256.New()
+	_, err := io.Copy(h, src)
+	if err != nil {
+		return "", false, err
+	}
+	stored := "out-" + hex.EncodeToString(h.Sum(nil)[:16]) + "-" + Sanitize(name)
+	if _, err := os.Lstat(filepath.Join(s.filesDir(), stored)); err != nil {
+		return "", false, nil
+	}
+	return stored, true, nil
 }
 
 // putDurable writes r to files/<stored> durably (temp -> fsync -> exclusive link ->
@@ -228,6 +325,7 @@ func (s *Store) Remove() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.removed = true
+	s.links = nil
 	return os.RemoveAll(s.dir)
 }
 
