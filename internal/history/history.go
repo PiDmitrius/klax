@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/claudetty/transcript"
@@ -496,13 +497,26 @@ func claudeAssistant(raw json.RawMessage) (string, []ToolCall, int) {
 
 // ---- Codex rollout ----
 
+// codexPaths caches located rollouts. A rollout's path is fixed once written, so a cached entry can
+// only go stale by the file being removed, which the stat catches.
+var codexPaths sync.Map // threadID -> path
+
+// locateCodex finds a codex rollout by thread id, scanning ~/.codex/sessions only on a cache miss.
 func locateCodex(threadID string) string {
+	if v, ok := codexPaths.Load(threadID); ok {
+		p := v.(string)
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+		codexPaths.Delete(threadID)
+	}
 	home, _ := os.UserHomeDir()
 	if home == "" {
 		return ""
 	}
 	matches, _ := filepath.Glob(filepath.Join(home, ".codex", "sessions", "*", "*", "*", "*"+threadID+".jsonl"))
 	if len(matches) > 0 {
+		codexPaths.Store(threadID, matches[0])
 		return matches[0]
 	}
 	return ""

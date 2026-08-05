@@ -305,7 +305,7 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 				if b.Text != "" || len(b.Tools) == 0 {
 					ut.Blocks = append(ut.Blocks, uiBlock{
 						ID: blockID(seq, "assistant", b.Text, nil), Role: "assistant",
-						Text: d.rewriteOutboundForUI(sk, created, b.Text), Time: b.Time,
+						Text: d.rewriteOutboundForUI(sk, created, seq, b.Text), Time: b.Time,
 					})
 				}
 				for _, tc := range b.Tools {

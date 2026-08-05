@@ -536,8 +536,8 @@ func TestYMThreadChatIDNoInheritWhenParentGroupModeOff(t *testing.T) {
 // "@<login>" as one more groupTriggerPrefixes entry is enough for either transport — no
 // separate structured-entity parsing needed.
 func TestRegisterSelfMentionTriggerMakesMentionAGroupTrigger(t *testing.T) {
-	original := append([]string(nil), groupTriggerPrefixes...)
-	defer func() { groupTriggerPrefixes = original }()
+	original := triggerPrefixes()
+	defer func() { groupTriggerPrefixes.Store(original) }()
 
 	registerSelfMentionTrigger("Yndx-Mssngr-jB6XY8NfmC-Bot")
 
@@ -551,8 +551,8 @@ func TestRegisterSelfMentionTriggerMakesMentionAGroupTrigger(t *testing.T) {
 }
 
 func TestRegisterSelfMentionTriggerWorksForTelegramUsername(t *testing.T) {
-	original := append([]string(nil), groupTriggerPrefixes...)
-	defer func() { groupTriggerPrefixes = original }()
+	original := triggerPrefixes()
+	defer func() { groupTriggerPrefixes.Store(original) }()
 
 	registerSelfMentionTrigger("klax_dev_bot")
 
@@ -566,13 +566,13 @@ func TestRegisterSelfMentionTriggerWorksForTelegramUsername(t *testing.T) {
 }
 
 func TestRegisterSelfMentionTriggerIgnoresEmptyLogin(t *testing.T) {
-	original := append([]string(nil), groupTriggerPrefixes...)
-	defer func() { groupTriggerPrefixes = original }()
+	original := triggerPrefixes()
+	defer func() { groupTriggerPrefixes.Store(original) }()
 
 	registerSelfMentionTrigger("")
 
-	if len(groupTriggerPrefixes) != len(original) {
-		t.Fatalf("an empty login must not add a trigger, prefixes = %v", groupTriggerPrefixes)
+	if len(triggerPrefixes()) != len(original) {
+		t.Fatalf("an empty login must not add a trigger, prefixes = %v", triggerPrefixes())
 	}
 }
 
@@ -581,8 +581,8 @@ func TestRegisterSelfMentionTriggerIgnoresEmptyLogin(t *testing.T) {
 // (punctuation or whitespace right after the matched prefix) already guards this; this
 // just locks that guarantee in for the mention case specifically.
 func TestRegisterSelfMentionTriggerDoesNotMatchUnrelatedNameWithSamePrefix(t *testing.T) {
-	original := append([]string(nil), groupTriggerPrefixes...)
-	defer func() { groupTriggerPrefixes = original }()
+	original := triggerPrefixes()
+	defer func() { groupTriggerPrefixes.Store(original) }()
 
 	registerSelfMentionTrigger("klax_dev_bot")
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -67,6 +68,8 @@ type daemon struct {
 	disabled     map[string]bool                // disabled transports
 	pollCtx      map[string]context.CancelFunc  // cancel functions for poll goroutines
 	sources      map[string]Source              // inbound channels by name (tg/mx/vk/ui)
+	handshakes   map[string]func() error        // per-transport readiness check, re-run by /transports on
+	connecting   map[string]bool                // handshakes in flight, so connect stays single-flight
 	store        *session.Store
 	runners      map[runnerKey]*sessionRunner // (sessionKey, created) -> runner+queue
 	runnersMu    sync.Mutex
@@ -109,6 +112,99 @@ func startupBackoff(attempt int) time.Duration {
 		return time.Minute
 	}
 	return d
+}
+
+// connectTransport runs one transport's startup handshake in the background and starts its poll loop
+// when it succeeds. A transient failure retries forever; a permanent one (bad or revoked token)
+// abandons this transport's connection attempt and leaves the rest of the daemon running.
+func connectTransport(name string, handshake func() error, onReady, onDone func()) {
+	go func() {
+		if onDone != nil {
+			defer onDone()
+		}
+		for attempt := 0; ; attempt++ {
+			err := handshake()
+			if err == nil {
+				onReady()
+				return
+			}
+			if isPermanentStartupError(err) {
+				log.Printf("[FAIL] %s not connected: %v — other transports are unaffected", name, err)
+				return
+			}
+			wait := connectBackoff(attempt)
+			log.Printf("%s unreachable: %v (retry in %v)", name, err, wait)
+			time.Sleep(wait)
+		}
+	}()
+}
+
+// announceStartup tells the messengers the daemon is up, without waiting: a send retries for up to
+// sendTimeout per user against an unreachable platform, and nothing on the startup path may block on
+// that. The UI reads the same fact from /api/tail.
+func (d *daemon) announceStartup(text string) { go d.notifyAllUsers(text) }
+
+// connect runs a transport's readiness check in the background and starts its poll loop when it
+// succeeds. Used at startup and by `/transports on`, so enabling always revalidates.
+//
+// Idempotent, and that is load-bearing: the handshake drains the platform's pending updates, which
+// DISCARDS them. Re-running it against a transport that is already polling would eat live messages
+// and mutate the bot's cursor underneath its own poll loop.
+func (d *daemon) connect(name string) {
+	d.mu.Lock()
+	h := d.handshakes[name]
+	_, polling := d.pollCtx[name]
+	if h == nil || polling || d.connecting[name] {
+		d.mu.Unlock()
+		return
+	}
+	d.connecting[name] = true
+	d.mu.Unlock()
+
+	connectTransport(name, h, func() { d.startPoll(name) }, func() {
+		d.mu.Lock()
+		delete(d.connecting, name)
+		d.mu.Unlock()
+	})
+}
+
+// connectBackoff is a variable so tests can shorten the schedule.
+var connectBackoff = startupBackoff
+
+// secretRes match credentials a transport error can quote back: Go's http client puts the full
+// request URL in its error text, and a token may sit in the path or in a query parameter. The bot
+// ID before the colon is public identity, not a credential, so it is kept.
+var secretRes = []struct {
+	re   *regexp.Regexp
+	repl string
+}{
+	{regexp.MustCompile(`(?i)(bot\d{5,}):[A-Za-z0-9_-]{10,}`), "$1:<redacted>"},                      // /bot<id>:<secret>/
+	{regexp.MustCompile(`(?i)\b((?:access_|api_)?(?:token|key|secret))=[^&\s"']+`), "$1=<redacted>"}, // ?access_token=<secret>
+}
+
+// redactSecrets strips credentials from a string before it is logged. Patterns are deliberately
+// narrow so ordinary text ("bottlenecks", "token bucket") is left intact.
+func redactSecrets(s string) string {
+	for _, p := range secretRes {
+		s = p.re.ReplaceAllString(s, p.repl)
+	}
+	return s
+}
+
+// redactingWriter is the single chokepoint every log line passes through, so no call site has to
+// remember to redact.
+type redactingWriter struct{ w io.Writer }
+
+func (rw redactingWriter) Write(p []byte) (int, error) {
+	clean := redactSecrets(string(p))
+	if clean == string(p) {
+		return rw.w.Write(p)
+	}
+	// Report the caller's length: a short count reads as a write error to log.Output.
+	if _, err := rw.w.Write([]byte(clean)); err != nil {
+		return 0, err
+	}
+	return len(p), nil
 }
 
 func isPermanentStartupError(err error) bool {
@@ -406,109 +502,29 @@ func runDaemon() {
 		log.Fatal("no tokens configured. Run 'klax setup'.")
 	}
 
+	// Constructing a bot does no I/O: every configured transport is registered before any network
+	// call happens. Readiness is established later, per transport, by connectTransport.
 	transports := make(map[string]transport.Transport)
 
-	// --- Telegram ---
 	var tgBot *tg.Bot
 	if cfg.TelegramToken != "" {
 		tgBot = tg.New(cfg.TelegramToken)
-		var me *tg.User
-		for attempt := 0; ; attempt++ {
-			var err error
-			me, err = tgBot.GetMe()
-			if err == nil {
-				if err := tgBot.DrainUpdates(); err != nil {
-					log.Printf("warning: tg drain updates: %v", err)
-				}
-				tgBot.SetMyCommands(tgMenuCommands)
-				break
-			}
-			if isPermanentStartupError(err) {
-				log.Fatalf("telegram auth failed: %v", err)
-			}
-			wait := startupBackoff(attempt)
-			log.Printf("telegram unreachable: %v (retry in %v)", err, wait)
-			time.Sleep(wait)
-		}
 		transports["tg"] = tgBot
-		registerSelfMentionTrigger(me.Username)
-		log.Println("[OK] Telegram connected")
 	}
-
-	// --- MAX ---
 	var maxBot *max.Bot
 	if cfg.MaxToken != "" {
 		maxBot = max.New(cfg.MaxToken)
-		var me *max.User
-		for attempt := 0; ; attempt++ {
-			var err error
-			me, err = maxBot.GetMe()
-			if err == nil {
-				break
-			}
-			if isPermanentStartupError(err) {
-				log.Fatalf("MAX auth failed: %v", err)
-			}
-			wait := startupBackoff(attempt)
-			log.Printf("MAX unreachable: %v (retry in %v)", err, wait)
-			time.Sleep(wait)
-		}
-		if err := maxBot.DrainUpdates(); err != nil {
-			log.Printf("warning: max drain updates: %v", err)
-		}
 		transports["mx"] = maxBot
-		log.Printf("[OK] MAX bot: [%d] %s (@%s)", me.UserID, me.Name, me.Username)
 	}
-
-	// --- VK ---
 	var vkBot *vk.Bot
 	if cfg.VKToken != "" {
 		vkBot = vk.New(cfg.VKToken)
-		var group *vk.GroupInfo
-		for attempt := 0; ; attempt++ {
-			var err error
-			group, err = vkBot.GetMe()
-			if err == nil {
-				break
-			}
-			if isPermanentStartupError(err) {
-				log.Fatalf("VK auth failed: %v", err)
-			}
-			wait := startupBackoff(attempt)
-			log.Printf("VK unreachable: %v (retry in %v)", err, wait)
-			time.Sleep(wait)
-		}
-		if err := vkBot.DrainUpdates(); err != nil {
-			log.Printf("warning: vk drain updates: %v", err)
-		}
 		transports["vk"] = vkBot
-		log.Printf("[OK] VK group: [%d] %s", group.ID, group.Name)
 	}
-
-	// --- Yandex Messenger ---
 	var ymBot *ym.Bot
 	if cfg.YmToken != "" {
 		ymBot = ym.New(cfg.YmToken)
-		var me *ym.SelfInfo
-		for attempt := 0; ; attempt++ {
-			var err error
-			me, err = ymBot.GetMe()
-			if err == nil {
-				break
-			}
-			if isPermanentStartupError(err) {
-				log.Fatalf("Yandex Messenger auth failed: %v", err)
-			}
-			wait := startupBackoff(attempt)
-			log.Printf("Yandex Messenger unreachable: %v (retry in %v)", err, wait)
-			time.Sleep(wait)
-		}
-		if err := ymBot.DrainUpdates(); err != nil {
-			log.Printf("warning: ym drain updates: %v", err)
-		}
 		transports["ym"] = ymBot
-		registerSelfMentionTrigger(me.Login)
-		log.Printf("[OK] Yandex Messenger bot: [%s] %s", me.ID, me.Login)
 	}
 
 	store, err := session.LoadStore()
@@ -677,11 +693,9 @@ func runDaemon() {
 	m := readMarker()
 	startupKind, text := startupNotice(m)
 	d.startupKind = startupKind
-	d.notifyAllUsers(text)
 	if m != nil {
 		removeMarker()
 	}
-
 	// Handle SIGTERM/SIGINT for graceful shutdown.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
@@ -698,21 +712,80 @@ func runDaemon() {
 	// accept-during-drain restart) before any transport starts taking new traffic.
 	d.replayDurableQueues()
 
-	// Start polling loops for enabled transports.
-	if tgBot != nil && !disabled["tg"] {
-		d.startPoll("tg")
+	// A transport's readiness check is kept on the daemon so `/transports on` re-runs it instead of
+	// starting a raw poll loop against credentials that were never validated. Built COMPLETE before
+	// anything can serve a command, so it is write-once-then-read-only and needs no lock.
+	d.handshakes = map[string]func() error{}
+	d.connecting = map[string]bool{}
+	if tgBot != nil {
+		d.handshakes["tg"] = func() error {
+			me, err := tgBot.GetMe()
+			if err != nil {
+				return err
+			}
+			if err := tgBot.DrainUpdates(); err != nil {
+				log.Printf("warning: tg drain updates: %v", err)
+			}
+			tgBot.SetMyCommands(tgMenuCommands)
+			registerSelfMentionTrigger(me.Username)
+			log.Printf("[OK] Telegram bot: @%s", me.Username)
+			return nil
+		}
 	}
-	if maxBot != nil && !disabled["mx"] {
-		d.startPoll("mx")
+	if maxBot != nil {
+		d.handshakes["mx"] = func() error {
+			me, err := maxBot.GetMe()
+			if err != nil {
+				return err
+			}
+			if err := maxBot.DrainUpdates(); err != nil {
+				log.Printf("warning: max drain updates: %v", err)
+			}
+			log.Printf("[OK] MAX bot: [%d] %s (@%s)", me.UserID, me.Name, me.Username)
+			return nil
+		}
 	}
-	if vkBot != nil && !disabled["vk"] {
-		d.startPoll("vk")
+	if vkBot != nil {
+		d.handshakes["vk"] = func() error {
+			group, err := vkBot.GetMe()
+			if err != nil {
+				return err
+			}
+			if err := vkBot.DrainUpdates(); err != nil {
+				log.Printf("warning: vk drain updates: %v", err)
+			}
+			log.Printf("[OK] VK group: [%d] %s", group.ID, group.Name)
+			return nil
+		}
 	}
-	if ymBot != nil && !disabled["ym"] {
-		d.startPoll("ym")
+	if ymBot != nil {
+		d.handshakes["ym"] = func() error {
+			me, err := ymBot.GetMe()
+			if err != nil {
+				return err
+			}
+			if err := ymBot.DrainUpdates(); err != nil {
+				log.Printf("warning: ym drain updates: %v", err)
+			}
+			registerSelfMentionTrigger(me.Login)
+			log.Printf("[OK] Yandex Messenger bot: [%s] %s", me.ID, me.Login)
+			return nil
+		}
 	}
+
+	// The UI depends on no remote platform, so it starts before anything network-bound. Replay
+	// deliberately precedes it: a message recovered from a previous run must run before newly
+	// accepted traffic. Binding the socket still happens inside the source's own goroutine.
 	if d.sources["ui"] != nil && !disabled["ui"] {
 		d.startPoll("ui")
+	}
+
+	d.announceStartup(text)
+
+	for _, name := range []string{"tg", "mx", "vk", "ym"} {
+		if !disabled[name] {
+			d.connect(name)
+		}
 	}
 
 	// Block forever (goroutines do the work).
@@ -729,6 +802,14 @@ func startupNotice(marker *restartMarker) (kind, text string) {
 // startPoll starts the inbound source loop for the given name.
 func (d *daemon) startPoll(name string) {
 	d.mu.Lock()
+	// A background handshake can succeed long after `/transports off` was issued — the retry runs for
+	// as long as the platform is down. Read the flag here, when the poll actually starts, so a
+	// disabled transport stays disabled. `/transports on` clears it before calling.
+	if d.disabled[name] {
+		d.mu.Unlock()
+		log.Printf("poll start skipped: %s is disabled", name)
+		return
+	}
 	// Stop existing loop if running.
 	if cancel, ok := d.pollCtx[name]; ok {
 		cancel()
@@ -760,29 +841,38 @@ func (d *daemon) stopPoll(name string) {
 
 // notifyAllUsers sends a message to all allowed users on enabled platforms.
 // These are self-initiated messages (no replyTo).
+//
+// Runs concurrently with the poll loops, and /transports mutates the disabled set under d.mu, so
+// that set is snapshotted under the lock rather than read live.
 func (d *daemon) notifyAllUsers(text string) map[string]uint64 {
-	if _, ok := d.transports["tg"]; ok && !d.disabled["tg"] {
+	d.mu.Lock()
+	disabled := make(map[string]bool, len(d.disabled))
+	for k, v := range d.disabled {
+		disabled[k] = v
+	}
+	d.mu.Unlock()
+	if _, ok := d.transports["tg"]; ok && !disabled["tg"] {
 		for _, uid := range d.cfg.AllowedUsers {
 			chatID := fmt.Sprintf("tg:%d", uid)
 			log.Printf("notify %s", chatID)
 			d.sendMessage(chatID, "", text)
 		}
 	}
-	if _, ok := d.transports["mx"]; ok && !d.disabled["mx"] {
+	if _, ok := d.transports["mx"]; ok && !disabled["mx"] {
 		for _, uid := range d.cfg.MaxAllowedUsers {
 			chatID := fmt.Sprintf("mx:%d", uid)
 			log.Printf("notify %s", chatID)
 			d.sendMessage(chatID, "", text)
 		}
 	}
-	if _, ok := d.transports["vk"]; ok && !d.disabled["vk"] {
+	if _, ok := d.transports["vk"]; ok && !disabled["vk"] {
 		for _, uid := range d.cfg.VKAllowedUsers {
 			chatID := fmt.Sprintf("vk:%d", uid)
 			log.Printf("notify %s", chatID)
 			d.sendMessage(chatID, "", text)
 		}
 	}
-	if _, ok := d.transports["ym"]; ok && !d.disabled["ym"] {
+	if _, ok := d.transports["ym"]; ok && !disabled["ym"] {
 		for _, login := range d.cfg.YmAllowedUsers {
 			chatID := fmt.Sprintf("ym:%s", login)
 			log.Printf("notify %s", chatID)
@@ -1662,10 +1752,20 @@ func (d *daemon) saveGroupChats() {
 
 // groupTriggerPrefixes are the recognized prefixes for group mode messages.
 // Checked case-insensitively. Must be followed by comma or any whitespace.
-var groupTriggerPrefixes = []string{
-	"klax", "клакс", "клэкс", "клац",
-	"kl", "кл",
+// Copy-on-write behind an atomic: registrations happen on background connect goroutines while
+// other transports are already reading the list.
+var groupTriggerPrefixes atomic.Value // []string
+
+var groupTriggerMu sync.Mutex // serializes the read-copy-append-store of groupTriggerPrefixes
+
+func init() {
+	groupTriggerPrefixes.Store([]string{
+		"klax", "клакс", "клэкс", "клац",
+		"kl", "кл",
+	})
 }
+
+func triggerPrefixes() []string { return groupTriggerPrefixes.Load().([]string) }
 
 // registerSelfMentionTrigger adds "@<login>" as one more recognized group trigger,
 // alongside "клакс"/"kl"/..., once the bot's own username/login on a transport is known
@@ -1676,21 +1776,25 @@ var groupTriggerPrefixes = []string{
 // likewise offsets into a text that already contains the literal "@username" — the bot's
 // own username is never used by anyone else, so this alone makes an @mention behave
 // exactly like typing the trigger word, with no new parsing path to keep in sync with
-// stripGroupTrigger. Called once per transport, before any poll loop starts (see
-// runDaemon) — no concurrent access to the slice at that point.
+// stripGroupTrigger.
 func registerSelfMentionTrigger(login string) {
 	login = strings.ToLower(strings.TrimSpace(login))
 	if login == "" {
 		return
 	}
-	groupTriggerPrefixes = append(groupTriggerPrefixes, "@"+login)
+	groupTriggerMu.Lock()
+	defer groupTriggerMu.Unlock()
+	cur := triggerPrefixes()
+	next := make([]string, len(cur), len(cur)+1)
+	copy(next, cur)
+	groupTriggerPrefixes.Store(append(next, "@"+login))
 }
 
 // stripGroupTrigger checks if text starts with a group trigger prefix.
 // Returns the remaining text (trimmed) and true, or "" and false.
 func stripGroupTrigger(text string) (string, bool) {
 	lower := strings.ToLower(text)
-	for _, prefix := range groupTriggerPrefixes {
+	for _, prefix := range triggerPrefixes() {
 		if !strings.HasPrefix(lower, prefix) {
 			continue
 		}

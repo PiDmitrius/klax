@@ -107,10 +107,16 @@ func safeMarkdownLabel(s string) string {
 // stored file) in the in-memory index so handleFile can resolve it. The token never changes across
 // read-model rebuilds, so an attachment's /api/file?ref=… URL — and thus its <img src> — is stable.
 func (d *daemon) fileToken(store *sessfiles.Store, sk string, created int64, stored, name, contentType string) (string, error) {
-	token, err := store.EnsureLink(stored, name, contentType)
+	return d.commitLink(store, sk, created, sessfiles.LinkRecord{Blob: stored, Name: name, ContentType: contentType})
+}
+
+// commitLink persists a link record and registers its token in the daemon's token→session index.
+func (d *daemon) commitLink(store *sessfiles.Store, sk string, created int64, r sessfiles.LinkRecord) (string, error) {
+	token, err := store.Commit(r)
 	if err != nil {
 		return "", err
 	}
+	stored := r.Blob
 	d.fileTokensMu.Lock()
 	if d.fileTokens == nil {
 		d.fileTokens = make(map[string]tokenRef)
