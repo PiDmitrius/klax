@@ -20,6 +20,42 @@ func TestCodexTokenCountUsesLastUsageForContext(t *testing.T) {
 	}
 }
 
+func TestCodexTerminalErrorComesFromRollout(t *testing.T) {
+	line := []byte(`{"type":"event_msg","payload":{"type":"task_complete","error":{"message":"Selected model is at capacity. Please try a different model.","codex_error_info":"server_overloaded"}}}`)
+	want := "Selected model is at capacity. Please try a different model. (server_overloaded)"
+	if got := ParseCodexTerminalError(line); got != want {
+		t.Fatalf("terminal error = %q, want %q", got, want)
+	}
+}
+
+func TestLatestSuccessfulCodexTurnClearsEarlierError(t *testing.T) {
+	failure := []byte(`{"type":"event_msg","payload":{"type":"task_complete","error":{"message":"overloaded","codex_error_info":"server_overloaded"}}}`)
+	success := []byte(`{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"done","error":null}}`)
+	if got, complete := parseCodexTaskComplete(failure); !complete || got == "" {
+		t.Fatalf("failure not recognized: complete=%v error=%q", complete, got)
+	}
+	if got, complete := parseCodexTaskComplete(success); !complete || got != "" {
+		t.Fatalf("success must clear an earlier error: complete=%v error=%q", complete, got)
+	}
+	data := append(append(append([]byte{}, failure...), '\n'), success...)
+	data = append(data, '\n')
+	if got := latestCodexTaskComplete(data); got != "" {
+		t.Fatalf("latest successful turn retained stale error: %q", got)
+	}
+}
+
+func TestCurrentCodexTurnDoesNotInheritPriorError(t *testing.T) {
+	prior := []byte(`{"type":"event_msg","payload":{"type":"task_complete","error":{"message":"old failure"}}}` + "\n")
+	current := []byte(`{"type":"event_msg","payload":{"type":"token_count"}}` + "\n")
+	rollout := append(append([]byte{}, prior...), current...)
+	if _, complete := parseCodexTaskComplete(current); complete {
+		t.Fatal("a non task_complete record was treated as a complete turn")
+	}
+	if got := latestCodexTaskComplete(rollout[len(prior):]); got != "" {
+		t.Fatalf("current turn inherited prior terminal error: %q", got)
+	}
+}
+
 // Poll must not swallow an unterminated final line: when codex is mid-write, the trailing
 // partial token_count is reparsed from its start on the next poll instead of being skipped.
 func TestCodexMetaTailReparsesUnterminatedLine(t *testing.T) {

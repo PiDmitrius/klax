@@ -586,6 +586,11 @@ func parseCodexRecords(records []rawRecord) []Item {
 		_ = json.Unmarshal(entry.Payload, &p)
 		ts := normalizeTime(entry.Timestamp)
 		switch {
+		case entry.Type == "event_msg" && p.Type == "task_complete":
+			if message := runner.ParseCodexTerminalError(raw); message != "" {
+				items = append(items, Item{Role: "system", Kind: "error", Text: message, Time: ts})
+				lastAssistant = -1
+			}
 		case entry.Type == "compacted":
 			items = append(items, Item{Role: "tool", Text: compactToolText("", 0, 0), Time: ts})
 			lastAssistant = -1

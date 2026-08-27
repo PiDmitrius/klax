@@ -205,15 +205,15 @@ func (m *messengerDelivery) Final(res runner.RunResult) {
 	d := m.d
 
 	if res.Error != nil {
-		finalText := formatRunFailure(m.logItems, m.chatFmt, res.Error)
+		finalChunks := formatRunFailureChunks(m.logItems, m.chatFmt, res.Error)
 		if m.hasTransport {
 			// Deliver with chatFmt so a rich-formatted failure goes out as a Rich
 			// Message (and reuses the rich-born progress chain when present).
-			if _, err := d.syncFinalMessageChain(m.chatID, m.replyTo, m.chain, finalText, m.chatFmt); err != nil {
+			if _, err := d.syncFinalMessageChainChunks(m.chatID, m.replyTo, m.chain, finalChunks, m.chatFmt); err != nil {
 				log.Printf("final error delivery failed: %v", err)
 			}
 		} else {
-			d.sendMessage(m.chatID, m.replyTo, finalText)
+			d.sendMessage(m.chatID, m.replyTo, strings.Join(finalChunks, "\n\n"))
 		}
 		return
 	}

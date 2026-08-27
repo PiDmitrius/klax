@@ -8,7 +8,9 @@
 
 import { mdSafe, esc, fmtTime, fmtDate } from "./markdown.js";
 
-function blockCls(role){ return role === "tool" ? "tool" : role === "error" ? "error" : role === "system" ? "system" : "assistant"; }
+// blockCls is the ONE mapping from a row to its visual class, for grouped blocks and standalone
+// rows alike. kind wins over role: an error row keeps the error class whatever role carries it.
+function blockCls(b){ return b.kind === "error" || b.role === "error" ? "error" : b.role === "tool" ? "tool" : b.role === "system" ? "system" : "assistant"; }
 function contextText(used, window){
   if(!used) return "";
   const uk = Math.floor(used / 1000) + "k";
@@ -57,7 +59,7 @@ export function renderModel(turns, watermark, holdSplits, joinHeldSplits){
       if(t.role === "notice") continue;
       // `key` is the standalone's live eventSeq (render-key stability only); it carries no data-pos
       // so it never drives read-advance, and it is not counted as unread.
-      items.push({ kind: "bubble", cls: (t.kind === "error" || t.role === "error") ? "error" : t.role === "system" ? "system" : t.role === "tool" ? "tool" : "assistant", text: t.text || "", md: t.role !== "tool", time: t.time, key: t.eventSeq });
+      items.push({ kind: "bubble", cls: blockCls(t), text: t.text || "", md: t.role !== "tool", time: t.time, key: t.eventSeq });
       continue;
     }
     const blocks_ = t.blocks || [];
@@ -71,9 +73,9 @@ export function renderModel(turns, watermark, holdSplits, joinHeldSplits){
         divided = true;
         continue;
       }
-      const role = blocks_[i].role, blocks = [];
+      const cls = blockCls(blocks_[i]), blocks = [];
       const groupStart = i;
-      while(i < blocks_.length && blocks_[i].role === role){
+      while(i < blocks_.length && blockCls(blocks_[i]) === cls){
         if(held && i > groupStart && held.has(pos(t.seq, i))) break;
         if(unread(pos(t.seq, i)) && !divided && has && blocks.length > 0) break;
         blocks.push(blocks_[i]); i++;
@@ -81,7 +83,7 @@ export function renderModel(turns, watermark, holdSplits, joinHeldSplits){
       const last = blocks.length ? blocks[blocks.length - 1] : {};
       const startPos = pos(t.seq, i - blocks.length);
       const group = {
-        cls: blockCls(role), blocks, tool: role === "tool", time: last.time,
+        cls, blocks, tool: cls === "tool", time: last.time,
         startPos,
         maxPos: pos(t.seq, i - 1), // the last block's position — drives read-advance (data-pos)
       };
