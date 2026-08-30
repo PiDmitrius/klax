@@ -2,6 +2,7 @@ package runner
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -108,6 +109,90 @@ type codexSessionMeta struct {
 	Model         string
 	ContextWindow int
 	ContextUsed   int
+}
+
+// ParseCodexTerminalError returns the terminal failure carried by a complete
+// rollout record. The rollout is the canonical source; callers never persist a
+// second copy of the message.
+func ParseCodexTerminalError(line []byte) string {
+	message, _ := parseCodexTaskComplete(line)
+	return message
+}
+
+func parseCodexTaskComplete(line []byte) (string, bool) {
+	var entry struct {
+		Type    string          `json:"type"`
+		Payload json.RawMessage `json:"payload"`
+	}
+	if json.Unmarshal(line, &entry) != nil || entry.Type != "event_msg" {
+		return "", false
+	}
+	var event struct {
+		Type  string `json:"type"`
+		Error *struct {
+			Message string `json:"message"`
+			Code    string `json:"codex_error_info"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(entry.Payload, &event) != nil || event.Type != "task_complete" {
+		return "", false
+	}
+	if event.Error == nil {
+		return "", true
+	}
+	message := strings.TrimSpace(event.Error.Message)
+	code := strings.TrimSpace(event.Error.Code)
+	if message == "" {
+		message = code
+	} else if code != "" {
+		message += " (" + code + ")"
+	}
+	return message, true
+}
+
+func codexSessionSize(threadID string) int64 {
+	path := findCodexSessionFile(threadID)
+	if path == "" {
+		return 0
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
+}
+
+// readCodexTaskCompleteSince returns the failure carried by the last complete
+// task_complete written at or after offset — empty when the run completed
+// without one, or wrote none at all. An unfinished trailing record is ignored.
+func readCodexTaskCompleteSince(threadID string, offset int64) string {
+	path := findCodexSessionFile(threadID)
+	if path == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	if offset < 0 || offset > int64(len(data)) {
+		return ""
+	}
+	return latestCodexTaskComplete(data[offset:])
+}
+
+func latestCodexTaskComplete(data []byte) string {
+	var last string
+	for len(data) > 0 {
+		i := bytes.IndexByte(data, '\n')
+		if i < 0 {
+			break
+		}
+		if message, complete := parseCodexTaskComplete(bytes.TrimSpace(data[:i])); complete {
+			last = message
+		}
+		data = data[i+1:]
+	}
+	return last
 }
 
 func (b *CodexBackend) ParseEvent(line []byte) ([]Event, bool) {

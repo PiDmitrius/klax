@@ -283,16 +283,20 @@ func TestGroupTurns(t *testing.T) {
 		{Role: "assistant", Text: "a1"},
 		{Role: "tool", Text: "t1"},
 		{Role: "tool", Text: "compact"},
-		{Role: "system", Kind: "error"},
+		{Role: "system", Kind: "error", Text: "API Error: 500"},
+		{Role: "system", Text: "notice"},
 		{Role: "user", Text: "u2"},
 	})
 	if len(g) != 3 {
 		t.Fatalf("want 3 units (turn, notice, turn), got %d", len(g))
 	}
-	if g[0].lead.Role != "user" || len(g[0].blocks) != 3 {
-		t.Fatalf("first unit should be a user turn with 3 blocks: %+v", g[0])
+	if g[0].lead.Role != "user" || len(g[0].blocks) != 4 {
+		t.Fatalf("an error row belongs to the turn it happened in: %+v", g[0])
 	}
-	if g[1].lead.Role != "system" || len(g[1].blocks) != 0 {
+	if g[0].blocks[3].Kind != "error" {
+		t.Fatalf("error row is not the turn's last block: %+v", g[0].blocks)
+	}
+	if g[1].lead.Role != "system" || g[1].lead.Kind != "" || len(g[1].blocks) != 0 {
 		t.Fatalf("second unit should be a standalone notice: %+v", g[1])
 	}
 	if g[2].lead.Role != "user" || len(g[2].blocks) != 0 {
@@ -397,6 +401,69 @@ func TestReadModelAbortedKeepsTurnOrder(t *testing.T) {
 	}
 	if turns[1].State != "err" {
 		t.Fatalf("middle turn state = %q, want err: %+v", turns[1].State, turns[1])
+	}
+}
+
+func TestReadModelUsesTranscriptTerminalError(t *testing.T) {
+	d, created := newReadModelDaemon(t)
+	sr := d.getRunner("user:alice", created)
+	seq, _, _, _, err := sr.store.Enqueue("ui:alice", "", "n1", "work", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := bindReadModelTurn(t, sr.store, seq, 1, "work")
+	if err := sr.store.MarkErr(seq, turnErrBackendFailed); err != nil {
+		t.Fatal(err)
+	}
+	const detail = "Selected model is at capacity. (server_overloaded)"
+	turns := testRM(d, created, []history.Item{
+		user,
+		{Role: "system", Kind: "error", Text: detail},
+	}, false, true)
+	if len(turns) != 1 || len(turns[0].Blocks) != 1 {
+		t.Fatalf("terminal error duplicated: %+v", turns)
+	}
+	if turns[0].Blocks[0].Kind != "error" || turns[0].Blocks[0].Text != detail {
+		t.Fatalf("wrong terminal error: %+v", turns[0].Blocks)
+	}
+}
+
+// An error row the turn recovered from is not its outcome: the durable reason decides, and an
+// abort keeps its own marker no matter what the transcript carries.
+func TestReadModelRecoveredErrorIsNotTheOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		reason    string
+		recovered bool
+		want      string
+	}{
+		{"aborted with the error row last", turnErrAborted, false, "Прервано"},
+		{"backend failed after recovery", turnErrBackendFailed, true, "Ошибка backend"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, created := newReadModelDaemon(t)
+			sr := d.getRunner("user:alice", created)
+			seq, _, _, _, err := sr.store.Enqueue("ui:alice", "", "n1", "work", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			user := bindReadModelTurn(t, sr.store, seq, 1, "work")
+			if err := sr.store.MarkErr(seq, tc.reason); err != nil {
+				t.Fatal(err)
+			}
+			items := []history.Item{
+				user,
+				{Role: "system", Kind: "error", Text: "API Error: 500"},
+			}
+			if tc.recovered {
+				items = append(items, history.Item{Role: "assistant", Text: "recovered, continuing"})
+			}
+			turns := testRM(d, created, items, false, true)
+			last := turns[0].Blocks[len(turns[0].Blocks)-1]
+			if last.Text != tc.want {
+				t.Fatalf("terminal block = %q, want %q: %+v", last.Text, tc.want, turns[0].Blocks)
+			}
+		})
 	}
 }
 

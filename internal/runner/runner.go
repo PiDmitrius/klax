@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -734,6 +735,10 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 	if err != nil {
 		return RunResult{Error: err}
 	}
+	var codexStartOffset int64
+	if backend.Name() == "codex" && opts.SessionID != "" {
+		codexStartOffset = codexSessionSize(opts.SessionID)
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -1082,6 +1087,17 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 		return RunResult{
 			SessionID: sessionID,
 			Error:     fmt.Errorf("%s: %w", backend.Name(), ctx.Err()),
+		}
+	}
+
+	// The rollout is the canonical source of a codex terminal failure. The read is
+	// scoped to the bytes this run appended, so a resume that dies without writing
+	// its own task_complete cannot inherit an older turn's error.
+	if backend.Name() == "codex" && sessionID != "" {
+		if terminal := readCodexTaskCompleteSince(sessionID, codexStartOffset); terminal != "" {
+			buf.demote()
+			_ = buf.drain()
+			return RunResult{SessionID: sessionID, Error: errors.New(terminal)}
 		}
 	}
 

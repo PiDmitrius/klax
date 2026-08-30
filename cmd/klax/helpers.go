@@ -14,32 +14,6 @@ import (
 	"github.com/PiDmitrius/klax/internal/session"
 )
 
-// formatLogItems renders the pre-answer progress log. Tool invocations stay
-// as inline monospace ("техлог"). Narration blocks — the intermediate
-// assistant text demoted by the runner — are full-format text rendered
-// through the same markdown-to-HTML path as the final answer, so lists,
-// code fences and emphasis survive. Adjacent tool labels share a single
-// newline so they stack tightly; any transition involving narration gets a
-// blank line so the formatted text breathes.
-//
-// Narration items are rendered one at a time because the runner cuts only
-// on paragraph boundaries — the "\n\n" between two narration items here is
-// the same separator that was consumed at the cut, so the original
-// paragraph structure of the model's reply is reproduced exactly.
-func formatLogItems(items []runner.ProgressEvent, format string) string {
-	var out strings.Builder
-	var prevKind runner.ProgressKind
-	for i, item := range items {
-		if i > 0 {
-			tight := prevKind == runner.ProgressKindTool && item.Kind == runner.ProgressKindTool
-			out.WriteString(logSeparator(format, tight))
-		}
-		out.WriteString(formatLogItem(item, format))
-		prevKind = item.Kind
-	}
-	return out.String()
-}
-
 // richSpacerBlock is an empty (zero-width) paragraph used as a visual gap between
 // rich blocks. Rich renderers ignore inter-block whitespace, so the "\n\n" blank
 // line that breathes legacy log sections apart has no effect — the gap must be a
@@ -85,6 +59,19 @@ func formatLogItem(item runner.ProgressEvent, format string) string {
 	}
 }
 
+// formatLogChunks renders the pre-answer progress log, split into chunks that
+// fit the messenger limit, with an optional tail segment appended last. Tool
+// invocations stay as inline monospace ("техлог"). Narration blocks — the
+// intermediate assistant text demoted by the runner — are full-format text
+// rendered through the same markdown-to-HTML path as the final answer, so
+// lists, code fences and emphasis survive. Adjacent tool labels share a single
+// newline so they stack tightly; any transition involving narration gets a
+// blank line so the formatted text breathes.
+//
+// Narration items are rendered one at a time because the runner cuts only
+// on paragraph boundaries — the "\n\n" between two narration items here is
+// the same separator that was consumed at the cut, so the original
+// paragraph structure of the model's reply is reproduced exactly.
 func formatLogChunks(items []runner.ProgressEvent, tail, format string, limit int) []string {
 	if len(items) == 0 {
 		if tail == "" {

@@ -221,6 +221,24 @@ func TestReadCodex(t *testing.T) {
 	}
 }
 
+func TestReadCodexTerminalError(t *testing.T) {
+	path := writeLines(t, []string{
+		`{"type":"event_msg","payload":{"type":"user_message","message":"do X"}}`,
+		`{"type":"event_msg","timestamp":"2026-08-27T07:39:51Z","payload":{"type":"task_complete","error":{"message":"Selected model is at capacity. Please try a different model.","codex_error_info":"server_overloaded"}}}`,
+	})
+	items, err := readCodex(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[1].Role != "system" || items[1].Kind != "error" {
+		t.Fatalf("terminal error item missing: %+v", items)
+	}
+	want := "Selected model is at capacity. Please try a different model. (server_overloaded)"
+	if items[1].Text != want {
+		t.Fatalf("terminal error = %q, want %q", items[1].Text, want)
+	}
+}
+
 func TestReadCodexCompactEvent(t *testing.T) {
 	path := writeLines(t, []string{
 		`{"type":"event_msg","timestamp":"2026-06-15T10:00:00Z","payload":{"type":"agent_message","message":"before"}}`,

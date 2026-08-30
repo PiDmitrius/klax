@@ -17,7 +17,7 @@ import (
 // EventSeq is filled by the client on live apply (= the event's seq); absent on reload.
 type uiBlock struct {
 	ID    string             `json:"id"`
-	Role  string             `json:"role"` // assistant|tool|system
+	Role  string             `json:"role"` // assistant|tool|system|error
 	Text  string             `json:"text,omitempty"`
 	Tools []history.ToolCall `json:"tools,omitempty"`
 	Kind  string             `json:"kind,omitempty"`
@@ -131,22 +131,23 @@ type groupedTurn struct {
 	blocks []history.Item
 }
 
-// groupTurns folds a flat transcript into top-level units: a user item starts a turn and
-// the following assistant/tool items become its blocks; a system/error item (or
-// an answer block with no preceding user) is a standalone unit.
+// groupTurns folds a flat transcript into top-level units: a user item starts a turn and the
+// following assistant/tool items become its blocks, as does an error row — an error happens
+// inside the turn that produced it, whatever its role. A standalone system notice (or an answer
+// block with no preceding user) is its own unit.
 func groupTurns(items []history.Item) []groupedTurn {
 	var out []groupedTurn
 	for _, it := range items {
-		switch it.Role {
-		case "user":
+		switch {
+		case it.Role == "user":
 			out = append(out, groupedTurn{lead: it})
-		case "assistant", "tool":
+		case it.Role == "assistant", it.Role == "tool", it.Kind == "error":
 			if n := len(out); n > 0 && out[n-1].lead.Role == "user" {
 				out[n-1].blocks = append(out[n-1].blocks, it)
 				continue
 			}
 			out = append(out, groupedTurn{lead: it})
-		default: // system | error notice
+		default: // system notice
 			out = append(out, groupedTurn{lead: it})
 		}
 	}
@@ -326,7 +327,7 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 			}
 			ut.Blocks = append(ut.Blocks, uiBlock{ID: blockID(seq, b.Role, b.Text, b.Tools), Role: b.Role, Text: b.Text, Tools: b.Tools, Kind: b.Kind, Time: b.Time})
 		}
-		if state == "err" {
+		if state == "err" && !explainedByTranscript(reason, g.blocks) {
 			ut.Blocks = append(ut.Blocks, errBlock(seq, reason))
 		}
 		if ok {
@@ -359,12 +360,10 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 			case "enq", "run":
 				missing = append(missing, ut)
 			case "err": // a queued turn aborted before it ran — show it with why it stopped
-				ut.State = "err"
 				ut.Blocks = append(ut.Blocks, errBlock(t.Seq, t.Reason))
 				missing = append(missing, ut)
 			case "done":
 				if !t.Bound {
-					ut.State = "unknown"
 					ut.Blocks = appendHookWarnings(ut.Blocks, t.Seq, t.HookFailures)
 					missing = append(missing, ut)
 				}
@@ -373,6 +372,18 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 		turns = mergeQueueOnlyTurns(turns, missing)
 	}
 	return turns
+}
+
+// explainedByTranscript reports whether the turn already ends with the backend's own account of
+// why it stopped. Only backend-failed defers to it: every other reason is klax's own
+// classification of a turn the backend never got to fail, and an error row that the turn
+// recovered from is not its outcome. It judges the turn's transcript rows, so a klax-side block
+// appended later — a hook warning carries the same kind — can never stand in for the backend.
+func explainedByTranscript(reason string, blocks []history.Item) bool {
+	if reason != turnErrBackendFailed || len(blocks) == 0 {
+		return false
+	}
+	return blocks[len(blocks)-1].Kind == "error"
 }
 
 func mergeQueueOnlyTurns(base, missing []uiTurn) []uiTurn {

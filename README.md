@@ -268,6 +268,13 @@ klax start                             # try again
 
 Common causes: invalid bot token, network unreachable at startup, broken config. Check `~/.config/klax/config.json` and re-run `klax setup` if needed.
 
+## Contract
+
+The invariants that span more than one file — what owns a turn's state, where a failure's reason
+comes from, how the live channel and the unread axis are defined — are listed in
+[`docs/CONTRACT.md`](docs/CONTRACT.md). An invariant that governs a single file lives at the top of
+that file instead.
+
 ## Project Structure
 
 ```text

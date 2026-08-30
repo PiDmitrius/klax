@@ -37,7 +37,7 @@ func sanitizeAttachmentFilename(name string) string {
 	return name
 }
 
-func formatRunFailure(logItems []runner.ProgressEvent, format string, err error) string {
+func formatRunFailureChunks(logItems []runner.ProgressEvent, format string, err error) []string {
 	// In rich mode each trailing marker must be its own block, and the error text
 	// must be escaped so stray <, > or & don't break the rich parser.
 	mark := func(s string) string {
@@ -48,32 +48,29 @@ func formatRunFailure(logItems []runner.ProgressEvent, format string, err error)
 	}
 	errLine := func(e error) string {
 		s := fmt.Sprintf("❌ Ошибка: %v", e)
-		if format == "rich" {
+		switch format {
+		case "rich":
 			return "<p>" + htmlEscapeLogText(s) + "</p>"
+		case "html":
+			return htmlEscapeLogText(s)
 		}
 		return s
 	}
 
-	// sep is the breathing gap between the log and the trailing markers — a real
-	// spacer block in rich (inter-block whitespace is ignored), a blank line in
-	// legacy.
-	sep := logSeparator(format, false)
-
 	if errors.Is(err, context.Canceled) {
 		if len(logItems) > 0 {
-			return formatLogItems(logItems, format) + sep + mark("❌ Прервано.")
+			return formatLogChunks(logItems, mark("❌ Прервано."), format, maxMessageLen)
 		}
-		return mark("❌ Прервано.")
+		return splitMessage(mark("❌ Прервано."), maxMessageLen, format)
 	}
 	if err.Error() == turnErrAuditStartFailed {
-		return mark("❌ Ошибка инфраструктуры аудита: запрос не был запущен.")
+		return splitMessage(mark("❌ Ошибка инфраструктуры аудита: запрос не был запущен."), maxMessageLen, format)
 	}
 
-	head := mark("...")
 	if len(logItems) > 0 {
-		head = formatLogItems(logItems, format) + sep + mark("...")
+		return formatLogChunks(logItems, errLine(err), format, maxMessageLen)
 	}
-	return head + "\n" + errLine(err)
+	return splitMessage(errLine(err), maxMessageLen, format)
 }
 
 func (d *daemon) syncFinalMessageChain(fullChatID, replyTo string, chain *messageChain, text, format string) (*messageChain, error) {

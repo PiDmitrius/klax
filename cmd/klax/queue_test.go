@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -39,13 +40,60 @@ func TestShouldReuseQueuedProgressReturnsFalseAfterGap(t *testing.T) {
 }
 
 func TestFormatRunFailureUsesAbortMarkerOnCancel(t *testing.T) {
-	got := formatRunFailure([]runner.ProgressEvent{
+	chunks := formatRunFailureChunks([]runner.ProgressEvent{
 		{Kind: runner.ProgressKindTool, Text: "🔧 build"},
 	}, "", context.Canceled)
+	got := strings.Join(chunks, "\n\n")
 
 	want := "`🔧 build`\n\n❌ Прервано."
 	if got != want {
 		t.Fatalf("unexpected cancel text:\nwant: %q\ngot:  %q", want, got)
+	}
+}
+
+func TestFormatRunFailureIsTerminal(t *testing.T) {
+	chunks := formatRunFailureChunks([]runner.ProgressEvent{
+		{Kind: runner.ProgressKindTool, Text: "⚙️ Exec: `true`"},
+		{Kind: runner.ProgressKindTool, Text: "❓ error"},
+	}, "", errors.New("codex exited"))
+	got := strings.Join(chunks, "\n\n")
+
+	want := "`⚙️ Exec: 'true'`\n`❓ error`\n\n❌ Ошибка: codex exited"
+	if got != want {
+		t.Fatalf("unexpected failure text:\nwant: %q\ngot:  %q", want, got)
+	}
+	if strings.Contains(got, "...") {
+		t.Fatalf("terminal failure retains a working marker: %q", got)
+	}
+}
+
+func TestFormatRunFailureEscapesErrorTextForMarkup(t *testing.T) {
+	err := errors.New("model <x> is at capacity & overloaded")
+	for _, format := range []string{"html", "rich"} {
+		got := strings.Join(formatRunFailureChunks(nil, format, err), "\n\n")
+		if strings.Contains(got, "<x>") || strings.Contains(got, " & ") {
+			t.Fatalf("%s failure text keeps raw markup: %q", format, got)
+		}
+		if !strings.Contains(got, "&lt;x&gt;") || !strings.Contains(got, "&amp;") {
+			t.Fatalf("%s failure text is not escaped: %q", format, got)
+		}
+	}
+}
+
+func TestFormatRunFailureReplacesWholeProgressChain(t *testing.T) {
+	logItems := []runner.ProgressEvent{
+		{Kind: runner.ProgressKindTool, Text: "⚙️ Exec: `first`"},
+		{Kind: runner.ProgressKindNarration, Text: strings.Repeat("narration ", 350)},
+		{Kind: runner.ProgressKindTool, Text: "⚙️ Exec: `second`"},
+		{Kind: runner.ProgressKindTool, Text: "⚙️ Exec: `third`"},
+	}
+	progress := withProgressEllipsis(formatLogChunks(logItems, "", "", maxMessageLen), "", maxMessageLen)
+	final := formatRunFailureChunks(logItems, "", errors.New("terminal"))
+	if len(final) < len(progress) {
+		t.Fatalf("final chain has %d chunks, progress chain has %d; stale working messages would survive", len(final), len(progress))
+	}
+	if strings.HasSuffix(final[len(final)-1], "...") {
+		t.Fatalf("terminal chain retains working marker: %q", final[len(final)-1])
 	}
 }
 
