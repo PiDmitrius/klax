@@ -352,7 +352,14 @@ func parseClaudeRecords(records []rawRecord) []Item {
 			continue
 		}
 		if line.IsAPIError {
-			items = append(items, Item{Role: "system", Kind: "error", Text: line.Error, Time: ts})
+			// The `error` field carries a machine code; a refusal puts the
+			// sentence that names the cause, and the request id support asks
+			// for, in the message text beside it. Show that when it exists.
+			text, _, _ := claudeAssistant(raw)
+			if text == "" {
+				text = line.Error
+			}
+			items = append(items, Item{Role: "system", Kind: "error", Text: text, Time: ts})
 			continue
 		}
 		switch line.Type {

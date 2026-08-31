@@ -359,3 +359,31 @@ func TestReadCodexTimestamp(t *testing.T) {
 		t.Fatalf("codex item time = %q (want 2026-06-15T10:00:00Z)", items[0].Time)
 	}
 }
+
+func TestReadClaudeAPIErrorShowsMessageNotBareCode(t *testing.T) {
+	// A refusal arrives as an assistant row whose `error` field is only a code
+	// ("invalid_request"); the sentence naming the cause and the request id
+	// live in the message text. Rendering the code alone hides both, which
+	// reads as a transport glitch rather than the model's own answer.
+	path := writeLines(t, []string{
+		`{"type":"assistant","isApiErrorMessage":true,"error":"invalid_request","message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: refused.\n\nDetails: ` + "`[bio]`" + `\n\nRequest ID: req_abc"}]},"timestamp":"2026-08-31T11:50:14Z"}`,
+		`{"type":"assistant","isApiErrorMessage":true,"error":"API Error: Overloaded","message":{"model":"m","content":[{"type":"text","text":""}]},"timestamp":"2026-08-31T11:51:14Z"}`,
+	})
+	items, err := readClaude(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("want 2 items, got %d: %+v", len(items), items)
+	}
+	if items[0].Kind != "error" || items[0].Role != "system" {
+		t.Fatalf("item0 = %+v", items[0])
+	}
+	if !strings.Contains(items[0].Text, "req_abc") || !strings.Contains(items[0].Text, "[bio]") {
+		t.Fatalf("refusal text lost the cause or the request id: %q", items[0].Text)
+	}
+	// A line carrying no message text still reports the code it does have.
+	if items[1].Text != "API Error: Overloaded" {
+		t.Fatalf("item1 = %q, want the error field as fallback", items[1].Text)
+	}
+}
