@@ -100,28 +100,33 @@ func bindingRepairs(sk string, created int64, cwd string, turns []sessfiles.Turn
 // safe because Store.Bind is the single one-to-one authority and rejects a conflict.
 func (d *daemon) repairBindings(work []bindingRepair) {
 	for _, w := range work {
-		d.reconcileBindings(w.sk, w.created, w.backend, w.session, w.cwd)
+		if d.reconcileBindings(w.sk, w.created, w.backend, w.session, w.cwd) {
+			// A repaired turn changes an already-rendered answer, and unlike the lifecycle
+			// call sites nothing else here wakes the surfaces afterwards.
+			d.broadcastSessions(w.sk)
+		}
 	}
 }
 
-func (d *daemon) reconcileBindings(sk string, created int64, backend, sessionID, cwd string) {
+// reconcileBindings reports whether it established a new binding.
+func (d *daemon) reconcileBindings(sk string, created int64, backend, sessionID, cwd string) bool {
 	if sessionID == "" {
-		return
+		return false
 	}
 	items, end, err := history.Snapshot(backend, sessionID, cwd)
 	if err != nil {
 		log.Printf("turn binding transcript %s/%d: %v", sk, created, err)
-		return
+		return false
 	}
-	d.reconcileBindingsSnapshot(sk, created, backend, sessionID, items, end)
+	return d.reconcileBindingsSnapshot(sk, created, backend, sessionID, items, end)
 }
 
-func (d *daemon) reconcileBindingsSnapshot(sk string, created int64, backend, sessionID string, items []history.Item, end int64) {
+func (d *daemon) reconcileBindingsSnapshot(sk string, created int64, backend, sessionID string, items []history.Item, end int64) bool {
 	st := d.sessionStore(sk, created)
 	turns, err := st.InboundLog()
 	if err != nil {
 		log.Printf("turn binding queue %s/%d: %v", sk, created, err)
-		return
+		return false
 	}
 	records := make(map[int64]string)
 	for _, it := range items {
@@ -137,11 +142,15 @@ func (d *daemon) reconcileBindingsSnapshot(sk string, created int64, backend, se
 			log.Printf("turn binding changed %s/%d turn %d %s/%s event %d: expected %s actual %s", sk, created, t.Seq, backend, sessionID, t.Event, t.RecordDigest, actual)
 		}
 	}
+	var bound bool
 	for _, b := range proposeBindings(turns, items, backend, sessionID, end) {
-		if err := st.Bind(b.Seq, b.Backend, b.Session, b.Event, b.RecordDigest); err != nil && err != sessfiles.ErrBindConflict {
-			log.Printf("turn bind %s/%d turn %d: %v", sk, created, b.Seq, err)
+		if err := st.Bind(b.Seq, b.Backend, b.Session, b.Event, b.RecordDigest); err == nil {
+			bound = true
 		} else if err == sessfiles.ErrBindConflict {
 			log.Printf("turn bind conflict %s/%d turn %d event %d", sk, created, b.Seq, b.Event)
+		} else {
+			log.Printf("turn bind %s/%d turn %d: %v", sk, created, b.Seq, err)
 		}
 	}
+	return bound
 }
