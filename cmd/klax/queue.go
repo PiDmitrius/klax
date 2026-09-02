@@ -199,13 +199,13 @@ func (d *daemon) replayDurableQueues() {
 				d.dropRunner(sk, sess.Created)
 				continue
 			}
-			if len(recovered) > 0 {
-				for _, t := range recovered {
-					if t.Backend != "" && t.Session != "" {
-						d.reconcileBindings(sk, sess.Created, t.Backend, t.Session, sess.CWD)
-					}
-					log.Printf("durable replay: recovered run without terminal for %s/%d turn %d", sk, sess.Created, t.Seq)
-				}
+			for _, t := range recovered {
+				log.Printf("durable replay: recovered run without terminal for %s/%d turn %d", sk, sess.Created, t.Seq)
+			}
+			if turns, err := sr.store.InboundLog(); err != nil {
+				log.Printf("durable replay queue (%s/%d): %v", sk, sess.Created, err)
+			} else {
+				d.reconcileUnbound(sk, sess.Created, sess.CWD, turns)
 			}
 			if len(reenq) == 0 {
 				d.dropRunner(sk, sess.Created) // no pending work — don't keep the runner

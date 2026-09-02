@@ -57,6 +57,35 @@ func proposeBindings(turns []sessfiles.Turn, items []history.Item, backend, sess
 	return out
 }
 
+// unboundBackendSessions lists, once each and in turn order, the backend sessions that still
+// own a turn a bind could match: unbound, with the digest and transcript address the matcher
+// needs. An all-bound session yields nothing, which is what keeps the startup pass free.
+func unboundBackendSessions(turns []sessfiles.Turn) [][2]string {
+	seen := make(map[string]bool)
+	var out [][2]string
+	for _, t := range turns {
+		if t.Bound || t.PromptDigest == "" || t.Backend == "" || t.Session == "" {
+			continue
+		}
+		key := t.Backend + "\x00" + t.Session
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, [2]string{t.Backend, t.Session})
+	}
+	return out
+}
+
+// reconcileUnbound is the startup repair pass: a run whose bind never landed — the daemon
+// died between the transcript append and the bind fsync, or klax could not read the record
+// when it was written — is matched now, so its answer joins its durable turn.
+func (d *daemon) reconcileUnbound(sk string, created int64, cwd string, turns []sessfiles.Turn) {
+	for _, bs := range unboundBackendSessions(turns) {
+		d.reconcileBindings(sk, created, bs[0], bs[1], cwd)
+	}
+}
+
 func (d *daemon) reconcileBindings(sk string, created int64, backend, sessionID, cwd string) {
 	if sessionID == "" {
 		return
