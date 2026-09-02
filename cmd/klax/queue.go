@@ -190,6 +190,7 @@ func (d *daemon) enqueueToSessionOrigin(chatID, msgID, text, originalText string
 // because the backend may already have written a transcript answer; the read model
 // resolves idle run records to done instead of showing a permanent spinner.
 func (d *daemon) replayDurableQueues() {
+	var repair []bindingRepair
 	for sk, cs := range d.store.Chats {
 		for _, sess := range cs.Sessions {
 			sr := d.getRunner(sk, sess.Created)
@@ -199,13 +200,13 @@ func (d *daemon) replayDurableQueues() {
 				d.dropRunner(sk, sess.Created)
 				continue
 			}
-			if len(recovered) > 0 {
-				for _, t := range recovered {
-					if t.Backend != "" && t.Session != "" {
-						d.reconcileBindings(sk, sess.Created, t.Backend, t.Session, sess.CWD)
-					}
-					log.Printf("durable replay: recovered run without terminal for %s/%d turn %d", sk, sess.Created, t.Seq)
-				}
+			for _, t := range recovered {
+				log.Printf("durable replay: recovered run without terminal for %s/%d turn %d", sk, sess.Created, t.Seq)
+			}
+			if turns, err := sr.store.InboundLog(); err != nil {
+				log.Printf("durable replay queue (%s/%d): %v", sk, sess.Created, err)
+			} else {
+				repair = append(repair, bindingRepairs(sk, sess.Created, sess.CWD, turns)...)
 			}
 			if len(reenq) == 0 {
 				d.dropRunner(sk, sess.Created) // no pending work — don't keep the runner
@@ -227,6 +228,7 @@ func (d *daemon) replayDurableQueues() {
 			go d.processSessionQueue(sr)
 		}
 	}
+	go d.repairBindings(repair)
 }
 
 func (d *daemon) processSessionQueue(sr *sessionRunner) {

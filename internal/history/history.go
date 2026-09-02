@@ -557,6 +557,19 @@ func parseCodexRecords(records []rawRecord) []Item {
 	appendCodexTool := func(tc ToolCall, ts string) {
 		appendAssistant(Item{Role: "assistant", Tools: []ToolCall{tc}, Time: ts})
 	}
+	appendCodexUser := func(message, ts string, rec rawRecord) {
+		if t, marker := StripTurnMarker(message); t != "" {
+			items = append(items, Item{Role: "user", Text: t, Marker: marker, Time: ts, Event: rec.Event, RecordDigest: rec.Digest, PromptDigest: promptcanon.Digest(message)})
+			lastAssistant = -1
+		}
+		lastWasCompacted = false
+		lastCompacted = -1
+	}
+	appendCodexAgent := func(message, ts string) {
+		if t := strings.TrimSpace(message); t != "" {
+			appendAssistant(Item{Role: "assistant", Text: t, Time: ts})
+		}
+	}
 	for _, rec := range records {
 		raw := rec.Raw
 		raw = bytes.TrimSpace(raw)
@@ -583,6 +596,7 @@ func parseCodexRecords(records []rawRecord) []Item {
 			Arguments json.RawMessage `json:"arguments"`
 			Input     json.RawMessage `json:"input"`
 			Action    json.RawMessage `json:"action"`
+			Item      *codexEventItem `json:"item"`
 			Info      *struct {
 				LastTokenUsage *struct {
 					InputTokens int `json:"input_tokens"`
@@ -604,15 +618,18 @@ func parseCodexRecords(records []rawRecord) []Item {
 			lastWasCompacted = true
 			lastCompacted = len(items) - 1
 		case entry.Type == "event_msg" && p.Type == "user_message":
-			if t, marker := StripTurnMarker(p.Message); t != "" {
-				items = append(items, Item{Role: "user", Text: t, Marker: marker, Time: ts, Event: rec.Event, RecordDigest: rec.Digest, PromptDigest: promptcanon.Digest(p.Message)})
-				lastAssistant = -1
-			}
-			lastWasCompacted = false
-			lastCompacted = -1
+			appendCodexUser(p.Message, ts, rec)
 		case entry.Type == "event_msg" && p.Type == "agent_message":
-			if t := strings.TrimSpace(p.Message); t != "" {
-				appendAssistant(Item{Role: "assistant", Text: t, Time: ts})
+			appendCodexAgent(p.Message, ts)
+		case entry.Type == "event_msg" && p.Type == "item_completed" && p.Item != nil:
+			// Codex carries conversation text as completed items; only the two message
+			// kinds are read here, because every other kind reaches the timeline through
+			// the response_item tool records and would otherwise be drawn twice.
+			switch p.Item.Type {
+			case "UserMessage":
+				appendCodexUser(p.Item.text(), ts, rec)
+			case "AgentMessage":
+				appendCodexAgent(p.Item.text(), ts)
 			}
 		case entry.Type == "event_msg" && p.Type == "context_compacted":
 			if !lastWasCompacted {
@@ -669,6 +686,29 @@ func parseCodexRecords(records []rawRecord) []Item {
 		}
 	}
 	return items
+}
+
+// codexEventItem is a completed conversation item; its content parts all carry the
+// text under the same field regardless of part kind.
+type codexEventItem struct {
+	Type    string `json:"type"`
+	Content []struct {
+		Text string `json:"text"`
+	} `json:"content"`
+}
+
+func (it *codexEventItem) text() string {
+	var b strings.Builder
+	for _, part := range it.Content {
+		if part.Text == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(part.Text)
+	}
+	return b.String()
 }
 
 type codexHistoryItem struct {

@@ -33,3 +33,20 @@ func TestProposeBindingsDoesNotCrossNextRun(t *testing.T) {
 		t.Fatalf("older run crossed interval: %+v", got)
 	}
 }
+
+func TestUnboundBackendSessionsSkipsWhatCannotBind(t *testing.T) {
+	d := promptcanon.Digest("same")
+	turns := []sessfiles.Turn{
+		{Seq: 1, Backend: "codex", Session: "S", PromptDigest: d, Bound: true},
+		{Seq: 2, Backend: "codex", Session: "S", PromptDigest: d},
+		{Seq: 3, Backend: "codex", Session: "S", PromptDigest: d},
+		{Seq: 4, Backend: "claude", Session: "T"},    // marker-era turn, no digest
+		{Seq: 5, Backend: "claude", PromptDigest: d}, // never reached a backend session
+		{Seq: 6, Backend: "claude", Session: "U", PromptDigest: d},
+	}
+	got := unboundBackendSessions(turns)
+	want := [][2]string{{"codex", "S"}, {"claude", "U"}}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("sessions to reconcile: %+v", got)
+	}
+}

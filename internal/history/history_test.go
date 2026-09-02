@@ -221,6 +221,38 @@ func TestReadCodex(t *testing.T) {
 	}
 }
 
+func TestReadCodexCompletedItems(t *testing.T) {
+	path := writeLines(t, []string{
+		`{"type":"session_meta","payload":{"id":"x"}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<recommended_plugins>injected</recommended_plugins>"}]}}`,
+		`{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"u1","content":[{"type":"text","text":"do X <!-- klax-turn:4444444444444444 -->"}]}}}`,
+		`{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"echo hello\",\"yield_time_ms\":1000}"}}`,
+		`{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"c1","command":["/bin/bash","-lc","echo hello"]}}}`,
+		`{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"a1","content":[{"type":"Text","text":"doing X"}],"phase":"final_answer"}}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"doing X"}]}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":144000},"model_context_window":258400}}}`,
+	})
+	items, err := readCodex(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("want 3 items, got %d: %+v", len(items), items)
+	}
+	if items[0].Role != "user" || items[0].Text != "do X" || items[0].Marker != "4444444444444444" || items[0].Event != 2 {
+		t.Fatalf("item0 = %+v", items[0])
+	}
+	if items[1].Role != "assistant" || len(items[1].Tools) != 1 || items[1].Tools[0].Name != "Exec" {
+		t.Fatalf("item1 = %+v", items[1])
+	}
+	if items[2].Role != "assistant" || items[2].Text != "doing X" {
+		t.Fatalf("item2 = %+v", items[2])
+	}
+	if items[2].CtxUsed != 144000 || items[2].CtxWindow != 258400 {
+		t.Fatalf("item2 context = %d/%d, want 144000/258400", items[2].CtxUsed, items[2].CtxWindow)
+	}
+}
+
 func TestReadCodexTerminalError(t *testing.T) {
 	path := writeLines(t, []string{
 		`{"type":"event_msg","payload":{"type":"user_message","message":"do X"}}`,
