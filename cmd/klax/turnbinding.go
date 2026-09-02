@@ -77,12 +77,30 @@ func unboundBackendSessions(turns []sessfiles.Turn) [][2]string {
 	return out
 }
 
-// reconcileUnbound is the startup repair pass: a run whose bind never landed — the daemon
-// died between the transcript append and the bind fsync, or klax could not read the record
-// when it was written — is matched now, so its answer joins its durable turn.
-func (d *daemon) reconcileUnbound(sk string, created int64, cwd string, turns []sessfiles.Turn) {
+// bindingRepair is one backend session to re-match, addressed by the klax session that owns it.
+type bindingRepair struct {
+	sk               string
+	created          int64
+	cwd              string
+	backend, session string
+}
+
+func bindingRepairs(sk string, created int64, cwd string, turns []sessfiles.Turn) []bindingRepair {
+	var out []bindingRepair
 	for _, bs := range unboundBackendSessions(turns) {
-		d.reconcileBindings(sk, created, bs[0], bs[1], cwd)
+		out = append(out, bindingRepair{sk: sk, created: created, cwd: cwd, backend: bs[0], session: bs[1]})
+	}
+	return out
+}
+
+// repairBindings matches a run whose bind never landed — the daemon died between the
+// transcript append and the bind fsync, or klax could not read the record when it was
+// written — so its answer joins its durable turn. It reads whole backend transcripts and a
+// transport must never wait on that, so it runs off the startup path; racing a live run is
+// safe because Store.Bind is the single one-to-one authority and rejects a conflict.
+func (d *daemon) repairBindings(work []bindingRepair) {
+	for _, w := range work {
+		d.reconcileBindings(w.sk, w.created, w.backend, w.session, w.cwd)
 	}
 }
 

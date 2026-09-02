@@ -190,6 +190,7 @@ func (d *daemon) enqueueToSessionOrigin(chatID, msgID, text, originalText string
 // because the backend may already have written a transcript answer; the read model
 // resolves idle run records to done instead of showing a permanent spinner.
 func (d *daemon) replayDurableQueues() {
+	var repair []bindingRepair
 	for sk, cs := range d.store.Chats {
 		for _, sess := range cs.Sessions {
 			sr := d.getRunner(sk, sess.Created)
@@ -205,7 +206,7 @@ func (d *daemon) replayDurableQueues() {
 			if turns, err := sr.store.InboundLog(); err != nil {
 				log.Printf("durable replay queue (%s/%d): %v", sk, sess.Created, err)
 			} else {
-				d.reconcileUnbound(sk, sess.Created, sess.CWD, turns)
+				repair = append(repair, bindingRepairs(sk, sess.Created, sess.CWD, turns)...)
 			}
 			if len(reenq) == 0 {
 				d.dropRunner(sk, sess.Created) // no pending work — don't keep the runner
@@ -227,6 +228,7 @@ func (d *daemon) replayDurableQueues() {
 			go d.processSessionQueue(sr)
 		}
 	}
+	go d.repairBindings(repair)
 }
 
 func (d *daemon) processSessionQueue(sr *sessionRunner) {
