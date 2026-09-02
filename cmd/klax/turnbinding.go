@@ -108,7 +108,7 @@ func (d *daemon) repairBindings(work []bindingRepair) {
 	}
 }
 
-// reconcileBindings reports whether it established a new binding.
+// reconcileBindings reports whether a proposed binding is now durably present.
 func (d *daemon) reconcileBindings(sk string, created int64, backend, sessionID, cwd string) bool {
 	if sessionID == "" {
 		return false
