@@ -8,25 +8,25 @@
   "background_color": "#f5f6f8",
   "icons": [
     {
-      "src": "./app-icon-any-192.png",
+      "src": "./app-icon-any-192-v1.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "./app-icon-any-512.png",
+      "src": "./app-icon-any-512-v1.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "./app-icon-1024.png",
+      "src": "./app-icon-1024-v1.png",
       "sizes": "1024x1024",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "./app-icon-maskable-512.png",
+      "src": "./app-icon-maskable-512-v1.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"

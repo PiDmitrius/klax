@@ -454,6 +454,9 @@ func TestHandleSPAManifestUsesConfiguredTitle(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); ct != "application/manifest+json" {
 		t.Fatalf("manifest content-type=%q", ct)
 	}
+	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=3600" {
+		t.Fatalf("manifest cache-control=%q", got)
+	}
 	var manifest struct {
 		Name       string `json:"name"`
 		ShortName  string `json:"short_name"`
@@ -501,6 +504,9 @@ func TestHandleSPAManifestUsesConfiguredTitle(t *testing.T) {
 		s.handleSPA(iconRec, httptest.NewRequest("GET", path, nil))
 		if iconRec.Code != http.StatusOK || iconRec.Header().Get("Content-Type") != "image/png" {
 			t.Fatalf("icon %s: code %d, content-type %q", icon.Src, iconRec.Code, iconRec.Header().Get("Content-Type"))
+		}
+		if got := iconRec.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+			t.Fatalf("icon %s cache-control=%q", icon.Src, got)
 		}
 		cfg, _, err := image.DecodeConfig(bytes.NewReader(iconRec.Body.Bytes()))
 		if err != nil {
