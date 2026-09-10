@@ -36,6 +36,7 @@ function saveServerStarted(value){
   try { sessionStorage.setItem(SERVER_STARTED_KEY, String(value)); } catch(_){}
 }
 const loaded = {};        // created -> transcript loaded?
+const transcriptLoads = {}; // created -> shared initial-load promise
 const readThrough = {};   // created -> encoded (turn,block) read watermark (pos()); undefined until seeded
 const unreadJump = {};    // created -> one-shot scroll to the unread divider
 const readGraceUntil = {}, readGraceTimer = {};
@@ -129,7 +130,7 @@ function startReadGrace(created){
   }, READ_GRACE_MS + 40);
 }
 function markRead(created, force){
-  if(!created) return false;
+  if(!created || !loaded[created]) return false;
   if(!force && inReadGrace(created)) return false;
   const visualChange = rawUnreadCount(created) > 0 || unreadJump[created] !== undefined || readGraceUntil[created] !== undefined;
   const prev = readThrough[created] || 0;
@@ -205,7 +206,7 @@ function stickToBottom(){
 }
 function rememberScroll(created){
   const log = document.getElementById("log");
-  if(created && log) scrollTopFor[created] = log.scrollTop;
+  if(created && loaded[created] && log) scrollTopFor[created] = log.scrollTop;
 }
 function restoreScroll(created){
   const log = document.getElementById("log");
@@ -245,7 +246,7 @@ function noMotion(){ return { motionMS: 0, mergeHeldSplits: false, holdSplits: n
 // repositioning must not be animated over.
 function rerender(created, live, opts){
   opts = opts || {};
-  if(created !== active) return noMotion();
+  if(created !== active || !loaded[created]) return noMotion();
   if(!live && liveBusy && created === active && !opts.forceStructural){
     liveDirty = true;
     return noMotion();
@@ -376,10 +377,28 @@ function hasRunningTurn(created){
   return model.turns(created).some(t => t.role === "user" && t.state === "run");
 }
 
-async function loadTranscript(created){
+function showTranscriptStatus(message = "", retry = false){
+  const box = document.getElementById("transcriptstatus");
+  box.querySelector("span").textContent = message;
+  box.querySelector("button").classList.toggle("hidden", !retry);
+  box.classList.toggle("hidden", !message);
+  const log = document.getElementById("log");
+  log.style.visibility = message ? "hidden" : "";
+  log.setAttribute("aria-busy", String(!!message && !retry));
+  toggleToBottom();
+}
+
+function loadTranscript(created){
+  if(!transcriptLoads[created]){
+    transcriptLoads[created] = fetchTranscript(created).finally(() => { delete transcriptLoads[created]; });
+  }
+  return transcriptLoads[created];
+}
+
+async function fetchTranscript(created){
   try {
     const r = await api("/api/transcript?session=" + created + "&limit=" + CAP);
-    if(!r.ok) return;
+    if(!r.ok) throw new Error("transcript HTTP " + r.status);
     const data = await r.json();
     // The session may have been CLOSED while this was in flight. `dropActive` already tore its state
     // down; repopulating it here would leave a dead session with a live model and a `loaded` flag,
@@ -387,7 +406,6 @@ async function loadTranscript(created){
     // its state is deliberately kept.
     if(!sessionList.some(s => s.created === created)) return;
     model.reconcile(created, data.turns || []);
-    loaded[created] = true;
     offsetFor[created] = data.offset || 0;
     moreFor[created] = !!data.more;
     // Seed this tab's durable tail cursor from its loaded rows. Each loaded tab has its own cursor,
@@ -398,7 +416,10 @@ async function loadTranscript(created){
     // watermark now known, position the active view — jump to the divider if there is unread.
     if(readThrough[created] === undefined) readThrough[created] = parsePos(data.read_through);
     await ensureLineLoaded(created); // guarantee the unread line + KEEP_ABOVE context are in the window
+    if(!sessionList.some(s => s.created === created)) return;
+    loaded[created] = true;
     if(created === active){
+      showTranscriptStatus();
       if(rawUnreadCount(created) > 0){ stick = false; jumpToUnread(created); }
       else { markRead(created); stick = true; }
       refreshStrip();
@@ -407,7 +428,9 @@ async function loadTranscript(created){
     // (No explicit capWindow here: positioning above fires a scroll event that re-caps once the DOM
     // is real; capWindow's fits-the-viewport guard needs that real geometry to avoid dropping visible
     // rows on a fresh/short load.)
-  } catch(e){}
+  } catch(e){
+    if(created === active) showTranscriptStatus("Не удалось загрузить историю", true);
+  }
 }
 
 // loadOlder pages in the previous CAP-turn page and PREPENDS it, keeping the viewport stable (the
@@ -423,12 +446,13 @@ async function loadOlder(created, showTop){
   const oldH = (created === active && log) ? log.scrollHeight : 0;
   try {
     const r = await api("/api/transcript?session=" + created + "&before=" + offsetFor[created] + "&limit=" + CAP);
-    if(!r.ok) return;
+    if(!r.ok) throw new Error("transcript HTTP " + r.status);
     const data = await r.json();
+    if(!sessionList.some(s => s.created === created)) return;
     model.prepend(created, data.turns || []);
     offsetFor[created] = data.offset || 0;
     moreFor[created] = !!data.more;
-    if(created === active){
+    if(created === active && loaded[created]){
       const prev = stick; stick = false; // never snap to the bottom after loading old history
       rerenderStructural(created, true);
       stick = prev;
@@ -437,7 +461,9 @@ async function loadOlder(created, showTop){
         else log.scrollTop += log.scrollHeight - oldH;   // scroll-driven: keep the current view stable
       }
     }
-  } catch(e){} finally { loadingOlder[created] = false; }
+  } catch(e){
+    if(!loaded[created]) throw e;
+  } finally { loadingOlder[created] = false; }
 }
 
 // rawUnreadCount is the true unread model (line-to-bottom): it drives the in-log divider,
@@ -528,7 +554,7 @@ function capWindow(created){
 // context are loaded. Bounded by a guard so a never-read session cannot loop the whole transcript in.
 async function ensureLineLoaded(created){
   let guard = 0;
-  while(moreFor[created] && bubblesAbove(created, firstUnreadRow(created)) < KEEP_ABOVE && guard++ < 25){
+  while(sessionList.some(s => s.created === created) && moreFor[created] && bubblesAbove(created, firstUnreadRow(created)) < KEEP_ABOVE && guard++ < 25){
     await loadOlder(created);
   }
 }
@@ -563,6 +589,7 @@ async function selectSession(created){
     markRead(active);
   }
   active = created;
+  if(switching && selectionInLog(logcol())) window.getSelection().removeAllRanges();
   // The composer travels with the tab. Its draft swap is programmatic session state, not a reason to
   // alter this session's scroll intent, so exclude that height change from composer resize anchoring.
   if(switching){ loadDraft(created); rebaselineComposerResize(); }
@@ -571,11 +598,16 @@ async function selectSession(created){
   // tab, base URL) restores it instead of falling back to the first tab, and so a root window and a
   // group window don't fight over one remembered tab. Cheap; survives reloads and restarts.
   try { localStorage.setItem(storageKey(), String(created)); } catch(e){}
+  refreshStrip();
+  focusComposer();
   if(!loaded[created]){
+    stick = false;
+    showTranscriptStatus("Загрузка истории…");
     // Not yet loaded: load first (loadTranscript seeds readThrough from the server and then
     // positions the view — jump to the divider if unread, else the bottom).
     await loadTranscript(created);
   } else {
+    showTranscriptStatus();
     // Already loaded: returning to unread jumps to the "новые сообщения" divider, else the bottom.
     const hadUnread = rawUnreadCount(created) > 0;
     if(hadUnread) jumpToUnread(created);
@@ -585,7 +617,6 @@ async function selectSession(created){
     rerenderStructural(created, true);
     if(!hadUnread) restoreScroll(created);
   }
-  focusComposer();
 }
 
 // onSessionsList is the SINGLE reconcile path for both /api/sessions and the live `sessions` event:
@@ -685,7 +716,7 @@ function leaveActive(){
 }
 function dropActive(){
   if(!active) return;
-  model.drop(active); delete loaded[active]; markRead(active); dropDraft(active);
+  model.drop(active); markRead(active); delete loaded[active]; dropDraft(active);
   active = 0;
 }
 
@@ -722,7 +753,7 @@ function onNoticeEvent(text){
 }
 
 // toggleToBottom shows the down-arrow affordance only when the user has scrolled up.
-function toggleToBottom(){ const b = document.getElementById("tobottom"); if(b) b.classList.toggle("hidden", atBottom()); }
+function toggleToBottom(){ const b = document.getElementById("tobottom"); if(b) b.classList.toggle("hidden", !loaded[active] || atBottom()); }
 
 // setDegraded turns the top-left logo amber while the live channel is down (the poll loop
 // is failing and backing off) and restores it on the next good poll — an explicit,
@@ -861,6 +892,7 @@ function start(){
     log.addEventListener("touchstart", allowReadOnScroll, { passive: true });
   }
   if(log) log.addEventListener("scroll", () => {
+    if(!loaded[active]) return;
     stick = settledDistance(log) < 80; // settled: a FLIP mid-slide must not unstick us
     if(active) scrollTopFor[active] = log.scrollTop;
     // Auto-load older history: only while the user is scrolled UP (not `stick`) and nearing the top of
@@ -906,6 +938,7 @@ function start(){
     }).observe(composer, { box: "border-box" });
   }
   const th = document.getElementById("theme");
+  document.querySelector("#transcriptstatus button").addEventListener("click", () => { if(active) selectLater(active); });
   if(th) th.addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
   const tb = document.getElementById("tobottom");
   if(tb) tb.addEventListener("click", () => { stick = true; markRead(active, true); refreshStrip(); rerenderStructural(active); }); // rerender's stickToBottom fires a scroll event → scroll handler re-caps with a current DOM
