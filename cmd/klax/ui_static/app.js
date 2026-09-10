@@ -825,7 +825,7 @@ async function afterClose(created){
   // strip order, select it before syncSessions so onSessionsList keeps it (no auto-pick of the first).
   const wasActive = created === active;
   const next = wasActive ? neighborCreated(created) : 0;
-  model.drop(created); delete loaded[created]; markRead(created); dropDraft(created);
+  model.drop(created); markRead(created); delete loaded[created]; dropDraft(created);
   if(wasActive){
     active = 0;
     if(next) await selectSession(next);
