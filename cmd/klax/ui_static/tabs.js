@@ -87,7 +87,7 @@ export function renderTabs(active){
   const existing = new Map();
   strip.querySelectorAll(".tab[data-created]").forEach(t => existing.set(t.dataset.created, t));
   const keep = new Set();
-  for(const s of sessions){
+  for(const [index, s] of sessions.entries()){
     const unread = deps.unread ? deps.unread(s.created) : 0;
     const isActive = sameSession(s.created, active);
     totalUnread += unread;
@@ -102,7 +102,8 @@ export function renderTabs(active){
     const badge = t.querySelector(".badge");
     badge.textContent = unread || "";
     badge.classList.toggle("hidden", !unread);
-    if(t.parentNode !== strip || strip.children[sessions.indexOf(s)] !== t) strip.appendChild(t);
+    const at = strip.children[index] || null;
+    if(at !== t) strip.insertBefore(t, at);
   }
   for(const [key, t] of existing) if(!keep.has(key)) t.remove();
   const activeKey = String(active || "");
