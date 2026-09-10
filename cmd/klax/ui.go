@@ -1425,14 +1425,14 @@ func (s *uiServer) serveManifest(w http.ResponseWriter) {
 	title, _ := json.Marshal(s.d.cfg.GetUITitle())
 	data := bytes.ReplaceAll(manifestJSON, []byte("__KLAX_UI_TITLE_JSON__"), title)
 	w.Header().Set("Content-Type", "application/manifest+json")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
 	_, _ = w.Write(data)
 }
 
 // serveModule serves one SPA ES module / stylesheet from the embedded ui_static dir. The
 // name is constrained to a single path component (no traversal); like the shell and emoji
-// font it needs no auth (the token gate is client-side). no-cache so a deploy's new
-// modules are always picked up on the next reload.
+// font it needs no auth (the token gate is client-side). JS/CSS revalidate on reload;
+// PNG filenames carry a version that must change whenever their content changes.
 func (s *uiServer) serveModule(w http.ResponseWriter, r *http.Request, p string) {
 	name := strings.TrimPrefix(p, "/")
 	if name == "" || strings.Contains(name, "/") {
@@ -1445,12 +1445,14 @@ func (s *uiServer) serveModule(w http.ResponseWriter, r *http.Request, p string)
 		return
 	}
 	ct := "text/javascript; charset=utf-8"
+	cacheControl := "no-cache"
 	if strings.HasSuffix(name, ".css") {
 		ct = "text/css; charset=utf-8"
 	} else if strings.HasSuffix(name, ".png") {
 		ct = "image/png"
+		cacheControl = "public, max-age=31536000, immutable"
 	}
 	w.Header().Set("Content-Type", ct)
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", cacheControl)
 	_, _ = w.Write(data)
 }

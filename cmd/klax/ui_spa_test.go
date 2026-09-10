@@ -197,6 +197,13 @@ assert(notifications.children[9].children[1].textContent === "notice 12", "newes
 // missing files; handleSPA dispatches static assets to it without needing auth or a daemon.
 func TestServeModule(t *testing.T) {
 	s := &uiServer{}
+	for _, path := range []string{"/model.js", "/app.css"} {
+		rec := httptest.NewRecorder()
+		s.serveModule(rec, httptest.NewRequest("GET", path, nil), path)
+		if got := rec.Header().Get("Cache-Control"); got != "no-cache" {
+			t.Fatalf("%s cache-control=%q", path, got)
+		}
+	}
 
 	rec := httptest.NewRecorder()
 	s.serveModule(rec, httptest.NewRequest("GET", "/model.js", nil), "/model.js")
