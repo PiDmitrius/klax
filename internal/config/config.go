@@ -9,13 +9,14 @@ import (
 // UserIdentity maps platform-specific IDs to a canonical user.
 // Sessions in DMs are shared across platforms for the same user.
 type UserIdentity struct {
-	ID         string `json:"id"`                 // canonical user ID (e.g. "alice")
-	TelegramID int64  `json:"tg_id,omitempty"`    // Telegram user ID
-	MaxID      int64  `json:"mx_id,omitempty"`    // MAX user ID
-	VKID       int64  `json:"vk_id,omitempty"`    // VK user ID
-	YmLogin    string `json:"ym_login,omitempty"` // Yandex Messenger login (e.g. "vasya@example.org")
-	UIToken    string `json:"ui_token,omitempty"` // bearer token authenticating as this user in the web UI
-	CWD        string `json:"cwd,omitempty"`      // default working directory for this user's new DM/UI sessions
+	ID          string `json:"id"`                 // canonical user ID (e.g. "alice")
+	TelegramID  int64  `json:"tg_id,omitempty"`    // Telegram user ID
+	MaxID       int64  `json:"mx_id,omitempty"`    // MAX user ID
+	VKID        int64  `json:"vk_id,omitempty"`    // VK user ID
+	YmLogin     string `json:"ym_login,omitempty"` // Yandex Messenger login (e.g. "vasya@example.org")
+	UIReadToken string `json:"ui_read_token,omitempty"`
+	UIToken     string `json:"ui_token,omitempty"` // bearer token authenticating as this user in the web UI
+	CWD         string `json:"cwd,omitempty"`      // default working directory for this user's new DM/UI sessions
 }
 
 // BackendConfig holds per-backend settings.
@@ -73,7 +74,7 @@ type Config struct {
 	TelegramRich bool `json:"tg_rich,omitempty"`
 
 	// UIListen is the address the web UI server binds to (e.g. "127.0.0.1:8799").
-	// Empty disables the UI. Access is per-user via UserIdentity.UIToken.
+	// Empty disables the UI. Access uses the user's management or viewing token.
 	UIListen string `json:"ui_listen,omitempty"`
 
 	// UITitle is the product name shown in the web UI (browser tab title and the

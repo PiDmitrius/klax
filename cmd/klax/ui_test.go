@@ -204,7 +204,7 @@ func TestBuildUITokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(tokens) != 2 || tokens["secret1"] != "alice" || tokens["secret2"] != "bob" {
+	if len(tokens) != 2 || tokens["secret1"].User != "alice" || tokens["secret2"].User != "bob" {
 		t.Fatalf("bad token map: %v", tokens)
 	}
 	if _, err := buildUITokens([]config.UserIdentity{{ID: "a", UIToken: "dup"}, {ID: "b", UIToken: "dup"}}); err == nil {
@@ -216,7 +216,7 @@ func TestBuildUITokens(t *testing.T) {
 }
 
 func TestUIServerAuth(t *testing.T) {
-	s := &uiServer{tokens: map[string]string{"secret": "alice"}}
+	s := &uiServer{tokens: map[string]uiAccess{"secret": {User: "alice"}}}
 
 	bearer := httptest.NewRequest("GET", "/api/sessions", nil)
 	bearer.Header.Set("Authorization", "Bearer secret")
@@ -344,7 +344,7 @@ func TestUIServerRoutes(t *testing.T) {
 		uiHub:   newUIHub(),
 		runners: make(map[runnerKey]*sessionRunner),
 	}
-	h := (&uiServer{d: d, tokens: map[string]string{"sec": "alice"}}).routes()
+	h := (&uiServer{d: d, tokens: map[string]uiAccess{"sec": {User: "alice"}}}).routes()
 
 	spa := httptest.NewRecorder()
 	h.ServeHTTP(spa, httptest.NewRequest("GET", "/", nil))
@@ -390,7 +390,7 @@ func TestUIServerRoutes(t *testing.T) {
 func TestUISendRequiresSession(t *testing.T) {
 	d := &daemon{cfg: &config.Config{}, store: newStoreWithChat("user:alice", "one"),
 		uiHub: newUIHub(), runners: make(map[runnerKey]*sessionRunner)}
-	h := (&uiServer{d: d, tokens: map[string]string{"sec": "alice"}}).routes()
+	h := (&uiServer{d: d, tokens: map[string]uiAccess{"sec": {User: "alice"}}}).routes()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/send", strings.NewReader(`{"text":"hi"}`))
 	req.Header.Set("Authorization", "Bearer sec")
@@ -403,7 +403,7 @@ func TestUISendRequiresSession(t *testing.T) {
 
 func TestUIAbortValidatesSession(t *testing.T) {
 	d := &daemon{store: newStoreWithChat("user:alice", "one"), runners: make(map[runnerKey]*sessionRunner)}
-	h := (&uiServer{d: d, tokens: map[string]string{"sec": "alice"}}).routes()
+	h := (&uiServer{d: d, tokens: map[string]uiAccess{"sec": {User: "alice"}}}).routes()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/abort", strings.NewReader(`{"session":99999}`))
 	req.Header.Set("Authorization", "Bearer sec")

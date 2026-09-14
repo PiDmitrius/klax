@@ -117,7 +117,7 @@ func TestCreateUISessionAtomicPreservesExistingCWDDefault(t *testing.T) {
 	existingCWD := t.TempDir()
 	d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) { def.CWD = existingCWD })
 
-	sess, err := d.createUISessionAtomic(sk, chatID, uiSettingsPatch{}, "")
+	sess, err := d.createUISessionAtomic(sk, chatID, uiSettingsPatch{})
 	if err != nil {
 		t.Fatalf("createUISessionAtomic: %v", err)
 	}

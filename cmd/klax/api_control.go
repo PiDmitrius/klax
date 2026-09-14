@@ -1,9 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,8 +21,8 @@ type apiError struct {
 func apiFailure(code string) *apiError {
 	status, message := http.StatusInternalServerError, "Не удалось подготовить выполнение"
 	switch code {
-	case "control-token-required":
-		status, message = http.StatusForbidden, "Для управления сессией требуется токен"
+	case "read-only":
+		status, message = http.StatusForbidden, "Доступ разрешён только для чтения"
 	case "session-deleted":
 		status, message = http.StatusNotFound, "Сессия удалена"
 	case "session-not-found":
@@ -66,25 +63,9 @@ func optionalNonemptyString(raw json.RawMessage, field, fallback string) (string
 	return value, nil
 }
 
-func controlDigest(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:])
-}
-
-func (d *daemon) controlError(sk string, created int64, token string) *apiError {
-	sess := d.store.Get(sk, created)
-	if sess == nil {
-		return apiFailure("session-not-found")
-	}
-	if sess.ControlHash != "" && (token == "" || subtle.ConstantTimeCompare([]byte(sess.ControlHash), []byte(controlDigest(token))) != 1) {
-		return apiFailure("control-token-required")
-	}
-	return nil
-}
-
-func (s *uiServer) requireControl(w http.ResponseWriter, r *http.Request, sk string, created int64) bool {
-	if err := s.d.controlError(sk, created, r.Header.Get("X-Klax-Control-Token")); err != nil {
-		writeAPIError(w, err)
+func (s *uiServer) requireSession(w http.ResponseWriter, sk string, created int64) bool {
+	if s.d.store.Get(sk, created) == nil {
+		writeAPIError(w, apiFailure("session-not-found"))
 		return false
 	}
 	return true

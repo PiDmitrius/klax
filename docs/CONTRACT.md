@@ -47,7 +47,8 @@ expresses it, so an entry can be checked and can be proven stale.
 
 6. **The unread axis is the durable `(turn_seq, block)`,** encoded `pos = turn * POS_MULT + block`
    (`cmd/klax/ui_static/render.js`). Forbidden: a second position scheme, and forbidden: re-zeroing
-   an axis the server did not move.
+   an axis the server did not move. Management and viewing access select independent persistent
+   watermarks on this same axis; changing a credential does not change its role's watermark.
 
 7. **Live animation has one serialization point.** Every live trigger goes through `commitLive`
    guarded by `liveBusy` (`cmd/klax/ui_static/app.js`), which accumulates instead of stacking.

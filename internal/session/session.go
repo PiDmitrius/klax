@@ -28,7 +28,6 @@ type ScopeDefaults struct {
 }
 
 type Session struct {
-	ControlHash   string `json:"control_hash,omitempty"`
 	ID            string `json:"id"`                       // session UUID (claude or codex thread_id)
 	Name          string `json:"name"`                     // user-friendly name
 	CWD           string `json:"cwd"`                      // working directory
@@ -53,15 +52,37 @@ type Session struct {
 	// (turn_seq, block index) the user has read. Absent on legacy stores ⇒ 0 ("nothing read
 	// yet"). Consumed by the UI so the unread divider/badge/title survive a page reload
 	// and a daemon restart instead of re-baselining to "all read".
-	ReadThroughTurn    int64  `json:"read_through_turn,omitempty"`
-	ReadThroughBlock   int    `json:"read_through_block,omitempty"`
-	AppendSystemPrompt string `json:"append_system_prompt,omitempty"`
+	ReadThroughTurn        int64  `json:"read_through_turn,omitempty"`
+	ReadThroughBlock       int    `json:"read_through_block,omitempty"`
+	ReaderReadThroughTurn  int64  `json:"reader_read_through_turn,omitempty"`
+	ReaderReadThroughBlock int    `json:"reader_read_through_block,omitempty"`
+	AppendSystemPrompt     string `json:"append_system_prompt,omitempty"`
 	// Deprecated: rate limits moved to global config per backend.
 	// Keep fields for JSON backward compat (old sessions.json).
 	RateLimitStatus  string `json:"rl_status,omitempty"`
 	RateLimitResets  int64  `json:"rl_resets,omitempty"`
 	RateLimitType    string `json:"rl_type,omitempty"`
 	RateLimitOverage bool   `json:"rl_overage,omitempty"`
+}
+
+// ReadThrough selects the durable watermark for the access role, independent of token rotation.
+func (s *Session) ReadThrough(readOnly bool) (int64, int) {
+	if readOnly {
+		return s.ReaderReadThroughTurn, s.ReaderReadThroughBlock
+	}
+	return s.ReadThroughTurn, s.ReadThroughBlock
+}
+
+func (s *Session) AdvanceReadThrough(readOnly bool, turn int64, block int) bool {
+	t, b := &s.ReadThroughTurn, &s.ReadThroughBlock
+	if readOnly {
+		t, b = &s.ReaderReadThroughTurn, &s.ReaderReadThroughBlock
+	}
+	if turn < *t || (turn == *t && block <= *b) {
+		return false
+	}
+	*t, *b = turn, block
+	return true
 }
 
 type ChatSessions struct {

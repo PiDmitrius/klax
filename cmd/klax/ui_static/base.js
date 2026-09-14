@@ -3,7 +3,8 @@
 // be imported under plain node for unit tests without a DOM.
 
 const TOKEN_KEY = "klax_ui_token";
-let _base, _token;
+let _base, _token, authFailure = () => {};
+export function onAuthFailure(fn){ authFailure = fn; }
 
 // BASE is the path the SPA is served under (with a trailing slash) — "/" normally,
 // "/klax/" behind a path-stripping reverse proxy.
@@ -12,10 +13,13 @@ export function BASE(){
 }
 
 export function getToken(){
-  if(_token === undefined || _token === null) _token = localStorage.getItem(TOKEN_KEY) || "";
+  if(_token === undefined || _token === null){ try { _token = localStorage.getItem(TOKEN_KEY) || ""; } catch(_){ _token = ""; } }
   return _token;
 }
-export function setToken(t){ _token = t; localStorage.setItem(TOKEN_KEY, t); }
+export function setToken(t){
+  _token = t;
+  try { if(t) localStorage.setItem(TOKEN_KEY, t); else localStorage.removeItem(TOKEN_KEY); } catch(_){}
+}
 
 // Canonical input-modality capability used by composer and focus management. Keep this as a
 // capability check, not a user-agent/device-name branch: hybrid devices may also have a mouse.
@@ -30,8 +34,12 @@ export function apiHref(href){ return href.charAt(0) === "/" ? BASE() + href.sli
 // api is the authenticated fetch: Bearer token + BASE-relative path.
 export function api(path, opts){
   opts = opts || {};
-  opts.headers = Object.assign({ "Authorization": "Bearer " + getToken() }, opts.headers || {});
-  return fetch(BASE() + (path[0] === "/" ? path.slice(1) : path), opts);
+  const token = getToken();
+  opts.headers = Object.assign({ "Authorization": "Bearer " + token }, opts.headers || {});
+  return fetch(BASE() + (path[0] === "/" ? path.slice(1) : path), opts).then(r => {
+    if(r.status === 401 && token === getToken()) authFailure();
+    return r;
+  });
 }
 
 // --- click-to-copy: ONE implementation shared by every copyable surface (timeline code,

@@ -455,7 +455,7 @@ func (d *daemon) queuedCount(sk string, created int64) int {
 	return n
 }
 
-func (d *daemon) createUISessionAtomic(sk, chatID string, patch uiSettingsPatch, controlHash string) (*session.Session, error) {
+func (d *daemon) createUISessionAtomic(sk, chatID string, patch uiSettingsPatch) (*session.Session, error) {
 	def := d.scopeDefaults(sk)
 	backend := resolveSessionBackend(nil, def, d.cfg.GetDefaultBackend())
 	// Seed a message-less session from the scope defaults (what createSession would have produced),
@@ -476,7 +476,6 @@ func (d *daemon) createUISessionAtomic(sk, chatID string, patch uiSettingsPatch,
 		}
 		applySettingsPatch(sess, r)
 	}
-	sess.ControlHash = controlHash
 	newDefaults := session.ScopeDefaults{
 		Backend:      resolveSessionBackend(sess, def, d.cfg.GetDefaultBackend()),
 		Model:        sess.ModelOverride,
@@ -551,7 +550,7 @@ func (d *daemon) closeSession(sk string, created int64) error {
 	return nil
 }
 
-func (d *daemon) sessionsSnapshot(sk string) []uiSessionInfo {
+func (d *daemon) sessionsSnapshot(sk string, readOnly bool) []uiSessionInfo {
 	sessions := d.store.SessionsFor(sk)
 	out := make([]uiSessionInfo, 0, len(sessions))
 	for _, s := range sessions {
@@ -563,12 +562,13 @@ func (d *daemon) sessionsSnapshot(sk string) []uiSessionInfo {
 		if model == "" {
 			model = s.Model
 		}
+		readTurn, readBlock := s.ReadThrough(readOnly)
 		// Unread answer-block count for a tab the client has not loaded (a loaded tab ignores this
 		// and counts client-side). Stat-cached, so an unchanged session costs only an os.Stat.
-		unread := d.sessionUnread(sk, s)
+		unread := d.sessionUnread(sk, s, readOnly)
 		out = append(out, uiSessionInfo{
 			Created:     s.Created,
-			ReadOnly:    s.ControlHash != "",
+			ReadOnly:    readOnly,
 			Name:        s.Name,
 			Active:      s.Active,
 			Busy:        d.isSessionBusy(sk, s.Created),
@@ -579,7 +579,7 @@ func (d *daemon) sessionsSnapshot(sk string) []uiSessionInfo {
 			Messages:    s.Messages,
 			CtxUsed:     s.ContextUsed,
 			CtxWindow:   s.ContextWindow,
-			ReadThrough: fmt.Sprintf("%d.%d", s.ReadThroughTurn, s.ReadThroughBlock),
+			ReadThrough: fmt.Sprintf("%d.%d", readTurn, readBlock),
 			Unread:      unread,
 			Groups:      s.Groups,
 		})
@@ -590,8 +590,9 @@ func (d *daemon) sessionsSnapshot(sk string) []uiSessionInfo {
 // sessionUnread returns a session's unread answer-block count for its tab badge — a loaded tab
 // ignores this and counts client-side; this serves tabs the client has NOT loaded (finding B). It
 // is cheap: readModel is cached, so this is a recount over cached rows.
-func (d *daemon) sessionUnread(sk string, sess *session.Session) int {
-	return unreadAfter(d.readModel(sk, sess), sess.ReadThroughTurn, sess.ReadThroughBlock)
+func (d *daemon) sessionUnread(sk string, sess *session.Session, readOnly bool) int {
+	turn, block := sess.ReadThrough(readOnly)
+	return unreadAfter(d.readModel(sk, sess), turn, block)
 }
 
 // readModel builds a session's full read-model rows (durable queue ⋈ transcript) — the SAME rows
@@ -677,22 +678,29 @@ func (d *daemon) watchRunTranscript(stop <-chan struct{}, idKnown <-chan string,
 	}
 }
 
-// buildUITokens maps each configured ui_token to its canonical user. It rejects
-// an empty id on a token-bearing user and duplicate tokens; the token itself is
-// never echoed into the error (privacy).
-func buildUITokens(users []config.UserIdentity) (map[string]string, error) {
-	tokens := make(map[string]string)
+type uiAccess struct {
+	User     string `json:"user"`
+	ReadOnly bool   `json:"read_only"`
+}
+
+func buildUITokens(users []config.UserIdentity) (map[string]uiAccess, error) {
+	tokens := make(map[string]uiAccess)
 	for _, u := range users {
-		if u.UIToken == "" {
-			continue
+		for _, entry := range []struct {
+			token    string
+			readOnly bool
+		}{{u.UIToken, false}, {u.UIReadToken, true}} {
+			if entry.token == "" {
+				continue
+			}
+			if u.ID == "" {
+				return nil, fmt.Errorf("ui: token owner has an empty id")
+			}
+			if _, dup := tokens[entry.token]; dup {
+				return nil, fmt.Errorf("ui: duplicate access token in config")
+			}
+			tokens[entry.token] = uiAccess{User: u.ID, ReadOnly: entry.readOnly}
 		}
-		if u.ID == "" {
-			return nil, fmt.Errorf("ui: user with a ui_token has an empty id")
-		}
-		if _, dup := tokens[u.UIToken]; dup {
-			return nil, fmt.Errorf("ui: duplicate ui_token in config")
-		}
-		tokens[u.UIToken] = u.ID
 	}
 	return tokens, nil
 }
@@ -726,7 +734,7 @@ func (t *uiTransport) EditMessage(chatID, messageID, text, replyTo, format strin
 type uiServer struct {
 	d      *daemon
 	addr   string
-	tokens map[string]string // token -> canonical user
+	tokens map[string]uiAccess // token -> user and access role
 }
 
 func (s *uiServer) Name() string { return uiPrefix }
@@ -769,6 +777,7 @@ func isLoopbackAddr(addr string) bool {
 
 func (s *uiServer) routes() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/auth", s.handleAuth)
 	mux.HandleFunc("/api/tail", s.handleTail)
 	mux.HandleFunc("/api/send", s.handleSend)
 	mux.HandleFunc("/api/abort", s.handleAbort)
@@ -786,19 +795,64 @@ func (s *uiServer) routes() http.Handler {
 	mux.HandleFunc("/api/file", s.handleFile)
 	mux.HandleFunc("/emoji/", s.handleEmoji)
 	mux.HandleFunc("/", s.handleSPA)
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			access, ok := s.access(r)
+			if !ok {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			if access.ReadOnly && !readerRequest(r) {
+				writeAPIError(w, apiFailure("read-only"))
+				return
+			}
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 // auth resolves the bearer token (Authorization header) to a canonical user. Every
 // UI request — including the long-poll — sets the header (fetch can), so there is
 // no ?token= query path to widen token-in-URL leakage.
-func (s *uiServer) auth(r *http.Request) (string, bool) {
+func (s *uiServer) access(r *http.Request) (uiAccess, bool) {
 	h := r.Header.Get("Authorization")
 	if !strings.HasPrefix(h, "Bearer ") {
-		return "", false
+		return uiAccess{}, false
 	}
-	u, ok := s.tokens[strings.TrimPrefix(h, "Bearer ")]
-	return u, ok
+	access, ok := s.tokens[strings.TrimPrefix(h, "Bearer ")]
+	return access, ok
+}
+
+func (s *uiServer) auth(r *http.Request) (string, bool) {
+	access, ok := s.access(r)
+	return access.User, ok
+}
+
+func (s *uiServer) readOnly(r *http.Request) bool {
+	access, _ := s.access(r)
+	return access.ReadOnly
+}
+
+// Readers may change only their own watermark; all other routes are denied by default.
+func readerRequest(r *http.Request) bool {
+	if r.Method == http.MethodGet {
+		switch r.URL.Path {
+		case "/api/auth", "/api/sessions", "/api/settings", "/api/system", "/api/transcript", "/api/file":
+			return true
+		}
+	}
+	return r.Method == http.MethodPost && (r.URL.Path == "/api/tail" || r.URL.Path == "/api/read")
+}
+
+func (s *uiServer) handleAuth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	access, _ := s.access(r)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(access)
 }
 
 func (s *uiServer) chatID(user string) string { return uiPrefix + ":" + user }
@@ -907,7 +961,7 @@ func tailCursor(rows []uiTurn) string {
 	return fmt.Sprintf("%d.%d.%s.%d", aTurn, aBlock, stateCode(aState), trail)
 }
 
-func (s *uiServer) buildTail(user, sk string, req tailReq) tailResp {
+func (s *uiServer) buildTail(user, sk string, req tailReq, readOnly bool) tailResp {
 	// Read the strip revision BEFORE the snapshot. A concurrent bumpSessions between the two must
 	// never pair a NEWER rev with an OLDER snapshot: the client would ack a strip change it never
 	// rendered, then stop re-requesting it (its next rev matches the server's) and stay stale until a
@@ -915,7 +969,7 @@ func (s *uiServer) buildTail(user, sk string, req tailReq) tailResp {
 	// taken after `rev` reflects at least rev's state — so resp.SessRev is never ahead of Sessions,
 	// and any bump after `rev` instead closes the wake channel and drives a rebuild.
 	rev := s.d.uiHub.sessionsRev(user)
-	resp := tailResp{Started: s.d.uiHub.epoch, Startup: s.d.startupKind, Version: version, Sessions: s.d.sessionsSnapshot(sk), SessRev: rev}
+	resp := tailResp{Started: s.d.uiHub.epoch, Startup: s.d.startupKind, Version: version, Sessions: s.d.sessionsSnapshot(sk, readOnly), SessRev: rev}
 	for createdStr, cur := range req.Cursors {
 		created, err := strconv.ParseInt(createdStr, 10, 64)
 		if err != nil {
@@ -960,7 +1014,9 @@ func (s *uiServer) handleTail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
-	s.d.ensureSessionWithCWD(sk, s.d.sessionCWD(s.chatID(user)))
+	if !s.readOnly(r) {
+		s.d.ensureSessionWithCWD(sk, s.d.sessionCWD(s.chatID(user)))
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 
@@ -979,7 +1035,7 @@ func (s *uiServer) handleTail(w http.ResponseWriter, r *http.Request) {
 	deadline := time.NewTimer(uiPollHold)
 	defer deadline.Stop()
 	ch := s.d.uiHub.waitChan(user) // grab BEFORE building (lost-wakeup-safe)
-	resp := s.buildTail(user, sk, req)
+	resp := s.buildTail(user, sk, req, s.readOnly(r))
 	// Return immediately on new content, a notice, OR a session-strip change the client hasn't seen
 	// (resp.SessRev past the client's last-rendered rev). The rev catches a rename/create/close/
 	// cross-tab-read whose wake was lost because this request arrived just after it — without it,
@@ -993,7 +1049,7 @@ func (s *uiServer) handleTail(w http.ResponseWriter, r *http.Request) {
 	// any tails land promptly; on timeout return the current strip so badges never go stale.
 	select {
 	case <-ch:
-		_ = json.NewEncoder(w).Encode(s.buildTail(user, sk, req))
+		_ = json.NewEncoder(w).Encode(s.buildTail(user, sk, req, s.readOnly(r)))
 	case <-deadline.C:
 		_ = json.NewEncoder(w).Encode(resp)
 	case <-r.Context().Done():
@@ -1108,7 +1164,7 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, &apiError{Code: "empty-message", Message: "Сообщение пусто", status: http.StatusBadRequest})
 		return
 	}
-	if !s.requireControl(w, r, s.d.sessionKey(s.chatID(user)), targetCreated) {
+	if !s.requireSession(w, s.d.sessionKey(s.chatID(user)), targetCreated) {
 		return
 	}
 	// The accepted user message is echoed to every UI tab from the common accept
@@ -1173,9 +1229,6 @@ func (s *uiServer) handleAbort(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Session not found", http.StatusNotFound)
 		return
 	}
-	if !s.requireControl(w, r, sk, body.Session) {
-		return
-	}
 	s.d.abortSession(sk, body.Session, false)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -1216,25 +1269,13 @@ func (s *uiServer) handleRead(w http.ResponseWriter, r *http.Request) {
 	}
 	raised := false
 	s.d.store.UpdateSession(sk, body.Session, func(cur *session.Session) {
-		raised = raiseReadThrough(cur, body.Turn, body.Block)
+		raised = cur.AdvanceReadThrough(s.readOnly(r), body.Turn, body.Block)
 	})
 	if raised {
 		s.d.saveStore()
 		s.d.broadcastSessions(sk) // push the new read_through/unread to this user's other tabs/devices
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// raiseReadThrough advances a session's durable read watermark to (turn, block) only when that is
-// strictly ahead of the stored one — a later turn, or the same turn with a further block — so a
-// duplicate or out-of-order report never regresses it. Returns whether it moved (⇒ worth saving).
-func raiseReadThrough(cur *session.Session, turn int64, block int) bool {
-	if turn < cur.ReadThroughTurn || (turn == cur.ReadThroughTurn && block <= cur.ReadThroughBlock) {
-		return false
-	}
-	cur.ReadThroughTurn = turn
-	cur.ReadThroughBlock = block
-	return true
 }
 
 func (s *uiServer) handleSessions(w http.ResponseWriter, r *http.Request) {
@@ -1244,9 +1285,11 @@ func (s *uiServer) handleSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
-	s.d.ensureSessionWithCWD(sk, s.d.sessionCWD(s.chatID(user)))
+	if !s.readOnly(r) {
+		s.d.ensureSessionWithCWD(sk, s.d.sessionCWD(s.chatID(user)))
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(s.d.sessionsSnapshot(sk))
+	_ = json.NewEncoder(w).Encode(s.d.sessionsSnapshot(sk, s.readOnly(r)))
 }
 
 func (s *uiServer) handleNew(w http.ResponseWriter, r *http.Request) {
@@ -1274,16 +1317,11 @@ func (s *uiServer) handleNew(w http.ResponseWriter, r *http.Request) {
 	// Atomic create: validate + configure the session, then a SINGLE save + broadcast. A rejected
 	// draft (e.g. an inaccessible cwd) creates nothing and returns the real reason; nothing external
 	// ever sees a defaults placeholder, and a crash before the save leaves no half-built session.
-	token, err := optionalNonemptyString(body.ControlToken, "control_token", "")
-	if err != nil {
-		writeAPIError(w, err)
+	if len(body.ControlToken) != 0 {
+		writeAPIError(w, &apiError{Code: "unsupported-control-token", Message: "Используйте ui_token или ui_read_token", status: http.StatusBadRequest})
 		return
 	}
-	hash := ""
-	if token != "" {
-		hash = controlDigest(token)
-	}
-	sess, createErr := s.d.createUISessionAtomic(sk, s.chatID(user), body.uiSettingsPatch, hash)
+	sess, createErr := s.d.createUISessionAtomic(sk, s.chatID(user), body.uiSettingsPatch)
 	if createErr != nil {
 		status := http.StatusBadRequest
 		if ue, ok := createErr.(*uiErr); ok {
@@ -1321,7 +1359,7 @@ func (s *uiServer) handleRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
-	if !s.requireControl(w, r, sk, body.Session) {
+	if !s.requireSession(w, sk, body.Session) {
 		return
 	}
 	if !s.d.renameSession(sk, body.Session, body.Name) {
@@ -1375,7 +1413,7 @@ func (s *uiServer) handleClose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
-	if !s.requireControl(w, r, sk, body.Session) {
+	if !s.requireSession(w, sk, body.Session) {
 		return
 	}
 	if err := s.d.closeSession(sk, body.Session); err != nil {
@@ -1439,13 +1477,14 @@ func (s *uiServer) handleTranscript(w http.ResponseWriter, r *http.Request) {
 	turns := s.d.buildReadModel(sk, created, grouped[start:end], queueTurns, presence, s.d.isSessionBusy(sk, created), start, before == 0, sess.ContextWindow)
 
 	w.Header().Set("Content-Type", "application/json")
+	readTurn, readBlock := sess.ReadThrough(s.readOnly(r))
 	_ = json.NewEncoder(w).Encode(struct {
 		Turns       []uiTurn `json:"turns"`
 		More        bool     `json:"more"`
 		Offset      int      `json:"offset"`
 		Watermark   string   `json:"watermark"`
 		ReadThrough string   `json:"read_through"` // the tab seeds its unread divider from this
-	}{Turns: turns, More: start > 0, Offset: start, Watermark: watermark, ReadThrough: fmt.Sprintf("%d.%d", sess.ReadThroughTurn, sess.ReadThroughBlock)})
+	}{Turns: turns, More: start > 0, Offset: start, Watermark: watermark, ReadThrough: fmt.Sprintf("%d.%d", readTurn, readBlock)})
 }
 
 // handleEmoji serves a bundled color-emoji web-font subset (woff2). No auth —

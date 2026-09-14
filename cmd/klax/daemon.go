@@ -231,7 +231,7 @@ func hasConfiguredTransport(cfg *config.Config) bool {
 	// The web UI can be the only configured channel.
 	if cfg.UIListen != "" {
 		for _, u := range cfg.Users {
-			if u.UIToken != "" {
+			if u.UIToken != "" || u.UIReadToken != "" {
 				return true
 			}
 		}

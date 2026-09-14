@@ -110,7 +110,6 @@ func (d *daemon) uiSessionSettings(sk string, created int64) (*uiSettings, bool)
 	def := d.scopeDefaults(sk)
 	backend := resolveSessionBackend(sess, def, d.cfg.GetDefaultBackend())
 	return &uiSettings{
-		ReadOnly:      sess.ControlHash != "",
 		Created:       sess.Created,
 		Name:          sess.Name,
 		Backend:       backend,
@@ -359,7 +358,9 @@ func (s *uiServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 		created, _ := strconv.ParseInt(r.URL.Query().Get("session"), 10, 64)
 		if created <= 0 { // session=0 → the "new session" draft view (no session exists yet)
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(s.d.uiDraftSettings(sk, s.chatID(user), r.URL.Query().Get("backend")))
+			settings := s.d.uiDraftSettings(sk, s.chatID(user), r.URL.Query().Get("backend"))
+			settings.ReadOnly = s.readOnly(r)
+			_ = json.NewEncoder(w).Encode(settings)
 			return
 		}
 		settings, ok := s.d.uiSessionSettings(sk, created)
@@ -368,6 +369,7 @@ func (s *uiServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		settings.ReadOnly = s.readOnly(r)
 		_ = json.NewEncoder(w).Encode(settings)
 	case http.MethodPost:
 		var body struct {
@@ -382,7 +384,7 @@ func (s *uiServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "A positive session is required", http.StatusBadRequest)
 			return
 		}
-		if !s.requireControl(w, r, sk, body.Session) {
+		if !s.requireSession(w, sk, body.Session) {
 			return
 		}
 		if err := s.d.applyUISessionSettings(sk, body.Session, body.uiSettingsPatch); err != nil {
@@ -399,6 +401,7 @@ func (s *uiServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		settings.ReadOnly = s.readOnly(r)
 		_ = json.NewEncoder(w).Encode(settings)
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

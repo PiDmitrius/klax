@@ -16,7 +16,7 @@ import (
 func systemTestServer() (*uiServer, *systemState) {
 	st := newSystemState(time.Now().Add(-time.Minute))
 	d := &daemon{cfg: &config.Config{SourceDir: "/source"}, uiHub: newUIHub(), system: st}
-	return &uiServer{d: d, tokens: map[string]string{"token": "owner"}}, st
+	return &uiServer{d: d, tokens: map[string]uiAccess{"token": {User: "owner"}}}, st
 }
 
 func authSystemRequest(method, path string) *http.Request {
