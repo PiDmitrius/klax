@@ -415,7 +415,7 @@ func TestAPIProtectedSessionAuthorizationAndPersistence(t *testing.T) {
 	if reloaded.Get("user:test", id).ControlHash != stored.ControlHash {
 		t.Fatal("protection lost after reload")
 	}
-	for _, path := range []string{"/api/send", "/api/abort", "/api/rename", "/api/close", "/api/settings", "/api/reorder"} {
+	for _, path := range []string{"/api/send", "/api/abort", "/api/rename", "/api/close", "/api/settings"} {
 		body := fmt.Sprintf(`{"session":%d,"text":"hello","name":"renamed","order":[%d,%d],"control_token":""}`, id, id, f.created)
 		for _, bad := range []string{"", "wrong"} {
 			errorResponse(t, f.request(path, body, bad), "control-token-required")
@@ -436,21 +436,6 @@ func TestAPIProtectedSessionAuthorizationAndPersistence(t *testing.T) {
 		if w.Code != 404 {
 			t.Fatalf("cross-user %s: %d", path, w.Code)
 		}
-	}
-	for _, cmd := range []string{"/name hacked", "/cwd /tmp", "/prompt hacked", "/m_sol", "/t_low", "/sb_off", "/tty on", "/backend claude", "/abort", "/nuke"} {
-		f.d.handleCommand("ui:test", "", cmd)
-	}
-	if f.d.handleInbound(Inbound{ChatID: "ui:test", Text: "unauthorized", TargetCreated: id, RawMessage: true}) {
-		t.Fatal("alternative send accepted")
-	}
-	if got := f.d.store.Get("user:test", id); got == nil || got.Name != "managed" || got.ControlHash != stored.ControlHash || got.AppendSystemPrompt != "instructions" {
-		t.Fatal("messenger mutated protection/session")
-	}
-	// A non-active protected session is also covered by the deletion command.
-	f.d.store.Switch("user:test", 0)
-	f.d.handleSessionDelete("ui:test", "", "user:test", "2")
-	if f.d.store.Get("user:test", id) == nil {
-		t.Fatal("alternative deletion accepted")
 	}
 	for _, path := range []string{"/api/sessions", "/api/settings?session=" + fmt.Sprint(id), "/api/transcript?session=" + fmt.Sprint(id)} {
 		req := httptest.NewRequest("GET", path, nil)
@@ -691,4 +676,93 @@ func TestAPIResultRetentionPreservesPendingWaiters(t *testing.T) {
 	w := httptest.NewRecorder()
 	awaitTurn(w, httptest.NewRequest("POST", "/api/send", nil), attached, "finish")
 	errorResponse(t, w, "aborted")
+}
+
+func TestAPIReorderIncludesProtectedSessions(t *testing.T) {
+	f := newAPIFixture(t, "", "", "")
+	w := f.request("/api/new", `{"name":"managed","control_token":"secret"}`, "")
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	id := f.d.store.Active("user:test").Created
+	body := fmt.Sprintf(`{"order":[%d,%d]}`, id, f.created)
+	if w := f.request("/api/reorder", body, ""); w.Code != 204 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if got := f.d.store.SessionsFor("user:test"); len(got) != 2 || got[0].Created != id || got[1].Created != f.created {
+		t.Fatal("protected tab prevented reorder")
+	}
+	errorResponse(t, f.request("/api/send", fmt.Sprintf(`{"session":%d,"text":"hello"}`, id), ""), "control-token-required")
+}
+
+func TestMessengerControlIgnoresControlToken(t *testing.T) {
+	for _, chatID := range []string{"tg:1", "mx:1", "vk:1", "ym:test@example.org"} {
+		t.Run(chatID, func(t *testing.T) {
+			f := newAPIFixture(t, "", "", "block")
+			f.d.identities = map[int64]string{1: "test"}
+			f.d.maxIdents = map[int64]string{1: "test"}
+			f.d.vkIdents = map[int]string{1: "test"}
+			f.d.ymIdents = map[string]string{"test@example.org": "test"}
+			if w := f.request("/api/new", `{"name":"managed","control_token":"secret"}`, ""); w.Code != 200 {
+				t.Fatal(w.Code, w.Body.String())
+			}
+			id := f.d.store.Active("user:test").Created
+			f.d.handleCommand(chatID, "", "/name renamed")
+			f.d.handleCommand(chatID, "", "/prompt instructions")
+			got := f.d.store.Get("user:test", id)
+			if got.Name != "renamed" || got.AppendSystemPrompt != "instructions" || got.ControlHash != controlDigest("secret") {
+				t.Fatal("messenger settings blocked or protection changed")
+			}
+			if !f.d.handleInbound(Inbound{ChatID: chatID, MsgID: "1", Text: "hello", Attachments: []attachment{{filename: "note.txt", data: []byte("note")}}}) {
+				t.Fatal("messenger send blocked")
+			}
+			f.entered(t, "backend")
+			sr := f.d.getRunner("user:test", id)
+			sr.mu.Lock()
+			var completion *turnWait
+			for _, result := range sr.results {
+				completion = result
+			}
+			sr.mu.Unlock()
+			if completion == nil {
+				t.Fatal("missing accepted turn")
+			}
+			f.d.handleCommand(chatID, "", "/abort")
+			w := httptest.NewRecorder()
+			awaitTurn(w, httptest.NewRequest("POST", "/api/send", nil), completion, "finish")
+			eventResponse(t, w, "finish", "aborted")
+			until := time.Now().Add(5 * time.Second)
+			for f.d.isSessionBusy("user:test", id) {
+				if time.Now().After(until) {
+					t.Fatal("session remained busy after abort")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			f.d.store.Switch("user:test", 0)
+			f.d.handleSessionDelete(chatID, "", "user:test", "2")
+			if f.d.store.Get("user:test", id) != nil {
+				t.Fatal("messenger deletion blocked")
+			}
+		})
+	}
+}
+
+func TestMessengerNukeDeletesProtectedSessionsAndWakesAPI(t *testing.T) {
+	f := newAPIFixture(t, "block", "", "")
+	f.d.identities = map[int64]string{1: "test"}
+	if w := f.request("/api/new", `{"name":"managed","control_token":"secret"}`, ""); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	id := f.d.store.Active("user:test").Created
+	wait := asyncResponse(func() *httptest.ResponseRecorder {
+		return f.request("/api/send", fmt.Sprintf(`{"session":%d,"text":"hello","return_on":"finish"}`, id), "secret")
+	})
+	f.entered(t, "start")
+	f.d.handleCommand("tg:1", "", "/nuke fresh")
+	errorResponse(t, response(t, wait), "session-deleted")
+	got := f.d.store.SessionsFor("user:test")
+	if len(got) != 1 || got[0].Name != "fresh" || !got[0].Active || got[0].ControlHash != "" {
+		t.Fatal("nuke did not replace all sessions")
+	}
+	f.release(t, "start")
 }

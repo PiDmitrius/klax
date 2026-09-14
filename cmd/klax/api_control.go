@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/PiDmitrius/klax/internal/session"
 	"github.com/PiDmitrius/klax/internal/turnaudit"
 )
 
@@ -140,7 +139,6 @@ func (t *turnWait) fail(code string) {
 }
 
 type sendAdmission struct {
-	token      string
 	completion *turnWait
 	err        *apiError
 }
@@ -187,18 +185,6 @@ func decodeAPIRequest(body io.Reader, value any, allowEmpty bool) error {
 		return fmt.Errorf("expected one JSON object")
 	}
 	return nil
-}
-
-func (d *daemon) manualSessionControl(chatID, msgID string, sess *session.Session) bool {
-	if sess == nil {
-		d.sendMessage(chatID, msgID, "Сессия не найдена")
-		return false
-	}
-	if sess.ControlHash != "" {
-		d.sendMessage(chatID, msgID, apiFailure("control-token-required").Message)
-		return false
-	}
-	return true
 }
 
 const retainedTurnResults = 64

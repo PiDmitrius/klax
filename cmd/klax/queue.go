@@ -115,18 +115,6 @@ func (d *daemon) enqueueToSessionOrigin(chatID, msgID, text, originalText string
 			return false
 		}
 	}
-	token := ""
-	if admission != nil {
-		token = admission.token
-	}
-	if err := d.controlError(sk, sess.Created, token); err != nil {
-		if admission != nil {
-			admission.err = err
-		} else {
-			d.sendMessage(chatID, msgID, err.Message)
-		}
-		return false
-	}
 	sr := d.getRunner(sk, sess.Created)
 	sr.acceptMu.Lock()
 	defer sr.acceptMu.Unlock()

@@ -204,16 +204,17 @@ session identifier used by all subsequent requests. Backend session identifiers
 are managed internally.
 
 Omitting `control_token` creates an ordinary session. An explicitly supplied
-value must be a nonempty string. A protected session requires
+value must be a nonempty string. HTTP API control of a protected session requires
 `X-Klax-Control-Token: <control-token>` for messages, attachments, abort/queue
-clearing, deletion, renaming, settings and reordering its position. The ordinary
+clearing, deletion, renaming and settings. Tab reordering is unrestricted. The ordinary
 API authorization and session ownership checks still apply.
 
 The token is hashed with SHA-256 for persistent verification. Neither the token
 nor its hash appears in session views, history, audit events or backend launch
-parameters. Token replacement and removal are not supported. Other manual
-control interfaces cannot change protected sessions. Bulk deletion through
-`/nuke` is rejected if the scope contains a protected session.
+parameters. Token replacement and removal are not supported. Messenger control
+is unaffected by this property: messages, settings, abort and deletion use the
+ordinary access rules, and `/nuke` also deletes protected sessions. The token
+does not grant exclusive control to a script.
 
 Session and settings views include `read_only`. The UI leaves a protected
 session's composer visible, gray and disabled, and disables mutation controls.

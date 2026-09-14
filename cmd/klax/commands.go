@@ -150,9 +150,6 @@ func (d *daemon) handleBackendSet(chatID, msgID, sk, name string) {
 		d.sendMessage(chatID, msgID, d.backendText(sk, sess))
 		return
 	}
-	if !d.manualSessionControl(chatID, msgID, sess) {
-		return
-	}
 	if sess.Messages > 0 {
 		d.sendMessage(chatID, msgID, "Backend нельзя изменить после первого сообщения.")
 		return
@@ -191,9 +188,6 @@ func (d *daemon) handleModelSet(chatID, msgID, sk, alias string) {
 	sess := d.store.Active(sk)
 	if sess == nil {
 		d.sendMessage(chatID, msgID, "Нет активной сессии")
-		return
-	}
-	if !d.manualSessionControl(chatID, msgID, sess) {
 		return
 	}
 	if d.isSessionBusy(sk, sess.Created) {
@@ -240,9 +234,6 @@ func (d *daemon) handleThinkSet(chatID, msgID, sk, alias string) {
 	sess := d.store.Active(sk)
 	if sess == nil {
 		d.sendMessage(chatID, msgID, "Нет активной сессии")
-		return
-	}
-	if !d.manualSessionControl(chatID, msgID, sess) {
 		return
 	}
 	if d.isSessionBusy(sk, sess.Created) {
@@ -295,9 +286,6 @@ func (d *daemon) handleSandboxSet(chatID, msgID, sk, mode string) {
 		d.sendMessage(chatID, msgID, d.sandboxText(sk, sess))
 		return
 	}
-	if !d.manualSessionControl(chatID, msgID, sess) {
-		return
-	}
 	if d.isSessionBusy(sk, sess.Created) {
 		d.sendMessage(chatID, msgID, sessionBusyText)
 		return
@@ -323,9 +311,6 @@ func (d *daemon) handleTTYSet(chatID, msgID, sk, mode string) {
 	}
 	if mode != "on" && mode != "off" {
 		d.sendMessage(chatID, msgID, d.ttyText(sk, sess))
-		return
-	}
-	if !d.manualSessionControl(chatID, msgID, sess) {
 		return
 	}
 	if resolveSessionBackend(sess, d.scopeDefaults(sk), d.cfg.GetDefaultBackend()) != "claude" {
@@ -422,10 +407,6 @@ func (d *daemon) handleSessionDelete(chatID, msgID, sk, n string) {
 		return
 	}
 	target := sessions[pos]
-	if target.ControlHash != "" {
-		d.sendMessage(chatID, msgID, apiFailure("control-token-required").Message)
-		return
-	}
 	if target.Active {
 		d.sendMessage(chatID, msgID, "Нельзя удалить активную сессию.")
 		return
@@ -492,7 +473,7 @@ func (d *daemon) deleteInactiveSessions(sk string) (deleted, aborted int) {
 	sessions := d.store.SessionsFor(sk)
 	for i := len(sessions) - 1; i >= 0; i-- {
 		s := sessions[i]
-		if s.Active || s.ControlHash != "" {
+		if s.Active {
 			continue
 		}
 		if d.abortSession(sk, s.Created, true) {
@@ -528,14 +509,6 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 	cmd, args = normalizeCommand(cmd, args)
 	parts = append([]string{cmd}, args...)
 	sk := d.sessionKey(chatID)
-	if cmd == "/nuke" {
-		for _, sess := range d.store.SessionsFor(sk) {
-			if sess.ControlHash != "" {
-				d.sendMessage(chatID, msgID, apiFailure("control-token-required").Message)
-				return
-			}
-		}
-	}
 
 	switch cmd {
 	case "/start", "/help", "/h":
@@ -590,7 +563,8 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			return
 		}
 		sess := d.store.Active(sk)
-		if !d.manualSessionControl(chatID, msgID, sess) {
+		if sess == nil {
+			d.sendMessage(chatID, msgID, "Нет активной сессии")
 			return
 		}
 		sess = d.store.UpdateSession(sk, sess.Created, func(sess *session.Session) {
@@ -614,9 +588,6 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		active := d.store.Active(sk)
 		if active == nil {
 			d.sendMessage(chatID, msgID, "Нет активной сессии")
-			return
-		}
-		if !d.manualSessionControl(chatID, msgID, active) {
 			return
 		}
 		if active.Messages > 0 {
@@ -654,9 +625,6 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			} else {
 				d.sendMessage(chatID, msgID, fmt.Sprintf("📝 <code>%s</code>", html.EscapeString(sess.AppendSystemPrompt)))
 			}
-			return
-		}
-		if !d.manualSessionControl(chatID, msgID, sess) {
 			return
 		}
 		if d.isSessionBusy(sk, sess.Created) {
@@ -765,9 +733,6 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		active := d.store.Active(sk)
 		if active == nil {
 			d.sendMessage(chatID, msgID, "Нет активной сессии")
-			return
-		}
-		if !d.manualSessionControl(chatID, msgID, active) {
 			return
 		}
 		if !d.abortSession(sk, active.Created, false) {

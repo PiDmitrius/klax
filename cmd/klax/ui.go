@@ -1115,7 +1115,7 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	// point (enqueueToSession), so a Telegram/MAX/VK DM shows up live too — not just
 	// UI sends. The web client does not render a local echo; the server event is the
 	// first visible copy.
-	admission := &sendAdmission{token: r.Header.Get("X-Klax-Control-Token")}
+	admission := &sendAdmission{}
 	if !s.d.handleInbound(Inbound{
 		admission:     admission,
 		ChatID:        s.chatID(user),
@@ -1349,11 +1349,6 @@ func (s *uiServer) handleReorder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
-	for _, created := range body.Order {
-		if !s.requireControl(w, r, sk, created) {
-			return
-		}
-	}
 	s.d.reorderSessions(sk, body.Order)
 	w.WriteHeader(http.StatusNoContent)
 }

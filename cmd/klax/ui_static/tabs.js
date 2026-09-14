@@ -197,7 +197,6 @@ function createTab(){
 // /api/reorder, and the server broadcast reconciles the canonical order (one source of truth).
 // Below the threshold nothing happens and it stays a plain click (select) / dblclick (settings).
 function startDrag(e, tab){
-  if(sessions.some(s => s.read_only)) return;
   const strip = document.getElementById("tabs");
   if(!strip || strip.querySelectorAll(".tab[data-created]").length < 2) return; // nothing to reorder
   didDrag = false; // fresh gesture — clear any stale flag so it can't swallow this click
