@@ -796,6 +796,10 @@ func (s *uiServer) routes() http.Handler {
 	mux.HandleFunc("/emoji/", s.handleEmoji)
 	mux.HandleFunc("/", s.handleSPA)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/file" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			s.handleFile(w, r)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			access, ok := s.access(r)
 			if !ok {
