@@ -546,3 +546,7 @@
   .debug-close { padding: 1px 4px; border: 0; background: transparent; color: var(--muted); }
   .debug-actions { display: flex; flex-direction: column; gap: 6px; }
   .debug-actions button { width: 100%; padding: 6px 8px; text-align: left; font-size: 12px; }
+
+#cbar.read-only { filter: grayscale(1); opacity: .5; }
+#cbar.read-only button, #cbar.read-only input, #cbar.read-only textarea, .stop:disabled { cursor: default; }
+.tab .tx.disabled { opacity: .3; pointer-events: none; }

@@ -178,6 +178,146 @@ A process crash after `turn.start` can leave that event without a matching
 Consumers should treat an old unmatched `turn.start` as an interrupted turn,
 not as proof that it is still running.
 
+## Session control API
+
+The UI HTTP server also serves programmatic clients. A browser is not required.
+Requests use the existing `Authorization: Bearer <api-token>` header and the
+same user scope, sessions, execution queue, settings and results as the UI.
+
+### Create a session
+
+`POST /api/new` accepts the initial session settings: `name`, `cwd`, `backend`,
+`model`, `think`, `sandbox`, `tty`, `prompt` and `groups`. Settings are validated
+before the session and its defaults are saved and published. A failed request
+creates no session. An empty body creates a session with the scope defaults.
+
+```json
+{
+  "name": "developer-01",
+  "cwd": "/work",
+  "control_token": "<control-token>"
+}
+```
+
+The response is `200` with `{"created":42}`. `created` is the persistent klax
+session identifier used by all subsequent requests. Backend session identifiers
+are managed internally.
+
+Omitting `control_token` creates an ordinary session. An explicitly supplied
+value must be a nonempty string. HTTP API control of a protected session requires
+`X-Klax-Control-Token: <control-token>` for messages, attachments, abort/queue
+clearing, deletion, renaming and settings. Tab reordering is unrestricted. The ordinary
+API authorization and session ownership checks still apply.
+
+The token is hashed with SHA-256 for persistent verification. Neither the token
+nor its hash appears in session views, history, audit events or backend launch
+parameters. Token replacement and removal are not supported. Messenger control
+is unaffected by this property: messages, settings, abort and deletion use the
+ordinary access rules, and `/nuke` also deletes protected sessions. The token
+does not grant exclusive control to a script.
+
+Session and settings views include `read_only`. The UI leaves a protected
+session's composer visible, gray and disabled, and disables mutation controls.
+History, files, navigation and read marking remain available. Protection does
+not change the backend's filesystem permissions.
+
+### Send a message
+
+`POST /api/send` accepts JSON or multipart form data. Multipart retains the
+`files` attachment field; scalar fields have the same names as in JSON.
+
+```json
+{
+  "session": 42,
+  "text": "Perform the task",
+  "nonce": "client-message-1",
+  "return_on": "finish"
+}
+```
+
+| `return_on` | Response boundary |
+| --- | --- |
+| `queued` (default) | Durable queue acceptance; `204 No Content`. |
+| `start` | Preparation, durable run registration and the optional start hook complete; `200` with `turn.start`. |
+| `finish` | Backend execution, result formation and the optional finish hook complete; `200` with `turn.finish`. |
+
+Both event responses use [klax.audit/v1](docs/audit-v1.md). The API and configured
+hook receive the same event snapshot. Waiting also works with no hooks.
+`start` permits execution; it does not guarantee a successful backend launch.
+A completed backend error or cancellation returns a finish event with
+`turn.result.status` equal to `error` or `aborted`. The existing normalized
+trace and raw-file range reference are retained; raw history is not embedded.
+
+`nonce` is optional. Omission generates a unique nonce. An explicit value must
+be a nonempty string. Repeating a nonce in the same session never starts another
+execution: `queued` confirms the existing acceptance; `start` and `finish`
+join or return that turn's result retained in this process. Each session retains
+up to 64 completed turn results; pending turns and already attached waiters are
+not evicted. If the requested
+boundary is unavailable, the response is `409` with `result-unavailable`.
+Requests without a supplied nonce are distinct messages and must not be
+retried automatically.
+
+### Waiting and failures
+
+For `start` and `finish`, klax sends no headers or body until the selected
+boundary or an error. The response contains exactly one JSON object; no
+heartbeat or intermediate backend events are sent. Responses are not cached.
+Klax sets no waiting timeout. Clients and any proxies must allow long periods
+without response data, including waiting for the response headers. A connection
+is not guaranteed to survive indefinitely.
+
+Disconnecting stops only that client's wait. Accepted work continues, and a
+slow or failed HTTP writer cannot block the executor or its queue. A connection
+ending without a complete JSON response leaves the outcome unknown to the
+client. Waiting is not restored across service restarts. Messages accepted
+while draining are durable for replay; their waiting response is
+`result-unavailable` because execution belongs to the next process.
+
+Errors use their HTTP status, since headers are held until the response is
+ready. Execution/preparation failures returned by the waiting API have this
+shape:
+
+```json
+{
+  "error": {
+    "code": "audit-start-failed",
+    "message": "Стартовый гейт отклонил выполнение"
+  }
+}
+```
+
+| Code | HTTP status | Meaning |
+| --- | --- | --- |
+| `control-token-required` | 403 | Missing or incorrect control token. |
+| `session-not-found`, `session-deleted` | 404 | Session unavailable in the authenticated scope. |
+| `invalid-nonce`, `invalid-return-on`, `invalid-control-token`, `empty-message` | 400 | Invalid input; nothing enqueued or created. |
+| `result-unavailable` | 409 | Boundary cannot be recovered in this process. |
+| `aborted` | 409 | Waiting message removed from the queue. |
+| `enqueue-failed` | 500 | Durable acceptance failed. |
+| `attachments-missing`, `run-start-failed`, `audit-start-failed` | 500 | Preparation, registration or start gate failed. |
+| `result-save-failed` | 500 | Result persistence failed. |
+
+Existing authentication, parsing and settings errors retain their ordinary
+HTTP error responses. All paths that stop a turn before the requested boundary
+release its waiters with an error. Start-gate failure does not await or produce
+a finish event. No new hook timeout is imposed: a blocked configured hook
+continues to block its corresponding boundary.
+
+A failed finish hook preserves the backend result and the existing UI warning.
+The API returns the finish event with an additional top-level field:
+
+```json
+{
+  "warnings": [
+    {
+      "code": "audit-finish-failed",
+      "message": "Не удалось записать событие завершения хода в аудит"
+    }
+  ]
+}
+```
+
 ## Chat Commands
 
 Primary commands available in messenger chats:

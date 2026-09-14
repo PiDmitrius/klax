@@ -22,11 +22,12 @@ type uiSettingsOption struct {
 // backend, and the guards (busy/backend-locked). Context usage is NOT here — it
 // lives inline in the chat, so the dialog no longer duplicates it.
 type uiSettings struct {
-	Created int64  `json:"created"`
-	Name    string `json:"name"`
-	Backend string `json:"backend"`
-	Model   string `json:"model"` // "" = backend default
-	Think   string `json:"think"` // "" = backend default
+	ReadOnly bool   `json:"read_only"`
+	Created  int64  `json:"created"`
+	Name     string `json:"name"`
+	Backend  string `json:"backend"`
+	Model    string `json:"model"` // "" = backend default
+	Think    string `json:"think"` // "" = backend default
 	// Read-only facts shown as "additional parameters" (settings dialog): the model the
 	// backend ACTUALLY answered with last (may differ from the selected default) and the
 	// resolved session UUID. Both empty until the first response lands.
@@ -109,6 +110,7 @@ func (d *daemon) uiSessionSettings(sk string, created int64) (*uiSettings, bool)
 	def := d.scopeDefaults(sk)
 	backend := resolveSessionBackend(sess, def, d.cfg.GetDefaultBackend())
 	return &uiSettings{
+		ReadOnly:      sess.ControlHash != "",
 		Created:       sess.Created,
 		Name:          sess.Name,
 		Backend:       backend,
@@ -378,6 +380,9 @@ func (s *uiServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.Session <= 0 {
 			http.Error(w, "A positive session is required", http.StatusBadRequest)
+			return
+		}
+		if !s.requireControl(w, r, sk, body.Session) {
 			return
 		}
 		if err := s.d.applyUISessionSettings(sk, body.Session, body.uiSettingsPatch); err != nil {

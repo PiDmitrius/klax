@@ -28,6 +28,7 @@ type ScopeDefaults struct {
 }
 
 type Session struct {
+	ControlHash   string `json:"control_hash,omitempty"`
 	ID            string `json:"id"`                       // session UUID (claude or codex thread_id)
 	Name          string `json:"name"`                     // user-friendly name
 	CWD           string `json:"cwd"`                      // working directory
@@ -233,8 +234,12 @@ func (s *Store) MergeKeys(targetKey string, oldKeys []string) bool {
 
 func (s *Store) Save() error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.saveLocked()
+}
+
+func (s *Store) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0700); err != nil {
-		s.mu.Unlock()
 		return err
 	}
 	path := s.path
@@ -253,13 +258,27 @@ func (s *Store) Save() error {
 	for key, def := range s.Scope {
 		payload.Scope[key] = cloneDefaults(def)
 	}
-	s.mu.Unlock()
 
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0600)
+	f, err := os.CreateTemp(filepath.Dir(path), ".sessions-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err = f.Write(data); err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Rename(f.Name(), path)
 }
 
 func (s *Store) chat(chatID string) *ChatSessions {
@@ -543,6 +562,10 @@ func (s *Store) Add(chatID string, sess *Session) *Session {
 func (s *Store) AddWithDefaults(chatID string, sess *Session, defaults *ScopeDefaults) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.addWithDefaultsLocked(chatID, sess, defaults)
+}
+
+func (s *Store) addWithDefaultsLocked(chatID string, sess *Session, defaults *ScopeDefaults) *Session {
 	cs := s.chat(chatID)
 	for _, existing := range cs.Sessions {
 		existing.Active = false
@@ -556,9 +579,24 @@ func (s *Store) AddWithDefaults(chatID string, sess *Session, defaults *ScopeDef
 	return cloneSession(sess)
 }
 
+func (s *Store) DeleteCreated(chatID string, created int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for idx, sess := range s.chat(chatID).Sessions {
+		if sess.Created == created {
+			return s.deleteLocked(chatID, idx)
+		}
+	}
+	return false
+}
+
 func (s *Store) Delete(chatID string, idx int) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.deleteLocked(chatID, idx)
+}
+
+func (s *Store) deleteLocked(chatID string, idx int) bool {
 	cs := s.chat(chatID)
 	if idx < 0 || idx >= len(cs.Sessions) {
 		return false
@@ -635,4 +673,36 @@ func (s *Store) Switch(chatID string, idx int) *Session {
 	}
 	cs.Sessions[idx].Active = true
 	return cloneSession(cs.Sessions[idx])
+}
+
+// AddPersisted publishes the configured session and defaults only after saving; failure restores the store under the same lock.
+func (s *Store) AddPersisted(chatID string, sess *Session, defaults *ScopeDefaults) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	oldChat, hadChat := s.Chats[chatID]
+	var prior *ChatSessions
+	if hadChat {
+		cp := *oldChat
+		cp.Sessions = cloneSessions(oldChat.Sessions)
+		prior = &cp
+	}
+	oldDefaults, hadDefaults := s.Scope[chatID]
+	priorDefaults := cloneDefaults(oldDefaults)
+	highWater := s.HighWater
+	created := s.addWithDefaultsLocked(chatID, sess, defaults)
+	if err := s.saveLocked(); err != nil {
+		s.HighWater = highWater
+		if hadChat {
+			s.Chats[chatID] = prior
+		} else {
+			delete(s.Chats, chatID)
+		}
+		if hadDefaults {
+			s.Scope[chatID] = priorDefaults
+		} else {
+			delete(s.Scope, chatID)
+		}
+		return nil, err
+	}
+	return created, nil
 }

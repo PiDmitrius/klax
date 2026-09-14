@@ -116,8 +116,15 @@ function syncRetry(text){
   }
 }
 
-// initCompose wires the composer DOM. deps: { getActive():created, isLive?(created),
-// notice?(), onAfterSend?() }.
+export function updateComposerAccess(readOnly){
+  const bar = document.getElementById("cbar");
+  if(bar){
+    bar.classList.toggle("read-only", readOnly);
+    bar.inert = readOnly;
+    bar.querySelectorAll("input, textarea, button").forEach(el => { el.disabled = readOnly; });
+  }
+}
+
 export function initCompose(deps){
   const ta = document.getElementById("input");
   const fileInput = document.getElementById("file");
@@ -127,6 +134,7 @@ export function initCompose(deps){
     ta.addEventListener("input", () => { syncRetry(ta.value); autoGrow(ta); });
     ta.addEventListener("keydown", e => { if(composerEnterSends(e, hasCoarsePointer())){ e.preventDefault(); send(deps); } });
     ta.addEventListener("paste", e => {
+      if(deps.readOnly()){ e.preventDefault(); return; }
       let added = false;
       for(const it of (e.clipboardData && e.clipboardData.items) || []){
         if(it.kind === "file"){ const f = it.getAsFile(); if(f){ files.push({ file: f, name: f.name || "pasted.png" }); added = true; } }
@@ -134,11 +142,11 @@ export function initCompose(deps){
       if(added) renderChips();
     });
   }
-  if(fileInput) fileInput.addEventListener("change", () => { for(const f of fileInput.files) files.push({ file: f, name: f.name }); fileInput.value = ""; renderChips(); });
+  if(fileInput) fileInput.addEventListener("change", () => { if(deps.readOnly()) return; for(const f of fileInput.files) files.push({ file: f, name: f.name }); fileInput.value = ""; renderChips(); });
   if(bar){
-    ["dragover","dragenter"].forEach(ev => bar.addEventListener(ev, e => { e.preventDefault(); bar.classList.add("drag"); }));
+    ["dragover","dragenter"].forEach(ev => bar.addEventListener(ev, e => { e.preventDefault(); if(deps.readOnly()) return; bar.classList.add("drag"); }));
     ["dragleave","drop"].forEach(ev => bar.addEventListener(ev, e => { e.preventDefault(); bar.classList.remove("drag"); }));
-    bar.addEventListener("drop", e => { for(const f of (e.dataTransfer && e.dataTransfer.files) || []) files.push({ file: f, name: f.name }); renderChips(); });
+    bar.addEventListener("drop", e => { if(deps.readOnly()) return; for(const f of (e.dataTransfer && e.dataTransfer.files) || []) files.push({ file: f, name: f.name }); renderChips(); });
   }
   const btn = document.getElementById("sendbtn");
   if(btn){
@@ -160,7 +168,7 @@ export function initCompose(deps){
     });
   }
   const ab = document.getElementById("attachbtn");
-  if(ab && fileInput) ab.addEventListener("click", () => fileInput.click());
+  if(ab && fileInput) ab.addEventListener("click", () => { if(!deps.readOnly()) fileInput.click(); });
 }
 
 function autoGrow(ta){
@@ -221,6 +229,7 @@ function renderChips(){
 }
 
 async function send(deps, blurOnSuccess){
+  if(deps.readOnly()) return;
   const ta = document.getElementById("input");
   const text = (ta ? ta.value : "").trim();
   const staged = files.slice();

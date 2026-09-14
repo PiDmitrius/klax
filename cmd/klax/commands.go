@@ -170,13 +170,16 @@ func (d *daemon) handleBackendSet(chatID, msgID, sk, name string) {
 			def.Think = ""
 		}
 	})
-	sess = d.store.UpdateActive(sk, func(sess *session.Session) {
+	sess = d.store.UpdateSession(sk, sess.Created, func(sess *session.Session) {
 		sess.Backend = name
 		if current != name {
 			sess.ModelOverride = ""
 			sess.ThinkOverride = ""
 		}
 	})
+	if sess == nil {
+		return
+	}
 	d.saveStore()
 	d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
 }
@@ -195,9 +198,12 @@ func (d *daemon) handleModelSet(chatID, msgID, sk, alias string) {
 		d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
 			def.Model = ""
 		})
-		sess = d.store.UpdateActive(sk, func(sess *session.Session) {
+		sess = d.store.UpdateSession(sk, sess.Created, func(sess *session.Session) {
 			sess.ModelOverride = ""
 		})
+		if sess == nil {
+			return
+		}
 		d.saveStore()
 		d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
 		return
@@ -214,9 +220,12 @@ func (d *daemon) handleModelSet(chatID, msgID, sk, alias string) {
 	d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
 		def.Model = resolved
 	})
-	sess = d.store.UpdateActive(sk, func(sess *session.Session) {
+	sess = d.store.UpdateSession(sk, sess.Created, func(sess *session.Session) {
 		sess.ModelOverride = resolved
 	})
+	if sess == nil {
+		return
+	}
 	d.saveStore()
 	d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
 }
@@ -235,9 +244,12 @@ func (d *daemon) handleThinkSet(chatID, msgID, sk, alias string) {
 		d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
 			def.Think = ""
 		})
-		sess = d.store.UpdateActive(sk, func(sess *session.Session) {
+		sess = d.store.UpdateSession(sk, sess.Created, func(sess *session.Session) {
 			sess.ThinkOverride = ""
 		})
+		if sess == nil {
+			return
+		}
 		d.saveStore()
 		d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
 		return
@@ -254,9 +266,12 @@ func (d *daemon) handleThinkSet(chatID, msgID, sk, alias string) {
 	d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
 		def.Think = resolved
 	})
-	sess = d.store.UpdateActive(sk, func(sess *session.Session) {
+	sess = d.store.UpdateSession(sk, sess.Created, func(sess *session.Session) {
 		sess.ThinkOverride = resolved
 	})
+	if sess == nil {
+		return
+	}
 	d.saveStore()
 	d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
 }
@@ -278,9 +293,12 @@ func (d *daemon) handleSandboxSet(chatID, msgID, sk, mode string) {
 	d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
 		def.Sandbox = mode
 	})
-	sess = d.store.UpdateActive(sk, func(sess *session.Session) {
+	sess = d.store.UpdateSession(sk, sess.Created, func(sess *session.Session) {
 		sess.Sandbox = mode
 	})
+	if sess == nil {
+		return
+	}
 	d.saveStore()
 	d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
 }
@@ -307,9 +325,12 @@ func (d *daemon) handleTTYSet(chatID, msgID, sk, mode string) {
 	d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
 		def.ClaudeTTY = on
 	})
-	sess = d.store.UpdateActive(sk, func(sess *session.Session) {
+	sess = d.store.UpdateSession(sk, sess.Created, func(sess *session.Session) {
 		sess.ClaudeTTY = on
 	})
+	if sess == nil {
+		return
+	}
 	d.saveStore()
 	d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
 }
@@ -394,7 +415,8 @@ func (d *daemon) handleSessionDelete(chatID, msgID, sk, n string) {
 		d.sendMessage(chatID, msgID, "⏳ Сессия занята: дождись завершения или сначала переключись и /abort.")
 		return
 	}
-	d.store.Delete(sk, pos)
+	d.abortSession(sk, target.Created, true)
+	d.store.DeleteCreated(sk, target.Created)
 	d.removeSessionStore(sk, target.Created) // before dropRunner: latch the runner-owned store
 	d.dropRunner(sk, target.Created)
 	d.saveStore()
@@ -457,7 +479,7 @@ func (d *daemon) deleteInactiveSessions(sk string) (deleted, aborted int) {
 		if d.abortSession(sk, s.Created, true) {
 			aborted++
 		}
-		if d.store.Delete(sk, i) {
+		if d.store.DeleteCreated(sk, s.Created) {
 			d.removeSessionStore(sk, s.Created) // before dropRunner: latch the runner-owned store
 			d.dropRunner(sk, s.Created)
 			deleted++
@@ -540,7 +562,12 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			d.sendMessage(chatID, msgID, "Использование: /name <имя>")
 			return
 		}
-		sess := d.store.UpdateActive(sk, func(sess *session.Session) {
+		sess := d.store.Active(sk)
+		if sess == nil {
+			d.sendMessage(chatID, msgID, "Нет активной сессии")
+			return
+		}
+		sess = d.store.UpdateSession(sk, sess.Created, func(sess *session.Session) {
 			sess.Name = strings.Join(args, " ")
 		})
 		if sess == nil {
@@ -604,9 +631,12 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 			d.sendMessage(chatID, msgID, sessionBusyText)
 			return
 		}
-		sess = d.store.UpdateActive(sk, func(sess *session.Session) {
+		sess = d.store.UpdateSession(sk, sess.Created, func(sess *session.Session) {
 			sess.AppendSystemPrompt = argPayload(text)
 		})
+		if sess == nil {
+			return
+		}
 		d.saveStore()
 		d.sendMessage(chatID, msgID, fmt.Sprintf("📝 <code>%s</code>", html.EscapeString(sess.AppendSystemPrompt)))
 

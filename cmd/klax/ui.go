@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,6 +52,7 @@ const uiMaxInflightPerUser = 32
 
 // uiSessionInfo is one tab in the strip.
 type uiSessionInfo struct {
+	ReadOnly  bool   `json:"read_only"`
 	Created   int64  `json:"created"`
 	Name      string `json:"name"`
 	Active    bool   `json:"active"`
@@ -452,12 +455,7 @@ func (d *daemon) queuedCount(sk string, created int64) int {
 	return n
 }
 
-// createUISessionAtomic creates a new UI session already fully configured. The session is VALIDATED
-// and FORMED entirely outside the shared store, then inserted with a single Store.Add (one lock) and
-// saved + announced once — so a concurrent /api/sessions can never observe a defaults or half-built
-// placeholder, a rejected patch creates nothing at all, and a crash before the save leaves nothing.
-// Returns the created session, or the settings error with NOTHING created.
-func (d *daemon) createUISessionAtomic(sk, chatID string, patch uiSettingsPatch) (*session.Session, error) {
+func (d *daemon) createUISessionAtomic(sk, chatID string, patch uiSettingsPatch, controlHash string) (*session.Session, error) {
 	def := d.scopeDefaults(sk)
 	backend := resolveSessionBackend(nil, def, d.cfg.GetDefaultBackend())
 	// Seed a message-less session from the scope defaults (what createSession would have produced),
@@ -478,6 +476,7 @@ func (d *daemon) createUISessionAtomic(sk, chatID string, patch uiSettingsPatch)
 		}
 		applySettingsPatch(sess, r)
 	}
+	sess.ControlHash = controlHash
 	newDefaults := session.ScopeDefaults{
 		Backend:      resolveSessionBackend(sess, def, d.cfg.GetDefaultBackend()),
 		Model:        sess.ModelOverride,
@@ -488,8 +487,10 @@ func (d *daemon) createUISessionAtomic(sk, chatID string, patch uiSettingsPatch)
 		GroupMode:    def.GroupMode,
 		GroupVerbose: def.GroupVerbose,
 	}
-	created := d.store.AddWithDefaults(sk, sess, &newDefaults) // session + its template: one store commit
-	d.saveStore()
+	created, err := d.store.AddPersisted(sk, sess, &newDefaults)
+	if err != nil {
+		return nil, &uiErr{http.StatusInternalServerError, "Не удалось сохранить сессию"}
+	}
 	d.broadcastSessions(sk)
 	return created, nil
 }
@@ -539,7 +540,7 @@ func (d *daemon) closeSession(sk string, created int64) error {
 		return errors.New("Сессия не найдена")
 	}
 	d.abortSession(sk, created, true)
-	d.store.Delete(sk, idx)
+	d.store.DeleteCreated(sk, created)
 	d.removeSessionStore(sk, created) // latch + delete the runner-owned store before dropping it
 	d.dropRunner(sk, created)
 	if wasActive {
@@ -567,6 +568,7 @@ func (d *daemon) sessionsSnapshot(sk string) []uiSessionInfo {
 		unread := d.sessionUnread(sk, s)
 		out = append(out, uiSessionInfo{
 			Created:     s.Created,
+			ReadOnly:    s.ControlHash != "",
 			Name:        s.Name,
 			Active:      s.Active,
 			Busy:        d.isSessionBusy(sk, s.Created),
@@ -1015,43 +1017,62 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	// client cannot exhaust memory/disk while parsing.
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<20)
 	var (
-		text          string
-		nonce         string
-		targetCreated int64
-		attachments   []attachment
+		text                string
+		nonce               string
+		returnOn            = "queued"
+		nonceRaw, returnRaw json.RawMessage
+		targetCreated       int64
+		attachments         []attachment
 	)
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			http.Error(w, "Bad multipart", http.StatusBadRequest)
 			return
 		}
+		defer r.MultipartForm.RemoveAll()
 		text = r.FormValue("text")
-		nonce = r.FormValue("nonce")
+		if values, ok := r.MultipartForm.Value["nonce"]; ok {
+			if len(values) != 1 {
+				http.Error(w, "Invalid nonce", http.StatusBadRequest)
+				return
+			}
+			nonceRaw, _ = json.Marshal(values[0])
+		}
+		if values, ok := r.MultipartForm.Value["return_on"]; ok {
+			if len(values) != 1 {
+				http.Error(w, "Invalid return_on", http.StatusBadRequest)
+				return
+			}
+			returnRaw, _ = json.Marshal(values[0])
+		}
 		targetCreated, _ = strconv.ParseInt(r.FormValue("session"), 10, 64)
 		for _, fh := range r.MultipartForm.File["files"] {
 			f, err := fh.Open()
 			if err != nil {
-				continue
+				http.Error(w, "Не удалось прочитать вложение", http.StatusBadRequest)
+				return
 			}
 			data, err := io.ReadAll(f)
 			f.Close()
 			if err != nil {
-				continue
+				http.Error(w, "Не удалось прочитать вложение", http.StatusBadRequest)
+				return
 			}
 			attachments = append(attachments, attachment{filename: fh.Filename, data: data})
 		}
 	} else {
 		var body struct {
-			Session int64  `json:"session"`
-			Text    string `json:"text"`
-			Nonce   string `json:"nonce"`
+			Session  int64           `json:"session"`
+			Text     string          `json:"text"`
+			Nonce    json.RawMessage `json:"nonce"`
+			ReturnOn json.RawMessage `json:"return_on"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := decodeAPIRequest(r.Body, &body, false); err != nil {
 			http.Error(w, "Bad request", http.StatusBadRequest)
 			return
 		}
 		text = body.Text
-		nonce = body.Nonce
+		nonceRaw, returnRaw = body.Nonce, body.ReturnOn
 		targetCreated = body.Session
 	}
 	// The UI always targets a specific tab; never silently fall back to the
@@ -1060,25 +1081,43 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "A positive session is required", http.StatusBadRequest)
 		return
 	}
-	// A UI send always carries a per-tab nonce for idempotency and traceability, so a
-	// missing one is a malformed request.
-	if nonce == "" {
-		http.Error(w, "A send nonce is required", http.StatusBadRequest)
+	var parseErr *apiError
+	nonce, parseErr = optionalNonemptyString(nonceRaw, "nonce", "")
+	if parseErr != nil {
+		writeAPIError(w, parseErr)
 		return
 	}
-	// Refuse a send to a tab whose session no longer exists (e.g. closed from
-	// another client): enqueue would drop it with only an SSE notice while we'd still
-	// answer success. A 404 lets the client restore the composer. (Mirrors handleAbort's
-	// existence check.)
-	if s.d.store.Get(s.d.sessionKey(s.chatID(user)), targetCreated) == nil {
-		http.Error(w, "Session not found", http.StatusNotFound)
+	returnOn, parseErr = optionalNonemptyString(returnRaw, "return_on", "queued")
+	if parseErr != nil {
+		writeAPIError(w, parseErr)
+		return
+	}
+	if returnOn != "queued" && returnOn != "start" && returnOn != "finish" {
+		writeAPIError(w, &apiError{Code: "invalid-return-on", Message: "Неизвестное значение return_on", status: http.StatusBadRequest})
+		return
+	}
+	if nonce == "" {
+		var value [16]byte
+		if _, err := rand.Read(value[:]); err != nil {
+			writeAPIError(w, apiFailure("enqueue-failed"))
+			return
+		}
+		nonce = hex.EncodeToString(value[:])
+	}
+	if strings.TrimSpace(text) == "" && len(attachments) == 0 {
+		writeAPIError(w, &apiError{Code: "empty-message", Message: "Сообщение пусто", status: http.StatusBadRequest})
+		return
+	}
+	if !s.requireControl(w, r, s.d.sessionKey(s.chatID(user)), targetCreated) {
 		return
 	}
 	// The accepted user message is echoed to every UI tab from the common accept
 	// point (enqueueToSession), so a Telegram/MAX/VK DM shows up live too — not just
 	// UI sends. The web client does not render a local echo; the server event is the
 	// first visible copy.
+	admission := &sendAdmission{}
 	if !s.d.handleInbound(Inbound{
+		admission:     admission,
 		ChatID:        s.chatID(user),
 		Text:          text,
 		Attachments:   attachments,
@@ -1092,9 +1131,17 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 			Sender:    inbound.Sender{ID: user, Username: user},
 		},
 	}) {
+		if admission.err != nil {
+			writeAPIError(w, admission.err)
+			return
+		}
 		// Dropped after our entry checks (drain flipped in the window) — tell the
 		// client so it restores the composer instead of silently losing the draft.
 		http.Error(w, "Сервис перезапускается — попробуйте через минуту", http.StatusServiceUnavailable)
+		return
+	}
+	if returnOn != "queued" {
+		awaitTurn(w, r, admission.completion, returnOn)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1124,6 +1171,9 @@ func (s *uiServer) handleAbort(w http.ResponseWriter, r *http.Request) {
 	sk := s.d.sessionKey(s.chatID(user))
 	if s.d.store.Get(sk, body.Session) == nil {
 		http.Error(w, "Session not found", http.StatusNotFound)
+		return
+	}
+	if !s.requireControl(w, r, sk, body.Session) {
 		return
 	}
 	s.d.abortSession(sk, body.Session, false)
@@ -1212,8 +1262,11 @@ func (s *uiServer) handleNew(w http.ResponseWriter, r *http.Request) {
 	// Optional initial settings from the "new session" draft dialog: the tab strip
 	// now defers creation until the draft is confirmed, sending the chosen fields
 	// here so the session is born configured. An empty body keeps the old behaviour.
-	var patch uiSettingsPatch
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil && err != io.EOF {
+	var body struct {
+		uiSettingsPatch
+		ControlToken json.RawMessage `json:"control_token"`
+	}
+	if err := decodeAPIRequest(r.Body, &body, true); err != nil {
 		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
 	}
@@ -1221,13 +1274,22 @@ func (s *uiServer) handleNew(w http.ResponseWriter, r *http.Request) {
 	// Atomic create: validate + configure the session, then a SINGLE save + broadcast. A rejected
 	// draft (e.g. an inaccessible cwd) creates nothing and returns the real reason; nothing external
 	// ever sees a defaults placeholder, and a crash before the save leaves no half-built session.
-	sess, err := s.d.createUISessionAtomic(sk, s.chatID(user), patch)
+	token, err := optionalNonemptyString(body.ControlToken, "control_token", "")
 	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	hash := ""
+	if token != "" {
+		hash = controlDigest(token)
+	}
+	sess, createErr := s.d.createUISessionAtomic(sk, s.chatID(user), body.uiSettingsPatch, hash)
+	if createErr != nil {
 		status := http.StatusBadRequest
-		if ue, ok := err.(*uiErr); ok {
+		if ue, ok := createErr.(*uiErr); ok {
 			status = ue.status
 		}
-		http.Error(w, err.Error(), status)
+		http.Error(w, createErr.Error(), status)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -1259,6 +1321,9 @@ func (s *uiServer) handleRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
+	if !s.requireControl(w, r, sk, body.Session) {
+		return
+	}
 	if !s.d.renameSession(sk, body.Session, body.Name) {
 		http.Error(w, "Session not found", http.StatusNotFound)
 		return
@@ -1310,6 +1375,9 @@ func (s *uiServer) handleClose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
+	if !s.requireControl(w, r, sk, body.Session) {
+		return
+	}
 	if err := s.d.closeSession(sk, body.Session); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

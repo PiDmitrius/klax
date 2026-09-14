@@ -9,7 +9,7 @@ import { esc } from "./markdown.js";
 import { tailLoop } from "./events.js";
 import { api, getToken, setToken, hasCoarsePointer, copyText, flashCopied } from "./base.js";
 import { selectionInLog } from "./scroll.js";
-import { initCompose, saveDraft, loadDraft, dropDraft, recoverOutbox } from "./compose.js";
+import { initCompose, updateComposerAccess, saveDraft, loadDraft, dropDraft, recoverOutbox } from "./compose.js";
 import { initTabs, reconcileSessions, renderTabs } from "./tabs.js";
 import { injectEmojiFont } from "./emoji.js";
 import { showNotice } from "./notices.js";
@@ -266,7 +266,7 @@ function rerender(created, live, opts){
   const hadDivider = anchorLive && !!col.querySelector(".readline");
   const snap = live ? beginShift(col) : null;
   const holdSplits = opts.holdSplits || (!opts.noHoldSplits && hadDivider && rawUnreadCount(active) === 0 && snap && snap.holdSplits && snap.holdSplits.size ? snap.holdSplits : null);
-  renderSession(col, model.turns(active), readThrough[active], abortActive, holdSplits, !!opts.joinHeldSplits);
+  renderSession(col, model.turns(active), readThrough[active], activeReadOnly() ? null : abortActive, holdSplits, !!opts.joinHeldSplits);
   watchInlineImages(col);
   if(moreFor[active]){ // older history exists → a "load earlier" button at the top
     const m = document.createElement("button");
@@ -363,7 +363,10 @@ function commitLive(created){
   collapseAndMerge();
 }
 
+function activeReadOnly(){ return !!sessionList.find(s => s.created === active)?.read_only; }
+
 function abortActive(){
+  if(activeReadOnly()) return;
   if(active) api("/api/abort", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: active }) }).catch(()=>{});
 }
 
@@ -813,7 +816,7 @@ const host = {
 // chip (its outside-this-group counter and the menu's per-group numbers) — from the same
 // client-side count, in one call. Repainting only the strip made the two disagree until the next
 // server broadcast: badges dropped the moment you read, the chip kept the stale number.
-function refreshStrip(){ renderTabs(active); renderChip(sessionList, badgeCount); }
+function refreshStrip(){ updateComposerAccess(activeReadOnly()); renderTabs(active); renderChip(sessionList, badgeCount); }
 
 async function onNewSession(created){ await syncSessions(); await selectSession(created); }
 // The neighbour rule itself lives in selection.js so it can be tested without the UI; here it is
@@ -840,7 +843,7 @@ function start(){
   initSystem({ notice: showNotice });
   initDebug({ notice: showNotice });
   initCompose({
-    getActive, notice: showNotice,
+    getActive, readOnly: activeReadOnly, notice: showNotice,
     isLive: c => sessionList.some(s => s.created === c),
     onAfterSend: () => { stick = true; markRead(active, true); refreshStrip(); stickToBottom(); },
   });
