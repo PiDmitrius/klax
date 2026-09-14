@@ -170,7 +170,7 @@ function indicator(state, note, onAbort){
   // is just the animated dots + the ✕ abort button.
   const queueNote = note ? '<span class="qnote">'+esc(note)+'</span>' : "";
   d.innerHTML = DOTS + queueNote + (abortable ? '<button class="stop" title="Прервать">✕</button>' : "");
-  if(abortable && onAbort){ const b = d.querySelector(".stop"); if(b) b.addEventListener("click", onAbort); }
+  if(abortable){ const b = d.querySelector(".stop"); if(b){ b.disabled = !onAbort; if(onAbort) b.addEventListener("click", onAbort); } }
   return d;
 }
 

@@ -36,7 +36,9 @@ import (
 // sessionRunner holds a per-session runner and message queue.
 // Different sessions run Claude in parallel; within a session, messages are serialized.
 type sessionRunner struct {
-	runner *runner.Runner
+	runner   *runner.Runner
+	acceptMu sync.Mutex          // serializes acceptance and boundary registration with queue clearing
+	results  map[int64]*turnWait // guarded by mu
 	// store is the per-session durable store (files + queue.jsonl). One instance
 	// per (sessionKey, created), owned here so its lock is a true per-session
 	// singleton — distinct from sr.mu and never held across a runner wait.
@@ -448,6 +450,7 @@ type attachment struct {
 }
 
 type queuedMsg struct {
+	completion   *turnWait
 	chatID       string
 	msgID        string // user's message ID (for replyTo)
 	text         string
@@ -1066,7 +1069,7 @@ func (d *daemon) dispatchInbound(chatID, msgID, text string, attachments []attac
 			return
 		}
 		d.ensureSessionWithCWD(d.sessionKey(chatID), d.sessionCWD(chatID))
-		d.enqueueToSessionOrigin(chatID, msgID, prompt, text, attachments, 0, "", origin)
+		d.enqueueToSessionOrigin(chatID, msgID, prompt, text, attachments, 0, "", origin, nil)
 	}
 }
 
@@ -1903,14 +1906,14 @@ func (d *daemon) handleInbound(in Inbound) bool {
 			return false
 		}
 		if prompt, ok := d.groupPrompt(in.ChatID, text, len(in.Attachments) > 0); ok {
-			return d.enqueueToSessionOrigin(in.ChatID, in.MsgID, prompt, in.Text, in.Attachments, in.TargetCreated, in.Nonce, in.Origin)
+			return d.enqueueToSessionOrigin(in.ChatID, in.MsgID, prompt, in.Text, in.Attachments, in.TargetCreated, in.Nonce, in.Origin, in.admission)
 		}
 		// No prefix — ignore silently
 		return false
 	}
 
 	// Queue for Claude
-	return d.enqueueToSessionOrigin(in.ChatID, in.MsgID, text, in.Text, in.Attachments, in.TargetCreated, in.Nonce, in.Origin)
+	return d.enqueueToSessionOrigin(in.ChatID, in.MsgID, text, in.Text, in.Attachments, in.TargetCreated, in.Nonce, in.Origin, in.admission)
 }
 
 func (d *daemon) ensureSession(sessionKey string) {

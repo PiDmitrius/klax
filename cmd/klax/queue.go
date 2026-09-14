@@ -89,7 +89,7 @@ func (d *daemon) syncFinalMessageChain(fullChatID, replyTo string, chain *messag
 // persisted-for-replay while draining), false if it was dropped (empty text and no
 // files, no such session, or a durable-write failure) — the web UI's handleSend
 // uses this to answer success vs restore the composer.
-func (d *daemon) enqueueToSessionOrigin(chatID, msgID, text, originalText string, attachments []attachment, targetCreated int64, nonce string, origin inbound.Origin) bool {
+func (d *daemon) enqueueToSessionOrigin(chatID, msgID, text, originalText string, attachments []attachment, targetCreated int64, nonce string, origin inbound.Origin, admission *sendAdmission) bool {
 	if text == "" && len(attachments) == 0 {
 		d.sendMessage(chatID, msgID, "∅")
 		return false
@@ -115,7 +115,30 @@ func (d *daemon) enqueueToSessionOrigin(chatID, msgID, text, originalText string
 			return false
 		}
 	}
+	token := ""
+	if admission != nil {
+		token = admission.token
+	}
+	if err := d.controlError(sk, sess.Created, token); err != nil {
+		if admission != nil {
+			admission.err = err
+		} else {
+			d.sendMessage(chatID, msgID, err.Message)
+		}
+		return false
+	}
 	sr := d.getRunner(sk, sess.Created)
+	sr.acceptMu.Lock()
+	defer sr.acceptMu.Unlock()
+	sr.mu.Lock()
+	closing := sr.closing
+	sr.mu.Unlock()
+	if closing || d.store.Get(sk, sess.Created) == nil {
+		if admission != nil {
+			admission.err = apiFailure("session-deleted")
+		}
+		return false
+	}
 
 	// Durably accept the message BEFORE acking: write its files and append a fsynced
 	// enq record, holding only the durable-store lock — never sr.mu (the two-lock
@@ -127,10 +150,27 @@ func (d *daemon) enqueueToSessionOrigin(chatID, msgID, text, originalText string
 	}
 	turnSeq, _, files, duplicate, acceptedAt, err := sr.store.EnqueueOrigin(chatID, msgID, nonce, text, originalText, readers, origin)
 	if err != nil {
+		if admission != nil {
+			admission.err = apiFailure("enqueue-failed")
+		}
 		log.Printf("durable enqueue (%s/%d): %v", sk, sess.Created, err)
 		d.sendMessage(chatID, msgID, "❌ Не удалось сохранить сообщение, попробуйте снова.")
 		return false
 	}
+
+	sr.mu.Lock()
+	if sr.results == nil {
+		sr.results = make(map[int64]*turnWait)
+	}
+	completion := sr.results[turnSeq]
+	if !duplicate {
+		completion = newTurnWait()
+		sr.results[turnSeq] = completion
+	}
+	if admission != nil {
+		admission.completion = completion
+	}
+	sr.mu.Unlock()
 
 	// The enqueued turn is durable, so the tail poll delivers it (and the sender's optimistic echo
 	// binds by nonce on the /api/send response) — a poke to re-read the durable log is all the UI
@@ -145,12 +185,16 @@ func (d *daemon) enqueueToSessionOrigin(chatID, msgID, text, originalText string
 		return true
 	}
 	if draining {
+		completion.fail("result-unavailable")
+		sr.mu.Lock()
+		sr.pruneResultsLocked()
+		sr.mu.Unlock()
 		emitEcho()
 		return true
 	}
 
 	sr.mu.Lock()
-	qm := queuedMsg{chatID: chatID, msgID: msgID, text: text, originalText: originalText, turnSeq: turnSeq, files: files, sessKey: sk, sessCreated: sess.Created, acceptedAt: acceptedAt, origin: origin}
+	qm := queuedMsg{completion: completion, chatID: chatID, msgID: msgID, text: text, originalText: originalText, turnSeq: turnSeq, files: files, sessKey: sk, sessCreated: sess.Created, acceptedAt: acceptedAt, origin: origin}
 	busy := sr.runner.IsBusy()
 	// The "В очереди" notice is a messenger placeholder later reused as the progress
 	// message; the UI streams independently, so skip it there.
@@ -279,6 +323,9 @@ func (d *daemon) processSessionQueue(sr *sessionRunner) {
 		d.broadcastSessions(msg.sessKey)
 
 		d.runBackend(msg)
+		sr.mu.Lock()
+		sr.pruneResultsLocked()
+		sr.mu.Unlock()
 	}
 }
 
@@ -332,8 +379,13 @@ func (d *daemon) abortSession(sk string, created int64, closing bool) bool {
 	var cancelFn context.CancelFunc
 	var active bool
 	if sr != nil {
+		sr.acceptMu.Lock()
+		defer sr.acceptMu.Unlock()
 		sr.mu.Lock()
 		if closing {
+			for _, completion := range sr.results {
+				completion.fail("session-deleted")
+			}
 			sr.closing = true
 		}
 		cancelFn = sr.cancel
@@ -345,12 +397,18 @@ func (d *daemon) abortSession(sk string, created int64, closing bool) bool {
 	// resurrect work the user just aborted (they were enq-without-run on disk).
 	if sr != nil {
 		for _, qm := range queued {
+			qm.completion.fail("aborted")
 			if err := sr.store.MarkErr(qm.turnSeq, turnErrAborted); err != nil && !errors.Is(err, sessfiles.ErrRemoved) {
 				log.Printf("durable MarkErr aborted (%s/%d): %v", sk, created, err)
 			}
 			// The err is durable (MarkErr); the broadcastSessions below pokes the tail, which
 			// delivers the error block from the durable log — no separate error event.
 		}
+	}
+	if sr != nil {
+		sr.mu.Lock()
+		sr.pruneResultsLocked()
+		sr.mu.Unlock()
 	}
 	hasWork := active || cancelFn != nil || len(queued) > 0
 	if cancelFn != nil {
@@ -386,12 +444,14 @@ func (d *daemon) shouldReuseQueuedProgress(msg queuedMsg) bool {
 }
 
 func (d *daemon) runBackend(msg queuedMsg) {
+	defer msg.completion.fail(turnErrRunStartFailed)
 	sk := msg.sessKey
 	// Look up the session bound at enqueue time. If the user deleted the
 	// session in the meantime the message has nowhere to land — surface that
 	// instead of silently picking a different session.
 	sess := d.store.Get(sk, msg.sessCreated)
 	if sess == nil {
+		msg.completion.fail("session-deleted")
 		d.sendMessage(msg.chatID, msg.msgID, "❌ Сессия удалена, сообщение не обработано.")
 		return
 	}
@@ -441,6 +501,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		defer os.RemoveAll(tmpDir)
 	}
 	if err != nil {
+		msg.completion.fail(turnErrAttachmentsMissing)
 		log.Printf("buildTurnPrompt (%s/%d): %v", sk, sess.Created, err)
 		if mErr := sr.store.MarkErr(msg.turnSeq, turnErrAttachmentsMissing); mErr != nil && !errors.Is(mErr, sessfiles.ErrRemoved) {
 			log.Printf("durable MarkErr (%s/%d): %v", sk, sess.Created, mErr)
@@ -490,7 +551,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	// known, and no backend process has been started yet.
 	var runStarted time.Time
 	var auditTurn *turnaudit.Turn
-	if d.auditEnabled() {
+	if d.auditEnabled() || msg.completion != nil {
 		snapshotAt := time.Now()
 		turn, auditErr := newAuditTurn(msg, sr.store, sess, prompt, backend.Name(), snapshotAt)
 		if auditErr != nil {
@@ -499,20 +560,24 @@ func (d *daemon) runBackend(msg queuedMsg) {
 				log.Printf("durable audit.turn.start error (%s/%d): %v", sk, sess.Created, mErr)
 			}
 			d.broadcastSessions(sk)
+			msg.completion.fail(turnErrAuditStartFailed)
 			del.Final(runner.RunResult{Error: errors.New(turnErrAuditStartFailed)})
 			return
 		}
 		runStarted = time.Now()
 		turn.StartAt = turnaudit.Time(runStarted)
 		auditTurn = &turn
-		if auditErr := d.invokeAudit(startAuditEvent(turn)); auditErr != nil {
+		startEvent := startAuditEvent(turn)
+		if auditErr := d.invokeAudit(startEvent); auditErr != nil {
 			if mErr := sr.store.MarkHookError(msg.turnSeq, "audit.turn.start", turnErrAuditStartFailed); mErr != nil && !errors.Is(mErr, sessfiles.ErrRemoved) {
 				log.Printf("durable audit.turn.start error (%s/%d): %v", sk, sess.Created, mErr)
 			}
 			d.broadcastSessions(sk)
+			msg.completion.fail(turnErrAuditStartFailed)
 			del.Final(runner.RunResult{Error: errors.New(turnErrAuditStartFailed)})
 			return
 		}
+		msg.completion.publish(false, boundaryReply{event: &startEvent})
 	} else {
 		runStarted = time.Now()
 	}
@@ -657,7 +722,10 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	if result.RateLimit != nil {
 		d.saveRateLimit(backend.Name(), result.RateLimit)
 	}
-	d.saveStore()
+	resultSaveErr := d.store.Save()
+	if resultSaveErr != nil {
+		log.Printf("save sessions: %v", resultSaveErr)
+	}
 
 	// Audit the completed computation synchronously before final delivery. The
 	// hook sees the answer klax is about to release, not transport-specific
@@ -673,12 +741,19 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	}
 	if auditTurn != nil {
 		event := finishAuditEvent(*auditTurn, result, trace, ctxUsed, ctxWindow, runStarted, backendStarted, backendFinished, runFinished)
+		var warnings []apiWarning
 		if auditErr := d.invokeAudit(event); auditErr != nil {
+			warnings = []apiWarning{{Code: turnWarnAuditFinishFailed, Message: turnWarnAuditFinishText}}
 			if mErr := sr.store.MarkHookError(msg.turnSeq, "audit.turn.finish", turnWarnAuditFinishFailed); mErr != nil && !errors.Is(mErr, sessfiles.ErrRemoved) {
 				log.Printf("durable audit.turn.finish error (%s/%d): %v", sk, sess.Created, mErr)
 			}
 			d.broadcastSessions(sk)
-			del.Warning("Не удалось записать событие завершения хода в аудит")
+			del.Warning(turnWarnAuditFinishText)
+		}
+		if termErr != nil || resultSaveErr != nil {
+			msg.completion.fail("result-save-failed")
+		} else {
+			msg.completion.publish(true, boundaryReply{event: &event, warnings: warnings})
 		}
 	}
 

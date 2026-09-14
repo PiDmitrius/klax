@@ -11,7 +11,7 @@ import (
 )
 
 func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []attachment, targetCreated int64, nonce string) bool {
-	return d.enqueueToSessionOrigin(chatID, msgID, text, text, attachments, targetCreated, nonce, inbound.Origin{})
+	return d.enqueueToSessionOrigin(chatID, msgID, text, text, attachments, targetCreated, nonce, inbound.Origin{}, nil)
 }
 
 func TestBuildTurnPromptContainsNoCorrelationMarker(t *testing.T) {

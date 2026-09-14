@@ -97,6 +97,7 @@ export function renderTabs(active){
     keep.add(key);
     t.dataset.created = key;
     t._sessionName = s.name || "";
+    t.querySelector(".tx").classList.toggle("disabled", !!s.read_only);
     t.className = "tab" + (isActive ? " active" : "") + (s.busy ? " busy" : "") + (unread ? " unread" : "");
     t.querySelector(".tname").textContent = s.name || ("сессия " + s.created);
     const badge = t.querySelector(".badge");
@@ -196,6 +197,7 @@ function createTab(){
 // /api/reorder, and the server broadcast reconciles the canonical order (one source of truth).
 // Below the threshold nothing happens and it stays a plain click (select) / dblclick (settings).
 function startDrag(e, tab){
+  if(sessions.some(s => s.read_only)) return;
   const strip = document.getElementById("tabs");
   if(!strip || strip.querySelectorAll(".tab[data-created]").length < 2) return; // nothing to reorder
   didDrag = false; // fresh gesture — clear any stale flag so it can't swallow this click
@@ -450,6 +452,7 @@ async function createFromDraft(){
 }
 
 async function closeSession(created, name){
+  if(sessions.find(s => sameSession(s.created, created))?.read_only) return;
   // The close glyph is not a focusable control, so this flow supplies its canonical destination to
   // the modal instead of running a second, competing focus-restoration timer after it resolves.
   const confirmed = await uiConfirm("Закрыть сессию «" + (name || ("#" + created)) + "»?", "Закрыть", true, deps.focus);
@@ -527,9 +530,9 @@ function renderSettings(d, isDraft){
   // In draft mode every control edits the pending `draft` object (nothing exists to PATCH yet);
   // for a real session each change applies immediately via patchSettings.
   const apply = isDraft ? draftApply : patch => patchSettings(d.created, patch);
-  const lock = d.busy, dis = lock ? " disabled" : "";
+  const lock = d.busy || d.read_only, dis = lock ? " disabled" : "";
   let h = "";
-  if(lock) h += '<div class="sbusy">⏳ Сессия занята — параметры запуска нельзя менять до завершения.</div>';
+  if(d.busy) h += '<div class="sbusy">⏳ Сессия занята — параметры запуска нельзя менять до завершения.</div>';
   h += '<div class="srow"><label>Имя</label><div class="sctl"><input class="sname" type="text" maxlength="80" value="'+esc(d.name)+'"></div></div>';
   h += '<div class="srow"><label>Движок</label><div class="sctl">'+selectHTML("s-backend", d.backends, d.backend, false, !!(d.backend_locked || lock))+'</div></div>';
   h += '<div class="srow"><label>Модель</label><div class="sctl">'+selectHTML("s-model", d.models, d.model, true, !!lock)+'</div></div>';
@@ -563,6 +566,10 @@ function renderSettings(d, isDraft){
   }
   const b = document.getElementById("sbody");
   b.innerHTML = h;
+  if(d.read_only){
+    b.querySelectorAll("input, textarea, button").forEach(el => { el.disabled = true; });
+    b.querySelectorAll(".sselect").forEach(el => el.classList.add("disabled"));
+  }
 
   const nameInput = b.querySelector(".sname");
   const applyName = () => {
@@ -656,6 +663,7 @@ function renderSettings(d, isDraft){
 }
 
 function patchSettings(created, patch){
+  if(sessions.find(s => sameSession(s.created, created))?.read_only) return;
   patch.session = created;
   api("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) })
     .then(r => { if(r.ok) return r.json(); r.text().then(t => notice(t.trim() || "Не удалось применить")); return fetchSettings(created); })

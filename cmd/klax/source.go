@@ -11,6 +11,7 @@ import (
 // attachment download); the daemon then routes every Inbound uniformly through
 // handleInbound, so command/group/enqueue logic lives in exactly one place.
 type Inbound struct {
+	admission   *sendAdmission
 	ChatID      string
 	MsgID       string // user's message ID (for replyTo)
 	Text        string

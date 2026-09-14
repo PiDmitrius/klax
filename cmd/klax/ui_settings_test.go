@@ -106,12 +106,18 @@ func TestMapSessionStoreErrPassesThroughOtherErrors(t *testing.T) {
 // Web UI "new session" draft with no explicit cwd override, not get reset to "".
 func TestCreateUISessionAtomicPreservesExistingCWDDefault(t *testing.T) {
 	d := newTestDaemon(t)
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	var loadErr error
+	d.store, loadErr = session.LoadStore()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
 	chatID := "tg:test"
 	sk := d.sessionKey(chatID)
 	existingCWD := t.TempDir()
 	d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) { def.CWD = existingCWD })
 
-	sess, err := d.createUISessionAtomic(sk, chatID, uiSettingsPatch{})
+	sess, err := d.createUISessionAtomic(sk, chatID, uiSettingsPatch{}, "")
 	if err != nil {
 		t.Fatalf("createUISessionAtomic: %v", err)
 	}

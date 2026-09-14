@@ -12,6 +12,7 @@ const (
 	turnErrBackendFailed      = "backend-failed"
 	turnErrAuditStartFailed   = "audit-start-failed"
 	turnWarnAuditFinishFailed = "audit-finish-failed"
+	turnWarnAuditFinishText   = "Не удалось записать событие завершения хода в аудит"
 )
 
 func turnErrorReason(err error) string {

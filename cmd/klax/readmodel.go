@@ -75,7 +75,7 @@ func appendHookWarnings(blocks []uiBlock, seq int64, failures []sessfiles.HookFa
 		if failure.Hook != "audit.turn.finish" || failure.Status != "error" {
 			continue
 		}
-		text := "Не удалось записать событие завершения хода в аудит"
+		text := turnWarnAuditFinishText
 		blocks = append(blocks, uiBlock{
 			ID: blockID(seq, "system", failure.Reason, nil), Role: "system",
 			Text: text, Kind: "error", Time: time.Unix(0, failure.TS).Format(time.RFC3339),
