@@ -69,7 +69,7 @@ func newAPIFixture(t *testing.T, start, finish, backend string) *apiFixture {
 		t.Fatal(err)
 	}
 	sess := d.store.New("user:test", "test", dir, session.ScopeDefaults{Backend: "codex"})
-	f := &apiFixture{d: d, s: &uiServer{d: d, tokens: map[string]string{"access": "test", "other": "other"}}, dir: dir, created: sess.Created}
+	f := &apiFixture{d: d, s: &uiServer{d: d, tokens: map[string]uiAccess{"access": {User: "test"}, "other": {User: "other"}}}, dir: dir, created: sess.Created}
 	t.Cleanup(func() {
 		for _, phase := range []string{"start", "finish", "backend"} {
 			_ = os.WriteFile(filepath.Join(dir, phase+".release"), nil, 0600)
@@ -98,8 +98,10 @@ func newAPIFixture(t *testing.T, start, finish, backend string) *apiFixture {
 }
 func (f *apiFixture) request(path, body, token string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
-	r.Header.Set("Authorization", "Bearer access")
-	r.Header.Set("X-Klax-Control-Token", token)
+	if token == "" {
+		token = "access"
+	}
+	r.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
 	f.s.routes().ServeHTTP(w, r)
 	return w
@@ -389,106 +391,9 @@ func TestAPIMultipartWait(t *testing.T) {
 	}
 }
 
-func TestAPIProtectedSessionAuthorizationAndPersistence(t *testing.T) {
-	f := newAPIFixture(t, "capture", "capture", "")
-	f.d.uiHub = newUIHub()
-	const token = "test-control-secret-84"
-	w := f.request("/api/new", fmt.Sprintf(`{"name":"managed","cwd":%q,"backend":"codex","model":"gpt-5.6-sol","think":"high","sandbox":"on","prompt":"instructions","groups":["work"],"control_token":%q}`, f.dir, token), "")
-	if w.Code != 200 {
-		t.Fatal(w.Code, w.Body.String())
-	}
-	var created struct {
-		Created int64 `json:"created"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
-		t.Fatal(err)
-	}
-	id := created.Created
-	stored := f.d.store.Get("user:test", id)
-	if stored == nil || stored.Name != "managed" || stored.ControlHash != controlDigest(token) || stored.CWD != f.dir || stored.ModelOverride != "gpt-5.6-sol" || stored.ThinkOverride != "high" || stored.Sandbox != "on" || stored.AppendSystemPrompt != "instructions" || len(stored.Groups) != 1 {
-		t.Fatalf("created settings mismatch")
-	}
-	reloaded, err := session.LoadStore()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reloaded.Get("user:test", id).ControlHash != stored.ControlHash {
-		t.Fatal("protection lost after reload")
-	}
-	for _, path := range []string{"/api/send", "/api/abort", "/api/rename", "/api/close", "/api/settings"} {
-		body := fmt.Sprintf(`{"session":%d,"text":"hello","name":"renamed","order":[%d,%d],"control_token":""}`, id, id, f.created)
-		for _, bad := range []string{"", "wrong"} {
-			errorResponse(t, f.request(path, body, bad), "control-token-required")
-		}
-	}
-	for _, path := range []string{"/api/send", "/api/abort", "/api/rename", "/api/close", "/api/settings"} {
-		req := httptest.NewRequest("POST", path, strings.NewReader(fmt.Sprintf(`{"session":%d,"text":"hello","name":"renamed"}`, id)))
-		req.Header.Set("X-Klax-Control-Token", token)
-		w := httptest.NewRecorder()
-		f.s.routes().ServeHTTP(w, req)
-		if w.Code != 401 {
-			t.Fatal("control token bypassed ordinary auth")
-		}
-		req.Header.Set("Authorization", "Bearer other")
-		req.Body = io.NopCloser(strings.NewReader(fmt.Sprintf(`{"session":%d,"text":"hello","name":"renamed"}`, id)))
-		w = httptest.NewRecorder()
-		f.s.routes().ServeHTTP(w, req)
-		if w.Code != 404 {
-			t.Fatalf("cross-user %s: %d", path, w.Code)
-		}
-	}
-	for _, path := range []string{"/api/sessions", "/api/settings?session=" + fmt.Sprint(id), "/api/transcript?session=" + fmt.Sprint(id)} {
-		req := httptest.NewRequest("GET", path, nil)
-		req.Header.Set("Authorization", "Bearer access")
-		w := httptest.NewRecorder()
-		f.s.routes().ServeHTTP(w, req)
-		if w.Code != 200 || strings.Contains(w.Body.String(), token) || strings.Contains(w.Body.String(), stored.ControlHash) {
-			t.Fatalf("unsafe read response: %d", w.Code)
-		}
-		if !strings.Contains(path, "transcript") && !strings.Contains(w.Body.String(), `"read_only":true`) {
-			t.Fatal("missing read_only")
-		}
-	}
-	if w := f.request("/api/read", fmt.Sprintf(`{"session":%d,"turn":1,"block":0}`, id), ""); w.Code != 204 {
-		t.Fatal("read marking forbidden")
-	}
-	if w := f.request("/api/settings", fmt.Sprintf(`{"session":%d,"name":"updated","control_token":null}`, id), token); w.Code != 200 {
-		t.Fatal(w.Code, w.Body.String())
-	}
-	if f.d.store.Get("user:test", id).ControlHash != stored.ControlHash {
-		t.Fatal("settings removed protection")
-	}
-	w = f.request("/api/send", fmt.Sprintf(`{"session":%d,"text":"hello","return_on":"finish"}`, id), token)
-	eventResponse(t, w, "finish", "success")
-	for _, name := range []string{"prompt", "args", "start.json", "finish.json"} {
-		data, err := os.ReadFile(filepath.Join(f.dir, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if bytes.Contains(data, []byte(token)) || bytes.Contains(data, []byte(stored.ControlHash)) {
-			t.Fatalf("control metadata leaked into %s", name)
-		}
-	}
-	sr := f.d.getRunner("user:test", id)
-	turns, err := sr.store.InboundLog()
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, _ := json.Marshal(turns)
-	if bytes.Contains(data, []byte(token)) || bytes.Contains(data, []byte(stored.ControlHash)) {
-		t.Fatal("control metadata leaked into history")
-	}
-	if w := f.request("/api/abort", fmt.Sprintf(`{"session":%d}`, id), token); w.Code != 204 {
-		t.Fatal(w.Code)
-	}
-	if w := f.request("/api/close", fmt.Sprintf(`{"session":%d}`, id), token); w.Code != 204 {
-		t.Fatal(w.Code, w.Body.String())
-	}
-}
-
 func TestAPINewRejectsInvalidWithoutPartialSession(t *testing.T) {
 	f := newAPIFixture(t, "", "", "")
-	for _, body := range []string{`{"control_token":""}`, `{"control_token":null}`, `{"control_token":false}`, `{"backend":"unknown","control_token":"valid"}`, `{"cwd":"/nonexistent/klax-api-test"}`} {
+	for _, body := range []string{`{"control_token":""}`, `{"control_token":null}`, `{"control_token":false}`, `{"backend":"unknown"}`, `{"cwd":"/nonexistent/klax-api-test"}`} {
 		w := f.request("/api/new", body, "")
 		if w.Code != 400 {
 			t.Fatalf("%s: %d", body, w.Code)
@@ -500,9 +405,7 @@ func TestAPINewRejectsInvalidWithoutPartialSession(t *testing.T) {
 	if w := f.request("/api/new", `{"name":"ordinary"}`, ""); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if f.d.store.Active("user:test").ControlHash != "" {
-		t.Fatal("ordinary session protected")
-	}
+
 	// A non-directory parent makes persistence fail before publishing the session.
 	invalid := filepath.Join(f.dir, "unwritable")
 	if err := os.WriteFile(invalid, nil, 0600); err != nil {
@@ -523,7 +426,7 @@ func TestAPINewRejectsInvalidWithoutPartialSession(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.dir, "store-parent"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	w := f.request("/api/new", `{"name":"must-not-exist","control_token":"valid"}`, "")
+	w := f.request("/api/new", `{"name":"must-not-exist"}`, "")
 	if w.Code != 500 || len(f.d.store.SessionsFor("user:test")) != 0 {
 		t.Fatal("failed save published a session", w.Code)
 	}
@@ -678,24 +581,7 @@ func TestAPIResultRetentionPreservesPendingWaiters(t *testing.T) {
 	errorResponse(t, w, "aborted")
 }
 
-func TestAPIReorderIncludesProtectedSessions(t *testing.T) {
-	f := newAPIFixture(t, "", "", "")
-	w := f.request("/api/new", `{"name":"managed","control_token":"secret"}`, "")
-	if w.Code != 200 {
-		t.Fatal(w.Code, w.Body.String())
-	}
-	id := f.d.store.Active("user:test").Created
-	body := fmt.Sprintf(`{"order":[%d,%d]}`, id, f.created)
-	if w := f.request("/api/reorder", body, ""); w.Code != 204 {
-		t.Fatal(w.Code, w.Body.String())
-	}
-	if got := f.d.store.SessionsFor("user:test"); len(got) != 2 || got[0].Created != id || got[1].Created != f.created {
-		t.Fatal("protected tab prevented reorder")
-	}
-	errorResponse(t, f.request("/api/send", fmt.Sprintf(`{"session":%d,"text":"hello"}`, id), ""), "control-token-required")
-}
-
-func TestMessengerControlIgnoresControlToken(t *testing.T) {
+func TestMessengerSessionControl(t *testing.T) {
 	for _, chatID := range []string{"tg:1", "mx:1", "vk:1", "ym:test@example.org"} {
 		t.Run(chatID, func(t *testing.T) {
 			f := newAPIFixture(t, "", "", "block")
@@ -703,15 +589,15 @@ func TestMessengerControlIgnoresControlToken(t *testing.T) {
 			f.d.maxIdents = map[int64]string{1: "test"}
 			f.d.vkIdents = map[int]string{1: "test"}
 			f.d.ymIdents = map[string]string{"test@example.org": "test"}
-			if w := f.request("/api/new", `{"name":"managed","control_token":"secret"}`, ""); w.Code != 200 {
+			if w := f.request("/api/new", `{"name":"managed"}`, ""); w.Code != 200 {
 				t.Fatal(w.Code, w.Body.String())
 			}
 			id := f.d.store.Active("user:test").Created
 			f.d.handleCommand(chatID, "", "/name renamed")
 			f.d.handleCommand(chatID, "", "/prompt instructions")
 			got := f.d.store.Get("user:test", id)
-			if got.Name != "renamed" || got.AppendSystemPrompt != "instructions" || got.ControlHash != controlDigest("secret") {
-				t.Fatal("messenger settings blocked or protection changed")
+			if got.Name != "renamed" || got.AppendSystemPrompt != "instructions" {
+				t.Fatal("messenger settings blocked")
 			}
 			if !f.d.handleInbound(Inbound{ChatID: chatID, MsgID: "1", Text: "hello", Attachments: []attachment{{filename: "note.txt", data: []byte("note")}}}) {
 				t.Fatal("messenger send blocked")
@@ -747,21 +633,21 @@ func TestMessengerControlIgnoresControlToken(t *testing.T) {
 	}
 }
 
-func TestMessengerNukeDeletesProtectedSessionsAndWakesAPI(t *testing.T) {
+func TestMessengerNukeWakesAPI(t *testing.T) {
 	f := newAPIFixture(t, "block", "", "")
 	f.d.identities = map[int64]string{1: "test"}
-	if w := f.request("/api/new", `{"name":"managed","control_token":"secret"}`, ""); w.Code != 200 {
+	if w := f.request("/api/new", `{"name":"managed"}`, ""); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	id := f.d.store.Active("user:test").Created
 	wait := asyncResponse(func() *httptest.ResponseRecorder {
-		return f.request("/api/send", fmt.Sprintf(`{"session":%d,"text":"hello","return_on":"finish"}`, id), "secret")
+		return f.request("/api/send", fmt.Sprintf(`{"session":%d,"text":"hello","return_on":"finish"}`, id), "")
 	})
 	f.entered(t, "start")
 	f.d.handleCommand("tg:1", "", "/nuke fresh")
 	errorResponse(t, response(t, wait), "session-deleted")
 	got := f.d.store.SessionsFor("user:test")
-	if len(got) != 1 || got[0].Name != "fresh" || !got[0].Active || got[0].ControlHash != "" {
+	if len(got) != 1 || got[0].Name != "fresh" || !got[0].Active {
 		t.Fatal("nuke did not replace all sessions")
 	}
 	f.release(t, "start")

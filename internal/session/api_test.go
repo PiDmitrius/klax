@@ -23,7 +23,7 @@ func TestAddPersistedFailureRestoresSessionAndDefaults(t *testing.T) {
 	if err := os.Mkdir(s.path, 0700); err != nil {
 		t.Fatal(err)
 	}
-	_, err = s.AddPersisted("user:test", &Session{Name: "uncommitted", ControlHash: "hash"}, &ScopeDefaults{Backend: "claude"})
+	_, err = s.AddPersisted("user:test", &Session{Name: "uncommitted"}, &ScopeDefaults{Backend: "claude"})
 	if err == nil {
 		t.Fatal("expected save failure")
 	}
@@ -45,12 +45,12 @@ func TestDeleteCreatedUsesIdentityAfterOrderChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := s.New("user:test", "first", "/work", ScopeDefaults{})
-	protected := s.Add("user:test", &Session{Name: "protected", ControlHash: "hash"})
-	s.Reorder("user:test", []int64{protected.Created, first.Created})
+	second := s.Add("user:test", &Session{Name: "second"})
+	s.Reorder("user:test", []int64{second.Created, first.Created})
 	if !s.DeleteCreated("user:test", first.Created) {
 		t.Fatal("target not deleted")
 	}
-	if s.Get("user:test", protected.Created) == nil || s.Get("user:test", first.Created) != nil {
+	if s.Get("user:test", second.Created) == nil || s.Get("user:test", first.Created) != nil {
 		t.Fatal("wrong identity deleted")
 	}
 }

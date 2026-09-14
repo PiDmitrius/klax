@@ -1,4 +1,5 @@
 import { api, copyText, flashCopied } from "./base.js";
+import { isReadOnly } from "./auth.js";
 import { uiConfirm } from "./modal.js";
 
 const $ = id => document.getElementById(id);
@@ -41,7 +42,7 @@ function render(data){
   body.appendChild(Object.assign(document.createElement("div"), { className: "syssep" }));
   if(u.source_dir) body.append(row("Исходник", u.source_dir, { copy: true }));
   const check = document.createElement("button"); check.id = "syscheck"; check.className = "syscheck";
-  check.disabled = !!u.checking; check.textContent = u.checking ? "Проверяется…" : "Проверить"; check.onclick = checkUpdates;
+  check.disabled = isReadOnly() || !!u.checking; check.textContent = u.checking ? "Проверяется…" : "Проверить"; check.onclick = checkUpdates;
   body.append(row("Обновления", "", { noValue: true, button: check }));
   if((u.releases || []).length){
     const list = document.createElement("div"); list.className = "sysreleases";
@@ -51,7 +52,7 @@ function render(data){
       const age = release.url ? document.createElement("a") : document.createElement("span"); age.className = "sysage"; age.textContent = release.age || "";
       if(release.url){ age.href = release.url; age.target = "_blank"; age.rel = "noopener noreferrer"; }
       const action = document.createElement("button"); action.className = "sysaction" + (release.action === "update" ? " update" : "");
-      action.dataset.tag = release.tag; action.dataset.action = release.action; action.disabled = !!u.running;
+      action.dataset.tag = release.tag; action.dataset.action = release.action; action.disabled = isReadOnly() || !!u.running;
       action.dataset.source = release.source;
       action.textContent = actionLabel(release.action);
       action.onclick = installFound;
@@ -94,6 +95,7 @@ function errorNotice(title, error){
 }
 
 async function checkUpdates(){
+  if(isReadOnly()) return;
   const b = $("syscheck"); if(b){ b.disabled = true; b.textContent = "Проверяется…"; }
   try {
     const r = await api("/api/system/check", { method: "POST" });
@@ -103,6 +105,7 @@ async function checkUpdates(){
 }
 
 async function installFound(event){
+  if(isReadOnly()) return;
   const button = event.currentTarget;
   const chosen = { tag: button.dataset.tag, source: button.dataset.source, action: button.dataset.action, current: "v" + lastData.version };
   if(!(await uiConfirm(confirmText(chosen), actionLabel(chosen.action)))) return;
@@ -111,6 +114,7 @@ async function installFound(event){
 }
 
 async function beginInstall(chosen){
+  if(isReadOnly()) return;
   try {
     const r = await api("/api/system/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tag: chosen.tag, source: chosen.source }) });
     const data = await r.json();

@@ -194,8 +194,7 @@ creates no session. An empty body creates a session with the scope defaults.
 ```json
 {
   "name": "developer-01",
-  "cwd": "/work",
-  "control_token": "<control-token>"
+  "cwd": "/work"
 }
 ```
 
@@ -203,23 +202,46 @@ The response is `200` with `{"created":42}`. `created` is the persistent klax
 session identifier used by all subsequent requests. Backend session identifiers
 are managed internally.
 
-Omitting `control_token` creates an ordinary session. An explicitly supplied
-value must be a nonempty string. HTTP API control of a protected session requires
-`X-Klax-Control-Token: <control-token>` for messages, attachments, abort/queue
-clearing, deletion, renaming and settings. Tab reordering is unrestricted. The ordinary
-API authorization and session ownership checks still apply.
+### Access roles and read markers
 
-The token is hashed with SHA-256 for persistent verification. Neither the token
-nor its hash appears in session views, history, audit events or backend launch
-parameters. Token replacement and removal are not supported. Messenger control
-is unaffected by this property: messages, settings, abort and deletion use the
-ordinary access rules, and `/nuke` also deletes protected sessions. The token
-does not grant exclusive control to a script.
+Each configured user may have two independent credentials:
 
-Session and settings views include `read_only`. The UI leaves a protected
-session's composer visible, gray and disabled, and disables mutation controls.
-History, files, navigation and read marking remain available. Protection does
-not change the backend's filesystem permissions.
+```json
+{
+  "id": "operator",
+  "ui_token": "<management-token>",
+  "ui_read_token": "<viewing-token>"
+}
+```
+
+Both tokens authenticate through `Authorization: Bearer <token>` and address the
+same user's sessions. Tokens must be unique across all users and roles.
+`ui_token` grants ordinary management access. `ui_read_token` permits viewing
+sessions, events, settings and files, plus updating its own read markers.
+Creation, messages, attachments, abort, deletion, settings changes, tab reordering
+and service updates are rejected by the server with `403 read-only`.
+Read access does not create an initial session in an empty account.
+
+`GET /api/auth` returns `user` and `read_only`. Session and settings views also
+include `read_only`. The viewing UI hides the new-session button, keeps its
+composer gray and disabled, and disables mutation controls. Messenger permissions
+and backend filesystem permissions are independent of the UI access role.
+
+Management and viewing access have separate persistent read-through watermarks
+for every session. Browsers sharing a role synchronize their markers; reading
+through one role does not mark the other role's messages as read. Markers survive
+a restart and token rotation. The watermark uses the same `(turn, block)` axis
+and unread-count calculation for both roles.
+
+For automatic login, open `https://<host>/<mount>/#login=<viewing-token>` with a
+URL-encoded token. The browser consumes and removes the fragment before making
+API requests, and uses the supplied token in preference to any saved credential.
+Anyone holding the link can read that user's sessions. An invalid saved token
+returns the UI to the login form; clearing application data is unnecessary.
+
+`control_token` on `/api/new` is unsupported and returns
+`400 unsupported-control-token`. There is no per-session control-token check;
+`X-Klax-Control-Token` grants no permissions.
 
 ### Send a message
 
@@ -289,9 +311,9 @@ shape:
 
 | Code | HTTP status | Meaning |
 | --- | --- | --- |
-| `control-token-required` | 403 | Missing or incorrect control token. |
+| `read-only` | 403 | The authenticated token permits viewing only. |
 | `session-not-found`, `session-deleted` | 404 | Session unavailable in the authenticated scope. |
-| `invalid-nonce`, `invalid-return-on`, `invalid-control-token`, `empty-message` | 400 | Invalid input; nothing enqueued or created. |
+| `invalid-nonce`, `invalid-return-on`, `unsupported-control-token`, `empty-message` | 400 | Invalid input; nothing enqueued or created. |
 | `result-unavailable` | 409 | Boundary cannot be recovered in this process. |
 | `aborted` | 409 | Waiting message removed from the queue. |
 | `enqueue-failed` | 500 | Durable acceptance failed. |

@@ -7,7 +7,8 @@ import { TurnModel } from "./model.js";
 import { renderSession, beginShift, playShift, fadeOutDivider, DIVIDER_FADE_MS, pos, parsePos, decodePos } from "./render.js";
 import { esc } from "./markdown.js";
 import { tailLoop } from "./events.js";
-import { api, getToken, setToken, hasCoarsePointer, copyText, flashCopied } from "./base.js";
+import { api, hasCoarsePointer, copyText, flashCopied } from "./base.js";
+import { initAuth, isReadOnly } from "./auth.js";
 import { selectionInLog } from "./scroll.js";
 import { initCompose, updateComposerAccess, saveDraft, loadDraft, dropDraft, recoverOutbox } from "./compose.js";
 import { initTabs, reconcileSessions, renderTabs } from "./tabs.js";
@@ -363,7 +364,7 @@ function commitLive(created){
   collapseAndMerge();
 }
 
-function activeReadOnly(){ return !!sessionList.find(s => s.created === active)?.read_only; }
+function activeReadOnly(){ return isReadOnly(); }
 
 function abortActive(){
   if(activeReadOnly()) return;
@@ -638,7 +639,7 @@ async function onSessionsList(list){
   // Restore any submitted-but-unconfirmed messages (durable outbox) BEFORE the first tab is selected,
   // so the active tab's recovered text loads straight into the composer via selectSession→loadDraft.
   // Runs once, as soon as we know the session list.
-  if(!outboxRecovered && list.length){
+  if(!isReadOnly() && !outboxRecovered && list.length){
     outboxRecovered = true;
     recoverOutbox({ isLive: c => list.some(s => s.created === c), notice: showNotice });
   }
@@ -804,7 +805,6 @@ const host = {
     }
     refreshStrip();
   },
-  onAuthFail: () => { const a = document.getElementById("app"); if(a) a.classList.remove("active"); const g = document.getElementById("gate"); if(g) g.classList.remove("hidden"); },
   onRestart: (kind, version) => showNotice(systemRestartNotice(kind, version)),
   // Show the amber logo only after the 2nd consecutive failure, so a single dropped poll
   // (or a fast daemon restart the next poll rides through) never flashes it; clear on any
@@ -837,6 +837,8 @@ async function afterClose(created){
 }
 
 function start(){
+  document.getElementById("newtab").classList.toggle("hidden", isReadOnly());
+  updateComposerAccess(isReadOnly());
   setScope(parseHash().scope); // the address bar decides the scope before the first strip render
   document.getElementById("gate").classList.add("hidden");
   const app = document.getElementById("app"); if(app) app.classList.add("active");
@@ -994,12 +996,6 @@ function start(){
   syncSessions().then(() => tailLoop(host)); // durable-tail live channel (POST /api/tail)
 }
 
-function gateSubmit(){ const el = document.getElementById("token"); const t = el ? el.value.trim() : ""; if(t){ setToken(t); start(); } }
-
 applyTheme((() => { try { return localStorage.getItem("klax_theme2"); } catch(e){ return null; } })() || "light");
 injectEmojiFont();
-if(getToken()) start();
-else {
-  const btn = document.getElementById("tokenbtn"); if(btn) btn.addEventListener("click", gateSubmit);
-  const tk = document.getElementById("token"); if(tk) tk.addEventListener("keydown", e => { if(e.key === "Enter") gateSubmit(); });
-}
+initAuth(start);

@@ -5,6 +5,7 @@
 
 import { api, copyText, flashCopied } from "./base.js";
 import { esc } from "./markdown.js";
+import { isReadOnly } from "./auth.js";
 import { uiConfirm } from "./modal.js";
 import { titlePrefix, currentScope, isRoot, knownGroups } from "./scope.js";
 
@@ -197,6 +198,7 @@ function createTab(){
 // /api/reorder, and the server broadcast reconciles the canonical order (one source of truth).
 // Below the threshold nothing happens and it stays a plain click (select) / dblclick (settings).
 function startDrag(e, tab){
+  if(isReadOnly()) return;
   const strip = document.getElementById("tabs");
   if(!strip || strip.querySelectorAll(".tab[data-created]").length < 2) return; // nothing to reorder
   didDrag = false; // fresh gesture — clear any stale flag so it can't swallow this click
@@ -377,6 +379,7 @@ function fetchDraft(backend){
 // openDraft opens the deferred-creation dialog. No session exists yet — settingsFor stays 0 and
 // `draft` holds the pending field values; nothing is created until onModalOk/createFromDraft.
 function openDraft(){
+  if(isReadOnly()) return;
   settingsFor = 0; settingsAutofocused = false; groupAdding = false;
   draft = {}; draftView = null; draftSubmitting = false;
   const tt = document.querySelector(".smodal-title"); if(tt) tt.textContent = "Новая сессия";

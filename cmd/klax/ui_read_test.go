@@ -12,22 +12,22 @@ import (
 func TestRaiseReadThroughIsMonotonic(t *testing.T) {
 	s := &session.Session{}
 
-	if !raiseReadThrough(s, 42, 3) || s.ReadThroughTurn != 42 || s.ReadThroughBlock != 3 {
+	if !s.AdvanceReadThrough(false, 42, 3) || s.ReadThroughTurn != 42 || s.ReadThroughBlock != 3 {
 		t.Fatalf("initial raise: watermark = (%d,%d), want moved to (42,3)", s.ReadThroughTurn, s.ReadThroughBlock)
 	}
-	if !raiseReadThrough(s, 42, 5) || s.ReadThroughBlock != 5 {
+	if !s.AdvanceReadThrough(false, 42, 5) || s.ReadThroughBlock != 5 {
 		t.Fatalf("same-turn further block: block = %d, want moved to 5", s.ReadThroughBlock)
 	}
-	if raiseReadThrough(s, 42, 5) {
+	if s.AdvanceReadThrough(false, 42, 5) {
 		t.Fatal("re-report of the same position must be a no-op")
 	}
-	if raiseReadThrough(s, 42, 2) || s.ReadThroughBlock != 5 {
+	if s.AdvanceReadThrough(false, 42, 2) || s.ReadThroughBlock != 5 {
 		t.Fatalf("earlier block on same turn regressed watermark to %d", s.ReadThroughBlock)
 	}
-	if raiseReadThrough(s, 41, 999) || s.ReadThroughTurn != 42 || s.ReadThroughBlock != 5 {
+	if s.AdvanceReadThrough(false, 41, 999) || s.ReadThroughTurn != 42 || s.ReadThroughBlock != 5 {
 		t.Fatalf("earlier turn regressed watermark to (%d,%d)", s.ReadThroughTurn, s.ReadThroughBlock)
 	}
-	if !raiseReadThrough(s, 43, 0) || s.ReadThroughTurn != 43 || s.ReadThroughBlock != 0 {
+	if !s.AdvanceReadThrough(false, 43, 0) || s.ReadThroughTurn != 43 || s.ReadThroughBlock != 0 {
 		t.Fatalf("later turn: watermark = (%d,%d), want moved to (43,0)", s.ReadThroughTurn, s.ReadThroughBlock)
 	}
 }

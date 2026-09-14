@@ -73,7 +73,8 @@ func TestHandleFileUsesDisplayNameForDownload(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/file?ref="+token, nil)
 	rec := httptest.NewRecorder()
-	(&uiServer{d: d}).handleFile(rec, req)
+	routes := (&uiServer{d: d}).routes()
+	routes.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("handleFile code = %d, want 200", rec.Code)
@@ -87,6 +88,32 @@ func TestHandleFileUsesDisplayNameForDownload(t *testing.T) {
 	}
 	if strings.Contains(cd, "out-") {
 		t.Fatalf("Content-Disposition leaked durable name: %q", cd)
+	}
+	if rec.Body.String() != "plan" {
+		t.Fatalf("download body = %q", rec.Body.String())
+	}
+	for _, tc := range []struct {
+		method string
+		path   string
+		status int
+	}{
+		{http.MethodHead, "/api/file?ref=" + token, http.StatusOK},
+		{http.MethodGet, "/api/file", http.StatusForbidden},
+		{http.MethodGet, "/api/file?ref=invalid", http.StatusForbidden},
+		{http.MethodPost, "/api/file?ref=" + token, http.StatusUnauthorized},
+		{http.MethodGet, "/api/sessions", http.StatusUnauthorized},
+	} {
+		w := httptest.NewRecorder()
+		routes.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
+		if w.Code != tc.status {
+			t.Fatalf("%s %s: status %d, want %d", tc.method, tc.path, w.Code, tc.status)
+		}
+	}
+	d.dropFileTokens("user:alice", sess.Created)
+	rec = httptest.NewRecorder()
+	routes.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("revoked file reference: status %d", rec.Code)
 	}
 }
 
