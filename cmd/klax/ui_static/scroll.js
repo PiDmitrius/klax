@@ -2,8 +2,6 @@
 // never rebuild the log out from under a live text selection (that would collapse it). The
 // host (app.js) owns the `stick` flag; these are the primitives it drives.
 
-export function nearBottom(el){ return el.scrollHeight - el.scrollTop - el.clientHeight < 80; }
-
 // selectionInLog reports a live, non-collapsed text selection inside el — the signal to
 // defer a re-render until the selection clears (flush on selectionchange).
 export function selectionInLog(el){
