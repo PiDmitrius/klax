@@ -5,7 +5,7 @@
 // retry nonce) is PER SESSION: app.js stashes it on tab switch and restores it on return,
 // so a draft typed in one tab never shows up in another.
 
-import { api, getToken, hasCoarsePointer } from "./base.js";
+import { api, getToken, hasCoarsePointer, bindButtonActivation } from "./base.js";
 
 // Phones have no practical Shift+Enter gesture, so their primary coarse pointer changes plain Enter
 // into a newline and leaves sending to the visible button. Ctrl/Cmd+Enter remains an explicit send
@@ -149,24 +149,7 @@ export function initCompose(deps){
     bar.addEventListener("drop", e => { if(deps.readOnly()) return; for(const f of (e.dataTransfer && e.dataTransfer.files) || []) files.push({ file: f, name: f.name }); renderChips(); });
   }
   const btn = document.getElementById("sendbtn");
-  if(btn){
-    let touchSent = false, touchSentTimer = 0;
-    btn.addEventListener("pointerdown", e => {
-      if(e.pointerType !== "touch") return;
-      // Waiting for click lets the textarea blur first; that restores the iPhone bottom safe-area,
-      // moves the composer out from under the finger, and Safari drops the click. Submit on the
-      // stable pointerdown and keep textarea focus/keyboard by cancelling that default blur.
-      e.preventDefault();
-      touchSent = true;
-      clearTimeout(touchSentTimer);
-      touchSentTimer = setTimeout(() => { touchSent = false; }, 1200);
-      send(deps, true);
-    });
-    btn.addEventListener("click", () => {
-      if(touchSent){ touchSent = false; clearTimeout(touchSentTimer); return; }
-      send(deps);
-    });
-  }
+  if(btn) bindButtonActivation(btn, touch => send(deps, touch));
   const ab = document.getElementById("attachbtn");
   if(ab && fileInput) ab.addEventListener("click", () => { if(!deps.readOnly()) fileInput.click(); });
 }

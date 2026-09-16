@@ -428,9 +428,9 @@ func TestComposerEnterContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(compose), `btn.addEventListener("pointerdown"`) ||
+	if !strings.Contains(string(compose), `bindButtonActivation(btn, touch => send(deps, touch))`) ||
 		!strings.Contains(string(compose), `ab.addEventListener("click"`) ||
-		!strings.Contains(string(compose), "send(deps, true)") || !strings.Contains(string(compose), "blurOnSuccess") {
+		!strings.Contains(string(compose), "blurOnSuccess") {
 		t.Fatal("touch send must act before textarea blur moves the composer")
 	}
 	dir := t.TempDir()

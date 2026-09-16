@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import { test } from "node:test";
+import { bindButtonActivation } from "./base.js";
 
 function composer(){
   const elements = {};
@@ -19,7 +20,7 @@ function composer(){
   for(const id of ["input","file","cbar","sendbtn","attachbtn"]) element(id);
   const apiCalls=[];
   const source=readFileSync(new URL("./compose.js",import.meta.url),"utf8").replace(/^import .*;$/gm,"").replace(/export /g,"");
-  const ctx={document:{getElementById:id=>elements[id]||null}, api:(...args)=>apiCalls.push(args),getToken:()=>"",hasCoarsePointer:()=>false,performance:{now:()=>1},setTimeout,clearTimeout};
+  const ctx={document:{getElementById:id=>elements[id]||null}, api:(...args)=>apiCalls.push(args),getToken:()=>"",hasCoarsePointer:()=>false,bindButtonActivation,performance:{now:()=>1},setTimeout,clearTimeout};
   runInNewContext(source+"\nthis.inspectFiles=()=>files.length; this.initialize=initCompose; this.access=updateComposerAccess;",ctx);
   return {ctx,elements,apiCalls};
 }
