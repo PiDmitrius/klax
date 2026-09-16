@@ -100,7 +100,7 @@ func TestSPASystemControlsAndNoticeStack(t *testing.T) {
 		t.Fatal("SPA shell must opt into and colour the iPhone safe area")
 	}
 	if !strings.Contains(string(css), "safe-area-inset-top") {
-		t.Fatal("header must account for the iPhone top safe area under viewport-fit=cover")
+		t.Fatal("header must respect any reported top safe area")
 	}
 	if strings.Count(string(css), "safe-area-inset-left") < 3 || strings.Count(string(css), "safe-area-inset-right") < 3 {
 		t.Fatal("header, timeline and composer must all account for landscape safe areas")

@@ -48,6 +48,8 @@ const tailCursors = {};                // created -> "<turn>.<block>.<state>.<tr
 let noticeCursor = "";                 // ring cursor for transient notices (tailLoop)
 let sessRev = 0;                       // last session-strip revision rendered (tailLoop; server returns it early on a strip change)
 let stick = true, pendingRender = false, readOnScroll = true;
+let readScrollTimer = 0, readTouching = false, readScrollReady = 0;
+const SCROLL_IDLE_MS = 160;
 let liveRenderRAF = 0, liveRenderCreated = 0;
 // Live DOM commits are serialized so streamed blocks never animate on top of each other.
 // While an entrance/FLIP is in flight the model keeps updating, but the DOM commit is
@@ -124,9 +126,7 @@ function startReadGrace(created){
     if(inReadGrace(created)) return;
     clearReadGrace(created);
     if(active === created && documentVisible() && atBottom() && rawUnreadCount(created) > 0){
-      markRead(created, true);
-      refreshStrip();
-      commitLive(created); // the unread line fades out, messages close the gap, then split bubbles merge.
+      scheduleReadProgress();
     }
   }, READ_GRACE_MS + 40);
 }
@@ -179,8 +179,12 @@ function focusComposer(){
   // call still belongs to a user gesture, Safari may open it, keep a hidden focus, or scroll the
   // textarea under it. Only a real tap focuses the mobile composer. Desktop keeps its keyboard-first
   // workflow and explicit focus restoration.
-  if(input && documentVisible() && !hasCoarsePointer()) input.focus({ preventScroll: true });
+  if(!input || !documentVisible()) return;
+  if(hasCoarsePointer()){
+    if(document.activeElement === input) input.blur();
+  } else input.focus({ preventScroll: true });
 }
+function resetMobileComposerFocus(){ if(hasCoarsePointer()) focusComposer(); }
 // settledDistance measures how far the view is from the SETTLED bottom of the timeline.
 // #logcol.offsetHeight is layout geometry: unlike log.scrollHeight it is NOT inflated by
 // the transient FLIP transforms (a unit mid-slide extends the scrollable overflow), so
@@ -196,7 +200,7 @@ function settledDistance(log){
 // conversation that fully fits the viewport, is never recomputed (no scroll event can fire).
 // Gating read-advance and the jump button on `stick` then strands a fully-visible session as
 // permanently-unread with the button showing; geometry cannot latch that way.
-function atBottom(){ const log = document.getElementById("log"); return !log || settledDistance(log) < 80; }
+function atBottom(){ const log = document.getElementById("log"); return !log || settledDistance(log) <= 2; }
 function stickToBottom(){
   const sc = document.getElementById("log");
   const col = logcol();
@@ -213,7 +217,7 @@ function restoreScroll(created){
   const log = document.getElementById("log");
   if(!created || !log || scrollTopFor[created] === undefined) return;
   log.scrollTop = Math.min(scrollTopFor[created], Math.max(0, log.scrollHeight - log.clientHeight));
-  stick = settledDistance(log) < 80;
+  stick = atBottom();
   toggleToBottom();
 }
 function watchInlineImages(col){
@@ -332,8 +336,10 @@ function commitLive(created){
   if(liveGateTimer) clearTimeout(liveGateTimer);
   const openGate = () => {
     liveGateTimer = 0;
+    const dirty = liveDirty;
     liveBusy = false;
-    if(liveDirty && active) scheduleLiveRerender(active);
+    flushReadProgress();
+    if(dirty && active) scheduleLiveRerender(active);
   };
   // Phase 2+: remove the (now-faded) unread line, collapse the gap, then merge any bubble the line split.
   const collapseAndMerge = () => {
@@ -562,6 +568,67 @@ async function ensureLineLoaded(created){
     await loadOlder(created);
   }
 }
+function resetReadScroll(){
+  clearTimeout(readScrollTimer);
+  readScrollTimer = 0; readScrollReady = 0; readTouching = false;
+}
+
+function initReadTouch(log){
+  log.addEventListener("touchstart", () => {
+    resetReadScroll();
+    readOnScroll = true;
+    readTouching = true;
+  }, { passive: true });
+  const releaseTouch = () => { readTouching = false; scheduleReadProgress(); };
+  document.addEventListener("touchend", e => { if(readTouching && !e.touches.length) releaseTouch(); }, { passive: true });
+  document.addEventListener("touchcancel", () => { if(readTouching) releaseTouch(); }, { passive: true });
+}
+
+// Read-driven DOM changes wait for a quiet scroll and a released touch, and never overlap live motion.
+function scheduleReadProgress(){
+  clearTimeout(readScrollTimer);
+  readScrollReady = 0;
+  const created = active;
+  readScrollTimer = setTimeout(() => {
+    readScrollTimer = 0;
+    if(created !== active || readTouching || !loaded[created] || !documentVisible()) return;
+    readScrollReady = created;
+    flushReadProgress();
+  }, SCROLL_IDLE_MS);
+}
+
+function flushReadProgress(){
+  if(liveBusy || !readScrollReady) return;
+  const created = readScrollReady;
+  readScrollReady = 0;
+  if(created !== active || readTouching || !loaded[created] || !documentVisible()) return;
+  const log = document.getElementById("log");
+  if(log) settleReadProgress(log);
+}
+
+function settleReadProgress(log){
+  const bottom = atBottom();
+  if((readOnScroll || bottom) && active && documentVisible()){
+    const oldTop = log.scrollTop;
+    const oldHeight = log.scrollHeight;
+    const advanced = !bottom && advanceReadThroughPastViewport(log);
+    if(bottom){
+      const read = markRead(active);
+      const capped = capWindow(active) > 0;
+      if(read || capped){
+        refreshStrip();
+        if(capped) rerenderStructural(active);
+        else commitLive(active);
+      }
+    } else if(advanced){
+      refreshStrip();
+      rerenderStructural(active);
+      log.scrollTop = oldTop + (log.scrollHeight - oldHeight);
+      scrollTopFor[active] = log.scrollTop;
+    }
+  }
+}
+
 function advanceReadThroughPastViewport(log){
   if(!active || readThrough[active] === undefined || !log || inReadGrace(active)) return false;
   const top = log.getBoundingClientRect().top;
@@ -590,8 +657,9 @@ async function selectSession(created){
   const switching = active !== created;
   if(active && switching){ rememberScroll(active); saveDraft(active); }
   if(active && switching && documentVisible() && stick){
-    markRead(active);
+    markRead(active, true);
   }
+  if(switching) resetReadScroll();
   active = created;
   if(switching && selectionInLog(logcol())) window.getSelection().removeAllRanges();
   // The composer travels with the tab. Its draft swap is programmatic session state, not a reason to
@@ -894,11 +962,11 @@ function start(){
   const allowReadOnScroll = () => { readOnScroll = true; };
   if(log){
     log.addEventListener("wheel", allowReadOnScroll, { passive: true });
-    log.addEventListener("touchstart", allowReadOnScroll, { passive: true });
+    initReadTouch(log);
   }
   if(log) log.addEventListener("scroll", () => {
     if(!loaded[active]) return;
-    stick = settledDistance(log) < 80; // settled: a FLIP mid-slide must not unstick us
+    stick = atBottom(); // settled: a FLIP mid-slide must not unstick us
     if(active) scrollTopFor[active] = log.scrollTop;
     // Auto-load older history: only while the user is scrolled UP (not `stick`) and nearing the top of
     // what's loaded. The `!stick` guard is essential: when the whole window fits the viewport (short
@@ -906,25 +974,7 @@ function start(){
     // "near the top" (scrollTop small) — without it, auto-load and capWindow ping-pong the same page
     // forever. loadOlder is guarded + preserves the scroll position, so this stays a smooth scroll up.
     if(active && !stick && log.scrollTop < 300 && moreFor[active] && !loadingOlder[active]) loadOlder(active);
-    if(readOnScroll && active && documentVisible()){
-      const oldTop = log.scrollTop;
-      const oldHeight = log.scrollHeight;
-      const advanced = advanceReadThroughPastViewport(log);
-      if(stick){
-        const read = markRead(active);
-        const capped = capWindow(active) > 0; // back at the bottom → evict the older rows scrolled up to read (they reload on the next scroll up)
-        if(read || advanced || capped){
-          refreshStrip();
-          if(capped) rerenderStructural(active); // structural when we evicted: drop the off-screen DOM cleanly
-          else commitLive(active); // animate divider collapse and finish any split-bubble merge
-        }
-      } else if(advanced){
-        refreshStrip();
-        rerenderStructural(active);
-        log.scrollTop = oldTop + (log.scrollHeight - oldHeight);
-        scrollTopFor[active] = log.scrollTop;
-      }
-    }
+    scheduleReadProgress();
     toggleToBottom();
   });
   // Composer is a normal-flow flex sibling, so layout itself reserves its exact height in the same
@@ -978,7 +1028,8 @@ function start(){
   // stop advancing; foregrounding an unread active tab performs one jump to the divider.
   document.addEventListener("visibilitychange", () => {
     if(document.visibilityState === "hidden"){
-      if(active && stick) markRead(active);
+      if(active && stick) markRead(active, true);
+      resetReadScroll();
       flushRead(active); // push the read watermark now, before the tab may freeze/close
     } else {
       syncSessions();
@@ -999,3 +1050,4 @@ function start(){
 applyTheme((() => { try { return localStorage.getItem("klax_theme2"); } catch(e){ return null; } })() || "light");
 injectEmojiFont();
 initAuth(start);
+window.addEventListener("pageshow", resetMobileComposerFocus);
