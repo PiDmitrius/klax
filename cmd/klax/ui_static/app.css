@@ -37,9 +37,7 @@
   body { margin: 0; font: 14px/1.5 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif, "klax-emoji", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
          background: var(--bg); color: var(--fg); height: 100vh; height: 100dvh;
          display: flex; flex-direction: column; }
-  /* Safari 26 derives its system-bar tint from body (and ignores theme-color). Switch only the
-     covered canvas behind the running app to the existing header/footer token; #bar, #log and
-     #composer retain their own canonical backgrounds, so no visible application colour changes. */
+  /* The canvas around the running app shares the header/footer background. */
   body:has(#app.active) { background: var(--panel); }
   a { color: var(--link); text-decoration-color: color-mix(in srgb, var(--link) 65%, transparent); }
   a:hover { color: var(--accent); text-decoration-color: currentColor; }
@@ -54,9 +52,9 @@
   #app.active { display: flex; }
 
   /* Single top panel: tabs + controls */
-  /* viewport-fit=cover lets the header paint through iPhone's top safe area. Keep the ordinary
-     6px toolbar inset below it; on devices without a cutout env() is zero. */
+  /* Safari's edge colour sampling recognizes fixed/sticky panels. Sticky keeps the header in flow. */
   #bar { display: flex; align-items: center; gap: 8px;
+         position: sticky; top: 0; z-index: 60; flex-shrink: 0;
          padding: calc(6px + env(safe-area-inset-top, 0px))
                   calc(8px + env(safe-area-inset-right, 0px)) 6px
                   calc(8px + env(safe-area-inset-left, 0px));
@@ -533,8 +531,8 @@
   /* Mobile Safari auto-zooms focused form controls whose text is smaller than 16px and does not
      restore the old scale when the keyboard closes. Keep manual pinch zoom available; only remove
      that automatic trigger. inputSizer must match the composer exactly for correct auto-growth. */
-  @media (pointer: coarse) {
-    #inputSizer, #cbar textarea, #gate input, .modal-input, .sfield input, .sfield textarea { font-size: 16px; }
+  @media (any-pointer: coarse) {
+    #inputSizer, input, textarea, select, [contenteditable]:not([contenteditable="false"]) { font-size: 16px !important; }
   }
 
   /* Explicit local visual harness: /?debug. It is absent from the normal UI. */
