@@ -8,7 +8,7 @@ import { pos } from "./render.js";
 function harness(){
   let now = 0, nextTimer = 0;
   const timers = new Map(), calls = [];
-  const log = { scrollTop: 1350, clientHeight: 600, scrollHeight: 2000 };
+  const log = { scrollTop: 1350, clientHeight: 600, scrollHeight: 2000, style: { overflowY: "auto" } };
   const col = { offsetHeight: 2000 };
   const logEvents = {}, documentEvents = {};
   log.addEventListener = (name, fn) => { logEvents[name] = fn; };
@@ -27,6 +27,7 @@ function harness(){
     active = 1; loaded[1] = loaded[2] = true; readThrough[1] = 0;
     globalThis.markReadActual = markRead;
     globalThis.commitLiveActual = commitLive;
+    globalThis.rerenderStructuralActual = rerenderStructural;
     advanceReadThroughPastViewport = () => { calls.push("advance"); return true; };
     markRead = () => { calls.push("read"); return true; };
     capWindow = () => { calls.push("cap"); return 0; };
@@ -40,7 +41,7 @@ function harness(){
     while(true){
       const due = [...timers.entries()].filter(([, t]) => t.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
       if(!due) break;
-      now = due[1].at; timers.delete(due[0]); due[1].fn();
+      now = due[1].at; timers.delete(due[0]); due[1].fn(now);
     }
     now = end;
   }
@@ -54,6 +55,57 @@ test("near-bottom reading is not bottom-following; fractional bottom and short l
   assert.equal(h.run("atBottom()"), true);
   h.col.offsetHeight = 400; h.log.scrollTop = 0;
   assert.equal(h.run("atBottom()"), true);
+});
+
+test("bottom jump animates to settled geometry and has no persistent scroll lock", () => {
+  const h = harness();
+  h.run("toggleToBottom = () => {}; jumpToBottom()");
+  assert.equal(h.log.scrollTop, 1350);
+  h.tick(100);
+  assert.ok(h.log.scrollTop > 1350 && h.log.scrollTop < 1400);
+  h.col.offsetHeight = 2100;
+  h.tick(200);
+  assert.equal(h.log.scrollTop, 1500);
+  assert.equal(h.run("bottomJumpFrame"), 0);
+  assert.equal(h.run("stick"), true);
+  assert.equal(h.log.style.overflowY, "auto");
+});
+
+test("new gesture cancels a bottom animation without pulling the reader back", () => {
+  const h = harness();
+  h.run("toggleToBottom = () => {}; jumpToBottom()");
+  h.tick(80);
+  h.run("releaseBottomJump()");
+  h.log.scrollTop = 1200;
+  h.tick(300);
+  assert.equal(h.log.scrollTop, 1200);
+  assert.equal(h.run("stick"), false);
+  assert.equal(h.run("bottomJumpFrame"), 0);
+});
+
+test("live updates wait for the jump and resume when it ends", () => {
+  const h = harness();
+  h.run("toggleToBottom = () => {}; jumpToBottom(); scheduleLiveRerender(active)");
+  h.tick(100);
+  assert.equal(h.calls.includes("animate"), false);
+  h.tick(160);
+  assert.ok(h.calls.includes("animate"));
+});
+
+test("reduced motion jumps on the next frame", () => {
+  const h = harness();
+  h.run("matchMedia = () => ({ matches: true }); toggleToBottom = () => {}; jumpToBottom()");
+  h.tick(16);
+  assert.equal(h.log.scrollTop, 1400);
+  assert.equal(h.run("bottomJumpFrame"), 0);
+});
+
+test("session reset cancels the pending bottom animation", () => {
+  const h = harness();
+  h.run("toggleToBottom = () => {}; jumpToBottom(); resetReadScroll()");
+  h.tick(300);
+  assert.equal(h.log.scrollTop, 1350);
+  assert.equal(h.run("bottomJumpFrame"), 0);
 });
 
 test("inertial scroll bursts postpone read mutations until quiet", () => {
@@ -169,4 +221,48 @@ test("large histories are capped after reaching bottom, not in the approach zone
   h.calls.length = 0; h.log.scrollTop = 1400;
   h.run("scheduleReadProgress()"); h.tick(200);
   assert.deepEqual(h.calls, ["read", "cap", "render"]);
+});
+
+
+test("blocks received during the jump are read without starting read grace", () => {
+  const h = harness();
+  h.run(`toggleToBottom = () => {}; markRead = markReadActual;
+    model.upsertUser(1, { seq: 1 }, "run");
+    model.appendBlock(1, 1, { text: "first" }); jumpToBottom();`);
+  h.tick(100);
+  h.run('model.appendBlock(1, 1, { text: "next" }); host.onAffected(new Set([1]))');
+  assert.equal(h.run("rawUnreadCount(1)"), 0);
+  assert.equal(h.run("inReadGrace(1)"), false);
+});
+
+test("send interrupts the jump without a later frame scrolling back up", () => {
+  const h = harness();
+  const source = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const body = source.match(/onAfterSend: \(\) => \{([^}]+)\}/)[1];
+  h.run("toggleToBottom = () => {}; jumpToBottom()");
+  h.tick(64);
+  h.run(body);
+  assert.equal(h.log.scrollTop, 1400);
+  h.tick(32);
+  assert.equal(h.log.scrollTop, 1400);
+  assert.equal(h.run("bottomJumpFrame"), 0);
+});
+
+test("typing a space does not cancel the jump but wheel navigation does", () => {
+  const h = harness();
+  const source = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+  const begin = source.indexOf("  const allowReadOnScroll =");
+  const end = source.indexOf('  if(log) log.addEventListener("scroll"', begin);
+  h.run('const log = document.getElementById("log");' + source.slice(begin, end));
+  const navigation = h.documentEvents.keydown;
+  const readListener = source.match(/document.addEventListener\("keydown", e => \{\n    if\(\["ArrowDown"[\s\S]*?\n  \}\);/)[0];
+  h.run(readListener);
+  h.run("toggleToBottom = () => {}; jumpToBottom()");
+  h.tick(64);
+  const event = { key: " ", target: { closest: () => ({}) } };
+  navigation(event);
+  h.documentEvents.keydown(event);
+  assert.notEqual(h.run("bottomJumpFrame"), 0);
+  h.logEvents.wheel();
+  assert.equal(h.run("bottomJumpFrame"), 0);
 });

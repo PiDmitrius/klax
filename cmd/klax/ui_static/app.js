@@ -7,7 +7,7 @@ import { TurnModel } from "./model.js";
 import { renderSession, beginShift, playShift, fadeOutDivider, DIVIDER_FADE_MS, pos, parsePos, decodePos } from "./render.js";
 import { esc } from "./markdown.js";
 import { tailLoop } from "./events.js";
-import { api, hasCoarsePointer, copyText, flashCopied } from "./base.js";
+import { api, hasCoarsePointer, copyText, flashCopied, bindButtonActivation } from "./base.js";
 import { initAuth, isReadOnly } from "./auth.js";
 import { selectionInLog } from "./scroll.js";
 import { initCompose, updateComposerAccess, saveDraft, loadDraft, dropDraft, recoverOutbox } from "./compose.js";
@@ -47,6 +47,7 @@ let active = 0;
 const tailCursors = {};                // created -> "<turn>.<block>.<state>.<trail>[.<head>]" durable content cursor
 let noticeCursor = "";                 // ring cursor for transient notices (tailLoop)
 let sessRev = 0;                       // last session-strip revision rendered (tailLoop; server returns it early on a strip change)
+let bottomJumpFrame = 0;
 let stick = true, pendingRender = false, readOnScroll = true;
 let readScrollTimer = 0, readTouching = false, readScrollReady = 0;
 const SCROLL_IDLE_MS = 160;
@@ -209,6 +210,44 @@ function stickToBottom(){
   if(sc) sc.scrollTop = Math.max(0, (col ? col.offsetHeight : sc.scrollHeight) - sc.clientHeight);
   toggleToBottom();
 }
+function jumpToBottom(){
+  releaseBottomJump();
+  const log = document.getElementById("log");
+  if(!log) return;
+  const from = log.scrollTop;
+  stick = false;
+  markRead(active, true);
+  refreshStrip();
+  rerenderStructural(active, true);
+  const overflow = log.style.overflowY;
+  log.style.overflowY = "hidden";
+  void log.offsetHeight;
+  log.scrollTop = from;
+  log.style.overflowY = overflow;
+  const start = log.scrollTop;
+  let started;
+  const reduced = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const frame = now => {
+    if(started === undefined) started = now;
+    const progress = reduced ? 1 : Math.min(1, (now - started) / 220);
+    const target = Math.max(0, log.scrollTop + settledDistance(log));
+    log.scrollTop = start + (target - start) * (1 - Math.pow(1 - progress, 3));
+    if(progress < 1){ bottomJumpFrame = requestAnimationFrame(frame); return; }
+    bottomJumpFrame = 0;
+    stick = true;
+    stickToBottom();
+    scheduleReadProgress();
+    if(liveDirty) scheduleLiveRerender(active);
+  };
+  bottomJumpFrame = requestAnimationFrame(frame);
+}
+function releaseBottomJump(){
+  if(!bottomJumpFrame) return;
+  cancelAnimationFrame(bottomJumpFrame);
+  bottomJumpFrame = 0;
+  stick = atBottom();
+  if(liveDirty) scheduleLiveRerender(active);
+}
 function rememberScroll(created){
   const log = document.getElementById("log");
   if(created && loaded[created] && log) scrollTopFor[created] = log.scrollTop;
@@ -315,7 +354,7 @@ function rerenderStructural(created, force){
 // already patched before we got here, so nothing waits on the DOM — only the animation does.
 function scheduleLiveRerender(created){
   if(created !== active) return;
-  if(liveBusy){ liveDirty = true; return; } // an animation is in flight — accumulate, don't stack
+  if(liveBusy || bottomJumpFrame){ liveDirty = true; return; } // an animation is in flight — accumulate, don't stack
   liveRenderCreated = created;
   if(liveRenderRAF) return;
   liveRenderRAF = requestAnimationFrame(() => {
@@ -330,7 +369,7 @@ function scheduleLiveRerender(created){
 // during that window sets liveDirty and is flushed as a single further animation when the
 // gate reopens — so a burst of streamed blocks queues into clean, non-overlapping grows.
 function commitLive(created){
-  if(liveBusy){ liveDirty = true; return; } // an animation is in flight — accumulate; openGate flushes it as one further animation
+  if(liveBusy || bottomJumpFrame){ liveDirty = true; return; } // an animation is in flight — accumulate; openGate flushes it as one further animation
   liveBusy = true;
   liveDirty = false;
   if(liveGateTimer) clearTimeout(liveGateTimer);
@@ -569,6 +608,7 @@ async function ensureLineLoaded(created){
   }
 }
 function resetReadScroll(){
+  releaseBottomJump();
   clearTimeout(readScrollTimer);
   readScrollTimer = 0; readScrollReady = 0; readTouching = false;
 }
@@ -598,7 +638,7 @@ function scheduleReadProgress(){
 }
 
 function flushReadProgress(){
-  if(liveBusy || !readScrollReady) return;
+  if(liveBusy || bottomJumpFrame || !readScrollReady) return;
   const created = readScrollReady;
   readScrollReady = 0;
   if(created !== active || readTouching || !loaded[created] || !documentVisible()) return;
@@ -857,7 +897,7 @@ const host = {
   onAffected: set => {
     for(const c of set){
       if(c === active){
-        if(documentVisible() && stick){
+        if(documentVisible() && (stick || bottomJumpFrame)){
           markRead(c);
           // NOTE: capWindow is NOT called here — the live render below runs later and the DOM is still
           // pre-update, so a viewport measurement would be stale. The stickToBottom in that render
@@ -915,7 +955,7 @@ function start(){
   initCompose({
     getActive, readOnly: activeReadOnly, notice: showNotice,
     isLive: c => sessionList.some(s => s.created === c),
-    onAfterSend: () => { stick = true; markRead(active, true); refreshStrip(); stickToBottom(); },
+    onAfterSend: () => { releaseBottomJump(); stick = true; markRead(active, true); refreshStrip(); stickToBottom(); },
   });
   initTabs({ select: selectSession, onNew: onNewSession, afterClose, notice: showNotice, unread: badgeCount,
              focus: focusComposer, allSessions: () => sessionList });
@@ -961,12 +1001,18 @@ function start(){
   const log = document.getElementById("log");
   const allowReadOnScroll = () => { readOnScroll = true; };
   if(log){
-    log.addEventListener("wheel", allowReadOnScroll, { passive: true });
+    log.addEventListener("wheel", () => { releaseBottomJump(); allowReadOnScroll(); }, { passive: true });
+    log.addEventListener("pointerdown", releaseBottomJump, { passive: true });
     initReadTouch(log);
   }
+  document.addEventListener("keydown", e => {
+    if(e.defaultPrevented || e.target.closest("input, textarea, select, [contenteditable]")) return;
+    if(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) releaseBottomJump();
+  });
   if(log) log.addEventListener("scroll", () => {
     if(!loaded[active]) return;
-    stick = atBottom(); // settled: a FLIP mid-slide must not unstick us
+    if(bottomJumpFrame) return;
+    stick = atBottom();
     if(active) scrollTopFor[active] = log.scrollTop;
     // Auto-load older history: only while the user is scrolled UP (not `stick`) and nearing the top of
     // what's loaded. The `!stick` guard is essential: when the whole window fits the viewport (short
@@ -996,7 +1042,7 @@ function start(){
   document.querySelector("#transcriptstatus button").addEventListener("click", () => { if(active) selectLater(active); });
   if(th) th.addEventListener("click", () => applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"));
   const tb = document.getElementById("tobottom");
-  if(tb) tb.addEventListener("click", () => { stick = true; markRead(active, true); refreshStrip(); rerenderStructural(active); }); // rerender's stickToBottom fires a scroll event → scroll handler re-caps with a current DOM
+  if(tb) bindButtonActivation(tb, jumpToBottom);
   // The hash is the window's address: a changed SCOPE is real navigation (re-filter the strip and
   // re-pick a tab), a changed tab within the same scope is just a selection.
   window.addEventListener("hashchange", async () => {

@@ -27,6 +27,23 @@ export function hasCoarsePointer(){
   return typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches;
 }
 
+// Touch activation precedes blur-driven layout changes and consumes the matching click.
+export function bindButtonActivation(button, activate){
+  let touchActivated = false, touchTimer = 0;
+  button.addEventListener("pointerdown", e => {
+    if(e.pointerType !== "touch") return;
+    e.preventDefault();
+    touchActivated = true;
+    clearTimeout(touchTimer);
+    touchTimer = setTimeout(() => { touchActivated = false; }, 1200);
+    activate(true);
+  });
+  button.addEventListener("click", () => {
+    if(touchActivated){ touchActivated = false; clearTimeout(touchTimer); return; }
+    activate(false);
+  });
+}
+
 // apiHref prefixes our own root-absolute /api/... URLs with BASE so they resolve behind
 // the mount proxy; remote (http/https) URLs pass through untouched.
 export function apiHref(href){ return href.charAt(0) === "/" ? BASE() + href.slice(1) : href; }

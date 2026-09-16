@@ -33,20 +33,20 @@
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background-color: var(--muted); border-radius: 6px;
                               border: 2px solid transparent; background-clip: padding-box; }
-  ::-webkit-scrollbar-thumb:hover { background-color: var(--fg); }
+  @media (hover: hover) { ::-webkit-scrollbar-thumb:hover { background-color: var(--fg); } }
   body { margin: 0; font: 14px/1.5 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif, "klax-emoji", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
          background: var(--bg); color: var(--fg); height: 100vh; height: 100dvh;
          display: flex; flex-direction: column; }
   /* The canvas around the running app shares the header/footer background. */
   body:has(#app.active) { background: var(--panel); }
   a { color: var(--link); text-decoration-color: color-mix(in srgb, var(--link) 65%, transparent); }
-  a:hover { color: var(--accent); text-decoration-color: currentColor; }
+  @media (hover: hover) { a:hover { color: var(--accent); text-decoration-color: currentColor; } }
   #gate { margin: auto; max-width: 360px; padding: 24px; text-align: center; }
   #gate input { width: 100%; padding: 10px; margin: 12px 0; border-radius: 8px;
                 border: 1px solid var(--border); background: var(--panel); color: var(--fg); }
   button { cursor: pointer; border: 1px solid var(--border); background: var(--panel); color: var(--fg);
            border-radius: 8px; padding: 8px 12px; }
-  button:hover { border-color: var(--accent); }
+  @media (hover: hover) { button:hover { border-color: var(--accent); } }
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   #app { display: none; flex-direction: column; flex: 1; min-height: 0; }
   #app.active { display: flex; }
@@ -62,7 +62,7 @@
   #bar, #bar * { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
   #bar .logo-btn { flex: none; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 8px;
                    background: transparent; display: block; line-height: 0; }
-  #bar .logo-btn:hover { filter: brightness(1.08); }
+  @media (hover: hover) { #bar .logo-btn:hover { filter: brightness(1.08); } }
   #bar .logo { flex: none; display: block; filter: drop-shadow(0 1px 1px rgba(0,0,0,.14)); transition: opacity .2s; }
   /* Degraded live channel: the poll loop lost the server and is retrying. The brand mark
      goes amber (the themed work/warning hue) and breathes until a poll succeeds — an
@@ -107,7 +107,7 @@
   .scopebtn { display: flex; align-items: center; gap: 0; max-width: 40vw; height: 26px; padding: 0;
               border-radius: 8px; border: 1px solid var(--border); background: var(--tool-bg);
               color: var(--fg); font: inherit; line-height: 1; cursor: pointer; }
-  .scopebtn:hover { border-color: var(--accent); }
+  @media (hover: hover) { .scopebtn:hover { border-color: var(--accent); } }
   /* The glyph is a FIXED 26px box at the chip's head — the same square as +, at the same position
      whether it stands alone (root) or a group name follows it. Nothing about the label may move it:
      padding lives on the label, never on the button. */
@@ -165,7 +165,7 @@
                   padding-right: 8px; }
   /* The count is pinned right whatever the row holds, so the column of numbers stays a column. */
   .scopeopt .scopecount { margin-left: auto; margin-right: 0; }
-  .scopeopt:hover { background: var(--tool-bg); color: var(--fg); }
+  @media (hover: hover) { .scopeopt:hover { background: var(--tool-bg); color: var(--fg); } }
   /* The current scope is marked by a fill, not by weight: bold reflows the monospace column and
      reads as emphasis rather than as state. */
   .scopeopt.sel { background: var(--chat); }
@@ -206,8 +206,9 @@
   .qnote { margin-left: 10px; font-size: 12px; color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tab .tname { overflow: hidden; text-overflow: ellipsis; max-width: 22ch; }
   .tab .tx { margin-left: 2px; color: var(--muted); opacity: 0; font-size: 12px; cursor: pointer; }
-  .tab:hover .tx, .tab.active .tx { opacity: .65; }
-  .tab .tx:hover { opacity: 1; color: var(--error-fg); }
+  .tab.active .tx { opacity: .65; }
+  @media (hover: hover) { .tab:hover .tx { opacity: .65; } }
+  @media (hover: hover) { .tab .tx:hover { opacity: 1; color: var(--error-fg); } }
   /* Drag-and-drop reorder (animated sortable): the grabbed tab LIFTS and glues to the cursor while
      the others slide apart to open its landing slot; on release it settles into place. No ghost, no
      marker — the live arrangement IS the preview. The dragged tab's transform is driven inline (JS);
@@ -289,8 +290,8 @@
   .body pre .copy { position: absolute; top: 6px; right: 6px; padding: 2px 7px; font-size: 12px; line-height: 1;
                     border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--muted);
                     cursor: pointer; opacity: 0; transition: opacity .12s; user-select: none; }
-  .body pre:hover .copy { opacity: .7; }
-  .body pre .copy:hover { opacity: 1; color: var(--fg); }
+  @media (hover: hover) { .body pre:hover .copy { opacity: .7; } }
+  @media (hover: hover) { .body pre .copy:hover { opacity: 1; color: var(--fg); } }
   .body code { background: var(--code-bg); padding: 1px 4px; border-radius: 4px; cursor: pointer; }
   .body pre code { background: none; padding: 0; cursor: text; }
   .copyflash { animation: copyflash .38s ease-out; }
@@ -302,8 +303,9 @@
   /* Message copy keeps its established top-right position and appears with the timestamp on click. */
   .msg > .block-copy { visibility: hidden; pointer-events: none; }
   .msg.show-actions > .block-copy { visibility: visible; pointer-events: auto; opacity: .8; }
-  .notify:hover > .block-copy { opacity: .7; }
-  .block-copy:hover, .block-copy:focus-visible { opacity: 1; color: var(--fg); }
+  @media (hover: hover) { .notify:hover > .block-copy { opacity: .7; } }
+  .block-copy:focus-visible { opacity: 1; color: var(--fg); }
+  @media (hover: hover) { .block-copy:hover { opacity: 1; color: var(--fg); } }
   @media (hover: none) { .notify > .block-copy, .body pre .copy { opacity: .45; } }
   /* GitHub-markdown reading font for conversation prose (assistant + user only) —
      tabs, composer, tool labels and notices keep the compact UI font. */
@@ -324,11 +326,11 @@
   .msg.show-actions > .meta { opacity: .8; }
   #more { align-self: center; font-size: 12px; }
 
-  #tobottom { position: absolute; right: 16px; bottom: 14px; width: 32px; height: 32px;
+  #tobottom { position: absolute; z-index: 3; right: 16px; bottom: 14px; width: 32px; height: 32px;
               border-radius: 50%; padding: 0; border: none; cursor: pointer;
               display: flex; align-items: center; justify-content: center;
               box-shadow: 0 2px 8px rgba(0,0,0,.3); background: #6b7280; color: #fff; }
-  #tobottom:hover { filter: brightness(1.08); }
+  @media (hover: hover) { #tobottom:hover { filter: brightness(1.08); } }
   #tobottom svg { display: block; }
   #composer { flex: none; display: flex; justify-content: center;
               padding: 10px calc(16px + env(safe-area-inset-right, 0px))
@@ -353,9 +355,9 @@
   #cbar .send, #cbar .attach { position: absolute; bottom: 6px; width: 32px; height: 32px; padding: 0; border: none;
                 border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; z-index: 2; }
   #cbar .send { right: 7px; background: var(--accent); color: #fff; }
-  #cbar .send:hover { filter: brightness(1.08); }
+  @media (hover: hover) { #cbar .send:hover { filter: brightness(1.08); } }
   #cbar .attach { left: 7px; background: transparent; color: var(--muted); }
-  #cbar .attach:hover { color: var(--accent); background: var(--tool-bg); }
+  @media (hover: hover) { #cbar .attach:hover { color: var(--accent); background: var(--tool-bg); } }
   #cbar .send svg, #cbar .attach svg { display: block; }
   /* Staged-attachment chips above the textarea */
   #chips { grid-column: 1; grid-row: 1; display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 8px 0; margin-bottom: 7px; }
@@ -366,7 +368,7 @@
   .chip .ic { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; font-size: 15px; flex: none; }
   .chip .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chip .rm { cursor: pointer; color: var(--muted); padding: 0 2px; flex: none; }
-  .chip .rm:hover { color: var(--error-fg); }
+  @media (hover: hover) { .chip .rm:hover { color: var(--error-fg); } }
   /* Drop highlight while dragging files anywhere over the window */
   #cbar.drag { outline: 2px dashed var(--accent); outline-offset: 3px; }
   /* Inline images the agent produced (served via /api/file capability refs) */
@@ -421,7 +423,7 @@
   .sysmodal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
   .sysmodal-title { font-weight: 600; font-size: 15px; }
   .sysmodal-x { background: none; border: none; color: var(--muted); font-size: 15px; line-height: 1; padding: 2px 6px; }
-  .sysmodal-x:hover { color: var(--error-fg); }
+  @media (hover: hover) { .sysmodal-x:hover { color: var(--error-fg); } }
   .sysrow { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; min-height: 27px; font-size: 13px; }
   .syskey { color: var(--muted); flex: none; }
   .sysvalgroup { min-width: 0; display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; text-align: right; }
@@ -447,7 +449,7 @@
   .smodal-title { font-weight: 600; font-size: 15px; }
   .smodal-x { background: none; border: none; color: var(--muted); font-size: 15px; cursor: pointer;
               line-height: 1; padding: 2px 6px; border-radius: 6px; }
-  .smodal-x:hover { color: var(--error-fg); }
+  @media (hover: hover) { .smodal-x:hover { color: var(--error-fg); } }
   .srow { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 32px; margin-bottom: 8px; }
   .srow > label { color: var(--muted); font-size: 13px; flex: none; }
   .srow .sctl { flex: 1; display: flex; justify-content: flex-end; }
@@ -460,7 +462,8 @@
   .sselect-btn { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px;
                  padding: 7px 9px; border-radius: 8px; border: 1px solid var(--border);
                  background: var(--panel); color: var(--fg); font: inherit; cursor: pointer; text-align: left; }
-  .sselect-btn:hover, .sselect.open .sselect-btn { border-color: var(--accent); }
+  .sselect.open .sselect-btn { border-color: var(--accent); }
+  @media (hover: hover) { .sselect-btn:hover { border-color: var(--accent); } }
   .sselect-cur { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sselect-caret { flex: none; color: var(--muted); font-size: 10px; transition: transform .15s; }
   .sselect.open .sselect-caret { transform: rotate(180deg); }
@@ -471,7 +474,7 @@
                   box-shadow: 0 8px 24px rgba(0,0,0,.3); padding: 4px; max-height: 232px; overflow-y: auto; }
   .sselect-opt { padding: 7px 9px; border-radius: 6px; cursor: pointer; font-size: 13px;
                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .sselect-opt:hover { background: var(--tool-bg); }
+  @media (hover: hover) { .sselect-opt:hover { background: var(--tool-bg); } }
   .sselect-opt.sel { color: var(--accent); font-weight: 600; }
   /* Groups: a row of chips plus one "+" that opens the existing groups. Nothing is typed as prose,
      so there is no comma syntax to get wrong and no ambiguity about what is already applied. */
@@ -485,7 +488,7 @@
   .sgroupx { width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center;
            border: 0; background: transparent; color: var(--muted); padding: 0; font-size: 11px;
            line-height: 1; border-radius: 4px; }
-  .sgroupx:hover { color: var(--error-fg); border-color: transparent; }
+  @media (hover: hover) { .sgroupx:hover { color: var(--error-fg); border-color: transparent; } }
   .sgroupadd { width: auto; height: 28px; }       /* not the 240px of a settings dropdown */
   /* The + is a bare text node, so it cannot be transformed on its own — and transforming the BUTTON
      would drag its border out of the row. A 2px bottom padding shrinks the content box inside the
