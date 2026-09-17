@@ -7,7 +7,7 @@ import { api, copyText, flashCopied } from "./base.js";
 import { esc } from "./markdown.js";
 import { isReadOnly } from "./auth.js";
 import { uiConfirm } from "./modal.js";
-import { titlePrefix, currentScope, isRoot, knownGroups } from "./scope.js";
+import { titlePrefix, currentScope, sameScope, isRoot, knownGroups } from "./scope.js";
 
 let sessions = [], deps = {}, settingsFor = 0, settingsAutofocused = false;
 // draft (non-null) = the "new session" dialog is open for a session that does NOT exist yet.
@@ -24,6 +24,7 @@ let groupAdding = false;
 const DRAG_SETTLE_MS = 180;
 const TOUCH_TAP_PX = 10;
 let renderedActive = "";
+let renderedScope = null;
 let tabsResizeObserver = null;
 // The shell's <title> (product name, server-injected) — the base for the unread prefix.
 const BASE_TITLE = (typeof document !== "undefined" && document.title) || "klax";
@@ -45,7 +46,7 @@ export function initTabs(d){
       e.preventDefault();
     }, { passive: false });
     if(typeof ResizeObserver !== "undefined"){
-      tabsResizeObserver = new ResizeObserver(() => { updateTabOverflow(); ensureActiveVisible(false); });
+      tabsResizeObserver = new ResizeObserver(updateTabOverflow);
       tabsResizeObserver.observe(tabs);
     }
   }
@@ -110,10 +111,12 @@ export function renderTabs(active){
   for(const [key, t] of existing) if(!keep.has(key)) t.remove();
   const activeKey = String(active || "");
   const activeChanged = activeKey !== renderedActive;
+  const scopeChanged = !renderedScope || !sameScope(renderedScope, currentScope());
   renderedActive = activeKey;
+  renderedScope = currentScope();
   requestAnimationFrame(() => {
+    if(activeChanged || scopeChanged) centerActiveTab(true);
     updateTabOverflow();
-    if(activeChanged) ensureActiveVisible(true);
   });
   const mark = (totalUnread || "") + "*".repeat(busyCount); // unread count + one * per busy session
   // "(3*) work — klax": the counter leads because browsers truncate the TAIL, and the product name
@@ -130,17 +133,16 @@ function updateTabOverflow(){
   wrap.classList.toggle("overflow-right", strip.scrollLeft < max - 1);
 }
 
-function ensureActiveVisible(smooth){
+function centerActiveTab(smooth){
+  if(dragging) return;
   const strip = document.getElementById("tabs");
   const tab = strip && strip.querySelector(".tab.active");
   if(!tab) return;
-  const left = tab.offsetLeft, right = left + tab.offsetWidth;
-  const viewLeft = strip.scrollLeft, viewRight = viewLeft + strip.clientWidth;
-  let target = viewLeft;
-  if(left < viewLeft) target = left;
-  else if(right > viewRight) target = right - strip.clientWidth;
-  else return;
-  strip.scrollTo({ left: Math.max(0, target), behavior: smooth ? "smooth" : "auto" });
+  const tabRect = tab.getBoundingClientRect(), stripRect = strip.getBoundingClientRect();
+  const target = strip.scrollLeft + tabRect.left - stripRect.left - strip.clientLeft
+    + (tabRect.width - strip.clientWidth) / 2;
+  const max = Math.max(0, strip.scrollWidth - strip.clientWidth);
+  strip.scrollTo({ left: Math.max(0, Math.min(max, target)), behavior: smooth ? "smooth" : "auto" });
 }
 
 function createTab(){

@@ -135,11 +135,8 @@
   .scopecount { margin-right: 8px; background: var(--muted); color: var(--panel);
                 font: 700 11px/1 ui-monospace, monospace; min-width: 17px; height: 17px;
                 padding: 0 4px; border-radius: 5px; display: inline-flex; align-items: center; justify-content: center; }
-  /* The chip gives its width back on a narrow VIEWPORT — the case that motivated collapsing at all.
-     It must never key off the strip's own scroll/overflow state: collapsing widens the strip, which
-     clamps scrollLeft and wakes the strip's ResizeObserver → ensureActiveVisible scrolls back →
-     the class returns → the width changes again. Trigger and effect on the same element's size is
-     an oscillator, not a hysteresis problem. The viewport cannot be moved by the chip. */
+  /* Chip collapse depends on viewport width, never strip overflow: changing the chip width changes
+     the strip's overflow and would feed back into the collapse condition. */
   @media (max-width: 560px) {
     .scopename { display: none; }
     .scopecount { margin-right: 6px; }
