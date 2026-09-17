@@ -227,9 +227,8 @@ function stamp(node, key, sig){
 // independently animatable unit — answer groups are keyed by the durable position of their first
 // block, not by content-derived block IDs, so tool-label/text changes patch the same DOM node instead
 // of creating an entering replacement. When reading merges bubbles a divider used to split, the
-// merged bubble inherits the leading part's position key and stays put. The signature is EVERYTHING
-// that determines the child's DOM, so buildTurn can reuse an unchanged child verbatim on the next
-// render (no markdown re-parse, no repaint) — only changed blocks and transient indicators update.
+// merged bubble inherits the leading part's position key and stays put. The content signature gates
+// formatting and DOM replacement; join classes update separately without rebuilding bubble contents.
 function childSig(kind, extra){ return JSON.stringify([kind, extra]); }
 
 // reconcileChildren makes parent's children exactly `desired` (in that order), IN PLACE — reused
@@ -263,25 +262,22 @@ function buildTurn(it, onAbort, old){
   // put queues a child, reusing the old node verbatim when its signature is unchanged. When a
   // bubble's content changed but its FLIP key is the same, patch the existing .msg in place instead
   // of replacing it: wrapped monospace tool text otherwise visibly blinks during tail re-syncs.
-  const put = (key, sig, make, patch) => {
+  const put = (key, sig, make) => {
     const o = reuse.get(key);
-    if(o && o.dataset.csig === sig){ reuse.delete(key); desired.push(o); return; }
-    if(o && patch && patch(o)){
-      reuse.delete(key);
-      o.dataset.flip = key; o.dataset.csig = sig;
-      desired.push(o);
-      return;
-    }
-    const el = make(); el.dataset.flip = key; el.dataset.csig = sig; desired.push(el);
+    if(o && o.dataset.csig === sig){ reuse.delete(key); desired.push(o); return o; }
+    const el = make(o);
+    reuse.delete(key);
+    el.dataset.flip = key; el.dataset.csig = sig; desired.push(el);
+    return el;
   };
-  const patchBubble = (cls, html, time, dataPos, raw) => old => {
-    if(!old.classList || !old.classList.contains("msg")) return false;
-    updateBubble(old, cls, html, time, dataPos, raw);
-    return true;
-  };
-  const userHTML = mdSafe(it.text), userSig = childSig("u", [it.text, it.time]);
-  put("u", userSig, () => bubble("user", userHTML, it.time, undefined, it.text),
-    patchBubble("user", userHTML, it.time, undefined, it.text));
+  const putBubble = (key, sig, cls, time, dataPos, content) => put(key, sig, old => {
+    const { html, raw } = content();
+    return old && old.classList.contains("msg")
+      ? updateBubble(old, cls, html, time, dataPos, raw)
+      : bubble(cls, html, time, dataPos, raw);
+  });
+  putBubble("u", childSig("u", [it.text, it.time]), "user", it.time, undefined,
+    () => ({ html: mdSafe(it.text), raw: it.text }));
   for(const g of it.groups){
     if(g.divider){
       // A fresh in-flow node every render (never reused via put() — it carries
@@ -296,13 +292,14 @@ function buildTurn(it, onAbort, old){
       continue;
     }
     const fk = "g:" + g.startPos;
-    const cls = g.cls + (g.joinPrev ? " join-prev" : "") + (g.joinNext ? " join-next" : "");
-    const sig = childSig("g", { cls: g.cls, tool: g.tool, time: g.time, maxPos: g.maxPos, joinPrev: !!g.joinPrev, joinNext: !!g.joinNext,
+    const sig = childSig("g", { cls: g.cls, tool: g.tool, time: g.time, maxPos: g.maxPos,
       blocks: (g.blocks || []).map(b => ({ id: b.id, role: b.role, text: b.text, kind: b.kind, time: b.time })) });
-    const html = g.blocks.map(b => g.tool ? esc(b.text || "") : mdSafe(b.text || "")).join(g.tool ? "<br>" : "");
-    const raw = g.blocks.map(b => b.text || "").join(g.tool ? "\n" : "\n\n");
-    put(fk, sig, () => bubble(cls, html, g.time, g.maxPos, raw),
-      patchBubble(cls, html, g.time, g.maxPos, raw));
+    const node = putBubble(fk, sig, g.cls, g.time, g.maxPos, () => ({
+      html: g.blocks.map(b => g.tool ? esc(b.text || "") : mdSafe(b.text || "")).join(g.tool ? "<br>" : ""),
+      raw: g.blocks.map(b => b.text || "").join(g.tool ? "\n" : "\n\n"),
+    }));
+    node.classList.toggle("join-prev", !!g.joinPrev);
+    node.classList.toggle("join-next", !!g.joinNext);
   }
   // The working/queued dots — the turn's in-progress indicator. INVARIANT: a turn in progress ALWAYS
   // shows this block, the WHOLE time it runs; it disappears only when the turn settles (done/err).
@@ -314,9 +311,8 @@ function buildTurn(it, onAbort, old){
   // The context "cut line" is the turn's final element — below the dots while running, and the last
   // line once the dots are gone (it slides up to close the gap).
   if(it.ctxLine){
-    const ctxHTML = esc(it.ctxLine), ctxSig = childSig("ctx", [it.ctxLine, it.ctxTime]);
-    put("g:ctx:" + it.seq, ctxSig, () => bubble("tool", ctxHTML, it.ctxTime, undefined, it.ctxLine),
-      patchBubble("tool", ctxHTML, it.ctxTime, undefined, it.ctxLine));
+    putBubble("g:ctx:" + it.seq, childSig("ctx", [it.ctxLine, it.ctxTime]), "tool", it.ctxTime, undefined,
+      () => ({ html: esc(it.ctxLine), raw: it.ctxLine }));
   }
   reconcileChildren(turn, desired); // apply the child order IN PLACE — reused nodes stay attached
   return turn;
