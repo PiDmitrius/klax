@@ -2,6 +2,23 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import { playShift } from "./render.js";
+
+test("shift animates the visible tail of a tall bubble and skips fully distant bubbles", () => {
+  for(const [top, bottom, expected] of [[100, 400, 180], [-3000, 400, 180], [-3000, -2000, 0], [2000, 2300, 0]]){
+    const transforms = [];
+    const el = {
+      dataset: { renderKey: "tool" },
+      classList: { contains: () => false },
+      style: { set transform(value) { if(value) transforms.push(value); } },
+      getBoundingClientRect: () => ({ top, bottom }),
+      addEventListener() {},
+    };
+    const snap = { units: new Map([["tool", top + 30]]), keys: new Set(["tool"]), hadAny: true };
+    assert.equal(playShift({ children: [el], offsetHeight: 4000 }, snap), expected);
+    assert.deepEqual(transforms, expected ? ["translateY(30px)"] : []);
+  }
+});
 
 class Element {
   children = [];
