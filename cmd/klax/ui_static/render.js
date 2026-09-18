@@ -458,7 +458,7 @@ export function playShift(col, snap){
       return;
     }
     const d = snap.units.get(uk) - r.top;
-    if(Math.abs(d) >= 2 && Math.abs(d) <= SHIFT_CAP && r.top > -vh && r.top < vh * 2) shifts.push([el, d]);
+    if(Math.abs(d) >= 2 && Math.abs(d) <= SHIFT_CAP && r.bottom > -vh && r.top < vh * 2) shifts.push([el, d]);
   });
   if(snap.hadAny) freshTurns.forEach(el => { if(inView(el.getBoundingClientRect())) fresh.push(el); });
   shifts.forEach(([el, d]) => { el.style.transform = "translateY(" + d + "px)"; });
