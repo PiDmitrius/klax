@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -732,14 +733,16 @@ func (t *uiTransport) EditMessage(chatID, messageID, text, replyTo, format strin
 // uiServer is the HTTP/SSE Source. It binds 127.0.0.1 (per config), serves the
 // SPA and the JSON API, and authenticates every request by bearer token.
 type uiServer struct {
-	d      *daemon
-	addr   string
-	tokens map[string]uiAccess // token -> user and access role
+	d        *daemon
+	addr     string
+	tokens   map[string]uiAccess // token -> user and access role
+	sendTest uiSendTest
 }
 
 func (s *uiServer) Name() string { return uiPrefix }
 
 func (s *uiServer) Run(ctx context.Context) {
+	s.sendTest.enabled = os.Getenv("KLAX_UI_SEND_TEST") == "1"
 	srv := &http.Server{Addr: s.addr, Handler: s.routes()}
 	go func() {
 		<-ctx.Done()
@@ -1169,6 +1172,9 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.requireSession(w, s.d.sessionKey(s.chatID(user)), targetCreated) {
+		return
+	}
+	if s.sendTest.intercept(w, r, user) {
 		return
 	}
 	// The accepted user message is echoed to every UI tab from the common accept

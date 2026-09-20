@@ -10,7 +10,7 @@ import { tailLoop } from "./events.js";
 import { api, hasCoarsePointer, copyText, flashCopied, bindButtonActivation } from "./base.js";
 import { initAuth, isReadOnly } from "./auth.js";
 import { selectionInLog } from "./scroll.js";
-import { initCompose, updateComposerAccess, saveDraft, loadDraft, dropDraft, recoverOutbox } from "./compose.js";
+import { initCompose, updateComposerAccess, saveDraft, loadDraft, dropDraft, recoverOutbox, outboxList } from "./compose.js";
 import { initTabs, reconcileSessions, renderTabs } from "./tabs.js";
 import { injectEmojiFont } from "./emoji.js";
 import { showNotice } from "./notices.js";
@@ -61,7 +61,7 @@ const COMMIT_MS = 200;
 const MERGE_JOIN_MS = 180;
 let liveBusy = false, liveDirty = false, liveGateTimer = 0;
 let sessionList = []; // last /api/sessions list — for hash-change validity + lookups
-let outboxRecovered = false; // one-shot: restore the durable send-outbox into composers on first load
+let pendingOutboxRecovery = null;
 const offsetFor = {}, moreFor = {}; // created -> first-loaded turn index + has-older-history flag (pagination)
 const loadingOlder = {}; // created -> a loadOlder() is in flight (guards the auto-load-on-scroll + the initial fill)
 // Timeline window (anchored on the "непрочитанные сообщения" line = the read watermark). Measured in
@@ -747,9 +747,9 @@ async function onSessionsList(list){
   // Restore any submitted-but-unconfirmed messages (durable outbox) BEFORE the first tab is selected,
   // so the active tab's recovered text loads straight into the composer via selectSession→loadDraft.
   // Runs once, as soon as we know the session list.
-  if(!isReadOnly() && !outboxRecovered && list.length){
-    outboxRecovered = true;
-    recoverOutbox({ isLive: c => list.some(s => s.created === c), notice: showNotice });
+  if(!isReadOnly() && pendingOutboxRecovery !== null && list.length){
+    recoverOutbox({ isLive: c => list.some(s => s.created === c), notice: showNotice }, pendingOutboxRecovery);
+    pendingOutboxRecovery = null;
   }
   const affected = new Set();
   let activeReadAdvanced = false;
@@ -936,7 +936,7 @@ async function afterClose(created){
   // strip order, select it before syncSessions so onSessionsList keeps it (no auto-pick of the first).
   const wasActive = created === active;
   const next = wasActive ? neighborCreated(created) : 0;
-  model.drop(created); markRead(created); delete loaded[created]; dropDraft(created);
+  model.drop(created); markRead(created); delete loaded[created]; dropDraft(created, true);
   if(wasActive){
     active = 0;
     if(next) await selectSession(next);
@@ -945,6 +945,7 @@ async function afterClose(created){
 }
 
 function start(){
+  pendingOutboxRecovery = outboxList();
   document.getElementById("newtab").classList.toggle("hidden", isReadOnly());
   updateComposerAccess(isReadOnly());
   setScope(parseHash().scope); // the address bar decides the scope before the first strip render
@@ -954,7 +955,6 @@ function start(){
   initDebug({ notice: showNotice });
   initCompose({
     getActive, readOnly: activeReadOnly, notice: showNotice,
-    isLive: c => sessionList.some(s => s.created === c),
     onAfterSend: () => { releaseBottomJump(); stick = true; markRead(active, true); refreshStrip(); stickToBottom(); },
   });
   initTabs({ select: selectSession, onNew: onNewSession, afterClose, notice: showNotice, unread: badgeCount,
