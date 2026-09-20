@@ -215,8 +215,10 @@
   .tab.active.tabdrag { background: var(--tab-active-bg); border-color: var(--tab-active-border); } /* keep the selected outline */
   .tab.tabsettle { transition: transform .18s cubic-bezier(.2,.7,.3,1), box-shadow .18s ease; }
   body.dragging-tab, body.dragging-tab .tab { cursor: grabbing; user-select: none; }
-  .stop { margin-left: 10px; padding: 2px 8px; font-size: 12px; border-radius: 6px; cursor: pointer;
+  .stop { margin-left: 10px; }
+  .stop, #cbar .send.cancel-send { height: auto; padding: 2px 8px; font-size: 12px; border-radius: 6px; cursor: pointer;
           background: var(--error-bg); color: var(--error-fg); border: 1px solid var(--border); }
+  @media (hover: hover) { .stop:hover, #cbar .send.cancel-send:hover { border-color: var(--accent); filter: none; } }
 
   /* Centred conversation column — on wide desktop the chat does not span the
      whole screen, so left (klax) and right (user) messages stay close. */
@@ -356,6 +358,10 @@
   #cbar .attach { left: 7px; background: transparent; color: var(--muted); }
   @media (hover: hover) { #cbar .attach:hover { color: var(--accent); background: var(--tool-bg); } }
   #cbar .send svg, #cbar .attach svg { display: block; }
+  #cbar .send.cancel-send { bottom: 22px; transform: translateY(50%); }
+  #cbar .send.cancel-send svg { display: none; }
+  #cbar .send.cancel-send::after { content: "✕"; }
+
   /* Staged-attachment chips above the textarea */
   #chips { grid-column: 1; grid-row: 1; display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 8px 0; margin-bottom: 7px; }
   #chips.hidden { display: none; }
@@ -545,6 +551,7 @@
   .debug-actions { display: flex; flex-direction: column; gap: 6px; }
   .debug-actions button { width: 100%; padding: 6px 8px; text-align: left; font-size: 12px; }
 
-#cbar.read-only { filter: grayscale(1); opacity: .5; }
-#cbar.read-only button, #cbar.read-only input, #cbar.read-only textarea, .stop:disabled { cursor: default; }
+#cbar.read-only > :not(.send), #cbar.read-only .send:disabled { filter: grayscale(1); opacity: .5; }
+#cbar.read-only textarea { caret-color: transparent; }
+#cbar.read-only button:disabled, #cbar.read-only input, #cbar.read-only textarea, .stop:disabled { cursor: default; }
 .tab .tx.disabled { opacity: .3; pointer-events: none; }

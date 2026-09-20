@@ -424,15 +424,6 @@ func TestComposerEnterContract(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not found")
 	}
-	compose, err := moduleFS.ReadFile("ui_static/compose.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(compose), `bindButtonActivation(btn, touch => send(deps, touch))`) ||
-		!strings.Contains(string(compose), `ab.addEventListener("click"`) ||
-		!strings.Contains(string(compose), "blurOnSuccess") {
-		t.Fatal("touch send must act before textarea blur moves the composer")
-	}
 	dir := t.TempDir()
 	for _, name := range []string{"base.js", "compose.js"} {
 		body, err := moduleFS.ReadFile("ui_static/" + name)

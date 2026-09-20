@@ -3,7 +3,8 @@
 // mutates the read model: the server is authoritative, and the sent message appears only
 // when the live event / transcript reports it back. Composer state (text + staged files +
 // retry nonce) is PER SESSION: app.js stashes it on tab switch and restores it on return,
-// so a draft typed in one tab never shows up in another.
+// so a draft typed in one tab never shows up in another. One request may be in flight per session;
+// the composer is read-only during it, and only HTTP 204 clears the submitted draft.
 
 import { api, getToken, hasCoarsePointer, bindButtonActivation } from "./base.js";
 
@@ -41,29 +42,19 @@ function randTab(){
 const SENDTAB = randTab();
 let nonceCtr = 0;
 function newNonce(){ return SENDTAB + "-" + (++nonceCtr); }
+const pendingSends = new Map();
+let getActive = () => 0, accessReadOnly = false;
 let files = [];                 // staged { file, name, url? } for the next send (url = lazy thumb blob)
+let attachmentsChanged = false;
 let retryNonce = "";            // outbox nonce this live composer currently corresponds to ("" = none)
 const drafts = {};              // created -> { text, files, nonce } — stashed composer state per tab
 const recoveryQueues = {};      // created -> remaining recovered drafts, each retaining its ORIGINAL nonce
 
-// --- Durable outbox: a no-loss guarantee for the TEXT of a submitted message. Every send mirrors its
-// text to localStorage BEFORE the network request and clears it only once the server confirms the
-// message durably enqueued (HTTP 204 == fsynced enq record). So at every instant the text is either in
-// the server's durable queue OR here in the browser — a tab close/reload/crash during the in-flight
-// send, or a failed send, can never drop it: recoverOutbox() restores survivors on the next load.
-// Design notes (hardened after review):
-//  - PER-NONCE KEYS, not one shared JSON array: two browser tabs never lose-update each other's
-//    entries (each put/drop touches only its own key).
-//  - NAMESPACED BY IDENTITY (the auth token): a browser shared by different users/tokens never
-//    restores or sends another identity's text.
-//  - CONFIRMED WRITES + NO EVICTION: outboxPut reports whether the write actually committed and never
-//    evicts an unconfirmed entry. send() DURABLY STORES the text before transmitting and REFUSES to
-//    send if it cannot (keeping the composer intact + notifying) — it never "sends anyway and hopes",
-//    so a crash can never leave text neither on the server nor in the browser.
-//  - FRESH NONCE ON EDIT: a nonce is reused only when its stored entry holds the exact text being
-//    sent; an edited message gets a new nonce so the server can't dedupe the edit down to old text.
-//    The reuse makes an idempotent resend of the SAME message safe (no double-delivery). Attachments
-//    are out of scope (localStorage holds no blobs) — text is the guarantee.
+// One durable outbox holds typed and submitted text, scoped by identity. Text is immutable per
+// nonce: edits write a new entry before removing the previous one, so browser tabs cannot overwrite
+// each other's edits. Sending marks the same entry sent; retries keep its nonce. Only acceptance or
+// an explicit edit/discard removes it. Storage failure preserves the prior entry and blocks sending.
+// Attachments remain in memory; localStorage stores no blobs.
 const OB_PREFIX = "klax_ob.";
 const OB_CAP = 500; // hard bound on retained unconfirmed entries per identity (never evicted — refused beyond)
 // idTag: a cheap, stable per-identity tag (djb2 of the auth token) so outbox keys are scoped to the
@@ -79,79 +70,117 @@ function outboxPut(entry){
   try {
     const key = obKey(entry.nonce);
     if(localStorage.getItem(key) === null && outboxCount() >= OB_CAP) return false; // full — never drop an unconfirmed message
-    localStorage.setItem(key, JSON.stringify(entry));
-    return localStorage.getItem(key) !== null; // confirm the write survived (quota errors throw or no-op)
+    const value = JSON.stringify(entry);
+    localStorage.setItem(key, value);
+    return localStorage.getItem(key) === value; // confirm the write survived (quota errors throw or no-op)
   } catch(e){ return false; }
 }
-function outboxDrop(nonce){ if(nonce){ try { localStorage.removeItem(obKey(nonce)); } catch(e){} } }
-function outboxList(){ const p = OB_PREFIX + idTag() + "."; const out = []; obScan(k => { if(k.indexOf(p) === 0){ try { const e = JSON.parse(localStorage.getItem(k)); if(e) out.push(e); } catch(_){} } }); return out; }
+function outboxDrop(nonce){
+  if(!nonce) return true;
+  try { const key = obKey(nonce); localStorage.removeItem(key); return localStorage.getItem(key) === null; }
+  catch(e){ return false; }
+}
+function discardUnsent(entry){ return entry.sent === false && outboxDrop(entry.nonce); }
+export function outboxList(){ const p = OB_PREFIX + idTag() + "."; const out = []; obScan(k => { if(k.indexOf(p) === 0){ try { const e = JSON.parse(localStorage.getItem(k)); if(e) out.push(e); } catch(_){} } }); return out; }
 
-// syncRetry keeps the durable outbox copy in step with the user's live edits of a restored/failed
-// message, so the text is NEVER momentarily un-stored (the earlier "drop on first edit" lost it on a
-// crash mid-edit). Editing a message that was already TRANSMITTED (sent==true) rotates to a fresh
-// never-sent nonce — writing the replacement BEFORE dropping the original — so the edited text is
-// delivered (not deduped away) and stays durable throughout; editing a not-yet-sent draft updates it
-// in place. Emptying the field discards the entry. A storage failure leaves the original untouched.
-function syncRetry(text){
-  if(!retryNonce) return;
-  const t = (text || "").trim();
-  const e = outboxGet(retryNonce);
-  if(!e){ retryNonce = ""; return; }                  // entry gone elsewhere — detach
-  if(e.text === t) return;                            // unchanged (e.g. an attach) — nothing to persist
-  if(!t){ outboxDrop(retryNonce); retryNonce = ""; return; } // emptied → discarded
-  if(e.sent){
-    // Editing an already-TRANSMITTED message makes it a NEW message that must never resend under the
-    // old, already-accepted nonce (the server would dedup it to the OLD text and the edit would
-    // vanish). Rotate to a fresh nonce, but WRITE THE REPLACEMENT FIRST and drop the old copy ONLY if
-    // it committed — so a durable copy always exists (the old A, or the new B), never neither. If the
-    // replacement can't be stored, keep the old copy; send() then mints/stores fresh or refuses.
-    const nn = newNonce();
-    if(outboxPut({ created: e.created, text: t, nonce: nn, sent: false, at: Date.now() })){
-      outboxDrop(retryNonce);
-      retryNonce = nn;
-    }
-  } else {
-    // Not-yet-transmitted draft: safe to update in place; a failed write leaves the prior text durable.
-    outboxPut({ created: e.created, text: t, nonce: retryNonce, sent: false, at: e.at || Date.now() });
+function persistDraft(created, text, transmitted = false){
+  if(!created) return false;
+  const previous = retryNonce;
+  const cur = previous ? outboxGet(previous) : null;
+  if(!text){
+    if(cur && !outboxDrop(previous)) return false;
+    retryNonce = transmitted ? (!attachmentsChanged && previous) || newNonce() : "";
+    attachmentsChanged = false;
+    return true;
   }
+  if(!sendTabSecure) return false;
+  if(!transmitted && !attachmentsChanged && cur && cur.text === text) return true;
+  const reuse = transmitted && !attachmentsChanged && previous && (!cur || cur.text === text);
+  const nonce = reuse ? previous : newNonce();
+  if(!outboxPut({ created, text, nonce, sent: transmitted, at: (cur && cur.at) || Date.now() })){
+    if(!cur && !transmitted) retryNonce = "";
+    return false;
+  }
+  retryNonce = nonce;
+  attachmentsChanged = false;
+  if(previous && previous !== nonce) outboxDrop(previous);
+  return true;
 }
 
 export function updateComposerAccess(readOnly){
+  accessReadOnly = readOnly;
+  const ta = document.getElementById("input");
+  const sending = pendingSends.get(getActive());
+  const locked = readOnly || !!sending;
+  const canCancel = !!sending && sending.cancelReady;
+  if(ta){
+    // Mobile editing resumes through a fresh user tap, never through focus retained across a lock.
+    if(locked && hasCoarsePointer() && document.activeElement === ta) ta.blur();
+    if(ta.readOnly !== locked) ta.readOnly = locked;
+  }
   const bar = document.getElementById("cbar");
   if(bar){
-    bar.classList.toggle("read-only", readOnly);
+    bar.classList.toggle("read-only", locked);
+    bar.setAttribute("aria-busy", String(!!sending));
     bar.inert = readOnly;
-    bar.querySelectorAll("input, textarea, button").forEach(el => { el.disabled = readOnly; });
+    bar.querySelectorAll("input, textarea, button").forEach(el => {
+      const disabled = readOnly || (!!sending && el.id !== "input" && !(el.id === "sendbtn" && canCancel));
+      if(el.disabled !== disabled) el.disabled = disabled;
+    });
+  }
+  const btn = document.getElementById("sendbtn");
+  if(btn){
+    btn.classList.toggle("cancel-send", canCancel);
+    btn.title = canCancel ? "Отменить ожидание отправки" : sending ? "Отправка…" : "Отправить";
+    btn.setAttribute("aria-label", btn.title);
   }
 }
 
 export function initCompose(deps){
+  getActive = deps.getActive;
   const ta = document.getElementById("input");
   const fileInput = document.getElementById("file");
   const bar = document.getElementById("cbar");
+  let storageFailed = false;
   if(ta){
     autoGrow(ta);
-    ta.addEventListener("input", () => { syncRetry(ta.value); autoGrow(ta); });
+    ta.addEventListener("pointerdown", e => { if(ta.readOnly && hasCoarsePointer()) e.preventDefault(); });
+    ta.addEventListener("focus", () => { if(ta.readOnly && hasCoarsePointer()) ta.blur(); });
+    ta.addEventListener("beforeinput", e => { if(pendingSends.has(getActive()) || deps.readOnly()) e.preventDefault(); });
+    ta.addEventListener("input", () => {
+      autoGrow(ta);
+      if(pendingSends.has(getActive()) || deps.readOnly()) return;
+      const created = deps.getActive();
+      const saved = persistDraft(created, ta.value);
+      if(!saved && !storageFailed && deps.notice) deps.notice("Не удалось сохранить черновик в браузере. Не закрывайте страницу; скопируйте текст.");
+      storageFailed = !saved;
+      if(saved && !ta.value && !files.length) showNextRecovered(created, deps);
+    });
     ta.addEventListener("keydown", e => { if(composerEnterSends(e, hasCoarsePointer())){ e.preventDefault(); send(deps); } });
     ta.addEventListener("paste", e => {
-      if(deps.readOnly()){ e.preventDefault(); return; }
+      if(pendingSends.has(getActive()) || deps.readOnly()){ e.preventDefault(); return; }
       let added = false;
       for(const it of (e.clipboardData && e.clipboardData.items) || []){
         if(it.kind === "file"){ const f = it.getAsFile(); if(f){ files.push({ file: f, name: f.name || "pasted.png" }); added = true; } }
       }
-      if(added) renderChips();
+      if(added){ attachmentsChanged = true; renderChips(); }
     });
   }
-  if(fileInput) fileInput.addEventListener("change", () => { if(deps.readOnly()) return; for(const f of fileInput.files) files.push({ file: f, name: f.name }); fileInput.value = ""; renderChips(); });
+  if(fileInput) fileInput.addEventListener("change", () => { if(pendingSends.has(getActive()) || deps.readOnly()) return; for(const f of fileInput.files){ files.push({ file: f, name: f.name }); attachmentsChanged = true; } fileInput.value = ""; renderChips(); });
   if(bar){
-    ["dragover","dragenter"].forEach(ev => bar.addEventListener(ev, e => { e.preventDefault(); if(deps.readOnly()) return; bar.classList.add("drag"); }));
+    ["dragover","dragenter"].forEach(ev => bar.addEventListener(ev, e => { e.preventDefault(); if(pendingSends.has(getActive()) || deps.readOnly()) return; bar.classList.add("drag"); }));
     ["dragleave","drop"].forEach(ev => bar.addEventListener(ev, e => { e.preventDefault(); bar.classList.remove("drag"); }));
-    bar.addEventListener("drop", e => { if(deps.readOnly()) return; for(const f of (e.dataTransfer && e.dataTransfer.files) || []) files.push({ file: f, name: f.name }); renderChips(); });
+    bar.addEventListener("drop", e => { if(pendingSends.has(getActive()) || deps.readOnly()) return; for(const f of (e.dataTransfer && e.dataTransfer.files) || []){ files.push({ file: f, name: f.name }); attachmentsChanged = true; } renderChips(); });
   }
   const btn = document.getElementById("sendbtn");
-  if(btn) bindButtonActivation(btn, touch => send(deps, touch));
+  if(btn) bindButtonActivation(btn, () => {
+    if(deps.readOnly()) return;
+    const sending = pendingSends.get(getActive());
+    if(sending){ if(sending.cancelReady) sending.controller.abort("cancelled"); }
+    else send(deps);
+  });
   const ab = document.getElementById("attachbtn");
-  if(ab && fileInput) ab.addEventListener("click", () => { if(!deps.readOnly()) fileInput.click(); });
+  if(ab && fileInput) ab.addEventListener("click", () => { if(!pendingSends.has(getActive()) && !deps.readOnly()) fileInput.click(); });
 }
 
 function autoGrow(ta){
@@ -173,7 +202,7 @@ function releaseThumb(f){ if(f.url){ URL.revokeObjectURL(f.url); delete f.url; }
 export function saveDraft(created){
   if(!created) return;
   const ta = document.getElementById("input");
-  drafts[created] = { text: ta ? ta.value : "", files, nonce: retryNonce };
+  drafts[created] = { text: ta ? ta.value : "", files, nonce: retryNonce, attachmentsChanged };
 }
 export function loadDraft(created){
   const d = created ? drafts[created] : null;
@@ -183,12 +212,14 @@ export function loadDraft(created){
   if(ta){ ta.value = d ? d.text : ""; autoGrow(ta); }
   files = d ? d.files : [];
   retryNonce = d ? d.nonce : "";
+  attachmentsChanged = !!(d && d.attachmentsChanged);
   renderChips();
 }
-export function dropDraft(created){
+export function dropDraft(created, confirmedDeletion = false){
   const d = drafts[created];
   if(d){ delete drafts[created]; d.files.forEach(releaseThumb); }
-  delete recoveryQueues[created]; // durable originals stay in localStorage and become orphans on reload
+  delete recoveryQueues[created];
+  if(confirmedDeletion){ for(const entry of outboxList()){ if(entry.created === created) discardUnsent(entry); } }
 }
 
 function renderChips(){
@@ -204,132 +235,105 @@ function renderChips(){
     c.querySelector(".nm").textContent = f.name;
     if(thumb) c.querySelector("img").src = thumb;
     c.querySelector(".rm").addEventListener("click", () => {
+      if(pendingSends.has(getActive()) || accessReadOnly) return;
       releaseThumb(f);
-      files.splice(i, 1); renderChips();
+      files.splice(i, 1); attachmentsChanged = true; renderChips();
     });
     chips.appendChild(c);
   });
 }
 
-async function send(deps, blurOnSuccess){
-  if(deps.readOnly()) return;
+async function send(deps){
+  if(pendingSends.has(getActive()) || deps.readOnly()) return;
   const ta = document.getElementById("input");
-  const text = (ta ? ta.value : "").trim();
+  const text = ta ? ta.value : "";
   const staged = files.slice();
-  if(!text && !staged.length) return;
+  if(!text.trim() && !staged.length) return;
   const created = deps.getActive();
   if(!created) return;
 
-  // Pick the nonce and DURABLY store the exact text BEFORE transmitting — the core of the guarantee:
-  //  - Reuse retryNonce ONLY if its stored entry holds THIS exact text (an idempotent resend of the
-  //    same message, so the server dedupes). A new or EDITED message gets a fresh nonce — it must
-  //    never post under a nonce already transmitted for different text, or the server would dedupe it
-  //    to the old text and the edit would vanish.
-  //  - The text MUST commit to localStorage first. If it cannot (storage disabled/full), DO NOT send:
-  //    keep the composer intact and tell the user it was not submitted, so the text is never lost.
-  //    (We never "send anyway and hope" — that is the crash-loss the guarantee forbids.)
-  let nonce;
-  if(text){
-    // Without a cryptographic nonce source we cannot guarantee tab-unique nonces, so a durable send
-    // could collide with another tab and overwrite its message — refuse rather than risk losing text.
-    if(!sendTabSecure){
-      if(deps.notice) deps.notice("Браузер не поддерживает надёжную генерацию идентификаторов — отправка текста отключена во избежание потери. Обновите браузер.");
-      return; // composer + retryNonce intact — nothing lost
-    }
-    const cur = retryNonce ? outboxGet(retryNonce) : null;
-    // Reuse retryNonce when its stored entry still holds this exact text (idempotent resend), OR when
-    // the entry is GONE while retryNonce is still set — that means this text was already transmitted
-    // under retryNonce and its durable copy was dropped on a 204, e.g. delivered by ANOTHER tab that
-    // held the same recovered draft. Reusing the nonce lets the server dedup it into a no-op instead
-    // of minting a fresh nonce that would DUPLICATE-deliver. (An edit clears/rotates retryNonce via
-    // syncRetry, so a set retryNonce with a missing entry always corresponds to THIS unmodified text.)
-    const reuse = !!retryNonce && (!cur || cur.text === text);
-    nonce = reuse ? retryNonce : newNonce();
-    if(!outboxPut({ created, text, nonce, sent: true, at: (cur && cur.at) || Date.now() })){
-      if(deps.notice) deps.notice("Не удалось сохранить сообщение локально — отправка отменена. Освободите хранилище браузера и повторите.");
-      return; // composer + retryNonce left intact — nothing lost
-    }
-    if(!reuse && retryNonce) outboxDrop(retryNonce); // supersede the stale entry AFTER the new one is stored
-  } else {
-    nonce = retryNonce || newNonce(); // attachment-only: no text to durably guarantee
+  if(!persistDraft(created, text, true)){
+    if(deps.notice) deps.notice("Не удалось сохранить сообщение локально — отправка отменена. Черновик остаётся во вводе.");
+    return;
   }
-  retryNonce = "";
-
-  // Text is durably stored (or there is none) — safe to clear the composer optimistically.
-  if(ta){ ta.value = ""; autoGrow(ta); }
-  files = []; staged.forEach(releaseThumb); renderChips();
-  if(deps.onAfterSend) deps.onAfterSend();
-
+  const nonce = retryNonce;
+  const controller = new AbortController();
+  const sending = { controller, cancelReady: false };
+  pendingSends.set(created, sending);
+  updateComposerAccess(accessReadOnly);
+  const cancelTimer = setTimeout(() => {
+    if(pendingSends.get(created) !== sending) return;
+    sending.cancelReady = true;
+    updateComposerAccess(accessReadOnly);
+  }, 3000);
+  const timer = setTimeout(() => controller.abort(), 60000);
+  let accepted = false;
   try {
     let r;
     if(staged.length){
       const fd = new FormData();
       fd.append("session", String(created)); fd.append("text", text); fd.append("nonce", nonce);
       staged.forEach(f => fd.append("files", f.file, f.name));
-      r = await api("/api/send", { method: "POST", body: fd });
+      r = await api("/api/send", { method: "POST", body: fd, signal: controller.signal });
     } else {
-      r = await api("/api/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: created, text, nonce }) });
+      r = await api("/api/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: created, text, nonce }), signal: controller.signal });
     }
-    // Keep the outbox copy on ANY non-2xx: the message is still unconfirmed, so it stays durable
-    // (and is shown again in the composer by rollback) until a successful resend clears it.
-    if(!r.ok){ rollback(deps, created, text, staged, nonce, (await r.text()).trim() || "Сообщение не принято"); return; }
-    outboxDrop(nonce); // server accepted & fsynced it — the browser copy is no longer needed
-    // A touch-button send keeps focus through pointerdown so Safari cannot move the button before
-    // click. Release it only after durable server acceptance; failures retain the keyboard/draft.
-    // Never blur a different session's composer if the user switched tabs while awaiting the POST.
-    if(blurOnSuccess && deps.getActive() === created && ta && document.activeElement === ta) ta.blur();
-    showNextRecovered(created, deps);
+    if(controller.signal.aborted) return;
+    accepted = r.status === 204;
+    if(!accepted && deps.notice) deps.notice((await r.text()).trim() || "Отправка не подтверждена — сообщение сохранено во вводе");
   } catch(e){
-    rollback(deps, created, text, staged, nonce, "Сеть недоступна — сообщение не отправлено"); // outbox copy stays
+    if(deps.notice) deps.notice(controller.signal.reason === "cancelled"
+      ? "Ожидание отменено. Черновик сохранён; сообщение могло быть принято сервером."
+      : "Отправка не подтверждена — сообщение сохранено во вводе. Можно повторить отправку.");
+  } finally {
+    clearTimeout(timer);
+    clearTimeout(cancelTimer);
+    pendingSends.delete(created);
+    updateComposerAccess(accessReadOnly);
   }
+  if(!accepted) return;
+  outboxDrop(nonce);
+  if(deps.getActive() === created){
+    if(ta){ ta.value = ""; autoGrow(ta); }
+    files.forEach(releaseThumb); files = []; retryNonce = ""; renderChips();
+    if(deps.onAfterSend) deps.onAfterSend();
+  } else {
+    const d = drafts[created];
+    if(d){ d.files.forEach(releaseThumb); delete drafts[created]; }
+  }
+  showNextRecovered(created, deps);
 }
 
-// After one recovered message is confirmed, surface the next ORIGINAL message for that session.
-// Never clobber text/files the user typed while the request was in flight; in that case the queue
-// simply waits until a later successful send/tab restore.
+// Each confirmed recovery reveals the next original message with its own retry nonce.
 function showNextRecovered(created, deps){
   const q = recoveryQueues[created];
   if(!q || !q.length) return;
   const next = q[0];
   if(deps.getActive() === created){
     const ta = document.getElementById("input");
-    if(!ta || ta.value.trim() || files.length) return;
+    if(!ta || ta.value || files.length) return;
     q.shift(); ta.value = next.text; retryNonce = next.nonce; autoGrow(ta); renderChips();
   } else {
     const d = drafts[created];
-    if(d && (d.text.trim() || d.files.length)) return;
+    if(d && (d.text || d.files.length)) return;
     q.shift(); drafts[created] = next;
   }
   if(!q.length) delete recoveryQueues[created];
 }
 
-function rollback(deps, created, text, staged, nonce, msg){
-  // Restore the failed draft into ITS session — the user may have switched tabs while the
-  // send was in flight. Active tab: back into the live composer; other live tab: into its
-  // stash. Never clobber a draft composed since, and never resurrect a draft for a
-  // session closed while the send was in flight (that would leak the staged Files).
-  if(deps.getActive() === created){
-    const ta = document.getElementById("input");
-    if(ta && !ta.value.trim() && !files.length){ ta.value = text || ""; autoGrow(ta); files = (staged || []).slice(); retryNonce = nonce || ""; renderChips(); }
-  } else if(!deps.isLive || deps.isLive(created)){
-    const d = drafts[created];
-    if(!d || (!d.text.trim() && !d.files.length)) drafts[created] = { text: text || "", files: (staged || []).slice(), nonce: nonce || "" };
-  }
-  if(msg && deps.notice) deps.notice(msg);
-}
-
-// recoverOutbox restores every message that was submitted but never confirmed durable by the server
-// (tab closed/reloaded/crashed mid-send, or a send that failed) back into its session's composer
-// draft. Called ONCE at startup, before the first tab is selected, so the active tab's recovered text
-// lands straight in the live composer via loadDraft. Returns the number of messages recovered. deps:
+// recoverOutbox restores typed and submitted text before the first session is selected;
+// loadDraft then moves it into the live composer. Returns the recovered count. deps:
 // { isLive(created), notice(text) }.
 //
 // Every live-session entry keeps its ORIGINAL nonce and remains a separate message. The first is
-// shown in the composer; the rest queue behind it and surface one-by-one after a successful 204.
+// shown in the composer; the rest surface after acceptance or explicit discard of the current text.
 // This is the only exactly-once-safe recovery: the server can dedupe a request whose 204 was lost.
-// Entries for a closed session are deliberately NOT re-homed — the original may already have run,
-// and sending it to another session under a fresh nonce would duplicate side effects.
-export function recoverOutbox(deps){
+// Confirmed deletion discards never-transmitted drafts. Startup cleanup only considers entries
+// observed before the session-list request; newer entries cannot be judged by that snapshot.
+// Submitted or legacy entries remain
+// recoverable in storage; re-homing them could duplicate already accepted work.
+export function recoverOutbox(deps, observedBeforeRequest = []){
+  const discardable = new Set(observedBeforeRequest.map(e => e.nonce));
   const list = outboxList().sort((a, b) => (a.at || 0) - (b.at || 0));
   if(!list.length) return 0;
   const isLive = deps && deps.isLive;
@@ -337,21 +341,24 @@ export function recoverOutbox(deps){
   let orphaned = 0;
   for(const e of list){
     if(!e || !e.text){ outboxDrop(e && e.nonce); continue; } // nothing recoverable (no text)
-    if(isLive && !isLive(e.created)){ orphaned++; continue; }
+    if(isLive && !isLive(e.created)){
+      if(!discardable.has(e.nonce) || !discardUnsent(e)) orphaned++;
+      continue;
+    }
     if(!groups.has(e.created)) groups.set(e.created, []);
     groups.get(e.created).push({ text: e.text, files: [], nonce: e.nonce });
   }
   let recovered = 0;
   for(const [target, entries] of groups){
     const d = drafts[target];
-    if(d && (d.text.trim() || d.files.length)) continue; // a newer draft already occupies this composer — don't clobber
+    if(d && (d.text || d.files.length)) continue; // a newer draft already occupies this composer — don't clobber
     drafts[target] = entries.shift();
     if(entries.length) recoveryQueues[target] = entries;
     recovered += 1 + entries.length;
   }
   if(recovered && deps && deps.notice){
-    deps.notice("Восстановлено несохранённых сообщений: " + recovered);
+    deps.notice("Восстановлено черновиков: " + recovered);
   }
-  if(orphaned && deps && deps.notice) deps.notice("Не восстановлено сообщений из закрытых сессий: " + orphaned);
+  if(orphaned && deps && deps.notice) deps.notice("Сохранено сообщений без доступной сессии: " + orphaned);
   return recovered;
 }
