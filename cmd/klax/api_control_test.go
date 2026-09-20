@@ -47,7 +47,7 @@ func newAPIFixture(t *testing.T, start, finish, backend string) *apiFixture {
 		}
 		script := "cat > \"$KLAX_API_TEST_DIR/" + phase + ".json\"\n"
 		if mode == "block" {
-			script += "touch \"$KLAX_API_TEST_DIR/" + phase + ".entered\"\nwhile [ ! -f \"$KLAX_API_TEST_DIR/" + phase + ".release\" ]; do sleep 0.01; done\n"
+			script += "touch \"$KLAX_API_TEST_DIR/" + phase + ".entered\"\nwhile [ -d \"$KLAX_API_TEST_DIR\" ] && [ ! -f \"$KLAX_API_TEST_DIR/" + phase + ".release\" ]; do sleep 0.01; done\n"
 		}
 		if mode == "fail" {
 			script += "exit 1\n"
@@ -58,7 +58,7 @@ func newAPIFixture(t *testing.T, start, finish, backend string) *apiFixture {
 	d.cfg.Audit.Turn.Finish = hook("finish", finish)
 	script := "#!/bin/sh\ncat > \"$KLAX_API_TEST_DIR/prompt\"\nprintf '%s\\n' \"$@\" > \"$KLAX_API_TEST_DIR/args\"\nprintf 'x\\n' >> \"$KLAX_API_TEST_DIR/runs\"\ntouch \"$KLAX_API_TEST_DIR/backend.entered\"\n"
 	if backend == "block" {
-		script += "while [ ! -f \"$KLAX_API_TEST_DIR/backend.release\" ]; do sleep 0.01; done\n"
+		script += "while [ -d \"$KLAX_API_TEST_DIR\" ] && [ ! -f \"$KLAX_API_TEST_DIR/backend.release\" ]; do sleep 0.01; done\n"
 	}
 	if backend == "fail" {
 		script += "exit 1\n"
@@ -72,7 +72,9 @@ func newAPIFixture(t *testing.T, start, finish, backend string) *apiFixture {
 	f := &apiFixture{d: d, s: &uiServer{d: d, tokens: map[string]uiAccess{"access": {User: "test"}, "other": {User: "other"}}}, dir: dir, created: sess.Created}
 	t.Cleanup(func() {
 		for _, phase := range []string{"start", "finish", "backend"} {
-			_ = os.WriteFile(filepath.Join(dir, phase+".release"), nil, 0600)
+			if err := os.WriteFile(filepath.Join(dir, phase+".release"), nil, 0600); err != nil {
+				t.Errorf("release %s: %v", phase, err)
+			}
 		}
 		until := time.Now().Add(5 * time.Second)
 		for {
@@ -92,6 +94,17 @@ func newAPIFixture(t *testing.T, start, finish, backend string) *apiFixture {
 				break
 			}
 			time.Sleep(time.Millisecond)
+		}
+		// Deleted sessions leave the runner map before their workers finish.
+		drained := make(chan struct{})
+		go func() {
+			d.drainWg.Wait()
+			close(drained)
+		}()
+		select {
+		case <-drained:
+		case <-time.After(5 * time.Second):
+			t.Error("workers did not settle")
 		}
 	})
 	return f
