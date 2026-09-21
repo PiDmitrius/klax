@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -13,6 +14,16 @@ import (
 	"testing"
 	"time"
 )
+
+func TestChildEnvironmentPreservesKlaxSession(t *testing.T) {
+	t.Setenv("KLAX_SESSION_ID", "42")
+	cmd := exec.Command("sh", "-c", "printf '%s' \"$KLAX_SESSION_ID\"")
+	cmd.Env = childEnv("test-fifo")
+	out, err := cmd.Output()
+	if err != nil || string(out) != "42" {
+		t.Fatalf("child session = %q, error = %v", out, err)
+	}
+}
 
 // fakeClaude is a stand-in for the interactive claude TUI: it fires the
 // SessionStart hook, reads the typed prompt off its tty, appends this turn's

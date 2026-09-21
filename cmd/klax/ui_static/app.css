@@ -285,14 +285,14 @@
   .body th { background: var(--tool-bg); font-weight: 700; }
   .body hr { border: none; border-top: 1px solid var(--border); }
   .body s { opacity: .65; }
-  .body pre { position: relative; background: var(--code-bg); padding: 8px; border-radius: 6px; overflow-x: auto; }
+  .body pre { position: relative; background: var(--code-bg); padding: 8px; border-radius: 6px; }
   .body pre .copy { position: absolute; top: 6px; right: 6px; padding: 2px 7px; font-size: 12px; line-height: 1;
                     border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--muted);
                     cursor: pointer; opacity: 0; transition: opacity .12s; user-select: none; }
   @media (hover: hover) { .body pre:hover .copy { opacity: .7; } }
   @media (hover: hover) { .body pre .copy:hover { opacity: 1; color: var(--fg); } }
   .body code { background: var(--code-bg); padding: 1px 4px; border-radius: 4px; cursor: pointer; }
-  .body pre code { background: none; padding: 0; cursor: text; }
+  .body pre code { display: block; overflow-x: auto; background: none; padding: 0; cursor: text; }
   .copyflash { animation: copyflash .38s ease-out; }
   /* One copy affordance for whole timeline messages and notifications. */
   .block-copy, .meta { position: absolute; padding: 2px 7px; font-size: 12px; line-height: 1;

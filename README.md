@@ -202,6 +202,15 @@ The response is `200` with `{"created":42}`. `created` is the persistent klax
 session identifier used by all subsequent requests. Backend session identifiers
 are managed internally.
 
+Each backend process receives `KLAX_SESSION_ID` in its environment, containing
+this persistent identifier. Launch wrappers and scripts invoked by the backend
+can use it as the `session` field in `/api/send`; the backend must preserve the
+variable when launching tools. The API URL and the owning user's management
+token are still required. Group-chat sessions are not addressable through this
+HTTP API. A running turn sending a new message to its own session
+must use `return_on: "queued"`: waiting for that message to start or finish would
+block on the current turn's completion.
+
 ### Access roles and read markers
 
 Each configured user may have two independent credentials:

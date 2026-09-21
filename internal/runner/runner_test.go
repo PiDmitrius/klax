@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -363,6 +364,37 @@ func (b *scriptBackend) ParseEvent(line []byte) ([]Event, bool) {
 		return []Event{{Type: EventIntermediate, Text: string(line)}}, true
 	}
 	return nil, false
+}
+
+func TestRunSessionEnvironmentReachesChildScript(t *testing.T) {
+	t.Setenv("KLAX_SESSION_ID", "inherited-value")
+	script := filepath.Join(t.TempDir(), "print_klax_id.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$KLAX_SESSION_ID\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	type outcome struct {
+		id     int64
+		result RunResult
+	}
+	results := make(chan outcome, 2)
+	for _, id := range []int64{41, 42} {
+		go func(id int64) {
+			b := &scriptBackend{shellCmd: "printf '%s\\n' \"$KLAX_SESSION_ID\"; " + script, parseAsIntermediate: true}
+			var r Runner
+			results <- outcome{id, r.Run(context.Background(), b, RunOptions{KlaxSessionID: id}, nil)}
+		}(id)
+	}
+	for range 2 {
+		got := <-results
+		want := strconv.FormatInt(got.id, 10)
+		values := strings.Fields(got.result.Text)
+		if got.result.Error != nil || len(values) != 2 || values[0] != want || values[1] != want {
+			t.Errorf("session %d: %+v", got.id, got.result)
+		}
+	}
+	if got := os.Getenv("KLAX_SESSION_ID"); got != "inherited-value" {
+		t.Fatalf("parent environment changed: %q", got)
+	}
 }
 
 // collectProgress builds a ProgressFunc that records every event so tests
@@ -787,6 +819,20 @@ func shQuote(args ...string) string {
 	return b.String()
 }
 
+// The cancellation marker follows the text, so its preceding event is already buffered.
+type cancelAfterTextBackend struct {
+	scriptBackend
+	cancel context.CancelFunc
+}
+
+func (b *cancelAfterTextBackend) ParseEvent(line []byte) ([]Event, bool) {
+	if string(line) == "cancel" {
+		b.cancel()
+		return nil, false
+	}
+	return b.scriptBackend.ParseEvent(line)
+}
+
 func TestRunCancelAfterIntermediateReturnsErrorWithoutText(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
@@ -795,23 +841,21 @@ func TestRunCancelAfterIntermediateReturnsErrorWithoutText(t *testing.T) {
 	// Emit one intermediate "thinking" line, then block. Without the cancel
 	// guard, this partial text gets promoted to Result.Text and the run is
 	// mistaken for a successful turn.
-	backend := &scriptBackend{
-		shellCmd:            `printf 'partial-thought\n'; sleep 60`,
-		parseAsIntermediate: true,
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	backend := &cancelAfterTextBackend{
+		scriptBackend: scriptBackend{
+			shellCmd:            `printf 'partial-thought\ncancel\n'; sleep 60`,
+			parseAsIntermediate: true,
+		},
+		cancel: cancel,
+	}
 
 	r := New()
 	done := make(chan RunResult, 1)
 	go func() {
 		done <- r.Run(ctx, backend, RunOptions{}, nil)
 	}()
-
-	// Give the script time to emit the intermediate line before cancelling.
-	time.Sleep(250 * time.Millisecond)
-	cancel()
 
 	var res RunResult
 	select {
@@ -820,8 +864,8 @@ func TestRunCancelAfterIntermediateReturnsErrorWithoutText(t *testing.T) {
 		t.Fatal("Run did not return after cancel")
 	}
 
-	if res.Error == nil {
-		t.Fatalf("expected error after cancel, got success with Text=%q", res.Text)
+	if !errors.Is(res.Error, context.Canceled) {
+		t.Fatalf("expected cancel error, got %v with Text=%q", res.Error, res.Text)
 	}
 	if res.Text != "" {
 		t.Fatalf("cancelled run must not expose partial intermediate as Text: %q", res.Text)
@@ -838,13 +882,15 @@ func TestRunCancelDemotesPendingAsNarration(t *testing.T) {
 		t.Skip("sh not available")
 	}
 
-	backend := &scriptBackend{
-		shellCmd:            `printf 'substantial narrative about to be cancelled\n'; sleep 60`,
-		parseAsIntermediate: true,
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	backend := &cancelAfterTextBackend{
+		scriptBackend: scriptBackend{
+			shellCmd:            `printf 'substantial narrative about to be cancelled\ncancel\n'; sleep 60`,
+			parseAsIntermediate: true,
+		},
+		cancel: cancel,
+	}
 
 	rec := &progressRecorder{}
 	r := New()
@@ -853,9 +899,6 @@ func TestRunCancelDemotesPendingAsNarration(t *testing.T) {
 		done <- r.Run(ctx, backend, RunOptions{}, rec.callback())
 	}()
 
-	time.Sleep(250 * time.Millisecond)
-	cancel()
-
 	var res RunResult
 	select {
 	case res = <-done:
@@ -863,8 +906,8 @@ func TestRunCancelDemotesPendingAsNarration(t *testing.T) {
 		t.Fatal("Run did not return after cancel")
 	}
 
-	if res.Error == nil {
-		t.Fatalf("expected cancel error, got success")
+	if !errors.Is(res.Error, context.Canceled) {
+		t.Fatalf("expected cancel error, got %v", res.Error)
 	}
 	if res.Text != "" {
 		t.Fatalf("RunResult.Text must stay empty on cancel, got %q", res.Text)

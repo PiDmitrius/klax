@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -382,6 +383,7 @@ func oneLinePreview(s string) string {
 // RunOptions configures a CLI invocation.
 type RunOptions struct {
 	Prompt                    string
+	KlaxSessionID             int64
 	SessionID                 string // empty = new session
 	CWD                       string // working directory
 	Sandbox                   string // "on" = CLI defaults, "off" = unrestricted
@@ -734,6 +736,9 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 	cmd, err := backend.BuildCmd(opts)
 	if err != nil {
 		return RunResult{Error: err}
+	}
+	if opts.KlaxSessionID > 0 {
+		cmd.Env = append(cmd.Environ(), "KLAX_SESSION_ID="+strconv.FormatInt(opts.KlaxSessionID, 10))
 	}
 	var codexStartOffset int64
 	if backend.Name() == "codex" && opts.SessionID != "" {
