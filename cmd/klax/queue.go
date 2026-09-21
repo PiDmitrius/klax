@@ -611,6 +611,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 
 	result := sr.runner.Run(ctx, backend, runner.RunOptions{
 		Prompt:                    prompt,
+		KlaxSessionID:             sess.Created,
 		SessionID:                 sess.ID,
 		CWD:                       sess.CWD,
 		Sandbox:                   sess.Sandbox,

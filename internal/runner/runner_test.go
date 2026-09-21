@@ -365,6 +365,37 @@ func (b *scriptBackend) ParseEvent(line []byte) ([]Event, bool) {
 	return nil, false
 }
 
+func TestRunSessionEnvironmentReachesChildScript(t *testing.T) {
+	t.Setenv("KLAX_SESSION_ID", "inherited-value")
+	script := filepath.Join(t.TempDir(), "print_klax_id.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$KLAX_SESSION_ID\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	type outcome struct {
+		id     int64
+		result RunResult
+	}
+	results := make(chan outcome, 2)
+	for _, id := range []int64{41, 42} {
+		go func(id int64) {
+			b := &scriptBackend{shellCmd: "printf '%s\\n' \"$KLAX_SESSION_ID\"; " + script, parseAsIntermediate: true}
+			var r Runner
+			results <- outcome{id, r.Run(context.Background(), b, RunOptions{KlaxSessionID: id}, nil)}
+		}(id)
+	}
+	for range 2 {
+		got := <-results
+		want := strconv.FormatInt(got.id, 10)
+		values := strings.Fields(got.result.Text)
+		if got.result.Error != nil || len(values) != 2 || values[0] != want || values[1] != want {
+			t.Errorf("session %d: %+v", got.id, got.result)
+		}
+	}
+	if got := os.Getenv("KLAX_SESSION_ID"); got != "inherited-value" {
+		t.Fatalf("parent environment changed: %q", got)
+	}
+}
+
 // collectProgress builds a ProgressFunc that records every event so tests
 // can assert both the final answer body and the demoted narration/tool log.
 type progressRecorder struct {

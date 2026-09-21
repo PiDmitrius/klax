@@ -60,6 +60,7 @@ func newAPIFixture(t *testing.T, start, finish, backend string) *apiFixture {
 	if backend == "block" {
 		script += "while [ -d \"$KLAX_API_TEST_DIR\" ] && [ ! -f \"$KLAX_API_TEST_DIR/backend.release\" ]; do sleep 0.01; done\n"
 	}
+	script += "printf '%s' \"$KLAX_SESSION_ID\" > \"$KLAX_API_TEST_DIR/session-env\"\n"
 	if backend == "fail" {
 		script += "exit 1\n"
 	} else {
@@ -229,6 +230,10 @@ func TestAPIWaitBoundariesAndSharedHookSnapshot(t *testing.T) {
 	blocked(t, finish)
 	f.release(t, "finish")
 	end := eventResponse(t, response(t, finish), "finish", "success")
+	env, err := os.ReadFile(filepath.Join(f.dir, "session-env"))
+	if err != nil || string(env) != fmt.Sprint(f.created) {
+		t.Fatalf("backend session environment = %q, want %d, error = %v", env, f.created, err)
+	}
 	raw, err = os.ReadFile(filepath.Join(f.dir, "finish.json"))
 	if err != nil {
 		t.Fatal(err)
