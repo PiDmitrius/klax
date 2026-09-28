@@ -413,6 +413,25 @@ func TestUIAbortValidatesSession(t *testing.T) {
 	}
 }
 
+func TestUICancelRejectsNotQueued(t *testing.T) {
+	d := &daemon{store: newStoreWithChat("user:alice", "one"), runners: make(map[runnerKey]*sessionRunner)}
+	created := d.store.SessionsFor("user:alice")[0].Created
+	h := (&uiServer{d: d, tokens: map[string]uiAccess{"sec": {User: "alice"}}}).routes()
+	for body, want := range map[string]int{
+		`{"session":99999,"seq":1}`:                    404,
+		fmt.Sprintf(`{"session":%d,"seq":1}`, created): 409,
+		fmt.Sprintf(`{"session":%d}`, created):         400,
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/api/cancel", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer sec")
+		h.ServeHTTP(rec, req)
+		if rec.Code != want {
+			t.Fatalf("/api/cancel %s: code=%d, want %d", body, rec.Code, want)
+		}
+	}
+}
+
 // The SPA's product name (browser tab title + login heading) comes from
 // config.ui_title, injected server-side per request; empty falls back to "klax";
 // the value is HTML-escaped.

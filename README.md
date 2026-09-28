@@ -227,7 +227,7 @@ Both tokens authenticate through `Authorization: Bearer <token>` and address the
 same user's sessions. Tokens must be unique across all users and roles.
 `ui_token` grants ordinary management access. `ui_read_token` permits viewing
 sessions, events, settings and files, plus updating its own read markers.
-Creation, messages, attachments, abort, deletion, settings changes, tab reordering
+Creation, messages, attachments, abort, queue cancellation, deletion, settings changes, tab reordering
 and service updates are rejected by the server with `403 read-only`.
 Read access does not create an initial session in an empty account.
 
@@ -325,6 +325,7 @@ shape:
 | `invalid-nonce`, `invalid-return-on`, `unsupported-control-token`, `empty-message` | 400 | Invalid input; nothing enqueued or created. |
 | `result-unavailable` | 409 | Boundary cannot be recovered in this process. |
 | `aborted` | 409 | Waiting message removed from the queue. |
+| `cancelled` | 409 | This message was cancelled from the queue in the web UI. |
 | `enqueue-failed` | 500 | Durable acceptance failed. |
 | `attachments-missing`, `run-start-failed`, `audit-start-failed` | 500 | Preparation, registration or start gate failed. |
 | `result-save-failed` | 500 | Result persistence failed. |

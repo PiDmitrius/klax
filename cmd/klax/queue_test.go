@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/PiDmitrius/klax/internal/runner"
+	"github.com/PiDmitrius/klax/internal/sessfiles"
 )
 
 func TestShouldReuseQueuedProgressWithoutGap(t *testing.T) {
@@ -316,5 +320,66 @@ func TestNotifyQueuePositionsUpdatesPositionAndReplyTo(t *testing.T) {
 		if call.replyTo != wantReply[call.message] {
 			t.Fatalf("edit %d (message %q) replyTo = %q, want %q", i, call.message, call.replyTo, wantReply[call.message])
 		}
+	}
+}
+
+func TestCancelQueuedDropsOnlyThatMessage(t *testing.T) {
+	d, created := newReadModelDaemon(t)
+	tp := &fakeTransport{}
+	d.transports["tg"] = tp
+	sr := d.getRunner("user:alice", created)
+	var queue []queuedMsg
+	for i, text := range []string{"first", "second", "third"} {
+		seq, _, _, _, err := sr.store.Enqueue("tg:1", "", "n"+text, text, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		queue = append(queue, queuedMsg{completion: newTurnWait(), chatID: "tg:1", msgID: text, turnSeq: seq, progressID: fmt.Sprintf("q%d", i+1)})
+	}
+	sr.queue = append([]queuedMsg(nil), queue...)
+
+	journal := filepath.Join(sessfiles.WorkDir("user:alice", created), "queue.jsonl")
+	if err := os.Chmod(journal, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if found, err := d.cancelQueued("user:alice", created, queue[1].turnSeq); !found || err == nil {
+		t.Fatalf("cancel with an unwritable journal = (%v, %v), want a durable-write error", found, err)
+	}
+	if len(sr.queue) != 3 {
+		t.Fatalf("a non-durable cancel dropped the message: %+v", sr.queue)
+	}
+	if err := os.Chmod(journal, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if found, err := d.cancelQueued("user:alice", created, queue[1].turnSeq); !found || err != nil {
+		t.Fatalf("queued message not cancelled: (%v, %v)", found, err)
+	}
+	if len(sr.queue) != 2 || sr.queue[0].turnSeq != queue[0].turnSeq || sr.queue[1].turnSeq != queue[2].turnSeq {
+		t.Fatalf("queue after cancel = %+v", sr.queue)
+	}
+	select {
+	case <-queue[1].completion.finish.done:
+		if e := queue[1].completion.finish.reply.err; e == nil || e.Code != turnErrCancelled {
+			t.Fatalf("completion error = %+v", e)
+		}
+	default:
+		t.Fatal("cancelled completion still pending")
+	}
+	turns, _ := sr.store.InboundLog()
+	if turns[1].Last != "err" || turns[1].Reason != turnErrCancelled || turns[0].Last != "enq" || turns[2].Last != "enq" {
+		t.Fatalf("durable states = %+v", turns)
+	}
+	if reenq, _, _ := sr.store.Replay(); len(reenq) != 2 {
+		t.Fatalf("replay re-enqueues %d, want 2", len(reenq))
+	}
+	if len(tp.editLog) == 0 || tp.editLog[0].message != "q2" || tp.editLog[0].text != "❌ Отменено." {
+		t.Fatalf("messenger placeholder edits = %+v", tp.editLog)
+	}
+	if last := tp.editLog[len(tp.editLog)-1]; last.message != "q3" || last.text != "⏳ В очереди: 2" {
+		t.Fatalf("queue position edit = %+v", last)
+	}
+	if found, _ := d.cancelQueued("user:alice", created, queue[1].turnSeq); found {
+		t.Fatal("already cancelled message cancelled again")
 	}
 }

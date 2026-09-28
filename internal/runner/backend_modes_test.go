@@ -185,3 +185,13 @@ func TestCodexParsesErrorItemAsVisibleError(t *testing.T) {
 		}
 	}
 }
+
+func TestCodexEffortUsesModelReasoningEffort(t *testing.T) {
+	cmd, err := (&CodexBackend{}).BuildCmd(RunOptions{Effort: "xhigh"})
+	if err != nil {
+		t.Fatalf("BuildCmd: %v", err)
+	}
+	if args := strings.Join(cmd.Args, " "); !strings.Contains(args, `-c model_reasoning_effort="xhigh"`) {
+		t.Fatalf("expected codex model_reasoning_effort override, got %q", args)
+	}
+}

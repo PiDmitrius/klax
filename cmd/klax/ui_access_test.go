@@ -37,7 +37,7 @@ func accessGet(f *apiFixture, path, token string) *httptest.ResponseRecorder {
 func TestReadTokenPermissionsAndIdentity(t *testing.T) {
 	f := readerFixture(t)
 	body := fmt.Sprintf(`{"session":%d,"name":"changed","text":"hello","order":[%d]}`, f.created, f.created)
-	for _, path := range []string{"/api/new", "/api/send", "/api/abort", "/api/rename", "/api/reorder", "/api/close", "/api/settings", "/api/system/check", "/api/system/update"} {
+	for _, path := range []string{"/api/new", "/api/send", "/api/abort", "/api/cancel", "/api/rename", "/api/reorder", "/api/close", "/api/settings", "/api/system/check", "/api/system/update"} {
 		w := f.request(path, body, "reader")
 		if w.Code != http.StatusForbidden {
 			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { TurnModel } from "./model.js";
-import { pos } from "./render.js";
+import { pos, answerBlock } from "./render.js";
 
 function harness(){
   let now = 0, nextTimer = 0;
@@ -14,7 +14,7 @@ function harness(){
   log.addEventListener = (name, fn) => { logEvents[name] = fn; };
   const arm = (fn, delay) => { const id = ++nextTimer; timers.set(id, { fn, at: now + delay }); return id; };
   const context = vm.createContext({
-    TurnModel, calls, pos, fadeOutDivider: () => false,
+    TurnModel, calls, pos, answerBlock, fadeOutDivider: () => false,
     document: { visibilityState: "visible", getElementById: id => id === "log" ? log : col,
       addEventListener: (name, fn) => { documentEvents[name] = fn; } },
     setTimeout: arm, requestAnimationFrame: fn => arm(fn, 16),
@@ -265,4 +265,14 @@ test("typing a space does not cancel the jump but wheel navigation does", () => 
   assert.notEqual(h.run("bottomJumpFrame"), 0);
   h.logEvents.wheel();
   assert.equal(h.run("bottomJumpFrame"), 0);
+});
+
+test("tail cursor mirrors the server, counting settled turns between the running anchor and head", () => {
+  const h = harness();
+  assert.equal(h.run(`tailPos([
+    { seq: 1, role: "user", state: "run", blocks: [{}] },
+    { seq: 2, role: "user", state: "err", blocks: [{ kind: "cancelled" }] },
+    { seq: 3, role: "user", state: "enq" },
+  ])`), "1.0.r.0.3.1");
+  assert.equal(h.run(`tailPos([{ seq: 1, role: "user", state: "run", blocks: [{}] }, { seq: 2, role: "user", state: "enq" }])`), "1.0.r.0.2.0");
 });

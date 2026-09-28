@@ -248,12 +248,13 @@
   @media (prefers-reduced-motion: reduce) { .turn.enter, .msg.enter, .readline.leaving { animation: none; } }
   /* klax-side blocks fill the column for a consistent width — only the colour
      differs between text, tool, error and command output. */
-  .msg.assistant, .msg.tool, .msg.error { align-self: stretch; }
+  .msg.assistant, .msg.tool, .msg.error, .msg.cancelled { align-self: stretch; }
   .msg.user { align-self: flex-end; max-width: 85%; background: var(--bubble-user); }
   .msg.assistant { background: var(--bubble-assistant); }
   .msg.system { align-self: center; font-size: 12px; color: var(--muted); background: transparent; }
   .msg.tool { font-family: ui-monospace, monospace; font-size: 12px; color: var(--tool-fg); background: var(--tool-bg); }
   .msg.error { background: var(--error-bg); color: var(--error-fg); }
+  .msg.cancelled { background: var(--tool-bg); color: var(--tool-fg); }
   /* typing indicator (work-in-progress marker, like Telegram's "..."): just the animated
      dots + ✕. The context line is a separate tool bubble below the dots, not beside them. */
   .msg.typing { align-self: flex-start; width: fit-content; padding: 12px 14px; display: inline-flex; align-items: center; gap: 0; }

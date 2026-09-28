@@ -43,6 +43,10 @@ class Element {
   }
   removeChild(node) { this.children.splice(this.children.indexOf(node), 1); node.parent = null; }
   querySelectorAll() { return []; }
+  querySelector(sel) {
+    if(sel !== ".stop" || !this.html.includes('class="stop"')) return null;
+    return this.stop ||= { disabled: false, addEventListener(type, fn) { this.click = fn; } };
+  }
 }
 
 function harness(){
@@ -112,4 +116,42 @@ test("content updates patch retained bubbles and join flags clear without rewrit
   assert.equal(second.classList.contains("join-prev"), false);
   assert.equal(second.writes, 2);
   assert.deepEqual(h.calls, counts);
+});
+
+test("queued ✕ stops only its own turn and re-enables after a failed cancel", async () => {
+  const h = harness();
+  const calls = [];
+  let result = false;
+  const onStop = (state, seq) => { calls.push([state, seq]); return Promise.resolve(result); };
+  h.render(h.col, [
+    { seq: 1, role: "user", text: "running", state: "run", blocks: [] },
+    { seq: 2, role: "user", text: "queued", state: "enq", blocks: [] },
+  ], undefined, onStop);
+  const [runDots, queuedDots] = h.col.children.map(turn => turn.children.find(c => c.dataset.flip === "dots"));
+  assert.match(runDots.html, /title="Прервать"/);
+  assert.match(queuedDots.html, /title="Убрать из очереди"/);
+
+  queuedDots.stop.click();
+  assert.equal(queuedDots.stop.disabled, true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(queuedDots.stop.disabled, false);
+
+  result = true;
+  queuedDots.stop.click();
+  runDots.stop.click();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, [["enq", 2], ["enq", 2], ["run", 1]]);
+  assert.equal(queuedDots.stop.disabled, true);
+});
+
+test("a cancelled note neither drives read-advance nor opens the unread divider", () => {
+  const h = harness();
+  h.render(h.col, [
+    { seq: 1, role: "user", text: "running", state: "run", blocks: [{ id: "a", role: "assistant", text: "one" }] },
+    { seq: 2, role: "user", text: "dropped", state: "err", blocks: [{ id: "c", role: "system", kind: "cancelled", text: "Отменено" }] },
+  ], h.pos(1, 0));
+  const [, note] = h.col.children[1].children;
+  assert.equal(note.className.split(" ").includes("cancelled"), true);
+  assert.equal(note.dataset.pos, undefined);
+  assert.equal(h.col.children.flatMap(t => t.children).some(c => c.className === "readline"), false);
 });
