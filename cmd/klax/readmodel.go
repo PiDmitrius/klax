@@ -53,8 +53,12 @@ func blockID(seq int64, role, text string, tools []history.ToolCall) string {
 }
 
 // errBlock is the terminal block of an aborted/errored turn, so a reload shows why it
-// stopped (mirrors the messenger "❌ Прервано") instead of a silently-frozen turn.
+// stopped (mirrors the messenger "❌ Прервано") instead of a silently-frozen turn. A cancelled
+// turn is the user's own choice, not a failure: the same block in a neutral kind.
 func errBlock(seq int64, reason string) uiBlock {
+	if reason == turnErrCancelled {
+		return uiBlock{ID: blockID(seq, "system", "Отменено", nil), Role: "system", Kind: "cancelled", Text: "Отменено"}
+	}
 	switch reason {
 	case "", turnErrAborted:
 		reason = "Прервано"
@@ -198,8 +202,8 @@ func transcriptPresence(items []history.Item, queueTurns []sessfiles.Turn) map[i
 // buildReadModel turns one paginated page of grouped turns into read-model rows: it joins
 // each user turn to its durable coordinate binding (or legacy marker), rewrites
 // text to durable text + file thumbnails, and gives every answer block its stable id.
-// On the latest page (`latest`) it also appends turns still queued (enq) or just-started
-// (run) that the transcript hasn't recorded yet, so a reload shows them. `startOrdinal`
+// It also places turns the transcript hasn't recorded (queued, just-started, cancelled or
+// aborted before running) by turn_seq, so a reload shows them. `startOrdinal`
 // startOrdinal is retained in the internal signature for page callers; physical
 // transcript event numbers mint stable native/legacy ids.
 func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, queueTurns []sessfiles.Turn, globalPresence map[int64]bool, busy bool, startOrdinal int, latest bool, ctxWindow int) []uiTurn {
@@ -343,35 +347,47 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 		turns = append(turns, ut)
 	}
 
-	if latest {
-		var missing []uiTurn
-		for _, t := range queueTurns {
-			if seen[t.Seq] {
-				continue
-			}
-			if globalPresence[t.Seq] && !pagePresence[t.Seq] {
+	// A queue-only turn (never reached the transcript) belongs to the page of the next turn that
+	// did, right before it; with no such turn it trails the latest page.
+	anchor := make(map[int64]int64, len(queueTurns))
+	var next int64
+	for i := len(queueTurns) - 1; i >= 0; i-- {
+		t := queueTurns[i]
+		anchor[t.Seq] = next
+		if globalPresence[t.Seq] {
+			next = t.Seq
+		}
+	}
+	var missing []uiTurn
+	for _, t := range queueTurns {
+		if seen[t.Seq] {
+			continue
+		}
+		if globalPresence[t.Seq] {
+			if !latest || !pagePresence[t.Seq] {
 				continue // its real transcript row lives on another page
 			}
-			ut := uiTurn{
-				Seq: t.Seq, Role: "user", Text: d.inboundText(store, t, sk, created),
-				Time: time.Unix(0, t.TS).Format(time.RFC3339), State: resolvedTurnState(t, busy, newestRun, false),
-			}
-			switch t.Last {
-			case "enq", "run":
+		} else if a := anchor[t.Seq]; (a == 0 && !latest) || (a != 0 && !pagePresence[a]) {
+			continue
+		}
+		ut := uiTurn{
+			Seq: t.Seq, Role: "user", Text: d.inboundText(store, t, sk, created),
+			Time: time.Unix(0, t.TS).Format(time.RFC3339), State: resolvedTurnState(t, busy, newestRun, false),
+		}
+		switch t.Last {
+		case "enq", "run":
+			missing = append(missing, ut)
+		case "err": // a queued turn aborted before it ran — show it with why it stopped
+			ut.Blocks = append(ut.Blocks, errBlock(t.Seq, t.Reason))
+			missing = append(missing, ut)
+		case "done":
+			if !t.Bound {
+				ut.Blocks = appendHookWarnings(ut.Blocks, t.Seq, t.HookFailures)
 				missing = append(missing, ut)
-			case "err": // a queued turn aborted before it ran — show it with why it stopped
-				ut.Blocks = append(ut.Blocks, errBlock(t.Seq, t.Reason))
-				missing = append(missing, ut)
-			case "done":
-				if !t.Bound {
-					ut.Blocks = appendHookWarnings(ut.Blocks, t.Seq, t.HookFailures)
-					missing = append(missing, ut)
-				}
 			}
 		}
-		turns = mergeQueueOnlyTurns(turns, missing)
 	}
-	return turns
+	return mergeQueueOnlyTurns(turns, missing)
 }
 
 // explainedByTranscript reports whether the turn already ends with the backend's own account of
@@ -417,7 +433,10 @@ func unreadAfter(turns []uiTurn, throughTurn int64, throughBlock int) int {
 		if t.Role != "user" || t.Seq <= 0 {
 			continue
 		}
-		for bi := range t.Blocks {
+		for bi, b := range t.Blocks {
+			if b.Kind == "cancelled" {
+				continue // the user's own action, possibly past a still-running turn — never unread
+			}
 			if t.Seq > throughTurn || (t.Seq == throughTurn && bi > throughBlock) {
 				n++
 			}
@@ -444,7 +463,7 @@ func stateCode(state string) string {
 }
 
 // tailFrom returns the live "tail" of a session's read model past a per-session
-// (turn,block,state,trail,head) cursor — the boundary turn (refreshed, so a grown OR state-changed
+// (turn,block,state,trail,head,settled) cursor — the boundary turn (refreshed, so a grown OR state-changed
 // last turn re-syncs) plus every later turn AND trailing standalone row. It returns nil when nothing
 // is new (the boundary turn has not grown, its state is unchanged, no later turn exists past `head`,
 // AND no standalone was appended after the last durable turn), so a long-poll keeps holding rather
@@ -459,11 +478,15 @@ func stateCode(state string) string {
 // when a turn is still RUNNING behind a newer QUEUED one, the boundary anchors on the running turn
 // (so its later blocks + completion are delivered) while `head` stays on the newest turn — so the
 // already-seen queued turn is NOT re-flagged as "new" on every poll (which would busy-loop the
-// long-poll). A whole new turn is one past `head`, not past the boundary.
-func tailFrom(turns []uiTurn, throughTurn int64, throughBlock int, throughState string, throughTrail int, head int64) []uiTurn {
+// long-poll). A whole new turn is one past `head`, not past the boundary. `settled` is how many turns
+// in (boundary, head] had already settled — a queued turn cancelled behind the running one changes it.
+func tailFrom(turns []uiTurn, throughTurn int64, throughBlock int, throughState string, throughTrail int, head int64, settled int) []uiTurn {
 	boundary := -1
 	fresh := false
 	trail := 0
+	if settledBetween(turns, throughTurn, head) != settled {
+		fresh = true
+	}
 	for i, t := range turns {
 		if t.Role != "user" || t.Seq <= 0 {
 			trail++ // a standalone / non-durable row; reset below when a later durable turn is seen
@@ -496,4 +519,15 @@ func tailFrom(turns []uiTurn, throughTurn int64, throughBlock int, throughState 
 		from = 0 // cursor turn gone / never set → resend from the top; the client reconciles
 	}
 	return turns[from:]
+}
+
+// settledBetween counts durable turns in (anchor, head] that are no longer enq/run.
+func settledBetween(turns []uiTurn, anchor, head int64) int {
+	n := 0
+	for _, t := range turns {
+		if t.Role == "user" && t.Seq > anchor && t.Seq <= head && t.State != "enq" && t.State != "run" {
+			n++
+		}
+	}
+	return n
 }

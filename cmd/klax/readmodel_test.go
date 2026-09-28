@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -472,5 +473,51 @@ func TestReadModelRecoveredErrorIsNotTheOutcome(t *testing.T) {
 func TestBlockIDCanonical(t *testing.T) {
 	if blockID(7, "assistant", "answer", nil) != blockID(7, "assistant", "answer\n\n ", nil) {
 		t.Fatal("blockID must be canonical across trailing whitespace")
+	}
+}
+
+// A turn that never reached the transcript is shown on the page of the next recorded turn,
+// right before it — never glued to the latest page once newer turns exist.
+func TestReadModelQueueOnlyTurnStaysOnItsPage(t *testing.T) {
+	d, created := newReadModelDaemon(t)
+	sr := d.getRunner("user:alice", created)
+	var seqs []int64
+	for _, text := range []string{"first", "cancelled", "third", "fourth"} {
+		seq, _, _, _, err := sr.store.Enqueue("ui:alice", "", "n"+text, text, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seqs = append(seqs, seq)
+	}
+	var items []history.Item
+	for i, seq := range []int64{seqs[0], seqs[2], seqs[3]} {
+		items = append(items, bindReadModelTurn(t, sr.store, seq, int64(2*i+1), []string{"first", "third", "fourth"}[i]),
+			history.Item{Role: "assistant", Text: "ok", Event: int64(2*i + 2)})
+		if err := sr.store.MarkDone(seq); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sr.store.MarkErr(seqs[1], turnErrCancelled); err != nil {
+		t.Fatal(err)
+	}
+	q, _ := sr.store.InboundLog()
+	presence := transcriptPresence(items, q)
+	grouped := groupTurns(items)
+	page := func(from, to int, latest bool) []int64 {
+		var out []int64
+		for _, row := range d.buildReadModel("user:alice", created, grouped[from:to], q, presence, false, from, latest, 1_000_000) {
+			out = append(out, row.Seq)
+		}
+		return out
+	}
+	if got, want := page(0, 2, false), []int64{seqs[0], seqs[1], seqs[2]}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("older page = %v, want %v", got, want)
+	}
+	if got, want := page(2, 3, true), []int64{seqs[3]}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("latest page = %v, want %v", got, want)
+	}
+	all := d.buildReadModel("user:alice", created, grouped, q, presence, false, 0, true, 1_000_000)
+	if len(all) != 4 || all[1].Seq != seqs[1] || all[1].State != "err" || all[1].Blocks[0].Kind != "cancelled" || all[1].Blocks[0].Text != "Отменено" {
+		t.Fatalf("cancelled turn = %+v", all)
 	}
 }

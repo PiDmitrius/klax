@@ -37,7 +37,7 @@ import (
 // Different sessions run Claude in parallel; within a session, messages are serialized.
 type sessionRunner struct {
 	runner   *runner.Runner
-	acceptMu sync.Mutex          // serializes acceptance and boundary registration with queue clearing
+	acceptMu sync.Mutex          // serializes acceptance, boundary registration, dequeue and queue clearing/cancellation
 	results  map[int64]*turnWait // guarded by mu
 	// store is the per-session durable store (files + queue.jsonl). One instance
 	// per (sessionKey, created), owned here so its lock is a true per-session

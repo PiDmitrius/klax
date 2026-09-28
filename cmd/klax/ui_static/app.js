@@ -4,7 +4,7 @@
 // insertAnswer/breakMerge) is gone — a turn's truth is model turn.state.
 
 import { TurnModel } from "./model.js";
-import { renderSession, beginShift, playShift, fadeOutDivider, DIVIDER_FADE_MS, pos, parsePos, decodePos } from "./render.js";
+import { renderSession, answerBlock, beginShift, playShift, fadeOutDivider, DIVIDER_FADE_MS, pos, parsePos, decodePos } from "./render.js";
 import { esc } from "./markdown.js";
 import { tailLoop } from "./events.js";
 import { api, hasCoarsePointer, copyText, flashCopied, bindButtonActivation } from "./base.js";
@@ -44,7 +44,7 @@ const readGraceUntil = {}, readGraceTimer = {};
 const readReportTimer = {}; // created -> pending POST /api/read debounce timer
 const READ_GRACE_MS = 1600;
 let active = 0;
-const tailCursors = {};                // created -> "<turn>.<block>.<state>.<trail>[.<head>]" durable content cursor
+const tailCursors = {};                // created -> "<turn>.<block>.<state>.<trail>[.<head>.<settled>]" durable content cursor
 let noticeCursor = "";                 // ring cursor for transient notices (tailLoop)
 let sessRev = 0;                       // last session-strip revision rendered (tailLoop; server returns it early on a strip change)
 let bottomJumpFrame = 0;
@@ -88,7 +88,7 @@ function getActive(){ return active; }
 // turn once — otherwise the bubble stays "queued" until the first block or a reload.
 function stateCode(s){ return s === "run" ? "r" : s === "done" ? "d" : s === "err" ? "x" : "e"; }
 
-// tailPos is the durable "<turn>.<block>.<state>.<trail>[.<head>]" content cursor to resume the live
+// tailPos is the durable "<turn>.<block>.<state>.<trail>[.<head>.<settled>]" content cursor to resume the live
 // tail from — it MIRRORS the server's tailCursor. The anchor (turn/block/state) is the OLDEST
 // unsettled turn (enq/run) so a still-running turn behind a newer queued one keeps getting its blocks
 // + completion; `head` (the newest turn) is appended only when it is past the anchor, so an
@@ -105,7 +105,9 @@ function tailPos(rows){
     else trail++;
   }
   const base = turn + "." + block + "." + stateCode(state) + "." + trail;
-  return (anchored && turn !== head) ? base + "." + head : base;
+  if(!anchored || turn === head) return base;
+  const settled = (rows || []).filter(t => t.role === "user" && t.seq > turn && t.seq <= head && t.state !== "enq" && t.state !== "run").length;
+  return base + "." + head + "." + settled;
 }
 function sameSession(a, b){ return String(a) === String(b); }
 function documentVisible(){ return typeof document === "undefined" || document.visibilityState !== "hidden"; }
@@ -152,8 +154,8 @@ function modelMaxPos(created){
   let max = 0;
   for(const t of model.turns(created)){
     if(t.role === "user" && t.seq !== undefined){
-      const nb = (t.blocks || []).length;
-      if(nb > 0){ const p = pos(t.seq, nb - 1); if(p > max) max = p; }
+      const bs = t.blocks || [];
+      for(let i = bs.length - 1; i >= 0; i--) if(answerBlock(bs[i])){ const p = pos(t.seq, i); if(p > max) max = p; break; }
     }
   }
   return max;
@@ -310,7 +312,7 @@ function rerender(created, live, opts){
   const hadDivider = anchorLive && !!col.querySelector(".readline");
   const snap = live ? beginShift(col) : null;
   const holdSplits = opts.holdSplits || (!opts.noHoldSplits && hadDivider && rawUnreadCount(active) === 0 && snap && snap.holdSplits && snap.holdSplits.size ? snap.holdSplits : null);
-  renderSession(col, model.turns(active), readThrough[active], activeReadOnly() ? null : abortActive, holdSplits, !!opts.joinHeldSplits);
+  renderSession(col, model.turns(active), readThrough[active], activeReadOnly() ? null : stopTurn, holdSplits, !!opts.joinHeldSplits);
   watchInlineImages(col);
   if(moreFor[active]){ // older history exists → a "load earlier" button at the top
     const m = document.createElement("button");
@@ -411,9 +413,17 @@ function commitLive(created){
 
 function activeReadOnly(){ return isReadOnly(); }
 
-function abortActive(){
-  if(activeReadOnly()) return;
-  if(active) api("/api/abort", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: active }) }).catch(()=>{});
+// stopTurn is the turn ✕: a running turn aborts the whole session (run + queue), a queued one
+// drops only itself. Resolves false when the button should become usable again.
+function stopTurn(state, seq){
+  if(activeReadOnly() || !active) return false;
+  const post = (path, body) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if(state !== "enq"){ post("/api/abort", { session: active }).catch(()=>{}); return true; }
+  return post("/api/cancel", { session: active, seq }).then(r => {
+    if(r.ok) return true;
+    return r.json().then(b => b.error.message).catch(() => "Не удалось отменить сообщение")
+      .then(m => { showNotice(m, "warning"); return false; });
+  }, () => { showNotice("Не удалось отменить сообщение", "error"); return false; });
 }
 
 function sessionContextHint(created, list){
@@ -524,7 +534,7 @@ function rawUnreadCount(created){
   let n = 0;
   for(const t of model.turns(created)){
     if(t.role !== "user" || t.seq === undefined) continue; // user bubbles + standalone rows don't count
-    for(let i = 0; i < (t.blocks || []).length; i++) if(pos(t.seq, i) > base) n++;
+    for(let i = 0; i < (t.blocks || []).length; i++) if(pos(t.seq, i) > base && answerBlock(t.blocks[i])) n++;
   }
   return n;
 }
@@ -537,8 +547,7 @@ function firstUnreadRow(created){
   for(let i = 0; i < arr.length; i++){
     const t = arr[i];
     if(t.role === "user" && t.seq !== undefined){
-      const nb = (t.blocks || []).length;
-      if(nb > 0 && pos(t.seq, nb - 1) > base) return i;
+      if((t.blocks || []).some((b, bi) => pos(t.seq, bi) > base && answerBlock(b))) return i;
     }
   }
   return arr.length;

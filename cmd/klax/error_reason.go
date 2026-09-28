@@ -7,6 +7,7 @@ import (
 
 const (
 	turnErrAborted            = "aborted"
+	turnErrCancelled          = "cancelled"
 	turnErrAttachmentsMissing = "attachments-missing"
 	turnErrRunStartFailed     = "run-start-failed"
 	turnErrBackendFailed      = "backend-failed"

@@ -31,6 +31,10 @@ func apiFailure(code string) *apiError {
 		status, message = http.StatusConflict, "Результат этой границы недоступен"
 	case "aborted":
 		status, message = http.StatusConflict, "Сообщение удалено из очереди"
+	case "cancelled":
+		status, message = http.StatusConflict, "Сообщение отменено"
+	case "not-queued":
+		status, message = http.StatusConflict, "Сообщение уже не в очереди"
 	case "audit-start-failed":
 		message = "Стартовый гейт отклонил выполнение"
 	case "attachments-missing":
@@ -39,6 +43,8 @@ func apiFailure(code string) *apiError {
 		message = "Не удалось сохранить результат хода"
 	case "enqueue-failed":
 		message = "Не удалось сохранить сообщение"
+	case "cancel-failed":
+		message = "Не удалось отменить сообщение"
 	}
 	return &apiError{Code: code, Message: message, status: status}
 }

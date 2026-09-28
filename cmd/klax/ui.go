@@ -639,8 +639,8 @@ func (d *daemon) readModel(sk string, sess *session.Session) []uiTurn {
 // sessionTail is the live tail of a session's read model past a per-session
 // (turn,block,state,trail,head) cursor — the rows the client merges to catch up. Empty when nothing
 // is new past the cursor. [S3]
-func (d *daemon) sessionTail(sk string, sess *session.Session, throughTurn int64, throughBlock int, throughState string, throughTrail int, head int64) []uiTurn {
-	return tailFrom(d.readModel(sk, sess), throughTurn, throughBlock, throughState, throughTrail, head)
+func (d *daemon) sessionTail(sk string, sess *session.Session, throughTurn int64, throughBlock int, throughState string, throughTrail int, head int64, settled int) []uiTurn {
+	return tailFrom(d.readModel(sk, sess), throughTurn, throughBlock, throughState, throughTrail, head, settled)
 }
 
 // watchRunTranscript pokes the user's tail whenever the active run's transcript FILE changes, so a
@@ -784,6 +784,7 @@ func (s *uiServer) routes() http.Handler {
 	mux.HandleFunc("/api/tail", s.handleTail)
 	mux.HandleFunc("/api/send", s.handleSend)
 	mux.HandleFunc("/api/abort", s.handleAbort)
+	mux.HandleFunc("/api/cancel", s.handleCancel)
 	mux.HandleFunc("/api/read", s.handleRead)
 	mux.HandleFunc("/api/new", s.handleNew)
 	mux.HandleFunc("/api/rename", s.handleRename)
@@ -917,10 +918,10 @@ type tailResp struct {
 // `head` is the newest durable turn the client has seen (only present when the cursor anchors on an
 // OLDER still-running turn behind a queued one); it defaults to `turn` so a normal/legacy cursor is
 // unchanged. Absent/blank ⇒ (0,-1,"",0,0) so a brand-new tab's first tail returns from the start.
-func parseBlockCursor(v string) (turn int64, block int, state string, trail int, head int64) {
-	parts := strings.SplitN(v, ".", 5)
+func parseBlockCursor(v string) (turn int64, block int, state string, trail int, head int64, settled int) {
+	parts := strings.SplitN(v, ".", 6)
 	if len(parts) < 2 {
-		return 0, -1, "", 0, 0
+		return 0, -1, "", 0, 0, 0
 	}
 	turn, _ = strconv.ParseInt(parts[0], 10, 64)
 	block, _ = strconv.Atoi(parts[1])
@@ -934,17 +935,21 @@ func parseBlockCursor(v string) (turn int64, block int, state string, trail int,
 	if len(parts) >= 5 {
 		head, _ = strconv.ParseInt(parts[4], 10, 64)
 	}
-	return turn, block, state, trail, head
+	if len(parts) >= 6 {
+		settled, _ = strconv.Atoi(parts[5])
+	}
+	return turn, block, state, trail, head, settled
 }
 
-// tailCursor is the position after applying `rows` — "<turn>.<block>.<state>.<trail>[.<head>]". The
-// anchor (turn/block/state) is the OLDEST turn that is still UNSETTLED (enq/run): the cursor must not
-// advance past it, so its later blocks and its completion are still delivered. When every turn is
+// tailCursor is the position after applying `rows` — "<turn>.<block>.<state>.<trail>[.<head>.<settled>]".
+// The anchor (turn/block/state) is the OLDEST turn that is still UNSETTLED (enq/run): the cursor must
+// not advance past it, so its later blocks and its completion are still delivered. When every turn is
 // settled, the anchor is simply the last durable turn (the plain case). `trail` is the count of
 // standalone rows after the last durable turn; `head` is the last durable turn's seq — emitted only
 // when it is NEWER than the anchor (a queued turn sitting behind the still-running one), so the tail
-// can tell a genuinely new turn from the already-seen queued one. State code + trail also advance the
-// cursor on a pure enq→run transition or a trailing standalone with no new block.
+// can tell a genuinely new turn from the already-seen queued one, together with `settled` — how many
+// turns in (anchor, head] already settled, so cancelling one of them is delivered. State code + trail
+// also advance the cursor on a pure enq→run transition or a trailing standalone with no new block.
 func tailCursor(rows []uiTurn) string {
 	var head, aTurn int64
 	aBlock := -1
@@ -963,7 +968,7 @@ func tailCursor(rows []uiTurn) string {
 		}
 	}
 	if anchored && aTurn != head {
-		return fmt.Sprintf("%d.%d.%s.%d.%d", aTurn, aBlock, stateCode(aState), trail, head)
+		return fmt.Sprintf("%d.%d.%s.%d.%d.%d", aTurn, aBlock, stateCode(aState), trail, head, settledBetween(rows, aTurn, head))
 	}
 	return fmt.Sprintf("%d.%d.%s.%d", aTurn, aBlock, stateCode(aState), trail)
 }
@@ -986,8 +991,8 @@ func (s *uiServer) buildTail(user, sk string, req tailReq, readOnly bool) tailRe
 		if sess == nil {
 			continue
 		}
-		ct, cb, cs, ctr, chd := parseBlockCursor(cur)
-		rows := s.d.sessionTail(sk, sess, ct, cb, cs, ctr, chd)
+		ct, cb, cs, ctr, chd, cst := parseBlockCursor(cur)
+		rows := s.d.sessionTail(sk, sess, ct, cb, cs, ctr, chd, cst)
 		if len(rows) == 0 {
 			continue
 		}
@@ -1240,6 +1245,42 @@ func (s *uiServer) handleAbort(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.d.abortSession(sk, body.Session, false)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleCancel drops one queued message of a session; 409 not-queued once it has started or settled.
+func (s *uiServer) handleCancel(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.auth(r)
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Session int64 `json:"session"`
+		Seq     int64 `json:"seq"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Session <= 0 || body.Seq <= 0 {
+		http.Error(w, "A positive session and seq are required", http.StatusBadRequest)
+		return
+	}
+	sk := s.d.sessionKey(s.chatID(user))
+	if !s.requireSession(w, sk, body.Session) {
+		return
+	}
+	found, err := s.d.cancelQueued(sk, body.Session, body.Seq)
+	if err != nil {
+		log.Printf("durable MarkErr cancelled (%s/%d): %v", sk, body.Session, err)
+		writeAPIError(w, apiFailure("cancel-failed"))
+		return
+	}
+	if !found {
+		writeAPIError(w, apiFailure("not-queued"))
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

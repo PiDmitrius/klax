@@ -10,7 +10,10 @@ import { mdSafe, esc, fmtTime, fmtDate } from "./markdown.js";
 
 // blockCls is the ONE mapping from a row to its visual class, for grouped blocks and standalone
 // rows alike. kind wins over role: an error row keeps the error class whatever role carries it.
-function blockCls(b){ return b.kind === "error" || b.role === "error" ? "error" : b.role === "tool" ? "tool" : b.role === "system" ? "system" : "assistant"; }
+// answerBlock says whether a block takes part in unread/read-advance: a cancelled note is the user's
+// own action and may sit on a later turn than the one still running, so it never moves the watermark.
+export function answerBlock(b){ return !b || b.kind !== "cancelled"; }
+function blockCls(b){ return b.kind === "cancelled" ? "cancelled" : b.kind === "error" || b.role === "error" ? "error" : b.role === "tool" ? "tool" : b.role === "system" ? "system" : "assistant"; }
 function contextText(used, window){
   if(!used) return "";
   const uk = Math.floor(used / 1000) + "k";
@@ -68,7 +71,7 @@ export function renderModel(turns, watermark, holdSplits, joinHeldSplits){
     let i = 0;
     let lastGroupTime = t.time;
     while(i < blocks_.length){
-      if(unread(pos(t.seq, i)) && !divided && has){
+      if(unread(pos(t.seq, i)) && answerBlock(blocks_[i]) && !divided && has){
         groups.push({ divider: true });
         divided = true;
         continue;
@@ -77,7 +80,7 @@ export function renderModel(turns, watermark, holdSplits, joinHeldSplits){
       const groupStart = i;
       while(i < blocks_.length && blockCls(blocks_[i]) === cls){
         if(held && i > groupStart && held.has(pos(t.seq, i))) break;
-        if(unread(pos(t.seq, i)) && !divided && has && blocks.length > 0) break;
+        if(unread(pos(t.seq, i)) && answerBlock(blocks_[i]) && !divided && has && blocks.length > 0) break;
         blocks.push(blocks_[i]); i++;
       }
       const last = blocks.length ? blocks[blocks.length - 1] : {};
@@ -85,7 +88,7 @@ export function renderModel(turns, watermark, holdSplits, joinHeldSplits){
       const group = {
         cls, blocks, tool: cls === "tool", time: last.time,
         startPos,
-        maxPos: pos(t.seq, i - 1), // the last block's position — drives read-advance (data-pos)
+        maxPos: answerBlock(last) ? pos(t.seq, i - 1) : 0, // the last block's position — drives read-advance (data-pos)
       };
       groups.push(group);
       if(group.time) lastGroupTime = group.time;
@@ -158,19 +161,29 @@ function updateBubble(d, cls, html, time, dataPos, raw){
   return d;
 }
 // indicator is the per-turn tail dots: null for a settled turn (done/err — err shows its
-// error block); animated + ✕ for run; dim note for enq/unknown.
-function indicator(state, note, onAbort){
+// error block); animated + ✕ for run (aborts the whole session); dim note + ✕ for enq (drops
+// only this message); dim note for unknown. onStop(state, seq) resolves false when it failed,
+// re-enabling the button.
+function indicator(state, seq, note, onStop){
   if(state === "done" || state === "err" || state === undefined) return null;
   const animated = state === "run";
-  const abortable = state === "run" || state === "enq";
+  const stoppable = state === "run" || state === "enq";
   const d = document.createElement("div");
   d.className = "msg assistant typing" + (animated ? "" : " queued");
   // The only note left is the enq queue position ('в очереди · N'). The context line is a
   // separate tool bubble rendered below the dots (see buildItem), so the running indicator
-  // is just the animated dots + the ✕ abort button.
+  // is just the animated dots + the ✕ button.
   const queueNote = note ? '<span class="qnote">'+esc(note)+'</span>' : "";
-  d.innerHTML = DOTS + queueNote + (abortable ? '<button class="stop" title="Прервать">✕</button>' : "");
-  if(abortable){ const b = d.querySelector(".stop"); if(b){ b.disabled = !onAbort; if(onAbort) b.addEventListener("click", onAbort); } }
+  const title = animated ? "Прервать" : "Убрать из очереди";
+  d.innerHTML = DOTS + queueNote + (stoppable ? '<button class="stop" title="'+title+'">✕</button>' : "");
+  const b = stoppable && d.querySelector(".stop");
+  if(b){
+    b.disabled = !onStop;
+    if(onStop) b.addEventListener("click", () => {
+      b.disabled = true;
+      Promise.resolve(onStop(state, seq)).then(ok => { if(ok === false) b.disabled = false; });
+    });
+  }
   return d;
 }
 
@@ -251,7 +264,7 @@ function reconcileChildren(parent, desired){
 // delta or a run→done flip only touches the block that changed — the finished blocks above never
 // re-parse or flicker. `old` is the previous turn node, REUSED AS THE CONTAINER and reconciled in
 // place (children are never re-parented into a fresh div), or null for a fresh build.
-function buildTurn(it, onAbort, old){
+function buildTurn(it, onStop, old){
   const turn = old || document.createElement("div");
   turn.className = "turn"; turn.dataset.seq = it.seq;
   const reuse = new Map();
@@ -306,7 +319,7 @@ function buildTurn(it, onAbort, old){
   // Kept a reuse unit so a stream that adds a block above doesn't re-create the animated dots (which
   // would restart the blink) or flicker them.
   if(it.state === "run" || it.state === "enq"){
-    put("dots", childSig("dots", [it.state, it.note]), () => indicator(it.state, it.note, onAbort));
+    put("dots", childSig("dots", [it.state, it.note]), () => indicator(it.state, it.seq, it.note, onStop));
   }
   // The context "cut line" is the turn's final element — below the dots while running, and the last
   // line once the dots are gone (it slides up to close the gap).
@@ -318,13 +331,13 @@ function buildTurn(it, onAbort, old){
   return turn;
 }
 
-function buildItem(it, onAbort){
+function buildItem(it, onStop){
   if(it.kind === "divider") return divider();
   if(it.kind === "bubble") return bubble(it.cls, it.md ? mdSafe(it.text) : esc(it.text), it.time, undefined, it.text);
-  return buildTurn(it, onAbort, null);
+  return buildTurn(it, onStop, null);
 }
 
-export function paint(col, items, onAbort){
+export function paint(col, items, onStop){
   const nodes = reusableNodes(col);
   const desired = []; // ordered final nodes, reconciled into `col` in place (no fragment detach)
   const fresh = [];   // freshly-built nodes that may hold NEW <img> elements to reconnect
@@ -342,10 +355,10 @@ export function paint(col, items, onAbort){
     let built, reusedContainer = false;
     if(it.kind === "turn"){
       const oc = old && old.classList && old.classList.contains("turn") ? old : null;
-      built = buildTurn(it, onAbort, oc);
+      built = buildTurn(it, onStop, oc);
       reusedContainer = !!oc; // its children (incl. images) were reused in place — no new imgs to swap
     } else {
-      built = buildItem(it, onAbort);
+      built = buildItem(it, onStop);
     }
     if(old) nodes.delete(key);
     const stamped = stamp(built, key, sig);
@@ -371,8 +384,8 @@ export function paint(col, items, onAbort){
   reconcileChildren(col, desired);
 }
 
-export function renderSession(col, turns, unreadAfter, onAbort, holdSplits, joinHeldSplits){
-  paint(col, renderModel(turns, unreadAfter, holdSplits, joinHeldSplits), onAbort);
+export function renderSession(col, turns, unreadAfter, onStop, holdSplits, joinHeldSplits){
+  paint(col, renderModel(turns, unreadAfter, holdSplits, joinHeldSplits), onStop);
 }
 
 // --- smooth live updates (FLIP) ---

@@ -290,9 +290,11 @@ func (d *daemon) processSessionQueue(sr *sessionRunner) {
 	}()
 
 	for {
+		sr.acceptMu.Lock()
 		sr.mu.Lock()
 		if len(sr.queue) == 0 {
 			sr.mu.Unlock()
+			sr.acceptMu.Unlock()
 			return
 		}
 		msg := sr.queue[0]
@@ -306,6 +308,7 @@ func (d *daemon) processSessionQueue(sr *sessionRunner) {
 		sr.mu.Unlock()
 
 		d.notifyQueuePositions(remaining)
+		sr.acceptMu.Unlock()
 
 		// A message just left the queue to run — refresh the queue depth.
 		d.broadcastSessions(msg.sessKey)
@@ -407,7 +410,52 @@ func (d *daemon) abortSession(sk string, created int64, closing bool) bool {
 	return hasWork
 }
 
+// cancelQueued removes one not-yet-started message from the session queue once its
+// cancellation is durable. found is false when it is no longer queued; a durable-write
+// failure leaves it queued and returns the error.
+func (d *daemon) cancelQueued(sk string, created, seq int64) (found bool, err error) {
+	sr := d.lookupRunner(sk, created)
+	if sr == nil {
+		return false, nil
+	}
+	sr.acceptMu.Lock()
+	defer sr.acceptMu.Unlock()
+	sr.mu.Lock()
+	for _, m := range sr.queue {
+		found = found || m.turnSeq == seq
+	}
+	sr.mu.Unlock()
+	if !found {
+		return false, nil
+	}
+	if err := sr.store.MarkErr(seq, turnErrCancelled); err != nil {
+		return true, err
+	}
+	sr.mu.Lock()
+	var qm queuedMsg
+	for i, m := range sr.queue {
+		if m.turnSeq == seq {
+			qm = m
+			sr.queue = append(sr.queue[:i:i], sr.queue[i+1:]...)
+			break
+		}
+	}
+	remaining := append([]queuedMsg(nil), sr.queue...)
+	sr.pruneResultsLocked()
+	sr.mu.Unlock()
+	qm.completion.fail(turnErrCancelled)
+	d.markQueuedMessages([]queuedMsg{qm}, "❌ Отменено.")
+	d.notifyQueuePositions(remaining)
+	d.broadcastSessions(sk)
+	return true, nil
+}
+
 func (d *daemon) abortQueuedMessages(msgs []queuedMsg) {
+	d.markQueuedMessages(msgs, "❌ Прервано.")
+}
+
+// markQueuedMessages rewrites the messenger "В очереди" placeholders of dropped messages.
+func (d *daemon) markQueuedMessages(msgs []queuedMsg, text string) {
 	for _, qm := range msgs {
 		if qm.progressID == "" {
 			continue
@@ -417,12 +465,12 @@ func (d *daemon) abortQueuedMessages(msgs []queuedMsg) {
 			fullChatID: qm.chatID,
 			messageID:  qm.progressID,
 			replyTo:    qm.msgID,
-			text:       "❌ Прервано.",
+			text:       text,
 			format:     "",
 		})
 		cancel()
 		if err != nil {
-			log.Printf("failed to mark queued message as aborted: %v", err)
+			log.Printf("failed to mark dropped queued message: %v", err)
 		}
 	}
 }
