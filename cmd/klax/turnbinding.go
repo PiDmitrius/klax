@@ -1,8 +1,10 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"log"
+	"slices"
 
 	"github.com/PiDmitrius/klax/internal/history"
 	"github.com/PiDmitrius/klax/internal/sessfiles"
@@ -20,7 +22,8 @@ func coordinateKey(backend, session string, event int64) string {
 }
 
 // proposeBindings is the single ordered interval matcher used by persistence
-// and by the read model's short-lived active-run provisional association.
+// and by the read model's short-lived active-run provisional association. User
+// records come in physical order, so each turn's interval is found by binary search.
 func proposeBindings(turns []sessfiles.Turn, items []history.Item, backend, session string, end int64) []turnBinding {
 	claimed := make(map[string]bool)
 	for _, t := range turns {
@@ -28,10 +31,19 @@ func proposeBindings(turns []sessfiles.Turn, items []history.Item, backend, sess
 			claimed[coordinateKey(t.Backend, t.Session, t.Event)] = true
 		}
 	}
+	var users []history.Item
 	var out []turnBinding
 	for i, t := range turns {
 		if t.Bound || t.Backend != backend || t.Session != session || t.PromptDigest == "" {
 			continue
+		}
+		if users == nil {
+			users = make([]history.Item, 0, len(turns))
+			for _, it := range items {
+				if it.Role == "user" {
+					users = append(users, it)
+				}
+			}
 		}
 		upper := end
 		for j := i + 1; j < len(turns); j++ {
@@ -41,8 +53,12 @@ func proposeBindings(turns []sessfiles.Turn, items []history.Item, backend, sess
 				break
 			}
 		}
-		for _, it := range items {
-			if it.Role != "user" || it.Event < t.FromEvent || it.Event >= upper || it.PromptDigest != t.PromptDigest {
+		from, _ := slices.BinarySearchFunc(users, t.FromEvent, func(it history.Item, ev int64) int { return cmp.Compare(it.Event, ev) })
+		for _, it := range users[from:] {
+			if it.Event >= upper {
+				break
+			}
+			if it.PromptDigest != t.PromptDigest {
 				continue
 			}
 			key := coordinateKey(backend, session, it.Event)
@@ -57,22 +73,29 @@ func proposeBindings(turns []sessfiles.Turn, items []history.Item, backend, sess
 	return out
 }
 
-// unboundBackendSessions lists, once each and in turn order, the backend sessions that still
-// own a turn a bind could match: unbound, with the digest and transcript address the matcher
-// needs. An all-bound session yields nothing, which is what keeps the startup pass free.
+// unboundBackendSessions lists, once each and in turn order, the backend sessions whose last
+// turn is still unbound with the digest and transcript address the matcher needs. An earlier
+// turn's interval was closed and reconciled when the next turn of that session started, and a
+// transcript only grows, so it can never bind later; an all-bound session yields nothing,
+// which keeps the startup pass free.
 func unboundBackendSessions(turns []sessfiles.Turn) [][2]string {
-	seen := make(map[string]bool)
-	var out [][2]string
+	last := make(map[[2]string]sessfiles.Turn)
+	var order [][2]string
 	for _, t := range turns {
-		if t.Bound || t.PromptDigest == "" || t.Backend == "" || t.Session == "" {
+		if t.Backend == "" || t.Session == "" {
 			continue
 		}
-		key := t.Backend + "\x00" + t.Session
-		if seen[key] {
-			continue
+		key := [2]string{t.Backend, t.Session}
+		if _, ok := last[key]; !ok {
+			order = append(order, key)
 		}
-		seen[key] = true
-		out = append(out, [2]string{t.Backend, t.Session})
+		last[key] = t
+	}
+	var out [][2]string
+	for _, key := range order {
+		if t := last[key]; !t.Bound && t.PromptDigest != "" {
+			out = append(out, key)
+		}
 	}
 	return out
 }
@@ -127,20 +150,6 @@ func (d *daemon) reconcileBindingsSnapshot(sk string, created int64, backend, se
 	if err != nil {
 		log.Printf("turn binding queue %s/%d: %v", sk, created, err)
 		return false
-	}
-	records := make(map[int64]string)
-	for _, it := range items {
-		if it.RecordDigest != "" {
-			records[it.Event] = it.RecordDigest
-		}
-	}
-	for _, t := range turns {
-		if !t.Bound || t.Backend != backend || t.Session != sessionID || t.Event >= end {
-			continue
-		}
-		if actual := records[t.Event]; actual != t.RecordDigest {
-			log.Printf("turn binding changed %s/%d turn %d %s/%s event %d: expected %s actual %s", sk, created, t.Seq, backend, sessionID, t.Event, t.RecordDigest, actual)
-		}
 	}
 	var bound bool
 	for _, b := range proposeBindings(turns, items, backend, sessionID, end) {

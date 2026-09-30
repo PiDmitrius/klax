@@ -1,6 +1,7 @@
 package sessfiles
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"strings"
@@ -264,5 +265,81 @@ func TestBindingIsOneToOneAndIncreasing(t *testing.T) {
 	}
 	if err := s.Bind(b, "codex", "S", 6, "r6"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The projection folds only appended records, sees another instance's appends, hands out
+// copies, and re-folds from zero when the path holds another file.
+func TestQueueProjectionFollowsAppends(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	a, b := Open("user:alice", 12), Open("user:alice", 12)
+	seq, _, _, _, err := a.Enqueue("ui:alice", "", "n1", "one", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turns, _ := b.InboundLog(); len(turns) != 1 || turns[0].Last != "enq" {
+		t.Fatalf("b before run = %+v", turns)
+	}
+	if err := a.MarkRunMeta(seq, "codex", "s", "d", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.MarkHookError(seq, "audit.turn.finish", "x"); err != nil {
+		t.Fatal(err)
+	}
+	turns, _ := b.InboundLog()
+	if len(turns) != 1 || turns[0].Last != "run" || len(turns[0].HookFailures) != 1 {
+		t.Fatalf("b after run = %+v", turns)
+	}
+	turns[0].Text, turns[0].HookFailures[0].Reason = "mutated", "mutated"
+	if again, _ := b.InboundLog(); again[0].Text != "one" || again[0].HookFailures[0].Reason != "x" {
+		t.Fatalf("caller mutation reached the projection: %+v", again[0])
+	}
+	if _, _, _, _, err := b.Enqueue("ui:alice", "", "n2", "two", nil); err != nil {
+		t.Fatal(err)
+	}
+	if turns, _ := a.InboundLog(); len(turns) != 2 || turns[1].Seq != seq+1 {
+		t.Fatalf("a after b's enqueue = %+v", turns)
+	}
+
+	path := a.queuePath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := data[:bytes.IndexByte(data, '\n')+1]
+	if err := os.WriteFile(path+".new", first, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path+".new", path); err != nil {
+		t.Fatal(err)
+	}
+	if turns, _ := a.InboundLog(); len(turns) != 1 || turns[0].Last != "enq" {
+		t.Fatalf("a after replacement = %+v", turns)
+	}
+}
+
+// A complete record that lost its newline in a crash still counts: its seq is not reused.
+func TestQueueUnterminatedCompleteRecordCounts(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	a := Open("user:alice", 13)
+	if _, _, _, _, err := a.Enqueue("ui:alice", "", "n1", "one", nil); err != nil {
+		t.Fatal(err)
+	}
+	path := a.queuePath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, bytes.TrimRight(data, "\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b := Open("user:alice", 13)
+	seq, _, _, _, err := b.Enqueue("ui:alice", "", "n2", "two", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	turns, _ := b.InboundLog()
+	if seq != 2 || len(turns) != 2 || turns[0].Text != "one" || turns[1].Text != "two" {
+		t.Fatalf("seq %d, turns %+v", seq, turns)
 	}
 }

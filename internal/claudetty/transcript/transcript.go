@@ -207,14 +207,24 @@ type Tailer struct {
 	frozen  bool   // once set, Pump stops resetting on shrink (see Freeze)
 }
 
-// OpenTailer opens path for tailing. Fails with os.ErrNotExist until the
+// OpenTailer opens path for tailing, from its current end when atEnd — a
+// resumed session's history is never read. Fails with os.ErrNotExist until the
 // child actually creates the file — callers retry.
-func OpenTailer(path string) (*Tailer, error) {
+func OpenTailer(path string, atEnd bool) (*Tailer, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	return &Tailer{file: f}, nil
+	t := &Tailer{file: f}
+	if atEnd {
+		fi, err := f.Stat()
+		if err != nil {
+			f.Close()
+			return nil, err
+		}
+		t.pos = fi.Size()
+	}
+	return t, nil
 }
 
 // Close releases the file handle.

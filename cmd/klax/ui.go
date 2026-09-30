@@ -135,6 +135,8 @@ type readModelEntry struct {
 	busy      bool // buildReadModel input NOT captured by the file stats — key on it so a busy⇄idle
 	ctxWindow int  // flip / ctx-window change can never serve a stale cached read model
 	rows      []uiTurn
+	memo      map[rowKey]uiTurn
+	gen       uint64 // transcript index generation the memo was built from
 }
 
 type uiHub struct {
@@ -600,7 +602,8 @@ func (d *daemon) sessionUnread(sk string, sess *session.Session, readOnly bool) 
 // the client renders, so server and client agree on one path (live delivery and reload converge on
 // buildReadModel). It is a stat-keyed MEMOIZATION of buildReadModel, not a delivery channel: the key
 // is EVERY input — the transcript's and queue's (mtime,size) plus the two non-file inputs (busy,
-// ctxWindow) — so a hit is provably identical to a rebuild, and any change rebuilds once.
+// ctxWindow) — so a hit is provably identical to a rebuild, and any change rebuilds once, reusing
+// the rows of turns it did not touch (rowMemo).
 func (d *daemon) readModel(sk string, sess *session.Session) []uiTurn {
 	st := d.sessionStore(sk, sess.Created)
 	if st == nil {
@@ -615,22 +618,29 @@ func (d *daemon) readModel(sk string, sess *session.Session) []uiTurn {
 	busy := d.isSessionBusy(sk, sess.Created)
 	cw := sess.ContextWindow
 	key := uiUnreadKey{sk: sk, created: sess.Created}
+	var prev readModelEntry
 	if d.uiHub != nil {
 		h := d.uiHub
 		h.rmMu.Lock()
-		if e, ok := h.rm[key]; ok && e.tSize == ts && e.tMtime.Equal(tm) && e.qSize == qs && e.qMtime.Equal(qm) && e.busy == busy && e.ctxWindow == cw {
+		e, ok := h.rm[key]
+		if ok && e.tSize == ts && e.tMtime.Equal(tm) && e.qSize == qs && e.qMtime.Equal(qm) && e.busy == busy && e.ctxWindow == cw {
 			h.rmMu.Unlock()
 			return e.rows
 		}
+		prev = e
 		h.rmMu.Unlock()
 	}
-	items, _ := history.Load(backend, sess.ID, sess.CWD)
+	items, gen, _ := history.LoadGeneration(backend, sess.ID, sess.CWD)
+	memo := &rowMemo{}
+	if prev.gen == gen {
+		memo.prev = prev.memo
+	}
 	queueTurns, _ := st.InboundLog()
-	rows := d.buildReadModel(sk, sess.Created, groupTurns(items), queueTurns, nil, busy, 0, true, cw)
+	rows := d.buildReadModel(sk, sess.Created, groupTurns(items), queueTurns, nil, busy, 0, true, cw, memo)
 	if d.uiHub != nil {
 		h := d.uiHub
 		h.rmMu.Lock()
-		h.rm[key] = readModelEntry{tMtime: tm, tSize: ts, qMtime: qm, qSize: qs, busy: busy, ctxWindow: cw, rows: rows}
+		h.rm[key] = readModelEntry{tMtime: tm, tSize: ts, qMtime: qm, qSize: qs, busy: busy, ctxWindow: cw, rows: rows, memo: memo.next, gen: gen}
 		h.rmMu.Unlock()
 	}
 	return rows
@@ -1525,7 +1535,7 @@ func (s *uiServer) handleTranscript(w http.ResponseWriter, r *http.Request) {
 	}
 	queueTurns, _ := s.d.sessionStore(sk, created).InboundLog()
 	presence := transcriptPresence(items, queueTurns)
-	turns := s.d.buildReadModel(sk, created, grouped[start:end], queueTurns, presence, s.d.isSessionBusy(sk, created), start, before == 0, sess.ContextWindow)
+	turns := s.d.buildReadModel(sk, created, grouped[start:end], queueTurns, presence, s.d.isSessionBusy(sk, created), start, before == 0, sess.ContextWindow, nil)
 
 	w.Header().Set("Content-Type", "application/json")
 	readTurn, readBlock := sess.ReadThrough(s.readOnly(r))

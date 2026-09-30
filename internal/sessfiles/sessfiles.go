@@ -70,8 +70,9 @@ type Store struct {
 	mu         sync.Mutex
 	seq        int64 // turn_seq high-water, lazily loaded from queue.jsonl
 	loaded     bool
-	removed    bool       // set by Remove; afterwards Enqueue/append return ErrRemoved (no resurrection)
-	links      *linksFile // see links.go
+	queue      queueProjection // see queue.go
+	removed    bool            // set by Remove; afterwards Enqueue/append return ErrRemoved (no resurrection)
+	links      *linksFile      // see links.go
 	linksMtime time.Time
 	linksSize  int64
 }

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 
@@ -244,96 +245,133 @@ func (s *Store) InboundLog() ([]Turn, error) {
 	return s.turns()
 }
 
-// turns folds queue.jsonl records into per-seq Turns (latest state). Caller holds mu.
+// turns returns the per-seq Turns (latest state) in turn_seq order, as a copy the caller may
+// modify. Caller holds mu.
 func (s *Store) turns() ([]Turn, error) {
-	recs, err := s.readRecords()
-	if err != nil {
+	if err := s.refreshQueue(); err != nil {
 		return nil, err
 	}
-	byseq := map[int64]*Turn{}
-	for _, r := range recs {
-		t := byseq[r.Seq]
-		if t == nil {
-			t = &Turn{Seq: r.Seq}
-			byseq[r.Seq] = t
-		}
-		switch r.Ev {
-		case "enq":
-			t.ChatID, t.MsgID, t.Nonce, t.Text, t.Files, t.Marker, t.TS, t.Last =
-				r.ChatID, r.MsgID, r.Nonce, r.Text, r.Files, r.Marker, r.TS, "enq"
-			t.OriginalText = r.OriginalText
-			if t.OriginalText == "" {
-				t.OriginalText = r.Text
-			}
-			t.Origin = r.Origin
-			t.enqueued = true
-		case "run":
-			t.Last, t.Reason = r.Ev, r.Reason
-			t.Backend, t.Session, t.PromptDigest, t.FromEvent = r.Backend, r.Session, r.PromptDigest, r.FromEvent
-		case "run_session":
-			if r.Backend != "" {
-				t.Backend = r.Backend
-			}
-			t.Session, t.FromEvent = r.Session, r.FromEvent
-		case "bind":
-			if !t.Bound && r.Event != nil && t.Backend == r.Backend && t.Session == r.Session {
-				t.Bound, t.Event, t.RecordDigest = true, *r.Event, r.RecordDigest
-			}
-		case "done", "err":
-			t.Last, t.Reason = r.Ev, r.Reason
-		case "hook":
-			if r.Status != "error" {
-				continue
-			}
-			t.HookFailures = append(t.HookFailures, HookFailure{
-				Hook: r.Hook, Status: r.Status, Reason: r.Reason, TS: r.TS,
-			})
-			if r.Hook == "audit.turn.start" {
-				t.Last, t.Reason = "err", r.Reason
-			}
-		}
+	out := slices.Clone(s.queue.turns)
+	for i := range out {
+		out[i].Files, out[i].HookFailures = slices.Clone(out[i].Files), slices.Clone(out[i].HookFailures)
 	}
-	out := make([]Turn, 0, len(byseq))
-	for _, t := range byseq {
-		if !t.enqueued { // no enq seen for this seq (torn/partial) — skip
-			continue
-		}
-		out = append(out, *t)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
 	return out, nil
 }
 
-// readRecords scans queue.jsonl with a bufio.Reader (never a Scanner — matches the
-// codebase rule and tolerates arbitrarily long lines). A torn trailing line from a
-// crash mid-append fails to unmarshal and is skipped. Caller holds mu.
-func (s *Store) readRecords() ([]record, error) {
+// queueProjection is queue.jsonl folded into per-seq Turns. queue.jsonl only grows, so the
+// projection reads just the complete records appended since the last read; a path that now
+// holds another file, or a shorter one, is folded again from zero.
+type queueProjection struct {
+	info   os.FileInfo
+	offset int64
+	byseq  map[int64]*Turn
+	maxSeq int64
+	turns  []Turn // sorted snapshot of byseq, rebuilt when a record is folded
+}
+
+// refreshQueue folds the records appended to queue.jsonl since the last call. A torn line
+// from a crash mid-append fails to unmarshal and is skipped; a complete record whose newline
+// was lost counts, as appendRecord only terminates it before the next one. Caller holds mu.
+func (s *Store) refreshQueue() error {
+	q := &s.queue
 	f, err := os.Open(s.queuePath())
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			*q = queueProjection{}
+			return nil
 		}
-		return nil, err
+		return err
 	}
 	defer f.Close()
-	var recs []record
-	br := bufio.NewReader(f)
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if q.info != nil && os.SameFile(fi, q.info) && fi.Size() == q.info.Size() && fi.ModTime().Equal(q.info.ModTime()) {
+		return nil
+	}
+	if q.info == nil || !os.SameFile(fi, q.info) || fi.Size() < q.offset {
+		*q = queueProjection{byseq: map[int64]*Turn{}}
+	}
+	br := bufio.NewReader(io.NewSectionReader(f, q.offset, fi.Size()-q.offset))
+	folded := false
 	for {
 		line, rerr := br.ReadBytes('\n')
-		if t := bytes.TrimRight(line, "\n"); len(t) > 0 {
-			var r record
-			if json.Unmarshal(t, &r) == nil {
-				recs = append(recs, r)
-			}
+		if rerr != nil && rerr != io.EOF {
+			q.info = nil
+			return rerr
 		}
-		if rerr != nil {
-			if rerr == io.EOF {
-				break
-			}
-			return nil, rerr
+		var r record
+		valid := json.Unmarshal(bytes.TrimRight(line, "\n"), &r) == nil
+		if rerr == io.EOF && !valid {
+			break // an unterminated partial record is read once it is complete
+		}
+		q.offset += int64(len(line))
+		if valid {
+			q.fold(r)
+			folded = true
+		}
+		if rerr == io.EOF {
+			break
 		}
 	}
-	return recs, nil
+	q.info = fi
+	if folded || q.turns == nil {
+		q.turns = make([]Turn, 0, len(q.byseq))
+		for _, t := range q.byseq {
+			if t.enqueued { // no enq seen for this seq (torn/partial) — skip
+				q.turns = append(q.turns, *t)
+			}
+		}
+		sort.Slice(q.turns, func(i, j int) bool { return q.turns[i].Seq < q.turns[j].Seq })
+	}
+	return nil
+}
+
+func (q *queueProjection) fold(r record) {
+	if r.Seq > q.maxSeq {
+		q.maxSeq = r.Seq
+	}
+	t := q.byseq[r.Seq]
+	if t == nil {
+		t = &Turn{Seq: r.Seq}
+		q.byseq[r.Seq] = t
+	}
+	switch r.Ev {
+	case "enq":
+		t.ChatID, t.MsgID, t.Nonce, t.Text, t.Files, t.Marker, t.TS, t.Last =
+			r.ChatID, r.MsgID, r.Nonce, r.Text, r.Files, r.Marker, r.TS, "enq"
+		t.OriginalText = r.OriginalText
+		if t.OriginalText == "" {
+			t.OriginalText = r.Text
+		}
+		t.Origin = r.Origin
+		t.enqueued = true
+	case "run":
+		t.Last, t.Reason = r.Ev, r.Reason
+		t.Backend, t.Session, t.PromptDigest, t.FromEvent = r.Backend, r.Session, r.PromptDigest, r.FromEvent
+	case "run_session":
+		if r.Backend != "" {
+			t.Backend = r.Backend
+		}
+		t.Session, t.FromEvent = r.Session, r.FromEvent
+	case "bind":
+		if !t.Bound && r.Event != nil && t.Backend == r.Backend && t.Session == r.Session {
+			t.Bound, t.Event, t.RecordDigest = true, *r.Event, r.RecordDigest
+		}
+	case "done", "err":
+		t.Last, t.Reason = r.Ev, r.Reason
+	case "hook":
+		if r.Status != "error" {
+			return
+		}
+		t.HookFailures = append(t.HookFailures, HookFailure{
+			Hook: r.Hook, Status: r.Status, Reason: r.Reason, TS: r.TS,
+		})
+		if r.Hook == "audit.turn.start" {
+			t.Last, t.Reason = "err", r.Reason
+		}
+	}
 }
 
 // appendRecord writes one fsynced JSON line to queue.jsonl. Caller holds mu.
@@ -388,15 +426,10 @@ func (s *Store) ensureLoaded() error {
 	if s.loaded {
 		return nil
 	}
-	recs, err := s.readRecords()
-	if err != nil {
+	if err := s.refreshQueue(); err != nil {
 		return err
 	}
-	for _, r := range recs {
-		if r.Seq > s.seq {
-			s.seq = r.Seq
-		}
-	}
+	s.seq = max(s.seq, s.queue.maxSeq)
 	s.loaded = true
 	return nil
 }

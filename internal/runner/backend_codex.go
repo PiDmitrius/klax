@@ -2,14 +2,17 @@ package runner
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -108,7 +111,20 @@ type codexUsage struct {
 type codexSessionMeta struct {
 	Model         string
 	ContextWindow int
-	ContextUsed   int
+}
+
+// codexLeadRe reads the fixed leading keys Codex writes on every rollout record.
+var codexLeadRe = regexp.MustCompile(`^\{"timestamp":"[^"]*",(?:"ordinal":\d+,)?"type":"(\w+)"(?:,"payload":\{"type":"(\w+)"(?:,"thread_id":"[^"]*")?(?:,"turn_id":"[^"]*")?(?:,"item":\{"type":"(\w+)")?)?`)
+
+// CodexLead returns a rollout record's type, payload type and completed-item type from its
+// leading keys, without decoding it. ok is false when the record does not start in Codex's
+// fixed key order; the caller must then decode it.
+func CodexLead(raw []byte) (record, payload, item string, ok bool) {
+	m := codexLeadRe.FindSubmatch(raw[:min(len(raw), 512)])
+	if m == nil {
+		return "", "", "", false
+	}
+	return string(m[1]), string(m[2]), string(m[3]), true
 }
 
 // ParseCodexTerminalError returns the terminal failure carried by a complete
@@ -151,7 +167,7 @@ func parseCodexTaskComplete(line []byte) (string, bool) {
 }
 
 func codexSessionSize(threadID string) int64 {
-	path := findCodexSessionFile(threadID)
+	path := LocateCodexRollout(threadID)
 	if path == "" {
 		return 0
 	}
@@ -162,37 +178,36 @@ func codexSessionSize(threadID string) int64 {
 	return info.Size()
 }
 
-// readCodexTaskCompleteSince returns the failure carried by the last complete
-// task_complete written at or after offset — empty when the run completed
-// without one, or wrote none at all. An unfinished trailing record is ignored.
-func readCodexTaskCompleteSince(threadID string, offset int64) string {
-	path := findCodexSessionFile(threadID)
-	if path == "" {
-		return ""
+// readCodexRun reads the rollout bytes a run appended, from offset, in one pass: the failure
+// carried by its last complete task_complete (empty when the run completed without one or
+// wrote none), and the model and context window it ran with — Codex writes both in every
+// turn. Records of other kinds are skipped by their leading keys, undecoded; an unfinished
+// trailing record is ignored.
+func readCodexRun(threadID string, offset int64) (terminal string, meta codexSessionMeta) {
+	path := LocateCodexRollout(threadID)
+	if path == "" || offset < 0 {
+		return "", meta
 	}
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
-		return ""
+		return "", meta
 	}
-	if offset < 0 || offset > int64(len(data)) {
-		return ""
-	}
-	return latestCodexTaskComplete(data[offset:])
-}
-
-func latestCodexTaskComplete(data []byte) string {
-	var last string
-	for len(data) > 0 {
-		i := bytes.IndexByte(data, '\n')
-		if i < 0 {
-			break
+	defer f.Close()
+	r := bufio.NewReaderSize(io.NewSectionReader(f, offset, math.MaxInt64-offset), 64*1024)
+	for {
+		line, err := readEventLine(r)
+		if err != nil {
+			return terminal, meta
 		}
-		if message, complete := parseCodexTaskComplete(bytes.TrimSpace(data[:i])); complete {
-			last = message
+		if record, payload, _, ok := CodexLead(line); ok && !codexRunRecord(record, payload) {
+			continue
 		}
-		data = data[i+1:]
+		if message, complete := parseCodexTaskComplete(line); complete {
+			terminal = message
+			continue
+		}
+		parseCodexSessionMetaLine(line, &meta)
 	}
-	return last
 }
 
 func (b *CodexBackend) ParseEvent(line []byte) ([]Event, bool) {
@@ -391,88 +406,54 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-// ReadSessionMeta reads model, effective context window, and the last turn's
-// prompt size from the local Codex session JSONL file.
-func ReadCodexSessionMeta(threadID string) (model string, contextWindow int, contextUsed int) {
-	// One-shot: a fresh tail polled from offset 0 opens, scans, and parses the whole
-	// rollout exactly as the live tail does (findCodexSessionFile + readEventLine +
-	// parseCodexSessionMetaLine), so the two share a single code path.
-	meta, _ := newCodexSessionMetaTail(threadID).Poll()
-	return meta.Model, meta.ContextWindow, meta.ContextUsed
+// codexRunRecord reports whether a record classified by CodexLead can carry a run's terminal
+// failure, model or window. An event whose payload type was not read must be decoded.
+func codexRunRecord(record, payload string) bool {
+	switch record {
+	case "turn_context":
+		return true
+	case "event_msg":
+		return payload == "" || payload == "task_started" || payload == "token_count" || payload == "task_complete"
+	}
+	return false
 }
 
-func findCodexSessionFile(threadID string) string {
-	home, _ := os.UserHomeDir()
-	if home == "" || threadID == "" {
+// codexRollouts caches located rollouts. A rollout's path is fixed once written, so a cached
+// entry can only go stale by the file being removed, which the stat catches.
+var codexRollouts sync.Map // threadID -> path
+
+// LocateCodexRollout finds a Codex rollout by thread id, scanning ~/.codex/sessions only on a
+// cache miss.
+func LocateCodexRollout(threadID string) string {
+	if threadID == "" {
 		return ""
 	}
-	pattern := filepath.Join(home, ".codex", "sessions", "*", "*", "*", fmt.Sprintf("*%s.jsonl", threadID))
-	matches, _ := filepath.Glob(pattern)
+	if v, ok := codexRollouts.Load(threadID); ok {
+		p := v.(string)
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+		codexRollouts.Delete(threadID)
+	}
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		return ""
+	}
+	matches, _ := filepath.Glob(filepath.Join(home, ".codex", "sessions", "*", "*", "*", "*"+threadID+".jsonl"))
 	if len(matches) == 0 {
 		return ""
 	}
+	codexRollouts.Store(threadID, matches[0])
 	return matches[0]
 }
 
-type codexSessionMetaTail struct {
-	threadID string
-	path     string
-	offset   int64
-	meta     codexSessionMeta
-}
-
-func newCodexSessionMetaTail(threadID string) *codexSessionMetaTail {
-	return &codexSessionMetaTail{threadID: threadID}
-}
-
-func (t *codexSessionMetaTail) Poll() (codexSessionMeta, bool) {
-	if t.path == "" {
-		t.path = findCodexSessionFile(t.threadID)
-		if t.path == "" {
-			return t.meta, false
-		}
-	}
-	f, err := os.Open(t.path)
-	if err != nil {
-		return t.meta, false
-	}
-	defer f.Close()
-	if t.offset > 0 {
-		if _, err := f.Seek(t.offset, 0); err != nil {
-			return t.meta, false
-		}
-	}
-	changed := false
-	reader := bufio.NewReaderSize(f, 64*1024)
-	trailing := 0 // raw bytes of an unterminated final line (codex mid-write) — not consumed
-	for {
-		line, readErr := readEventLine(reader)
-		if readErr != nil && len(line) > 0 && len(line) < maxEventLine {
-			// A line returned together with the read error has no newline terminator, so
-			// len(line) is its exact raw length. Roll the offset back past it and reparse
-			// from its start next poll — a token_count split across two polls is not lost.
-			trailing = len(line)
-		}
-		if len(line) > 0 && parseCodexSessionMetaLine(line, &t.meta) {
-			changed = true
-		}
-		if readErr != nil {
-			break
-		}
-	}
-	if off, err := f.Seek(0, 1); err == nil {
-		t.offset = off - int64(trailing)
-	}
-	return t.meta, changed
-}
-
-func parseCodexSessionMetaLine(line []byte, meta *codexSessionMeta) bool {
+func parseCodexSessionMetaLine(line []byte, meta *codexSessionMeta) {
 	var entry struct {
 		Type    string          `json:"type"`
 		Payload json.RawMessage `json:"payload"`
 	}
 	if json.Unmarshal(line, &entry) != nil {
-		return false
+		return
 	}
 	switch entry.Type {
 	case "event_msg":
@@ -480,45 +461,25 @@ func parseCodexSessionMetaLine(line []byte, meta *codexSessionMeta) bool {
 			Type               string `json:"type"`
 			ModelContextWindow int    `json:"model_context_window"`
 			Info               *struct {
-				LastTokenUsage *struct {
-					InputTokens int `json:"input_tokens"`
-				} `json:"last_token_usage"`
 				ModelContextWindow int `json:"model_context_window"`
 			} `json:"info,omitempty"`
 		}
 		if json.Unmarshal(entry.Payload, &ev) != nil {
-			return false
+			return
 		}
-		switch ev.Type {
-		case "task_started":
-			if ev.ModelContextWindow > 0 && meta.ContextWindow != ev.ModelContextWindow {
-				meta.ContextWindow = ev.ModelContextWindow
-				return true
-			}
-		case "token_count":
-			changed := false
-			if ev.Info != nil {
-				if ev.Info.ModelContextWindow > 0 && meta.ContextWindow != ev.Info.ModelContextWindow {
-					meta.ContextWindow = ev.Info.ModelContextWindow
-					changed = true
-				}
-				if ev.Info.LastTokenUsage != nil && ev.Info.LastTokenUsage.InputTokens > 0 && meta.ContextUsed != ev.Info.LastTokenUsage.InputTokens {
-					meta.ContextUsed = ev.Info.LastTokenUsage.InputTokens
-					changed = true
-				}
-			}
-			return changed
+		if ev.Info != nil && ev.Info.ModelContextWindow > 0 {
+			meta.ContextWindow = ev.Info.ModelContextWindow
+		} else if ev.Type == "task_started" && ev.ModelContextWindow > 0 {
+			meta.ContextWindow = ev.ModelContextWindow
 		}
 	case "turn_context":
 		var tc struct {
 			Model string `json:"model"`
 		}
-		if json.Unmarshal(entry.Payload, &tc) == nil && tc.Model != "" && meta.Model != tc.Model {
+		if json.Unmarshal(entry.Payload, &tc) == nil && tc.Model != "" {
 			meta.Model = tc.Model
-			return true
 		}
 	}
-	return false
 }
 
 // codexPlanInput normalizes a codex todo_list event into the canonical

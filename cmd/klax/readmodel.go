@@ -138,16 +138,19 @@ type groupedTurn struct {
 // groupTurns folds a flat transcript into top-level units: a user item starts a turn and the
 // following assistant/tool items become its blocks, as does an error row — an error happens
 // inside the turn that produced it, whatever its role. A standalone system notice (or an answer
-// block with no preceding user) is its own unit.
+// block with no preceding user) is its own unit. A turn's blocks are the contiguous items after
+// its lead, so they share the transcript's backing array instead of copying it.
 func groupTurns(items []history.Item) []groupedTurn {
 	var out []groupedTurn
-	for _, it := range items {
+	lead := 0
+	for i, it := range items {
 		switch {
 		case it.Role == "user":
 			out = append(out, groupedTurn{lead: it})
+			lead = i
 		case it.Role == "assistant", it.Role == "tool", it.Kind == "error":
 			if n := len(out); n > 0 && out[n-1].lead.Role == "user" {
-				out[n-1].blocks = append(out[n-1].blocks, it)
+				out[n-1].blocks = items[lead+1 : i+1 : i+1]
 				continue
 			}
 			out = append(out, groupedTurn{lead: it})
@@ -176,6 +179,9 @@ func transcriptPresence(items []history.Item, queueTurns []sessfiles.Turn) map[i
 		}
 	}
 	for _, it := range items {
+		if it.Role != "user" {
+			continue // only user records carry coordinates, markers and bindings
+		}
 		if it.Event >= end {
 			end = it.Event + 1
 		}
@@ -206,7 +212,7 @@ func transcriptPresence(items []history.Item, queueTurns []sessfiles.Turn) map[i
 // aborted before running) by turn_seq, so a reload shows them. `startOrdinal`
 // startOrdinal is retained in the internal signature for page callers; physical
 // transcript event numbers mint stable native/legacy ids.
-func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, queueTurns []sessfiles.Turn, globalPresence map[int64]bool, busy bool, startOrdinal int, latest bool, ctxWindow int) []uiTurn {
+func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, queueTurns []sessfiles.Turn, globalPresence map[int64]bool, busy bool, startOrdinal int, latest bool, ctxWindow int, memo *rowMemo) []uiTurn {
 	store := d.sessionStore(sk, created)
 	byMarker := make(map[string]sessfiles.Turn, len(queueTurns))
 	byCoord := make(map[string]sessfiles.Turn, len(queueTurns))
@@ -220,11 +226,10 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 	}
 	// The only non-durable association allowed here is the newest active run,
 	// using the exact same matcher as persistence while its bind fsync is pending.
-	var pageItems []history.Item
+	pageItems := make([]history.Item, 0, len(page)) // presence and binding read only user leads
 	var pageEnd int64
 	for _, g := range page {
 		pageItems = append(pageItems, g.lead)
-		pageItems = append(pageItems, g.blocks...)
 		if g.lead.Event >= pageEnd {
 			pageEnd = g.lead.Event + 1
 		}
@@ -273,9 +278,8 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 		var (
 			seq    = -(g.lead.Event + 1) // stable physical-record id unless a durable seq is found
 			state  = "done"
-			text   = g.lead.Text
-			turnAt = g.lead.Time
 			reason string
+			hooks  int
 		)
 		var matched sessfiles.Turn
 		var ok bool
@@ -286,63 +290,23 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 			matched, ok = byMarker[g.lead.Marker]
 		}
 		if ok {
-			t := matched
-			seen[t.Seq] = true
-			seq = t.Seq
-			state = resolvedTurnState(t, busy, newestRun, g.lead.Marker != "")
-			reason = t.Reason
-			// The durable accept time is the ONE user-message timestamp. Before the backend transcript
-			// records this turn it is already shown from queue.jsonl; switching later to the transcript's
-			// slightly different timestamp changed the bubble signature and rebuilt an unchanged image.
-			turnAt = time.Unix(0, t.TS).Format(time.RFC3339)
-			if e := d.inboundText(store, t, sk, created); e != "" {
-				text = e
-			}
+			seen[matched.Seq] = true
+			seq = matched.Seq
+			state = resolvedTurnState(matched, busy, newestRun, g.lead.Marker != "")
+			reason = matched.Reason
+			hooks = len(matched.HookFailures)
 		}
-		ut := uiTurn{Seq: seq, Role: "user", Text: text, Time: turnAt, State: state}
-		// Split an assistant item's text and each tool into separate blocks, matching the
-		// live progress stream (one narration block, one block per tool) so a block's id is
-		// computed over the same canonical shape in both the transcript and the live event.
-		// The id hashes CANONICAL raw text; the displayed text gets the same outbound
-		// file-ref rewrite the live final applies, so reloaded agent files stay sealed refs.
-		for _, b := range g.blocks {
-			if b.Role == "assistant" {
-				if b.Text != "" || len(b.Tools) == 0 {
-					ut.Blocks = append(ut.Blocks, uiBlock{
-						ID: blockID(seq, "assistant", b.Text, nil), Role: "assistant",
-						Text: d.rewriteOutboundForUI(sk, created, seq, b.Text), Time: b.Time,
-					})
-				}
-				for _, tc := range b.Tools {
-					ut.Blocks = append(ut.Blocks, uiBlock{ID: blockID(seq, "tool", tc.Label, nil), Role: "tool", Text: tc.Label, Time: b.Time})
-				}
-				// The per-turn context "cut line" comes from the last assistant block's usage —
-				// including a tool-only block (a codex turn whose final token_count lands on a
-				// trailing tool call), so this lives outside the text-block branch above. The
-				// block's own window wins; else fall back to the session window (Claude has none).
-				if b.CtxUsed > 0 {
-					ut.CtxUsed = b.CtxUsed
-					ut.CtxWindow = b.CtxWindow
-					if ut.CtxWindow == 0 {
-						ut.CtxWindow = ctxWindow
-					}
-				}
-				continue
-			}
-			ut.Blocks = append(ut.Blocks, uiBlock{ID: blockID(seq, b.Role, b.Text, b.Tools), Role: b.Role, Text: b.Text, Tools: b.Tools, Kind: b.Kind, Time: b.Time})
+		key := rowKey{event: g.lead.Event, seq: seq, blocks: len(g.blocks), state: state, reason: reason, hooks: hooks, ctxWindow: ctxWindow}
+		if n := len(g.blocks); n > 0 {
+			last := g.blocks[n-1]
+			key.lastCtx, key.lastCtxWindow, key.lastTime = last.CtxUsed, last.CtxWindow, last.Time
 		}
-		if state == "err" && !explainedByTranscript(reason, g.blocks) {
-			ut.Blocks = append(ut.Blocks, errBlock(seq, reason))
+		ut, keep := memo.get(key)
+		if !keep {
+			ut, keep = d.userRow(store, sk, created, g, matched, ok, seq, state, reason, ctxWindow)
 		}
-		if ok {
-			ut.Blocks = appendHookWarnings(ut.Blocks, seq, matched.HookFailures)
-		}
-		// While the turn is still RUNNING, hold back only the most-recent assistant text block:
-		// the message currently being generated is represented by the working dots, not shown as
-		// a settled bubble. Tool/progress blocks are already discrete events and must remain
-		// visible immediately, including compaction.
-		if state == "run" && len(ut.Blocks) > 0 && ut.Blocks[len(ut.Blocks)-1].Role == "assistant" {
-			ut.Blocks = ut.Blocks[:len(ut.Blocks)-1]
+		if keep {
+			memo.put(key, ut)
 		}
 		turns = append(turns, ut)
 	}
@@ -388,6 +352,107 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 		}
 	}
 	return mergeQueueOnlyTurns(turns, missing)
+}
+
+// userRow builds one user turn's row: durable text and time, answer blocks with stable ids, and
+// the klax-side error and hook-warning blocks. keep is false when a local file link degraded to
+// its label, which a later build may still publish.
+func (d *daemon) userRow(store *sessfiles.Store, sk string, created int64, g groupedTurn, matched sessfiles.Turn, ok bool, seq int64, state, reason string, ctxWindow int) (ut uiTurn, keep bool) {
+	keep = true
+	text, turnAt := g.lead.Text, g.lead.Time
+	if ok {
+		// The durable accept time is the ONE user-message timestamp. Before the backend transcript
+		// records this turn it is already shown from queue.jsonl; switching later to the transcript's
+		// slightly different timestamp changed the bubble signature and rebuilt an unchanged image.
+		turnAt = time.Unix(0, matched.TS).Format(time.RFC3339)
+		if e := d.inboundText(store, matched, sk, created); e != "" {
+			text = e
+		}
+	}
+	ut = uiTurn{Seq: seq, Role: "user", Text: text, Time: turnAt, State: state}
+	// Split an assistant item's text and each tool into separate blocks, matching the
+	// live progress stream (one narration block, one block per tool) so a block's id is
+	// computed over the same canonical shape in both the transcript and the live event.
+	// The id hashes CANONICAL raw text; the displayed text gets the same outbound
+	// file-ref rewrite the live final applies, so reloaded agent files stay sealed refs.
+	for _, b := range g.blocks {
+		if b.Role == "assistant" {
+			if b.Text != "" || len(b.Tools) == 0 {
+				text, published := d.rewriteOutboundForUI(sk, created, seq, b.Text)
+				keep = keep && published
+				ut.Blocks = append(ut.Blocks, uiBlock{
+					ID: blockID(seq, "assistant", b.Text, nil), Role: "assistant",
+					Text: text, Time: b.Time,
+				})
+			}
+			for _, tc := range b.Tools {
+				ut.Blocks = append(ut.Blocks, uiBlock{ID: blockID(seq, "tool", tc.Label, nil), Role: "tool", Text: tc.Label, Time: b.Time})
+			}
+			// The per-turn context "cut line" comes from the last assistant block's usage —
+			// including a tool-only block (a codex turn whose final token_count lands on a
+			// trailing tool call), so this lives outside the text-block branch above. The
+			// block's own window wins; else fall back to the session window (Claude has none).
+			if b.CtxUsed > 0 {
+				ut.CtxUsed = b.CtxUsed
+				ut.CtxWindow = b.CtxWindow
+				if ut.CtxWindow == 0 {
+					ut.CtxWindow = ctxWindow
+				}
+			}
+			continue
+		}
+		ut.Blocks = append(ut.Blocks, uiBlock{ID: blockID(seq, b.Role, b.Text, b.Tools), Role: b.Role, Text: b.Text, Tools: b.Tools, Kind: b.Kind, Time: b.Time})
+	}
+	if state == "err" && !explainedByTranscript(reason, g.blocks) {
+		ut.Blocks = append(ut.Blocks, errBlock(seq, reason))
+	}
+	if ok {
+		ut.Blocks = appendHookWarnings(ut.Blocks, seq, matched.HookFailures)
+	}
+	// While the turn is still RUNNING, hold back only the most-recent assistant text block:
+	// the message currently being generated is represented by the working dots, not shown as
+	// a settled bubble. Tool/progress blocks are already discrete events and must remain
+	// visible immediately, including compaction.
+	if state == "run" && len(ut.Blocks) > 0 && ut.Blocks[len(ut.Blocks)-1].Role == "assistant" {
+		ut.Blocks = ut.Blocks[:len(ut.Blocks)-1]
+	}
+	return ut, keep
+}
+
+// rowMemo carries a session's user rows from one read-model build to the next, within one
+// transcript index generation. A row is a pure function of its rowKey — transcript blocks are
+// append-only apart from the last one's usage and time, and the durable text, time and published
+// file links of a seq never change — so a transcript append rebuilds only the turns it touched.
+// A row whose file link degraded is not kept. A nil memo builds every row.
+type rowMemo struct {
+	prev, next map[rowKey]uiTurn
+}
+
+type rowKey struct {
+	event, seq             int64
+	blocks                 int
+	lastCtx, lastCtxWindow int
+	lastTime               string
+	state, reason          string
+	hooks, ctxWindow       int
+}
+
+func (m *rowMemo) get(k rowKey) (uiTurn, bool) {
+	if m == nil {
+		return uiTurn{}, false
+	}
+	r, ok := m.prev[k]
+	return r, ok
+}
+
+func (m *rowMemo) put(k rowKey, r uiTurn) {
+	if m == nil {
+		return
+	}
+	if m.next == nil {
+		m.next = make(map[rowKey]uiTurn)
+	}
+	m.next[k] = r
 }
 
 // explainedByTranscript reports whether the turn already ends with the backend's own account of

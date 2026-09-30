@@ -101,3 +101,13 @@ expresses it, so an entry can be checked and can be proven stale.
     stream. A turn's terminal outcome is carried by `result.status` and `result.error`; blocks are
     a rendering helper, not forensic evidence. Forbidden: changing the meaning or required shape of
     an existing event inside v1.
+
+## Backend transcript
+
+18. **A backend transcript only grows.** A Claude transcript or Codex rollout is append-only: a
+    complete JSONL record, once written, never changes, moves or disappears; compaction is one more
+    appended record. Durable turn bindings (physical event + record digest in `queue.jsonl`), audit
+    coordinates and the incremental index (`internal/history/transcript.go`) rest on it. The index
+    re-reads from zero only when the path now holds another file or a file shorter than what it
+    consumed. Forbidden: re-reading or re-validating an already consumed prefix on an append, and
+    forbidden: positions derived from timestamps.
