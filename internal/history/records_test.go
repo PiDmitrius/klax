@@ -8,27 +8,40 @@ import (
 	"github.com/PiDmitrius/klax/internal/promptcanon"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 )
 
-func TestCompleteRecordsPhysicalCoordinates(t *testing.T) {
-	recs := completeRecords([]byte("ok\n\n{bad}\ntorn"))
-	if len(recs) != 3 {
-		t.Fatalf("records = %d, want 3", len(recs))
+func TestScanRecordsPhysicalCoordinates(t *testing.T) {
+	scan := func(data string) ([]rawRecord, int64) {
+		var recs []rawRecord
+		n, err := scanRecords(strings.NewReader(data), 0, func(r rawRecord) {
+			r.Raw = slices.Clone(r.Raw)
+			recs = append(recs, r)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return recs, n
+	}
+	recs, n := scan("ok\r\n\n{bad}\ntorn")
+	if len(recs) != 3 || n != int64(len("ok\r\n\n{bad}\n")) {
+		t.Fatalf("records = %d, consumed %d", len(recs), n)
 	}
 	for i, r := range recs {
 		if r.Event != int64(i) {
 			t.Fatalf("event[%d]=%d", i, r.Event)
 		}
 	}
-	if string(recs[1].Raw) != "" {
-		t.Fatalf("blank raw = %q", recs[1].Raw)
+	if string(recs[1].Raw) != "" || recs[0].Len != 4 {
+		t.Fatalf("blank raw = %q, first len %d", recs[1].Raw, recs[0].Len)
 	}
 	s := sha256.Sum256([]byte("ok"))
-	if recs[0].Digest != hex.EncodeToString(s[:]) {
+	if recs[0].digest() != hex.EncodeToString(s[:]) {
 		t.Fatal("raw digest mismatch")
 	}
-	recs = completeRecords([]byte("ok\n\n{bad}\ntorn\n"))
+	recs, _ = scan("ok\n\n{bad}\ntorn\n")
 	if len(recs) != 4 || string(recs[3].Raw) != "torn" {
 		t.Fatal("completed tail was not admitted")
 	}
@@ -77,7 +90,7 @@ func TestCodexUserPayloadDigestMatchesSubmittedPrompt(t *testing.T) {
 	if err := os.WriteFile(path, append(b, '\n'), 0600); err != nil {
 		t.Fatal(err)
 	}
-	items, _, err := readCodexSnapshot(path)
+	items, err := readCodex(path)
 	if err != nil || len(items) != 1 {
 		t.Fatalf("Codex fixture = %+v, %v", items, err)
 	}

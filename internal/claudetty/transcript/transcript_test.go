@@ -70,7 +70,7 @@ func TestTailerHoldsPartialLines(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"type":"summary"}`+"\n"+`{"type":"assistant"`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tailer, err := OpenTailer(path)
+	tailer, err := OpenTailer(path, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,5 +120,31 @@ func TestParseLineTimestamp(t *testing.T) {
 	}
 	if !l.Time.IsZero() {
 		t.Fatalf("Time = %v, want zero for an unparseable timestamp", l.Time)
+	}
+}
+
+func TestTailerAtEndSkipsExistingHistory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	if err := os.WriteFile(path, []byte(`{"type":"summary"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tailer, err := OpenTailer(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tailer.Close()
+	if lines := tailer.Pump(); len(lines) != 0 {
+		t.Fatalf("history read: %q", lines)
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(`{"type":"user"}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	if lines := tailer.Pump(); len(lines) != 1 || string(lines[0]) != `{"type":"user"}` {
+		t.Fatalf("appended lines = %q", lines)
 	}
 }

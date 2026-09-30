@@ -43,6 +43,8 @@ func TestUnboundBackendSessionsSkipsWhatCannotBind(t *testing.T) {
 		{Seq: 4, Backend: "claude", Session: "T"},    // marker-era turn, no digest
 		{Seq: 5, Backend: "claude", PromptDigest: d}, // never reached a backend session
 		{Seq: 6, Backend: "claude", Session: "U", PromptDigest: d},
+		{Seq: 7, Backend: "codex", Session: "V", PromptDigest: d}, // interval closed by seq 8
+		{Seq: 8, Backend: "codex", Session: "V", PromptDigest: d, Bound: true},
 	}
 	got := unboundBackendSessions(turns)
 	want := [][2]string{{"codex", "S"}, {"claude", "U"}}

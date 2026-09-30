@@ -159,30 +159,31 @@ func (s *Store) Commit(r LinkRecord) (string, error) {
 	if e, ok := lf.Links[r.Blob]; ok {
 		token = e.Token
 	}
+	addSource := r.Source != "" && lf.Sources[r.Source] != r.Blob
+	var seen *SeenEntry
+	if r.SeenPath != "" && r.SeenInfo != nil {
+		if dev, ino, ctime, ok := fileIdentity(r.SeenInfo); ok {
+			e := SeenEntry{Blob: r.Blob, Size: r.SeenInfo.Size(), MtimeNS: r.SeenInfo.ModTime().UnixNano(), CtimeNS: ctime, Ino: ino, Dev: dev}
+			if cur, had := lf.Seen[r.SeenPath]; !had || cur != e {
+				seen = &e
+			}
+		}
+	}
+	if token != "" && !addSource && seen == nil {
+		return token, nil
+	}
 	next := lf.clone()
-	changed := false
 	if token == "" {
 		if token, err = newToken(); err != nil {
 			return "", err
 		}
 		next.Links[r.Blob] = LinkEntry{Token: token, Name: r.Name, ContentType: r.ContentType}
-		changed = true
 	}
-	if r.Source != "" && next.Sources[r.Source] != r.Blob {
+	if addSource {
 		next.Sources[r.Source] = r.Blob
-		changed = true
 	}
-	if r.SeenPath != "" && r.SeenInfo != nil {
-		if dev, ino, ctime, ok := fileIdentity(r.SeenInfo); ok {
-			e := SeenEntry{Blob: r.Blob, Size: r.SeenInfo.Size(), MtimeNS: r.SeenInfo.ModTime().UnixNano(), CtimeNS: ctime, Ino: ino, Dev: dev}
-			if cur, had := next.Seen[r.SeenPath]; !had || cur != e {
-				next.Seen[r.SeenPath] = e
-				changed = true
-			}
-		}
-	}
-	if !changed {
-		return token, nil
+	if seen != nil {
+		next.Seen[r.SeenPath] = *seen
 	}
 	if err := s.writeLinks(next); err != nil {
 		return "", err

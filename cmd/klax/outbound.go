@@ -21,28 +21,34 @@ var outLinkRe = regexp.MustCompile(`(!?)\[([^\]]*)\]\(([^)\s]+)\)`)
 const maxOutboundFiles = 16
 
 // rewriteOutboundForUI rewrites an agent answer's local file links to /api/file?ref= capability
-// URLs. A link that cannot be confined or snapshotted degrades to its plain label. UI-only.
-func (d *daemon) rewriteOutboundForUI(sk string, created, turnSeq int64, md string) string {
+// URLs. A link that cannot be confined or snapshotted degrades to its plain label; published
+// reports whether none did, so a caller may keep the result. UI-only.
+func (d *daemon) rewriteOutboundForUI(sk string, created, turnSeq int64, md string) (out string, published bool) {
 	if d.uiHub == nil || md == "" || !strings.Contains(md, "](") {
-		return md
+		return md, true
 	}
 	// Store first, then liveness: closeSession deletes the session before dropping the runner, so a
 	// missing session here means a concurrent close won.
 	store := d.sessionStore(sk, created)
 	sess := d.store.Get(sk, created)
 	if sess == nil {
-		return md
+		return md, false
 	}
 	roots := []string{sess.CWD}
 	n := 0
-	return outLinkRe.ReplaceAllStringFunc(md, func(m string) string {
+	published = true
+	degrade := func(label string) string {
+		published = false
+		return label
+	}
+	out = outLinkRe.ReplaceAllStringFunc(md, func(m string) string {
 		sub := outLinkRe.FindStringSubmatch(m)
 		bang, label, href := sub[1], sub[2], sub[3]
 		if isRemoteHref(href) {
 			return m // http(s)/data/anchor/already-ours: leave untouched
 		}
 		if n >= maxOutboundFiles {
-			return label
+			return degrade(label)
 		}
 		key, keyOK := outboundKey(turnSeq, href, sess.CWD)
 		if keyOK {
@@ -51,17 +57,17 @@ func (d *daemon) rewriteOutboundForUI(sk string, created, turnSeq int64, md stri
 					n++
 					return out
 				}
-				return label
+				return degrade(label)
 			}
 		}
 		// Not snapshotted yet: the one point the original is read, and where confinement applies.
 		real, ok := resolveInRoot(href, sess.CWD, roots)
 		if !ok {
-			return label // outside any root / malformed: degrade to text, never a dead link
+			return degrade(label) // outside any root / malformed: degrade to text, never a dead link
 		}
 		stored, fi, err := store.Adopt(filepath.Base(real), real)
 		if err != nil {
-			return label
+			return degrade(label)
 		}
 		// Token, turn mapping and content identity are one durable write, not three.
 		token, err := d.commitLink(store, sk, created, sessfiles.LinkRecord{
@@ -70,11 +76,12 @@ func (d *daemon) rewriteOutboundForUI(sk string, created, turnSeq int64, md stri
 			Source:      key, SeenPath: real, SeenInfo: fi,
 		})
 		if err != nil {
-			return label // a link that cannot be re-resolved later is not published
+			return degrade(label) // a link that cannot be re-resolved later is not published
 		}
 		n++
 		return renderHref(store, stored, token, bang, label)
 	})
+	return out, published
 }
 
 // storedHref renders an already-published blob as its markdown link.

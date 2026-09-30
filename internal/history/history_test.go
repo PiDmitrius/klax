@@ -41,6 +41,24 @@ func TestTurnAuditSnapshotUsesBoundRecordAndExactBytes(t *testing.T) {
 	}
 }
 
+func readCodex(path string) ([]Item, error) {
+	snap, err := loadTranscript("codex", "", path)
+	return snap.items, err
+}
+
+func readClaude(path string) ([]Item, error) {
+	snap, err := loadTranscript("claude", "", path)
+	return snap.items, err
+}
+
+func readAuditSessionFile(backend, sessionID, path string) (*AuditSession, error) {
+	snap, err := loadTranscript(backend, sessionID, path)
+	if err != nil {
+		return nil, err
+	}
+	return newAuditSession(snap), nil
+}
+
 func writeLines(t *testing.T, lines []string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "t.jsonl")

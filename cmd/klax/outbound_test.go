@@ -33,7 +33,13 @@ func TestRewriteOutboundForUI(t *testing.T) {
 	created := d.store.SessionsFor("tg:1")[0].Created
 
 	md := "img ![c](chart.png) esc [r](../../../etc/passwd) web [w](https://x.com/a)"
-	out := d.rewriteOutboundForUI("tg:1", created, 1, md)
+	out, published := d.rewriteOutboundForUI("tg:1", created, 1, md)
+	if published {
+		t.Fatal("a degraded link was reported as published")
+	}
+	if _, published := d.rewriteOutboundForUI("tg:1", created, 1, "img ![c](chart.png) web [w](https://x.com/a)"); !published {
+		t.Fatal("published links reported as degraded")
+	}
 
 	if !strings.Contains(out, "![c](/api/file?ref=") {
 		t.Fatalf("in-root image must be rewritten to a capability URL: %q", out)
@@ -62,7 +68,7 @@ func TestRewriteOutboundForUI(t *testing.T) {
 
 	// With the UI off the markdown is returned unchanged.
 	d.uiHub = nil
-	if got := d.rewriteOutboundForUI("tg:1", created, 1, md); got != md {
+	if got, _ := d.rewriteOutboundForUI("tg:1", created, 1, md); got != md {
 		t.Fatalf("UI-off must pass through unchanged: %q", got)
 	}
 }
@@ -84,7 +90,7 @@ func TestRewriteOutboundSurvivesADeletedOriginal(t *testing.T) {
 	created := d.store.SessionsFor("tg:1")[0].Created
 
 	md := "see [report](report.csv)"
-	first := d.rewriteOutboundForUI("tg:1", created, 1, md)
+	first, _ := d.rewriteOutboundForUI("tg:1", created, 1, md)
 	if !strings.Contains(first, "[report](/api/file?ref=") {
 		t.Fatalf("first render must publish the file: %q", first)
 	}
@@ -93,7 +99,7 @@ func TestRewriteOutboundSurvivesADeletedOriginal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	second := d.rewriteOutboundForUI("tg:1", created, 1, md)
+	second, _ := d.rewriteOutboundForUI("tg:1", created, 1, md)
 	if second != first {
 		t.Fatalf("a rebuild after the original vanished changed the link:\n first=%q\nsecond=%q", first, second)
 	}
@@ -119,17 +125,17 @@ func TestRewriteOutboundCapturesEachTurnsVersion(t *testing.T) {
 	created := d.store.SessionsFor("tg:1")[0].Created
 
 	md := "готово [summary](summary.md)"
-	turn1 := d.rewriteOutboundForUI("tg:1", created, 1, md)
+	turn1, _ := d.rewriteOutboundForUI("tg:1", created, 1, md)
 
 	if err := os.WriteFile(src, []byte("# v2 corrected\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	turn2 := d.rewriteOutboundForUI("tg:1", created, 2, md)
+	turn2, _ := d.rewriteOutboundForUI("tg:1", created, 2, md)
 
 	if turn2 == turn1 {
 		t.Fatalf("the corrected file was served as the old snapshot — the fix is invisible: %q", turn2)
 	}
-	if again := d.rewriteOutboundForUI("tg:1", created, 1, md); again != turn1 {
+	if again, _ := d.rewriteOutboundForUI("tg:1", created, 1, md); again != turn1 {
 		t.Fatalf("re-rendering turn 1 changed its link:\n was=%q\nnow=%q", turn1, again)
 	}
 	body1, body2 := servedBody(t, d, turn1), servedBody(t, d, turn2)
@@ -185,7 +191,7 @@ func TestRewriteOutboundResolvesAfterRestart(t *testing.T) {
 
 	md := "see [report](report.csv)"
 	d1, created1 := newDaemon()
-	first := d1.rewriteOutboundForUI("tg:1", created1, 1, md)
+	first, _ := d1.rewriteOutboundForUI("tg:1", created1, 1, md)
 	if !strings.Contains(first, "/api/file?ref=") {
 		t.Fatalf("first render must publish the file: %q", first)
 	}
@@ -197,7 +203,7 @@ func TestRewriteOutboundResolvesAfterRestart(t *testing.T) {
 	if created2 != created1 {
 		t.Fatalf("test setup did not reproduce the same durable store (%d vs %d)", created1, created2)
 	}
-	second := d2.rewriteOutboundForUI("tg:1", created2, 1, md)
+	second, _ := d2.rewriteOutboundForUI("tg:1", created2, 1, md)
 	if second != first {
 		t.Fatalf("after restart the link changed:\n first=%q\nsecond=%q", first, second)
 	}

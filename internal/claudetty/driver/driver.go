@@ -351,7 +351,7 @@ func Run(ctx context.Context, w io.Writer, opts Options) (int, error) {
 		// current echo status rather than a stale one (a SessionStart buffered
 		// alongside the echo could otherwise re-type an accepted prompt).
 		if tailer == nil && transcriptPath != "" {
-			if t, err := transcript.OpenTailer(transcriptPath); err == nil {
+			if t, err := transcript.OpenTailer(transcriptPath, opts.Resume != "" && !promptSent); err == nil {
 				tailer = t
 				trace("transcript opened for tailing: %s", transcriptPath)
 			}
@@ -431,9 +431,10 @@ func Run(ctx context.Context, w io.Writer, opts Options) (int, error) {
 					waitQuiescent(&lastOutputNS, trace)
 					// Fast-forward past a resumed session's history before
 					// typing: open the tailer now (on --resume the file
-					// already exists) and discard its current content.
+					// already exists, and the tailer starts at its end) and
+					// discard whatever was appended since.
 					if tailer == nil && transcriptPath != "" {
-						if t, err := transcript.OpenTailer(transcriptPath); err == nil {
+						if t, err := transcript.OpenTailer(transcriptPath, opts.Resume != "" && !promptSent); err == nil {
 							tailer = t
 							trace("transcript opened for tailing: %s", transcriptPath)
 						}
@@ -552,7 +553,7 @@ func Run(ctx context.Context, w io.Writer, opts Options) (int, error) {
 	if ctx.Err() == nil {
 		for i := 0; i < postStopDrain; i++ {
 			if tailer == nil && transcriptPath != "" {
-				if t, err := transcript.OpenTailer(transcriptPath); err == nil {
+				if t, err := transcript.OpenTailer(transcriptPath, opts.Resume != "" && !promptSent); err == nil {
 					tailer = t
 				}
 			}

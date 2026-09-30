@@ -12,11 +12,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/claudetty/transcript"
@@ -63,42 +64,6 @@ type Item struct {
 	Session      string `json:"-"`
 }
 
-type rawRecord struct {
-	Event  int64
-	Start  int
-	End    int
-	Raw    []byte
-	Digest string
-}
-
-// completeRecords is the sole source of transcript event numbering: Event is
-// the zero-based physical JSONL record index, regardless of record type or its
-// embedded timestamp. Claude compact_boundary is an ordinary appended record
-// in this same sequence; preserved summary/input rows written after it may
-// carry earlier timestamps, so timestamps must never define turn ranges.
-// A final unterminated fragment is deliberately omitted and retried after it
-// is complete.
-func completeRecords(data []byte) []rawRecord {
-	var out []rawRecord
-	start := 0
-	for i, b := range data {
-		if b != '\n' {
-			continue
-		}
-		raw := data[start:i]
-		if len(raw) > 0 && raw[len(raw)-1] == '\r' {
-			raw = raw[:len(raw)-1]
-		}
-		sum := sha256.Sum256(raw)
-		out = append(out, rawRecord{
-			Event: int64(len(out)), Start: start, End: i + 1,
-			Raw: raw, Digest: hex.EncodeToString(sum[:]),
-		})
-		start = i + 1
-	}
-	return out
-}
-
 // turnMarkerRe matches ONLY klax's injected marker shape: the exact 16-hex token
 // newMarker produces, at the end of the message (where buildTurnPrompt appends it),
 // so a user message that merely contains a klax-turn-looking comment is left intact.
@@ -119,11 +84,22 @@ func StripTurnMarker(text string) (clean, marker string) {
 // session id yields (nil, nil) so callers degrade to "live only" rather than
 // erroring.
 func Load(backend, sessionID, cwd string) ([]Item, error) {
-	items, _, err := Snapshot(backend, sessionID, cwd)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
+	items, _, err := LoadGeneration(backend, sessionID, cwd)
 	return items, err
+}
+
+// LoadGeneration is Load plus the transcript's index generation, which changes
+// only when the file is re-indexed from zero, never on an append: a cache of
+// rows derived from earlier items stays valid while it is unchanged.
+func LoadGeneration(backend, sessionID, cwd string) ([]Item, uint64, error) {
+	if sessionID == "" {
+		return nil, 0, nil
+	}
+	snap, err := sessionTranscript(backend, sessionID, cwd)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, 0, nil
+	}
+	return snap.items, snap.gen, err
 }
 
 // Snapshot returns rendered items and the next complete physical event number.
@@ -131,28 +107,26 @@ func Snapshot(backend, sessionID, cwd string) ([]Item, int64, error) {
 	if sessionID == "" {
 		return nil, 0, nil
 	}
-	if backend == "codex" {
-		path := locateCodex(sessionID)
-		if path == "" {
-			return nil, 0, fmt.Errorf("codex transcript %s: %w", sessionID, os.ErrNotExist)
-		}
-		items, end, err := readCodexSnapshot(path)
-		stampCoordinates(items, backend, sessionID)
-		return items, end, err
-	}
-	path := locateClaude(sessionID, cwd)
-	if path == "" {
-		return nil, 0, fmt.Errorf("claude transcript %s: %w", sessionID, os.ErrNotExist)
-	}
-	items, end, err := readClaudeSnapshot(path)
-	stampCoordinates(items, backend, sessionID)
-	return items, end, err
+	snap, err := sessionTranscript(backend, sessionID, cwd)
+	return snap.items, int64(len(snap.ends)), err
 }
 
-// AuditSnapshot reads one backend transcript exactly once and derives every
-// finish-side audit projection from those same bytes: the whole-session
-// context, the normalized turn slice, its physical coordinates, and the exact
-// contiguous-byte digest.
+func sessionTranscript(backend, sessionID, cwd string) (transcriptSnapshot, error) {
+	var path string
+	if backend == "codex" {
+		path = runner.LocateCodexRollout(sessionID)
+	} else {
+		path = locateClaude(sessionID, cwd)
+	}
+	if path == "" {
+		return transcriptSnapshot{}, fmt.Errorf("%s transcript %s: %w", backend, sessionID, os.ErrNotExist)
+	}
+	return loadTranscript(backend, sessionID, path)
+}
+
+// AuditSnapshot is the finish-side audit projection of one transcript
+// snapshot: the whole-session context, the normalized turn slice, its physical
+// coordinates, and the exact contiguous-byte digest.
 type AuditSnapshot struct {
 	Path          string
 	FromEvent     int64
@@ -171,8 +145,8 @@ func TurnAuditSnapshot(backend, sessionID, cwd string, fromEvent int64) (AuditSn
 	return session.Turn(fromEvent)
 }
 
-// AuditSession is one immutable physical transcript read used for binding,
-// context, and turn-trace construction.
+// AuditSession is one immutable transcript snapshot used for binding, context,
+// and turn-trace construction.
 type AuditSession struct {
 	Path          string
 	ToEvent       int64
@@ -180,80 +154,63 @@ type AuditSession struct {
 	ContextUsed   int
 	ContextWindow int
 
-	backend   string
-	sessionID string
-	data      []byte
-	records   []rawRecord
+	ends []int64
+	file os.FileInfo
 }
 
 func ReadAuditSession(backend, sessionID, cwd string) (*AuditSession, error) {
 	if sessionID == "" {
 		return nil, errors.New("backend session id is empty")
 	}
-	var path string
-	if backend == "codex" {
-		path = locateCodex(sessionID)
-	} else {
-		path = locateClaude(sessionID, cwd)
-	}
-	if path == "" {
-		return nil, fmt.Errorf("%s transcript %s: %w", backend, sessionID, os.ErrNotExist)
-	}
-	return readAuditSessionFile(backend, sessionID, path)
-}
-
-func readAuditSessionFile(backend, sessionID, path string) (*AuditSession, error) {
-	data, err := os.ReadFile(path)
+	snap, err := sessionTranscript(backend, sessionID, cwd)
 	if err != nil {
 		return nil, err
 	}
-	records := completeRecords(data)
-	parse := parseClaudeRecords
-	if backend == "codex" {
-		parse = parseCodexRecords
-	}
-	all := parse(records)
-	stampCoordinates(all, backend, sessionID)
-	var used, window int
-	for _, it := range all {
-		if it.Role == "assistant" && it.CtxUsed > 0 {
-			used, window = it.CtxUsed, it.CtxWindow
-		}
-	}
-	return &AuditSession{
-		Path: path, ToEvent: int64(len(records)), Items: all,
-		ContextUsed: used, ContextWindow: window,
-		backend: backend, sessionID: sessionID, data: data, records: records,
-	}, nil
+	return newAuditSession(snap), nil
 }
 
+func newAuditSession(snap transcriptSnapshot) *AuditSession {
+	used, window := latestContext(snap.items)
+	return &AuditSession{
+		Path: snap.path, ToEvent: int64(len(snap.ends)), Items: snap.items,
+		ContextUsed: used, ContextWindow: window,
+		ends: snap.ends, file: snap.file,
+	}
+}
+
+// Turn is the snapshot's projection of one bound turn: its blocks as indexed and
+// the SHA-256 of its exact byte span, from fromEvent to the snapshot's end. The
+// transcript only grows (docs/CONTRACT.md), so those bytes are the ones indexed.
 func (s *AuditSession) Turn(fromEvent int64) (AuditSnapshot, error) {
-	if fromEvent < 0 || fromEvent >= int64(len(s.records)) {
-		return AuditSnapshot{}, fmt.Errorf("bound event %d outside transcript [0,%d)", fromEvent, len(s.records))
+	if fromEvent < 0 || fromEvent >= s.ToEvent {
+		return AuditSnapshot{}, fmt.Errorf("bound event %d outside transcript [0,%d)", fromEvent, s.ToEvent)
 	}
-	parse := parseClaudeRecords
-	if s.backend == "codex" {
-		parse = parseCodexRecords
+	lead := slices.IndexFunc(s.Items, func(it Item) bool { return it.Role == "user" && it.Event == fromEvent })
+	if lead < 0 {
+		return AuditSnapshot{}, fmt.Errorf("event %d is not a normalized backend user record of this snapshot", fromEvent)
 	}
-	blocks := parse(s.records[fromEvent:])
-	if len(blocks) == 0 || blocks[0].Role != "user" || blocks[0].Event != fromEvent {
-		return AuditSnapshot{}, fmt.Errorf("event %d is not a normalized backend user record", fromEvent)
+	start := int64(0)
+	if fromEvent > 0 {
+		start = s.ends[fromEvent-1]
 	}
-	stampCoordinates(blocks, s.backend, s.sessionID)
-	start := s.records[fromEvent].Start
-	end := s.records[len(s.records)-1].End
-	sum := sha256.Sum256(s.data[start:end])
+	end := s.ends[len(s.ends)-1]
+	f, err := os.Open(s.Path)
+	if err != nil {
+		return AuditSnapshot{}, err
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !os.SameFile(fi, s.file) {
+		return AuditSnapshot{}, fmt.Errorf("transcript %s is no longer the indexed file", s.Path)
+	}
+	h := sha256.New()
+	if n, err := io.Copy(h, io.NewSectionReader(f, start, end-start)); err != nil || n != end-start {
+		return AuditSnapshot{}, fmt.Errorf("read transcript events %d..%d: %d of %d bytes: %v", fromEvent, s.ToEvent, n, end-start, err)
+	}
 	return AuditSnapshot{
 		Path: s.Path, FromEvent: fromEvent, ToEvent: s.ToEvent,
-		SHA256: hex.EncodeToString(sum[:]), Blocks: blocks,
+		SHA256: hex.EncodeToString(h.Sum(nil)), Blocks: s.Items[lead:],
 		ContextUsed: s.ContextUsed, ContextWindow: s.ContextWindow,
 	}, nil
-}
-
-func stampCoordinates(items []Item, backend, session string) {
-	for i := range items {
-		items[i].Backend, items[i].Session = backend, session
-	}
 }
 
 // LatestContext returns a session's current context (used tokens, window) from the
@@ -264,6 +221,10 @@ func stampCoordinates(items []Item, backend, session string) {
 // transcript carries none); the caller falls back to the stream-reported window.
 func LatestContext(backend, sessionID, cwd string) (used, window int) {
 	items, _ := Load(backend, sessionID, cwd)
+	return latestContext(items)
+}
+
+func latestContext(items []Item) (used, window int) {
 	for _, it := range items {
 		if it.Role == "assistant" && it.CtxUsed > 0 {
 			used, window = it.CtxUsed, it.CtxWindow
@@ -281,7 +242,7 @@ func Stat(backend, sessionID, cwd string) (modTime time.Time, size int64, ok boo
 	}
 	var path string
 	if backend == "codex" {
-		path = locateCodex(sessionID)
+		path = runner.LocateCodexRollout(sessionID)
 	} else {
 		path = locateClaude(sessionID, cwd)
 	}
@@ -321,69 +282,63 @@ func encodeProjectDir(cwd string) string {
 	return strings.NewReplacer("/", "-", ".", "-", "_", "-").Replace(cwd)
 }
 
-func readClaude(path string) ([]Item, error) {
-	items, _, err := readClaudeSnapshot(path)
-	return items, err
+type claudeParser struct {
+	items            []Item
+	backend, session string
 }
 
-func readClaudeSnapshot(path string) ([]Item, int64, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, 0, err
+func (p *claudeParser) append(it Item) {
+	it.Backend, it.Session = p.backend, p.session
+	p.items = append(p.items, it)
+}
+
+func (p *claudeParser) publish() []Item { return p.items[:len(p.items):len(p.items)] }
+
+func (p *claudeParser) add(rec rawRecord) {
+	raw := rec.Raw
+	line, ok := transcript.Parse(raw) // skips blanks and sidechains
+	if !ok {
+		return
 	}
-	records := completeRecords(data)
-	return parseClaudeRecords(records), int64(len(records)), nil
-}
-
-func parseClaudeRecords(records []rawRecord) []Item {
-	var items []Item
-	for _, rec := range records {
-		raw := rec.Raw
-		line, ok := transcript.Parse(raw) // skips blanks and sidechains
-		if !ok {
-			continue
+	if line.IsMeta {
+		return // SDK-injected internal row (e.g. image-view annotation), never a real message
+	}
+	ts := timeOrEmpty(line.Time)
+	if line.Compact != nil {
+		p.append(Item{Role: "tool", Text: compactToolText(line.Compact.Trigger, line.Compact.PreTokens, line.Compact.PostTokens), Time: ts})
+		return
+	}
+	if line.IsAPIError {
+		// The `error` field carries a machine code; a refusal puts the
+		// sentence that names the cause, and the request id support asks
+		// for, in the message text beside it. Show that when it exists.
+		text, _, _ := claudeAssistant(raw)
+		if text == "" {
+			text = line.Error
 		}
-		if line.IsMeta {
-			continue // SDK-injected internal row (e.g. image-view annotation), never a real message
-		}
-		ts := timeOrEmpty(line.Time)
-		if line.Compact != nil {
-			items = append(items, Item{Role: "tool", Text: compactToolText(line.Compact.Trigger, line.Compact.PreTokens, line.Compact.PostTokens), Time: ts})
-			continue
-		}
-		if line.IsAPIError {
-			// The `error` field carries a machine code; a refusal puts the
-			// sentence that names the cause, and the request id support asks
-			// for, in the message text beside it. Show that when it exists.
-			text, _, _ := claudeAssistant(raw)
-			if text == "" {
-				text = line.Error
-			}
-			items = append(items, Item{Role: "system", Kind: "error", Text: text, Time: ts})
-			continue
-		}
-		switch line.Type {
-		case "user":
-			if text, marker := claudeUserText(line.Raw); text != "" {
-				if marker == "" {
-					if compactText, ok := claudeCompactContinuationToolText(text); ok {
-						items = append(items, Item{Role: "tool", Text: compactText, Time: ts})
-						continue
-					}
-					if claudeInternalCompactNoise(text) {
-						continue
-					}
+		p.append(Item{Role: "system", Kind: "error", Text: text, Time: ts})
+		return
+	}
+	switch line.Type {
+	case "user":
+		if text, marker := claudeUserText(line.Raw); text != "" {
+			if marker == "" {
+				if compactText, ok := claudeCompactContinuationToolText(text); ok {
+					p.append(Item{Role: "tool", Text: compactText, Time: ts})
+					return
 				}
-				items = append(items, Item{Role: "user", Text: text, Marker: marker, Time: ts, Event: rec.Event, RecordDigest: rec.Digest, PromptDigest: claudeUserDigest(line.Raw)})
+				if claudeInternalCompactNoise(text) {
+					return
+				}
 			}
-		case "assistant":
-			text, tools, ctxUsed := claudeAssistant(line.Raw)
-			if text != "" || len(tools) > 0 {
-				items = append(items, Item{Role: "assistant", Text: text, Tools: tools, Time: ts, CtxUsed: ctxUsed})
-			}
+			p.append(Item{Role: "user", Text: text, Marker: marker, Time: ts, Event: rec.Event, RecordDigest: rec.digest(), PromptDigest: claudeUserDigest(line.Raw)})
+		}
+	case "assistant":
+		text, tools, ctxUsed := claudeAssistant(line.Raw)
+		if text != "" || len(tools) > 0 {
+			p.append(Item{Role: "assistant", Text: text, Tools: tools, Time: ts, CtxUsed: ctxUsed})
 		}
 	}
-	return items
 }
 
 func claudeUserDigest(raw json.RawMessage) string {
@@ -504,188 +459,189 @@ func claudeAssistant(raw json.RawMessage) (string, []ToolCall, int) {
 
 // ---- Codex rollout ----
 
-// codexPaths caches located rollouts. A rollout's path is fixed once written, so a cached entry can
-// only go stale by the file being removed, which the stat catches.
-var codexPaths sync.Map // threadID -> path
-
-// locateCodex finds a codex rollout by thread id, scanning ~/.codex/sessions only on a cache miss.
-func locateCodex(threadID string) string {
-	if v, ok := codexPaths.Load(threadID); ok {
-		p := v.(string)
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-		codexPaths.Delete(threadID)
-	}
-	home, _ := os.UserHomeDir()
-	if home == "" {
-		return ""
-	}
-	matches, _ := filepath.Glob(filepath.Join(home, ".codex", "sessions", "*", "*", "*", "*"+threadID+".jsonl"))
-	if len(matches) > 0 {
-		codexPaths.Store(threadID, matches[0])
-		return matches[0]
-	}
-	return ""
+type codexParser struct {
+	items            []Item
+	shared           int // items[:shared] are published and amended only on a private copy
+	backend, session string
+	lastAssistant    int
+	lastWasCompacted bool
+	lastCompacted    int
 }
 
-func readCodex(path string) ([]Item, error) {
-	items, _, err := readCodexSnapshot(path)
-	return items, err
+func (c *codexParser) publish() []Item {
+	c.shared = len(c.items)
+	return c.items[:len(c.items):len(c.items)]
 }
 
-func readCodexSnapshot(path string) ([]Item, int64, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, 0, err
+func (c *codexParser) at(i int) *Item {
+	if i < c.shared {
+		c.items, c.shared = slices.Clone(c.items), 0
 	}
-	records := completeRecords(data)
-	return parseCodexRecords(records), int64(len(records)), nil
+	return &c.items[i]
 }
 
-func parseCodexRecords(records []rawRecord) []Item {
-	var items []Item
-	lastAssistant := -1
-	lastWasCompacted := false
-	lastCompacted := -1
-	appendAssistant := func(it Item) {
-		items = append(items, it)
-		lastAssistant = len(items) - 1
-		lastWasCompacted = false
-		lastCompacted = -1
+func (c *codexParser) append(it Item) {
+	it.Backend, it.Session = c.backend, c.session
+	c.items = append(c.items, it)
+}
+
+func (c *codexParser) appendAssistant(it Item) {
+	c.append(it)
+	c.lastAssistant = len(c.items) - 1
+	c.lastWasCompacted = false
+	c.lastCompacted = -1
+}
+
+func (c *codexParser) appendTool(tc ToolCall, ts string) {
+	c.appendAssistant(Item{Role: "assistant", Tools: []ToolCall{tc}, Time: ts})
+}
+
+func (c *codexParser) appendUser(message, ts string, rec rawRecord) {
+	if t, marker := StripTurnMarker(message); t != "" {
+		c.append(Item{Role: "user", Text: t, Marker: marker, Time: ts, Event: rec.Event, RecordDigest: rec.digest(), PromptDigest: promptcanon.Digest(message)})
+		c.lastAssistant = -1
 	}
-	appendCodexTool := func(tc ToolCall, ts string) {
-		appendAssistant(Item{Role: "assistant", Tools: []ToolCall{tc}, Time: ts})
+	c.lastWasCompacted = false
+	c.lastCompacted = -1
+}
+
+func (c *codexParser) appendAgent(message, ts string) {
+	if t := strings.TrimSpace(message); t != "" {
+		c.appendAssistant(Item{Role: "assistant", Text: t, Time: ts})
 	}
-	appendCodexUser := func(message, ts string, rec rawRecord) {
-		if t, marker := StripTurnMarker(message); t != "" {
-			items = append(items, Item{Role: "user", Text: t, Marker: marker, Time: ts, Event: rec.Event, RecordDigest: rec.Digest, PromptDigest: promptcanon.Digest(message)})
-			lastAssistant = -1
-		}
-		lastWasCompacted = false
-		lastCompacted = -1
+}
+
+// codexSilent reports a record that never renders: tool output, reasoning, raw model messages
+// and completed items other than messages. They are most of a rollout's bytes, so they are
+// recognized by their leading keys and skip JSON decoding.
+func codexSilent(raw []byte) bool {
+	record, payload, item, ok := runner.CodexLead(raw)
+	if !ok {
+		return false
 	}
-	appendCodexAgent := func(message, ts string) {
-		if t := strings.TrimSpace(message); t != "" {
-			appendAssistant(Item{Role: "assistant", Text: t, Time: ts})
+	switch record + "/" + payload {
+	case "response_item/function_call_output", "response_item/custom_tool_call_output", "response_item/reasoning", "response_item/message":
+		return true
+	case "event_msg/item_completed":
+		return item != "" && item != "UserMessage" && item != "AgentMessage"
+	}
+	return false
+}
+
+func (c *codexParser) add(rec rawRecord) {
+	raw := rec.Raw
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || codexSilent(raw) {
+		return
+	}
+	var entry struct {
+		Type      string            `json:"type"`
+		Timestamp string            `json:"timestamp"`
+		Payload   json.RawMessage   `json:"payload"`
+		Item      *codexHistoryItem `json:"item"`
+	}
+	if json.Unmarshal(raw, &entry) != nil {
+		return
+	}
+	if entry.Type != "event_msg" && entry.Type != "response_item" && entry.Type != "compacted" && !strings.HasPrefix(entry.Type, "item.") {
+		return
+	}
+	var p struct {
+		Type      string          `json:"type"`
+		Message   string          `json:"message"`
+		Name      string          `json:"name"`
+		Namespace string          `json:"namespace"`
+		Arguments json.RawMessage `json:"arguments"`
+		Input     json.RawMessage `json:"input"`
+		Action    json.RawMessage `json:"action"`
+		Item      *codexEventItem `json:"item"`
+		Info      *struct {
+			LastTokenUsage *struct {
+				InputTokens int `json:"input_tokens"`
+			} `json:"last_token_usage"`
+			ModelContextWindow int `json:"model_context_window"`
+		} `json:"info"`
+	}
+	_ = json.Unmarshal(entry.Payload, &p)
+	ts := normalizeTime(entry.Timestamp)
+	switch {
+	case entry.Type == "event_msg" && p.Type == "task_complete":
+		if message := runner.ParseCodexTerminalError(raw); message != "" {
+			c.append(Item{Role: "system", Kind: "error", Text: message, Time: ts})
+			c.lastAssistant = -1
+		}
+	case entry.Type == "compacted":
+		c.append(Item{Role: "tool", Text: compactToolText("", 0, 0), Time: ts})
+		c.lastAssistant = -1
+		c.lastWasCompacted = true
+		c.lastCompacted = len(c.items) - 1
+	case entry.Type == "event_msg" && p.Type == "user_message":
+		c.appendUser(p.Message, ts, rec)
+	case entry.Type == "event_msg" && p.Type == "agent_message":
+		c.appendAgent(p.Message, ts)
+	case entry.Type == "event_msg" && p.Type == "item_completed" && p.Item != nil:
+		// Codex carries conversation text as completed items; only the two message
+		// kinds are read here, because every other kind reaches the timeline through
+		// the response_item tool records and would otherwise be drawn twice.
+		switch p.Item.Type {
+		case "UserMessage":
+			c.appendUser(p.Item.text(), ts, rec)
+		case "AgentMessage":
+			c.appendAgent(p.Item.text(), ts)
+		}
+	case entry.Type == "event_msg" && p.Type == "context_compacted":
+		if !c.lastWasCompacted {
+			c.append(Item{Role: "tool", Text: compactToolText("", 0, 0), Time: ts})
+			c.lastCompacted = len(c.items) - 1
+		} else if c.lastCompacted >= 0 && c.items[c.lastCompacted].Time == "" {
+			c.at(c.lastCompacted).Time = ts
+		}
+		c.lastAssistant = -1
+		c.lastWasCompacted = true
+	case entry.Type == "event_msg" && p.Type == "token_count" && c.lastAssistant >= 0:
+		if p.Info != nil && p.Info.LastTokenUsage != nil {
+			it := c.at(c.lastAssistant)
+			it.CtxUsed, it.CtxWindow = p.Info.LastTokenUsage.InputTokens, p.Info.ModelContextWindow
+		}
+	case entry.Type == "item.started":
+		if tool, ok := codexHistoryItemTool(entry.Item); ok {
+			c.appendAssistant(Item{Role: "assistant", Tools: []ToolCall{tool}, Time: ts})
+		}
+	case entry.Type == "item.completed" && entry.Item != nil && entry.Item.Type == "web_search" && entry.Item.Query != "":
+		c.appendAssistant(Item{Role: "assistant", Tools: []ToolCall{toolCall("WebSearch", jsonObject("query", entry.Item.Query))}, Time: ts})
+	case entry.Type == "response_item" && p.Type == "custom_tool_call" && p.Name == "exec":
+		// New Codex orchestration wrapper: its JavaScript `input` invokes one or more
+		// tools.<name>(...) actions. Decode them into real tool rows (Exec, Write, …).
+		// If nothing decodes, fall back to showing the RAW orchestration source as an Exec
+		// row (truncated by the preview) so the user still sees what Codex ran, rather than
+		// an opaque 🔧 exec; a row is never silently dropped.
+		src := rawJSONArgument(p.Input)
+		if tools := decodeCodexExecTools(src); len(tools) > 0 {
+			for _, tc := range tools {
+				c.appendTool(tc, ts)
+			}
+		} else if src != "" {
+			c.appendAssistant(Item{Role: "assistant", Tools: []ToolCall{toolCall("Exec", jsonObject("command", src))}, Time: ts})
+		} else {
+			c.appendAssistant(Item{Role: "assistant", Tools: []ToolCall{{Name: "exec", Label: "🔧 exec"}}, Time: ts})
+		}
+	case entry.Type == "response_item" && (p.Type == "function_call" || p.Type == "custom_tool_call"):
+		if p.Name != "" {
+			args := rawJSONArgument(p.Arguments)
+			if args == "" {
+				args = rawJSONArgument(p.Input) // custom_tool_call carries "input" instead of "arguments"
+			}
+			c.appendTool(codexResponseToolCall(p.Namespace, p.Name, args), ts)
+		}
+	case entry.Type == "response_item" && p.Type == "web_search_call":
+		if tool, ok := codexWebSearchTool(p.Action); ok {
+			c.appendAssistant(Item{Role: "assistant", Tools: []ToolCall{tool}, Time: ts})
+		}
+	case entry.Type == "response_item" && p.Type == "tool_search_call":
+		if query := jsonStringField(rawJSONArgument(p.Arguments), "query"); query != "" {
+			c.appendAssistant(Item{Role: "assistant", Tools: []ToolCall{{Name: "ToolSearch", Label: "🔎 Tool search: " + query}}, Time: ts})
 		}
 	}
-	for _, rec := range records {
-		raw := rec.Raw
-		raw = bytes.TrimSpace(raw)
-		if len(raw) == 0 {
-			continue
-		}
-		var entry struct {
-			Type      string            `json:"type"`
-			Timestamp string            `json:"timestamp"`
-			Payload   json.RawMessage   `json:"payload"`
-			Item      *codexHistoryItem `json:"item"`
-		}
-		if json.Unmarshal(raw, &entry) != nil {
-			continue
-		}
-		if entry.Type != "event_msg" && entry.Type != "response_item" && entry.Type != "compacted" && !strings.HasPrefix(entry.Type, "item.") {
-			continue
-		}
-		var p struct {
-			Type      string          `json:"type"`
-			Message   string          `json:"message"`
-			Name      string          `json:"name"`
-			Namespace string          `json:"namespace"`
-			Arguments json.RawMessage `json:"arguments"`
-			Input     json.RawMessage `json:"input"`
-			Action    json.RawMessage `json:"action"`
-			Item      *codexEventItem `json:"item"`
-			Info      *struct {
-				LastTokenUsage *struct {
-					InputTokens int `json:"input_tokens"`
-				} `json:"last_token_usage"`
-				ModelContextWindow int `json:"model_context_window"`
-			} `json:"info"`
-		}
-		_ = json.Unmarshal(entry.Payload, &p)
-		ts := normalizeTime(entry.Timestamp)
-		switch {
-		case entry.Type == "event_msg" && p.Type == "task_complete":
-			if message := runner.ParseCodexTerminalError(raw); message != "" {
-				items = append(items, Item{Role: "system", Kind: "error", Text: message, Time: ts})
-				lastAssistant = -1
-			}
-		case entry.Type == "compacted":
-			items = append(items, Item{Role: "tool", Text: compactToolText("", 0, 0), Time: ts})
-			lastAssistant = -1
-			lastWasCompacted = true
-			lastCompacted = len(items) - 1
-		case entry.Type == "event_msg" && p.Type == "user_message":
-			appendCodexUser(p.Message, ts, rec)
-		case entry.Type == "event_msg" && p.Type == "agent_message":
-			appendCodexAgent(p.Message, ts)
-		case entry.Type == "event_msg" && p.Type == "item_completed" && p.Item != nil:
-			// Codex carries conversation text as completed items; only the two message
-			// kinds are read here, because every other kind reaches the timeline through
-			// the response_item tool records and would otherwise be drawn twice.
-			switch p.Item.Type {
-			case "UserMessage":
-				appendCodexUser(p.Item.text(), ts, rec)
-			case "AgentMessage":
-				appendCodexAgent(p.Item.text(), ts)
-			}
-		case entry.Type == "event_msg" && p.Type == "context_compacted":
-			if !lastWasCompacted {
-				items = append(items, Item{Role: "tool", Text: compactToolText("", 0, 0), Time: ts})
-				lastCompacted = len(items) - 1
-			} else if lastCompacted >= 0 && items[lastCompacted].Time == "" {
-				items[lastCompacted].Time = ts
-			}
-			lastAssistant = -1
-			lastWasCompacted = true
-		case entry.Type == "event_msg" && p.Type == "token_count" && lastAssistant >= 0:
-			if p.Info != nil && p.Info.LastTokenUsage != nil {
-				items[lastAssistant].CtxUsed = p.Info.LastTokenUsage.InputTokens
-				items[lastAssistant].CtxWindow = p.Info.ModelContextWindow
-			}
-		case entry.Type == "item.started":
-			if tool, ok := codexHistoryItemTool(entry.Item); ok {
-				appendAssistant(Item{Role: "assistant", Tools: []ToolCall{tool}, Time: ts})
-			}
-		case entry.Type == "item.completed" && entry.Item != nil && entry.Item.Type == "web_search" && entry.Item.Query != "":
-			appendAssistant(Item{Role: "assistant", Tools: []ToolCall{toolCall("WebSearch", jsonObject("query", entry.Item.Query))}, Time: ts})
-		case entry.Type == "response_item" && p.Type == "custom_tool_call" && p.Name == "exec":
-			// New Codex orchestration wrapper: its JavaScript `input` invokes one or more
-			// tools.<name>(...) actions. Decode them into real tool rows (Exec, Write, …).
-			// If nothing decodes, fall back to showing the RAW orchestration source as an Exec
-			// row (truncated by the preview) so the user still sees what Codex ran, rather than
-			// an opaque 🔧 exec; a row is never silently dropped.
-			src := rawJSONArgument(p.Input)
-			if tools := decodeCodexExecTools(src); len(tools) > 0 {
-				for _, tc := range tools {
-					appendCodexTool(tc, ts)
-				}
-			} else if src != "" {
-				appendAssistant(Item{Role: "assistant", Tools: []ToolCall{toolCall("Exec", jsonObject("command", src))}, Time: ts})
-			} else {
-				appendAssistant(Item{Role: "assistant", Tools: []ToolCall{{Name: "exec", Label: "🔧 exec"}}, Time: ts})
-			}
-		case entry.Type == "response_item" && (p.Type == "function_call" || p.Type == "custom_tool_call"):
-			if p.Name != "" {
-				args := rawJSONArgument(p.Arguments)
-				if args == "" {
-					args = rawJSONArgument(p.Input) // custom_tool_call carries "input" instead of "arguments"
-				}
-				appendCodexTool(codexResponseToolCall(p.Namespace, p.Name, args), ts)
-			}
-		case entry.Type == "response_item" && p.Type == "web_search_call":
-			if tool, ok := codexWebSearchTool(p.Action); ok {
-				appendAssistant(Item{Role: "assistant", Tools: []ToolCall{tool}, Time: ts})
-			}
-		case entry.Type == "response_item" && p.Type == "tool_search_call":
-			if query := jsonStringField(rawJSONArgument(p.Arguments), "query"); query != "" {
-				appendAssistant(Item{Role: "assistant", Tools: []ToolCall{{Name: "ToolSearch", Label: "🔎 Tool search: " + query}}, Time: ts})
-			}
-		}
-	}
-	return items
 }
 
 // codexEventItem is a completed conversation item; its content parts all carry the

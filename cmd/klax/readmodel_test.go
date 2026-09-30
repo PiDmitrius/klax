@@ -2,6 +2,9 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -39,7 +42,7 @@ func bindReadModelTurn(t *testing.T, st *sessfiles.Store, seq, event int64, text
 
 func testRM(d *daemon, created int64, items []history.Item, busy, latest bool) []uiTurn {
 	q, _ := d.sessionStore("user:alice", created).InboundLog()
-	return d.buildReadModel("user:alice", created, groupTurns(items), q, nil, busy, 0, latest, 1_000_000)
+	return d.buildReadModel("user:alice", created, groupTurns(items), q, nil, busy, 0, latest, 1_000_000, nil)
 }
 
 // A turn still queued (enq, never run) is surfaced on the latest page as state "enq" with
@@ -194,7 +197,7 @@ func TestReadModelUnboundRecordRemainsOnHistoricalPage(t *testing.T) {
 		{Role: "user", Text: "go", Event: 3, RecordDigest: "record", PromptDigest: digest, Backend: "claude", Session: "S"},
 		{Role: "assistant", Text: "answer"},
 	}
-	turns := d.buildReadModel("user:alice", created, groupTurns(items), q, nil, false, 10, false, 1_000_000)
+	turns := d.buildReadModel("user:alice", created, groupTurns(items), q, nil, false, 10, false, 1_000_000, nil)
 	if len(turns) != 1 || turns[0].Seq >= 0 || len(turns[0].Blocks) != 1 || turns[0].Blocks[0].Text != "answer" {
 		t.Fatalf("historical transcript turn disappeared: %+v", turns)
 	}
@@ -211,7 +214,7 @@ func TestReadModelLatestDoesNotRepeatTurnsFromOlderPages(t *testing.T) {
 	all := []history.Item{old, {Role: "assistant", Text: "old answer"}, newer, {Role: "assistant", Text: "new answer"}}
 	presence := transcriptPresence(all, q)
 	page := groupTurns(all[2:])
-	turns := d.buildReadModel("user:alice", created, page, q, presence, false, 1, true, 1_000_000)
+	turns := d.buildReadModel("user:alice", created, page, q, presence, false, 1, true, 1_000_000, nil)
 	if len(turns) != 1 || turns[0].Seq != 2 {
 		t.Fatalf("latest page repeated historical turn: %+v", turns)
 	}
@@ -221,7 +224,7 @@ func TestReadModelLegacyMarkerWithoutTranscriptIsUnknown(t *testing.T) {
 	d, created := newReadModelDaemon(t)
 	for _, last := range []string{"run", "done"} {
 		q := []sessfiles.Turn{{Seq: 1, Text: "legacy", Marker: "0123456789abcdef", TS: time.Now().UnixNano(), Last: last}}
-		turns := d.buildReadModel("user:alice", created, nil, q, nil, false, 0, true, 1_000_000)
+		turns := d.buildReadModel("user:alice", created, nil, q, nil, false, 0, true, 1_000_000, nil)
 		if len(turns) != 1 || turns[0].State != "unknown" {
 			t.Fatalf("legacy %s without match: %+v", last, turns)
 		}
@@ -505,7 +508,7 @@ func TestReadModelQueueOnlyTurnStaysOnItsPage(t *testing.T) {
 	grouped := groupTurns(items)
 	page := func(from, to int, latest bool) []int64 {
 		var out []int64
-		for _, row := range d.buildReadModel("user:alice", created, grouped[from:to], q, presence, false, from, latest, 1_000_000) {
+		for _, row := range d.buildReadModel("user:alice", created, grouped[from:to], q, presence, false, from, latest, 1_000_000, nil) {
 			out = append(out, row.Seq)
 		}
 		return out
@@ -516,8 +519,129 @@ func TestReadModelQueueOnlyTurnStaysOnItsPage(t *testing.T) {
 	if got, want := page(2, 3, true), []int64{seqs[3]}; fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("latest page = %v, want %v", got, want)
 	}
-	all := d.buildReadModel("user:alice", created, grouped, q, presence, false, 0, true, 1_000_000)
+	all := d.buildReadModel("user:alice", created, grouped, q, presence, false, 0, true, 1_000_000, nil)
 	if len(all) != 4 || all[1].Seq != seqs[1] || all[1].State != "err" || all[1].Blocks[0].Kind != "cancelled" || all[1].Blocks[0].Text != "Отменено" {
 		t.Fatalf("cancelled turn = %+v", all)
+	}
+}
+
+// A memoized build equals a from-scratch build at every step of a session's life — queued,
+// running with growing blocks and amended usage, finished, errored — and reuses the rows of
+// turns the step did not touch.
+func TestReadModelMemoMatchesFullBuild(t *testing.T) {
+	d, created := newReadModelDaemon(t)
+	sr := d.getRunner("user:alice", created)
+	var items []history.Item
+	memo := &rowMemo{}
+	check := func(step string, busy bool) []uiTurn {
+		t.Helper()
+		q, _ := sr.store.InboundLog()
+		memo = &rowMemo{prev: memo.next}
+		got := d.buildReadModel("user:alice", created, groupTurns(items), q, nil, busy, 0, true, 1_000_000, memo)
+		want := d.buildReadModel("user:alice", created, groupTurns(items), q, nil, busy, 0, true, 1_000_000, nil)
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: memoized rows differ\n got %+v\nwant %+v", step, got, want)
+		}
+		return got
+	}
+	for i, text := range []string{"one", "two"} {
+		seq, _, _, _, err := sr.store.Enqueue("ui:alice", "", "n"+text, text, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		check(text+" queued", i == 1)
+		items = append(items, bindReadModelTurn(t, sr.store, seq, int64(len(items)), text))
+		check(text+" running", true)
+		for b := 0; b < 3; b++ {
+			items = append(items, history.Item{Role: "assistant", Tools: []history.ToolCall{{Name: "Exec", Label: fmt.Sprint(text, b)}}})
+			check(fmt.Sprint(text, " block ", b), true)
+			items[len(items)-1].CtxUsed = 100 * (b + 1)
+			check(fmt.Sprint(text, " usage ", b), true)
+		}
+		items = append(items, history.Item{Role: "assistant", Text: "answer " + text})
+		check(text+" answer while running", true)
+		if i == 0 {
+			if err := sr.store.MarkDone(seq); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := sr.store.MarkErr(seq, turnErrBackendFailed); err != nil {
+			t.Fatal(err)
+		}
+		check(text+" finished", false)
+	}
+	prev := check("unchanged", false)
+	items = append(items, history.Item{Role: "system", Text: "notice"})
+	rows := check("appended notice", false)
+	if &rows[0].Blocks[0] != &prev[0].Blocks[0] {
+		t.Fatal("an untouched turn was rebuilt")
+	}
+}
+
+// A row whose file link could not be published yet is rebuilt, not kept: the link appears once
+// the file exists, as it would in a from-scratch build.
+func TestReadModelMemoRetriesDegradedLink(t *testing.T) {
+	d, created := newReadModelDaemon(t)
+	sr := d.getRunner("user:alice", created)
+	seq, _, _, _, err := sr.store.Enqueue("ui:alice", "", "n", "q", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := filepath.Join(t.TempDir(), "report.txt") // under the session cwd /tmp
+	items := []history.Item{
+		bindReadModelTurn(t, sr.store, seq, 0, "q"),
+		{Role: "assistant", Text: "see [r](" + report + ")"},
+	}
+	if err := sr.store.MarkDone(seq); err != nil {
+		t.Fatal(err)
+	}
+	q, _ := sr.store.InboundLog()
+	build := func(memo *rowMemo) string {
+		return d.buildReadModel("user:alice", created, groupTurns(items), q, nil, false, 0, true, 1_000_000, memo)[0].Blocks[0].Text
+	}
+	first := &rowMemo{}
+	if got := build(first); strings.Contains(got, "/api/file") || len(first.next) != 0 {
+		t.Fatalf("missing file: text %q, memoized %d rows", got, len(first.next))
+	}
+	if err := os.WriteFile(report, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := build(&rowMemo{prev: first.next}); !strings.Contains(got, "/api/file?ref=") {
+		t.Fatalf("link not published after the file appeared: %q", got)
+	}
+}
+
+// An attachment whose link could not be written is retried by the next build, not memoized.
+func TestReadModelMemoRetriesUnpublishedAttachment(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores directory modes")
+	}
+	d, created := newReadModelDaemon(t)
+	sr := d.getRunner("user:alice", created)
+	seq, _, _, _, err := sr.store.Enqueue("ui:alice", "", "n", "q", []sessfiles.NamedReader{{Name: "a.txt", R: strings.NewReader("x")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := []history.Item{bindReadModelTurn(t, sr.store, seq, 0, "q")}
+	if err := sr.store.MarkDone(seq); err != nil {
+		t.Fatal(err)
+	}
+	q, _ := sr.store.InboundLog()
+	build := func(memo *rowMemo) string {
+		return d.buildReadModel("user:alice", created, groupTurns(items), q, nil, false, 0, true, 1_000_000, memo)[0].Text
+	}
+	dir := filepath.Dir(filepath.Dir(sr.store.Path("x"))) // the session dir holding links.json
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	first := &rowMemo{}
+	got := build(first)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "/api/file") || len(first.next) != 0 {
+		t.Fatalf("unwritable links: text %q, memoized %d rows", got, len(first.next))
+	}
+	if got := build(&rowMemo{prev: first.next}); !strings.Contains(got, "/api/file?ref=") {
+		t.Fatalf("attachment not linked once links were writable: %q", got)
 	}
 }

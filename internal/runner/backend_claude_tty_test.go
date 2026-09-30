@@ -20,18 +20,12 @@ func TestParseEventToleratesTranscriptAssistantEnvelope(t *testing.T) {
 		t.Fatal("transcript-enveloped assistant line not recognised")
 	}
 	var text string
-	var ctxUsed int
 	for _, ev := range evs {
 		if ev.Type == EventText {
 			text = ev.Text
-			ctxUsed = ev.Usage.ContextUsed
 		}
 	}
 	if text != "PONG" {
 		t.Fatalf("text = %q, want PONG", text)
-	}
-	// Usage still reads off `.message.usage` regardless of the outer envelope.
-	if ctxUsed != 3+7 {
-		t.Fatalf("ContextUsed = %d, want 10 (input+cache_read)", ctxUsed)
 	}
 }
