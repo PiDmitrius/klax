@@ -405,10 +405,8 @@ includes its final answer; an aborted or failed turn may not have one:
 
 ```text
 trace.blocks =
-  klax_normalize(
-    bytes/records addressed by trace.raw[from_event:to_event),
-    with normalizer state initialized at the slice boundary
-  )
+  the items klax_normalize(whole transcript) produces
+  for the records addressed by trace.raw[from_event:to_event)
 ```
 
 Raw is the canonical source. Blocks are derived from that exact snapshot, not
@@ -457,10 +455,9 @@ are never serialized as public blocks.
 
 Blocks are a helper, not forensic evidence. Backend-specific structure,
 reasoning, full tool inputs/results, or a one-block-to-one-event mapping are not
-promised. There are no per-block raw coordinates. Normalization starts with
-empty state at `from_event`, so it may differ slightly from rendering the same
-records as part of the whole session. Changes to the public block shape or
-meaning are protocol changes.
+promised. There are no per-block raw coordinates. Blocks are the same
+normalized items the session timeline shows for those records. Changes to the
+public block shape or meaning are protocol changes.
 
 ### Raw range
 
@@ -496,8 +493,11 @@ It includes original JSON bytes, whitespace, LF terminators, and CR bytes when
 the file uses CRLF. Klax must not parse/reserialize records, join normalized
 record payloads, or normalize line endings to compute it.
 
-The binding that supplies `from_event`, `to_event`, the byte range, its hash,
-and `trace.blocks` are derived from one read of the transcript.
+The binding that supplies `from_event`, `to_event`, the byte range, and
+`trace.blocks` come from one snapshot of the transcript index. The hash covers
+the exact byte range of that same file: a backend transcript only grows, so
+those bytes are the ones indexed, and klax produces no trace if the path now
+holds another file.
 
 Klax neither embeds, copies, compresses, nor archives raw transcript bytes. A
 consumer that needs independent retention must copy the addressed bytes before

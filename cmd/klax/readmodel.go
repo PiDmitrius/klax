@@ -334,8 +334,9 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 		} else if a := anchor[t.Seq]; (a == 0 && !latest) || (a != 0 && !pagePresence[a]) {
 			continue
 		}
+		text, _ := d.inboundText(store, t, sk, created)
 		ut := uiTurn{
-			Seq: t.Seq, Role: "user", Text: d.inboundText(store, t, sk, created),
+			Seq: t.Seq, Role: "user", Text: text,
 			Time: time.Unix(0, t.TS).Format(time.RFC3339), State: resolvedTurnState(t, busy, newestRun, false),
 		}
 		switch t.Last {
@@ -355,8 +356,8 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 }
 
 // userRow builds one user turn's row: durable text and time, answer blocks with stable ids, and
-// the klax-side error and hook-warning blocks. keep is false when a local file link degraded to
-// its label, which a later build may still publish.
+// the klax-side error and hook-warning blocks. keep is false when an attachment or a local file
+// link could not be published yet, which a later build may still do.
 func (d *daemon) userRow(store *sessfiles.Store, sk string, created int64, g groupedTurn, matched sessfiles.Turn, ok bool, seq int64, state, reason string, ctxWindow int) (ut uiTurn, keep bool) {
 	keep = true
 	text, turnAt := g.lead.Text, g.lead.Time
@@ -365,7 +366,9 @@ func (d *daemon) userRow(store *sessfiles.Store, sk string, created int64, g gro
 		// records this turn it is already shown from queue.jsonl; switching later to the transcript's
 		// slightly different timestamp changed the bubble signature and rebuilt an unchanged image.
 		turnAt = time.Unix(0, matched.TS).Format(time.RFC3339)
-		if e := d.inboundText(store, matched, sk, created); e != "" {
+		e, published := d.inboundText(store, matched, sk, created)
+		keep = keep && published
+		if e != "" {
 			text = e
 		}
 	}

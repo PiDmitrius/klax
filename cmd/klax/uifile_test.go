@@ -138,7 +138,7 @@ func TestInboundTextShowsAttachmentSize(t *testing.T) {
 		t.Fatalf("log len = %d, want 1", len(log))
 	}
 
-	got := d.inboundText(store, log[0], "user:alice", 1)
+	got, _ := d.inboundText(store, log[0], "user:alice", 1)
 	if !strings.Contains(got, "[report.md](/api/file?ref=") {
 		t.Fatalf("inboundText missing attachment link: %q", got)
 	}

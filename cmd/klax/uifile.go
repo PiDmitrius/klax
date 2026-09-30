@@ -22,8 +22,10 @@ const fileCacheControl = "private, max-age=86400, immutable"
 
 // inboundText rebuilds a turn's display text from its durable inbound record: the text
 // the user actually sent, plus a freshly-minted capability-URL image/link per attached
-// file (contract §5/§6 — refs are per-response, never persisted).
-func (d *daemon) inboundText(store *sessfiles.Store, t sessfiles.Turn, sk string, created int64) string {
+// file (contract §5/§6 — refs are per-response, never persisted). published reports whether
+// every attached file got its link.
+func (d *daemon) inboundText(store *sessfiles.Store, t sessfiles.Turn, sk string, created int64) (text string, published bool) {
+	published = true
 	parts := make([]string, 0, 1+len(t.Files))
 	if t.Text != "" {
 		parts = append(parts, t.Text)
@@ -33,6 +35,7 @@ func (d *daemon) inboundText(store *sessfiles.Store, t sessfiles.Turn, sk string
 		display := sessfiles.DisplayName(name)
 		token, err := d.fileToken(store, sk, created, name, display, ct)
 		if err != nil {
+			published = false
 			continue
 		}
 		u := "/api/file?ref=" + url.QueryEscape(token)
@@ -47,7 +50,7 @@ func (d *daemon) inboundText(store *sessfiles.Store, t sessfiles.Turn, sk string
 			parts = append(parts, withSize("["+label+"]("+u+")", size))
 		}
 	}
-	return strings.Join(parts, "\n\n")
+	return strings.Join(parts, "\n\n"), published
 }
 
 func withSize(markdown, size string) string {

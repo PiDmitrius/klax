@@ -609,3 +609,39 @@ func TestReadModelMemoRetriesDegradedLink(t *testing.T) {
 		t.Fatalf("link not published after the file appeared: %q", got)
 	}
 }
+
+// An attachment whose link could not be written is retried by the next build, not memoized.
+func TestReadModelMemoRetriesUnpublishedAttachment(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores directory modes")
+	}
+	d, created := newReadModelDaemon(t)
+	sr := d.getRunner("user:alice", created)
+	seq, _, _, _, err := sr.store.Enqueue("ui:alice", "", "n", "q", []sessfiles.NamedReader{{Name: "a.txt", R: strings.NewReader("x")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := []history.Item{bindReadModelTurn(t, sr.store, seq, 0, "q")}
+	if err := sr.store.MarkDone(seq); err != nil {
+		t.Fatal(err)
+	}
+	q, _ := sr.store.InboundLog()
+	build := func(memo *rowMemo) string {
+		return d.buildReadModel("user:alice", created, groupTurns(items), q, nil, false, 0, true, 1_000_000, memo)[0].Text
+	}
+	dir := filepath.Dir(filepath.Dir(sr.store.Path("x"))) // the session dir holding links.json
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	first := &rowMemo{}
+	got := build(first)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "/api/file") || len(first.next) != 0 {
+		t.Fatalf("unwritable links: text %q, memoized %d rows", got, len(first.next))
+	}
+	if got := build(&rowMemo{prev: first.next}); !strings.Contains(got, "/api/file?ref=") {
+		t.Fatalf("attachment not linked once links were writable: %q", got)
+	}
+}
