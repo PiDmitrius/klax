@@ -4,11 +4,12 @@ let readOnly = true;
 export function isReadOnly(){ return readOnly; }
 
 export function consumeLoginLink(){
-  if(!location.hash.startsWith("#login=")) return;
+  if(!location.hash.startsWith("#login=")) return false;
   const params = new URLSearchParams(location.hash.slice(1));
   const token = params.get("login") || "";
   history.replaceState(null, "", location.pathname + location.search);
   setToken(token);
+  return true;
 }
 
 export function initAuth(start){
@@ -16,6 +17,12 @@ export function initAuth(start){
   const input = document.getElementById("token");
   const button = document.getElementById("tokenbtn");
   const message = document.getElementById("autherror");
+  window.addEventListener("hashchange", e => {
+    if(!consumeLoginLink()) return;
+    e.stopImmediatePropagation();
+    invalidated = true;
+    location.reload();
+  });
   const fail = text => {
     document.getElementById("gate").classList.remove("hidden");
     document.getElementById("app").classList.remove("active");
@@ -43,6 +50,7 @@ export function initAuth(start){
         return;
       }
       const access = await r.json();
+      if(invalidated) return;
       readOnly = !!access.read_only;
       input.value = "";
       if(message) message.textContent = "";
