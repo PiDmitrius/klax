@@ -15,7 +15,9 @@ function harness(saved="",hash=""){
       listeners};
   }
   let starts=0,reloads=0;
+  const hashListeners=[];
   const ctx={URLSearchParams,
+    window:{addEventListener:(name,fn)=>{assert.equal(name,"hashchange");hashListeners.push(fn);}},
     localStorage:{getItem:k=>store.get(k)||null,setItem:(k,v)=>store.set(k,v),removeItem:k=>store.delete(k)},
     location:{pathname:"/mount/",search:"",hash,reload:()=>reloads++},
     history:{replaceState:(_s,_t,url)=>{ctx.location.hash="";ctx.cleanedURL=url;}},
@@ -26,7 +28,15 @@ function harness(saved="",hash=""){
   runInNewContext(source+"\nthis.boot=initAuth; this.readOnly=isReadOnly; this.api=api; this.setToken=setToken; this.getToken=getToken;",ctx);
   const respond=(n,status=200,read_only=false)=>calls[n].resolve({status,ok:status===200,json:async()=>({user:"owner",read_only})});
   ctx.boot(()=>{starts++;elements.gate.classList.add("hidden");elements.app.classList.add("active");});
-  return {ctx,store,elements,calls,respond,starts:()=>starts,reloads:()=>reloads};
+  const navigate=hash=>{
+    ctx.location.hash=hash;
+    let stopped=false;
+    for(const fn of hashListeners){
+      fn({stopImmediatePropagation:()=>{stopped=true;}});
+      if(stopped) break;
+    }
+  };
+  return {ctx,store,elements,calls,respond,navigate,starts:()=>starts,reloads:()=>reloads};
 }
 
 test("an invalid saved token returns to a working login form",async()=>{
@@ -64,6 +74,32 @@ test("authorization loss clears the credential and reloads the initialized app o
   assert.equal(h.reloads(),1);
   assert.equal(h.ctx.getToken(),"");
   assert.equal(h.store.has("klax_ui_token"),false);
+});
+
+test("repeat login bypasses scope navigation and reloads with the replacement token",async()=>{
+  const h=harness("manager");h.respond(0);await tick();
+  let scopeChanges=0;
+  h.ctx.window.addEventListener("hashchange",()=>scopeChanges++);
+  h.navigate("#work/123");
+  assert.equal(scopeChanges,1);
+  assert.equal(h.reloads(),0);
+  h.navigate("#login=view%2Bsecret");
+  assert.equal(scopeChanges,1);
+  assert.equal(h.ctx.location.hash,"");
+  assert.equal(h.ctx.cleanedURL,"/mount/");
+  assert.equal(h.store.get("klax_ui_token"),"view+secret");
+  assert.equal(h.reloads(),1);
+});
+
+test("login navigation works from the gate and supersedes pending authentication",async()=>{
+  for(const saved of ["", "pending"]){
+    const h=harness(saved);
+    h.navigate("#login=reader");
+    assert.equal(h.reloads(),1);
+    assert.equal(h.ctx.getToken(),"reader");
+    if(saved){h.respond(0);await tick();}
+    assert.equal(h.starts(),0);
+  }
 });
 
 test("a delayed unauthorized response cannot invalidate a replacement credential",async()=>{
