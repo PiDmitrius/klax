@@ -487,10 +487,10 @@ function selectHTML(id, list, cur, withDefault, disabled){
   const curOpt = opts.find(o => o.value === cur);
   const curLabel = curOpt ? curOpt.label : (cur || "—");
   const menu = opts.map(o => {
-    const refresh = id === "s-model" && o.value === "";
+    const refresh = (id === "s-model" || id === "s-think") && o.value === "";
     return '<div class="sselect-opt'+(refresh ? " sselect-default" : "")+(o.value === cur ? " sel" : "")+'" data-value="'+esc(o.value)+'">'
       +'<span>'+esc(o.label)+'</span>'
-      +(refresh ? '<button type="button" class="model-refresh" data-action="refresh" title="Обновить список моделей" aria-label="Обновить список моделей"'+(disabled ? " disabled" : "")+'><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8M21 3v5h-5M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16M8 16H3v5"/></svg></button>' : "")+'</div>';
+      +(refresh ? '<button type="button" class="model-refresh" data-action="refresh" title="Обновить список" aria-label="Обновить список"'+(disabled ? " disabled" : "")+'><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8M21 3v5h-5M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16M8 16H3v5"/></svg></button>' : "")+'</div>';
   }).join("");
   return '<div class="sselect'+(disabled ? " disabled" : "")+'" id="'+id+'" data-value="'+esc(cur)+'">'
     +'<button type="button" class="sselect-btn"'+(disabled ? " disabled" : "")+'><span class="sselect-cur">'+esc(curLabel)+'</span><span class="sselect-caret">▾</span></button>'
@@ -523,23 +523,28 @@ function wireSelect(id, onPick){
   }));
 }
 
+const catalogSelects = [["s-model", "model", "models"], ["s-think", "think", "efforts"]];
+
 function wireModelSelect(d, isDraft, apply){
-  const root = document.getElementById("s-model");
-  modelMenu = { root, d, isDraft, apply };
-  wireSelect("s-model", v => apply({ model: v }));
-  const action = root.querySelector('[data-action="refresh"]');
-  setModelRefreshState(root, d.backend);
-  action.onclick = e => {
-    e.stopPropagation();
-    if(!action.disabled) return refreshModels(d.backend);
-  };
+  modelMenu = { root: document.getElementById("s-model"), d, isDraft, apply };
+  for(const [id, field] of catalogSelects){
+    const root = document.getElementById(id);
+    if(!root) continue;
+    wireSelect(id, v => apply({ [field]: v }));
+    const action = root.querySelector('[data-action="refresh"]');
+    setModelRefreshState(root, d.backend);
+    action.onclick = e => {
+      e.stopPropagation();
+      if(!action.disabled) return refreshModels(d.backend);
+    };
+  }
 }
 
 function setModelRefreshState(root, backend){
   const action = root.querySelector('[data-action="refresh"]');
   const updating = refreshingModels.has(backend);
   action.disabled = updating || root.classList.contains("disabled");
-  action.title = updating ? "Обновление…" : "Обновить список моделей";
+  action.title = updating ? "Обновление…" : "Обновить список";
   action.setAttribute("aria-label", action.title);
   action.setAttribute("aria-busy", String(updating));
 }
@@ -547,7 +552,10 @@ function setModelRefreshState(root, backend){
 async function refreshModels(backend){
   if(refreshingModels.has(backend)) return;
   refreshingModels.add(backend);
-  setModelRefreshState(modelMenu.root, backend);
+  for(const [id] of catalogSelects){
+    const root = document.getElementById(id);
+    if(root) setModelRefreshState(root, backend);
+  }
   let models;
   try {
     const r = await api("/api/models/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ backend }) });
@@ -561,19 +569,20 @@ async function refreshModels(backend){
       if(models){
         view.d.models = models;
         view.d.efforts = modelEfforts(view.d);
-        const think = document.getElementById("s-think");
-        if(think){
-          think.outerHTML = selectHTML("s-think", view.d.efforts, view.d.think, true, !!(view.d.busy || view.d.read_only));
-          wireSelect("s-think", v => view.apply({ think: v }));
-        }
         if(view.isDraft && draftView) draftView.models = models;
       }
-      const open = view.root.classList.contains("open");
-      view.root.outerHTML = selectHTML("s-model", view.d.models, view.d.model, true, !!(view.d.busy || view.d.read_only));
+      const open = new Set();
+      for(const [id, field, list] of catalogSelects){
+        const root = document.getElementById(id);
+        if(!root) continue;
+        if(root.classList.contains("open")) open.add(id);
+        root.outerHTML = selectHTML(id, view.d[list], view.d[field], true, !!(view.d.busy || view.d.read_only));
+      }
       wireModelSelect(view.d, view.isDraft, view.apply);
-      if(open){
-        modelMenu.root.classList.add("open");
-        modelMenu.root.querySelector(".sselect-menu").classList.remove("hidden");
+      for(const id of open){
+        const root = document.getElementById(id);
+        root.classList.add("open");
+        root.querySelector(".sselect-menu").classList.remove("hidden");
       }
     }
   }
@@ -669,7 +678,6 @@ function renderSettings(d, isDraft){
   }
   wireSelect("s-backend", v => apply({ backend: v }));
   wireModelSelect(d, isDraft, apply);
-  wireSelect("s-think",   v => apply({ think: v }));
   const wire = (sel, fn) => { const el = b.querySelector(sel); if(el) el.onchange = fn; };
   wire("#s-sandbox", e => apply({ sandbox: e.target.checked ? "on" : "off" }));
   const cwd = b.querySelector(".scwd");

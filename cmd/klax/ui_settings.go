@@ -193,25 +193,39 @@ func (d *daemon) applyUISessionSettings(sk string, created int64, p uiSettingsPa
 // applyUISessionSettingsCore runs the validation + in-memory mutation but does NOT persist — the
 // caller owns the save + broadcast.
 func (d *daemon) applyUISessionSettingsCore(sk string, created int64, p uiSettingsPatch) error {
-	sess := d.store.Get(sk, created)
-	if sess == nil {
+	if d.store.Get(sk, created) == nil {
 		return &uiErr{http.StatusNotFound, "Сессия не найдена"}
 	}
-	backend := resolveSessionBackend(sess, d.scopeDefaults(sk), d.cfg.GetDefaultBackend())
-	// Validate the WHOLE patch (incl. cwd I/O) BEFORE taking the store lock, then apply the resolved
-	// result in a single UpdateSession — so a rejected patch never half-changes the session.
-	r, err := d.validateSettingsPatch(sess, backend, d.isSessionBusy(sk, created), p)
-	if err != nil {
-		return err
+	def := d.scopeDefaults(sk)
+	busy := d.isSessionBusy(sk, created)
+	var cwd string
+	if p.CWD != nil {
+		var err error
+		cwd, err = resolveWorkingDir(*p.CWD)
+		if err != nil {
+			return &uiErr{http.StatusBadRequest, err.Error()}
+		}
 	}
-	// Re-check the cwd lock under the SAME lock as the mutation: a message could have
-	// started and finished running between the snapshot validated above and this call.
-	_, err = d.store.UpdateSessionChecked(sk, created,
+	// Resolve filesystem paths outside the lock; validate settings against the state being changed.
+	var r resolvedPatch
+	_, err := d.store.UpdateSessionChecked(sk, created,
 		func(cur *session.Session) error {
 			if p.CWD != nil && cur.Messages > 0 {
 				return &uiErr{http.StatusConflict, "Рабочую директорию нельзя изменить после первого сообщения."}
 			}
-			return nil
+			check := p
+			check.CWD = nil
+			if busy && p.CWD != nil {
+				return &uiErr{http.StatusConflict, "Сессия занята — параметры запуска нельзя менять до завершения."}
+			}
+			backend := resolveSessionBackend(cur, def, d.cfg.GetDefaultBackend())
+			var err error
+			r, err = d.validateSettingsPatch(cur, backend, busy, check)
+			r.p.CWD = p.CWD
+			if p.CWD != nil {
+				r.cwd = cwd
+			}
+			return err
 		},
 		func(cur *session.Session) { applySettingsPatch(cur, r) },
 	)

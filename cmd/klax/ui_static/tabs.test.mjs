@@ -163,12 +163,12 @@ test("active tabs center on entry and scope changes without overriding manual br
 
 function modelRefreshHarness(){
   const requests = [], notices = [], picks = [];
-  let root;
+  let root, thinkRoot;
   const classes = () => {
     const names = new Set();
     return { contains: name => names.has(name), add: name => names.add(name), remove: name => names.delete(name) };
   };
-  function makeRoot(){
+  function makeRoot(id = "s-model"){
     const action = { attrs: {}, setAttribute(key, value){ this.attrs[key] = value; } };
     const menu = { classList: classes(), addEventListener(){}, querySelectorAll(selector){
       assert.equal(selector, ".sselect-opt[data-value]", "refresh action must not enter the model selection handler");
@@ -182,12 +182,12 @@ function modelRefreshHarness(){
         if(selector === ".sselect-btn") return { addEventListener(){} };
         throw new Error(selector);
       },
-      set outerHTML(html){ this.isConnected = false; root = makeRoot(); root.html = html; },
+      set outerHTML(html){ this.isConnected = false; const next = makeRoot(id); next.html = html; if(id === "s-model") root = next; else thinkRoot = next; },
     };
   }
-  root = makeRoot();
+  root = makeRoot(); thinkRoot = makeRoot("s-think");
   const context = vm.createContext({
-    document: { getElementById: id => id === "s-model" ? root : null, querySelectorAll: () => [] },
+    document: { getElementById: id => id === "s-model" ? root : id === "s-think" ? thinkRoot : null, querySelectorAll: () => [] },
     esc: value => String(value),
     api(path, options){
       let resolve;
@@ -203,12 +203,13 @@ function modelRefreshHarness(){
   context.onPick = value => picks.push(value);
   vm.runInContext("deps = { notice: onNotice };", context);
   function show(backend, selected, isDraft = false){
-    root.isConnected = false; root = makeRoot(); root.classList.add("open");
+    root.isConnected = false; thinkRoot.isConnected = false;
+    root = makeRoot(); thinkRoot = makeRoot("s-think"); root.classList.add("open");
     context.view = { backend, model: selected, models: [{ value: "old", label: "Old" }] };
     context.isDraft = isDraft;
     vm.runInContext('draftView = isDraft ? view : null; draft = isDraft ? { name: "unsaved", model: view.model } : null; wireModelSelect(view, isDraft, onPick);', context);
   }
-  return { context, requests, notices, picks, show, root: () => root,
+  return { context, requests, notices, picks, show, root: () => root, thinkRoot: () => thinkRoot,
     run: code => vm.runInContext(code, context) };
 }
 
@@ -237,7 +238,7 @@ test("model refresh is an action, preserves selection and draft, and saves no se
   assert.equal(h.root().action.attrs["aria-busy"], "false");
   assert.equal(h.root().classList.contains("open"), true);
   assert.deepEqual(h.picks, []);
-  assert.equal(h.root().action.title, "Обновить список моделей");
+  assert.equal(h.root().action.title, "Обновить список");
 });
 
 test("refresh response cannot replace another backend's menu", async () => {
@@ -261,7 +262,7 @@ test("refresh failures retain models and expose the reason", async () => {
   assert.equal(h.context.view.model, "opus");
   assert.equal(h.context.view.models[0].value, "old");
   assert.deepEqual(h.notices, ["CLI unavailable"]);
-  assert.equal(h.root().action.title, "Обновить список моделей");
+  assert.equal(h.root().action.title, "Обновить список");
 });
 
 test("refresh uses the current selection after settings re-render", async () => {
@@ -304,5 +305,28 @@ test("catalog refresh updates effort options without changing selection", async 
   assert.equal(h.run('JSON.stringify(view.efforts.map(e => e.value))'), '["low","high"]');
   assert.equal(h.context.view.think, "ultra");
   assert.equal(h.run('draftView.models[0].efforts[0]'), "low");
+  assert.equal(h.picks.length, 0);
+});
+
+test("either catalog button locks both and refreshes both menus, keeping effort menu open", async () => {
+  const h = modelRefreshHarness();
+  h.show("codex", "pinned");
+  h.root().classList.remove("open");
+  h.thinkRoot().classList.add("open");
+  h.context.view.think = "high";
+  const pending = h.thinkRoot().action.onclick({stopPropagation(){}});
+  assert.equal(h.root().action.disabled, true);
+  assert.equal(h.thinkRoot().action.disabled, true);
+  h.root().action.onclick({stopPropagation(){}});
+  assert.equal(h.requests.length, 1);
+  h.requests[0].resolve({ok: true, json: async () => ({models: [{value: "pinned", label: "pinned", efforts: ["high", "max"]}]})});
+  await pending;
+  assert.equal(h.root().action.disabled, false);
+  assert.equal(h.thinkRoot().action.disabled, false);
+  assert.equal(h.thinkRoot().classList.contains("open"), true);
+  assert.equal(h.root().classList.contains("open"), false);
+  assert.match(h.thinkRoot().html, /data-value="max"/);
+  assert.match(h.thinkRoot().html, /data-value=""><span>По умолчанию<\/span><button[^>]*data-action="refresh"/);
+  assert.equal(h.context.view.think, "high");
   assert.equal(h.picks.length, 0);
 });

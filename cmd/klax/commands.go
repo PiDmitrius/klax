@@ -522,10 +522,16 @@ func argPayload(text string) string {
 
 func (d *daemon) handleCommand(chatID, msgID, text string) {
 	parts := strings.Fields(text)
-	cmd := strings.ToLower(parts[0])
+	cmd := parts[0]
 	// Strip @botname suffix (e.g. /sessions@klax_bot → /sessions)
 	if at := strings.Index(cmd, "@"); at != -1 {
 		cmd = cmd[:at]
+	}
+	lower := strings.ToLower(cmd)
+	if strings.HasPrefix(lower, "/m_") && lower != "/m_default" && lower != "/m_update" {
+		cmd = "/m_" + cmd[len("/m_"):]
+	} else {
+		cmd = lower
 	}
 	args := parts[1:]
 	cmd, args = normalizeCommand(cmd, args)

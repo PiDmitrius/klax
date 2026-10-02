@@ -237,3 +237,52 @@ func TestModelEffortsDriveSettingsAndCommands(t *testing.T) {
 		})
 	}
 }
+
+func setTestModelCatalog(t *testing.T, d *daemon, models []modelcatalog.Model) {
+	t.Helper()
+	data, err := json.Marshal(map[string][]modelcatalog.Model{"codex": models})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "models.json")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	d.models, err = modelcatalog.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestModelCommandPreservesCase(t *testing.T) {
+	f := newAPIFixture(t, "", "", "")
+	setTestModelCatalog(t, f.d, []modelcatalog.Model{{Value: "Model-A", Label: "Model-A"}, {Value: "model-a", Label: "model-a"}})
+	f.d.handleCommand(f.s.chatID("test"), "", "/m_Model_A")
+	got := f.d.store.Get("user:test", f.created).ModelOverride
+	if got != "Model-A" {
+		t.Fatalf("menu command /m_Model_A selected %q instead of Model-A", got)
+	}
+}
+
+func TestConcurrentModelEffortSettings(t *testing.T) {
+	f := newAPIFixture(t, "", "", "")
+	setTestModelCatalog(t, f.d, []modelcatalog.Model{{Value: "large", Label: "large", Efforts: []string{"high", "ultra"}}, {Value: "small", Label: "small", Efforts: []string{"high"}}})
+	for i := 0; i < 1000; i++ {
+		f.d.store.UpdateSession("user:test", f.created, func(s *session.Session) { s.Backend = "codex"; s.ModelOverride = "large"; s.ThinkOverride = "high" })
+		start, done := make(chan struct{}), make(chan error, 2)
+		go func() {
+			<-start
+			done <- f.d.applyUISessionSettingsCore("user:test", f.created, uiSettingsPatch{Model: str2("small")})
+		}()
+		go func() {
+			<-start
+			done <- f.d.applyUISessionSettingsCore("user:test", f.created, uiSettingsPatch{Think: str2("ultra")})
+		}()
+		close(start)
+		a, b := <-done, <-done
+		s := f.d.store.Get("user:test", f.created)
+		if s.ModelOverride == "small" && s.ThinkOverride == "ultra" {
+			t.Fatalf("unsupported small/ultra saved at iteration %d, request errors: %v / %v", i, a, b)
+		}
+	}
+}
