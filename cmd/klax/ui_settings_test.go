@@ -11,7 +11,7 @@ func TestValidateSettingsPatchLocksCWDAfterFirstMessage(t *testing.T) {
 	newCWD := t.TempDir()
 	cur := &session.Session{CWD: t.TempDir(), Messages: 1}
 
-	_, err := validateSettingsPatch(cur, "claude", false, uiSettingsPatch{CWD: &newCWD})
+	_, err := (&daemon{}).validateSettingsPatch(cur, "claude", false, uiSettingsPatch{CWD: &newCWD})
 
 	uerr, ok := err.(*uiErr)
 	if !ok || uerr == nil {
@@ -26,7 +26,7 @@ func TestValidateSettingsPatchAllowsCWDBeforeFirstMessage(t *testing.T) {
 	newCWD := t.TempDir()
 	cur := &session.Session{CWD: t.TempDir(), Messages: 0}
 
-	r, err := validateSettingsPatch(cur, "claude", false, uiSettingsPatch{CWD: &newCWD})
+	r, err := (&daemon{}).validateSettingsPatch(cur, "claude", false, uiSettingsPatch{CWD: &newCWD})
 
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -136,7 +136,7 @@ func TestValidateSettingsPatchTreatsGroupsAsFreeWhileBusy(t *testing.T) {
 	cur := &session.Session{CWD: t.TempDir(), Messages: 1, Groups: []string{"work"}}
 	groups := []string{"work", "klax"}
 
-	r, err := validateSettingsPatch(cur, "claude", true, uiSettingsPatch{Groups: &groups})
+	r, err := (&daemon{}).validateSettingsPatch(cur, "claude", true, uiSettingsPatch{Groups: &groups})
 	if err != nil {
 		t.Fatalf("groups rejected while busy: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestValidateSettingsPatchTreatsGroupsAsFreeWhileBusy(t *testing.T) {
 		"prompt":  {Prompt: str("x")},
 	}
 	for name, patch := range runAffecting {
-		if _, err := validateSettingsPatch(cur, "claude", true, patch); err == nil {
+		if _, err := (&daemon{}).validateSettingsPatch(cur, "claude", true, patch); err == nil {
 			t.Fatalf("%s was accepted while busy — only groups and name are free", name)
 		}
 	}
@@ -168,7 +168,7 @@ func TestApplySettingsPatchClearsGroupsOnExplicitEmptySet(t *testing.T) {
 	cur := &session.Session{CWD: t.TempDir(), Groups: []string{"work", "klax"}}
 	empty := []string{}
 
-	r, err := validateSettingsPatch(cur, "claude", false, uiSettingsPatch{Groups: &empty})
+	r, err := (&daemon{}).validateSettingsPatch(cur, "claude", false, uiSettingsPatch{Groups: &empty})
 	if err != nil {
 		t.Fatalf("empty group set rejected: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestApplySettingsPatchClearsGroupsOnExplicitEmptySet(t *testing.T) {
 	}
 
 	cur.Groups = []string{"work"}
-	r, err = validateSettingsPatch(cur, "claude", false, uiSettingsPatch{Name: str2("renamed")})
+	r, err = (&daemon{}).validateSettingsPatch(cur, "claude", false, uiSettingsPatch{Name: str2("renamed")})
 	if err != nil {
 		t.Fatalf("name patch rejected: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestValidateSettingsPatchRejectsAmbiguousGroupName(t *testing.T) {
 	cur := &session.Session{CWD: t.TempDir()}
 	for _, bad := range []string{"123", "is:unread", "a/b", "a#b", "*"} {
 		groups := []string{bad}
-		_, err := validateSettingsPatch(cur, "claude", false, uiSettingsPatch{Groups: &groups})
+		_, err := (&daemon{}).validateSettingsPatch(cur, "claude", false, uiSettingsPatch{Groups: &groups})
 		uerr, ok := err.(*uiErr)
 		if !ok || uerr == nil {
 			t.Fatalf("group %q: err = %v, want a *uiErr", bad, err)

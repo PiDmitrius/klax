@@ -49,7 +49,7 @@ func (b *CodexBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 	// Prompt via stdin.
 	args = append(args, "-")
 
-	bin := findBinary("codex", []string{".npm-global/bin/codex"})
+	bin := FindBinary("codex")
 	if bin == "" {
 		return nil, errors.New("codex not found. Install: npm install -g @openai/codex")
 	}

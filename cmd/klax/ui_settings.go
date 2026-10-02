@@ -126,7 +126,7 @@ func (d *daemon) uiSessionSettings(sk string, created int64) (*uiSettings, bool)
 		CWDLocked:     sess.Messages > 0,
 		TTYAvailable:  backend == "claude",
 		Backends:      []uiSettingsOption{{Value: "claude", Label: "Claude"}, {Value: "codex", Label: "Codex"}},
-		Models:        uiSettingsOptions(modelsForBackend(backend)),
+		Models:        uiSettingsOptions(d.modelsForBackend(backend)),
 		Efforts:       uiSettingsOptions(effortsForBackend(backend)),
 		Groups:        sess.Groups,
 	}, true
@@ -168,7 +168,7 @@ func (d *daemon) uiDraftSettings(sk, chatID, backendOverride string) *uiSettings
 		CWD:          pathutil.TildePathsInText(d.defaultSessionCWD(chatID, sk)),
 		TTYAvailable: backend == "claude",
 		Backends:     []uiSettingsOption{{Value: "claude", Label: "Claude"}, {Value: "codex", Label: "Codex"}},
-		Models:       uiSettingsOptions(modelsForBackend(backend)),
+		Models:       uiSettingsOptions(d.modelsForBackend(backend)),
 		Efforts:      uiSettingsOptions(effortsForBackend(backend)),
 	}
 }
@@ -199,7 +199,7 @@ func (d *daemon) applyUISessionSettingsCore(sk string, created int64, p uiSettin
 	backend := resolveSessionBackend(sess, d.scopeDefaults(sk), d.cfg.GetDefaultBackend())
 	// Validate the WHOLE patch (incl. cwd I/O) BEFORE taking the store lock, then apply the resolved
 	// result in a single UpdateSession — so a rejected patch never half-changes the session.
-	r, err := validateSettingsPatch(sess, backend, d.isSessionBusy(sk, created), p)
+	r, err := d.validateSettingsPatch(sess, backend, d.isSessionBusy(sk, created), p)
 	if err != nil {
 		return err
 	}
@@ -242,7 +242,7 @@ type resolvedPatch struct {
 // validateSettingsPatch validates `p` against `cur`'s current state (`backend` = its effective
 // backend, `busy` gates run-affecting changes) and resolves the derived values. It performs the cwd
 // filesystem check here so the later mutation holds no lock during I/O. It never mutates `cur`.
-func validateSettingsPatch(cur *session.Session, backend string, busy bool, p uiSettingsPatch) (resolvedPatch, error) {
+func (d *daemon) validateSettingsPatch(cur *session.Session, backend string, busy bool, p uiSettingsPatch) (resolvedPatch, error) {
 	r := resolvedPatch{p: p, name: cur.Name, cwd: cur.CWD, prompt: cur.AppendSystemPrompt, backend: backend}
 	if p.Name != nil {
 		r.name = strings.TrimSpace(*p.Name)
@@ -265,7 +265,7 @@ func validateSettingsPatch(cur *session.Session, backend string, busy bool, p ui
 		r.backendChanged = true
 	}
 	// model/think are validated against the EFFECTIVE (possibly new) backend.
-	if p.Model != nil && *p.Model != "" && !validOption(modelsForBackend(r.backend), *p.Model) {
+	if p.Model != nil && *p.Model != "" && (r.backendChanged || *p.Model != cur.ModelOverride) && !validOption(d.modelsForBackend(r.backend), *p.Model) {
 		return r, &uiErr{http.StatusBadRequest, "Неизвестная модель"}
 	}
 	if p.Think != nil && *p.Think != "" && !validOption(effortsForBackend(r.backend), *p.Think) {

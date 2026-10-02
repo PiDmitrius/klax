@@ -211,7 +211,7 @@ func (d *daemon) handleModelSet(chatID, msgID, sk, alias string) {
 	def := d.scopeDefaults(sk)
 	backend := effectiveBackendName(d.cfg, def, sess)
 	resolved := alias
-	for _, m := range modelsForBackend(backend) {
+	for _, m := range d.modelsForBackend(backend) {
 		if m.alias == alias {
 			resolved = m.model
 			break

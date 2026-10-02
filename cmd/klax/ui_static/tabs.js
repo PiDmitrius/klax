@@ -15,6 +15,8 @@ let sessions = [], deps = {}, settingsFor = 0, settingsAutofocused = false;
 // OK/Enter. Closing the dialog (✕ / backdrop / Escape) discards the draft and creates nothing.
 // draftView caches the last server option-lists (models/efforts for the chosen backend).
 let draft = null, draftView = null, draftSubmitting = false;
+const refreshingModels = new Set();
+let modelMenu = null;
 // dragging = a tab reorder drag/settle is in progress; while true renderTabs leaves the strip DOM
 // alone. didDrag = the click immediately after a drop must be swallowed (not treated as a select).
 let dragging = false, didDrag = false;
@@ -448,7 +450,7 @@ async function createFromDraft(){
   } catch(e){ draftSubmitting = false; if(ok) ok.disabled = false; notice("Не удалось создать сессию"); return; }
   if(!r.ok){ draftSubmitting = false; if(ok) ok.disabled = false; notice((await r.text()).trim() || "Не удалось создать сессию"); return; }
   const j = await r.json();
-  draft = null; draftView = null;
+  draft = null; draftView = null; modelMenu = null;
   draftSubmitting = false; if(ok) ok.disabled = false;
   document.getElementById("smodal").classList.add("hidden");
   settingsFor = 0; settingsAutofocused = false;
@@ -476,9 +478,11 @@ function fetchSettings(created){ return api("/api/settings?session=" + created).
 // refresh can honestly hold off while a menu is open instead of yanking it (see maybeRefreshSettings).
 function selectHTML(id, list, cur, withDefault, disabled){
   const opts = (withDefault ? [{ value: "", label: "По умолчанию" }] : []).concat(list || []);
+  if(withDefault && cur && !opts.some(o => o.value === cur)) opts.push({ value: cur, label: cur });
   const curOpt = opts.find(o => o.value === cur);
   const curLabel = curOpt ? curOpt.label : (cur || "—");
-  const menu = opts.map(o => '<div class="sselect-opt'+(o.value === cur ? " sel" : "")+'" data-value="'+esc(o.value)+'">'+esc(o.label)+'</div>').join("");
+  let menu = opts.map(o => '<div class="sselect-opt'+(o.value === cur ? " sel" : "")+'" data-value="'+esc(o.value)+'">'+esc(o.label)+'</div>').join("");
+  if(id === "s-model") menu += '<div class="ssep"></div><div class="sselect-opt" data-action="refresh">(обновить список)</div>';
   return '<div class="sselect'+(disabled ? " disabled" : "")+'" id="'+id+'" data-value="'+esc(cur)+'">'
     +'<button type="button" class="sselect-btn"'+(disabled ? " disabled" : "")+'><span class="sselect-cur">'+esc(curLabel)+'</span><span class="sselect-caret">▾</span></button>'
     +'<div class="sselect-menu hidden">'+menu+'</div></div>';
@@ -501,12 +505,50 @@ function wireSelect(id, onPick){
     if(willOpen){ menu.classList.remove("hidden"); root.classList.add("open"); }
   });
   menu.addEventListener("click", e => e.stopPropagation()); // a click on the menu chrome (padding/scrollbar) must not close it
-  menu.querySelectorAll(".sselect-opt").forEach(opt => opt.addEventListener("click", e => {
+  menu.querySelectorAll(".sselect-opt[data-value]").forEach(opt => opt.addEventListener("click", e => {
     e.stopPropagation();
     menu.classList.add("hidden"); root.classList.remove("open");
     const v = opt.dataset.value;
     if(v !== root.dataset.value) onPick(v);
   }));
+}
+
+function wireModelSelect(d, isDraft, apply){
+  const root = document.getElementById("s-model");
+  modelMenu = { root, d, isDraft, apply };
+  wireSelect("s-model", v => apply({ model: v }));
+  const action = root.querySelector('[data-action="refresh"]');
+  action.textContent = refreshingModels.has(d.backend) ? "Обновление…" : "(обновить список)";
+  if(!root.classList.contains("disabled")) action.onclick = () => refreshModels(d.backend);
+}
+
+async function refreshModels(backend){
+  if(refreshingModels.has(backend)) return;
+  refreshingModels.add(backend);
+  modelMenu.root.querySelector('[data-action="refresh"]').textContent = "Обновление…";
+  let models;
+  try {
+    const r = await api("/api/models/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ backend }) });
+    if(!r.ok) throw new Error((await r.text()).trim() || "Не удалось обновить список моделей");
+    models = (await r.json()).models;
+  } catch(e){ notice(e.message || "Не удалось обновить список моделей"); }
+  finally {
+    refreshingModels.delete(backend);
+    const view = modelMenu;
+    if(view && view.d.backend === backend && view.root.isConnected){
+      if(models){
+        view.d.models = models;
+        if(view.isDraft && draftView) draftView.models = models;
+      }
+      const open = view.root.classList.contains("open");
+      view.root.outerHTML = selectHTML("s-model", view.d.models, view.d.model, true, !!(view.d.busy || view.d.read_only));
+      wireModelSelect(view.d, view.isDraft, view.apply);
+      if(open){
+        modelMenu.root.classList.add("open");
+        modelMenu.root.querySelector(".sselect-menu").classList.remove("hidden");
+      }
+    }
+  }
 }
 
 export function openSettings(created, title){
@@ -521,6 +563,7 @@ export function openSettings(created, title){
 }
 function closeSettings(){
   settingsFor = 0; settingsAutofocused = false; groupAdding = false;
+  modelMenu = null;
   draft = null; draftView = null; draftSubmitting = false; // discard any pending "new session" draft — closing creates nothing
   const ok = document.querySelector(".smodal-ok"); if(ok) ok.disabled = false;
   document.getElementById("smodal").classList.add("hidden");
@@ -596,7 +639,7 @@ function renderSettings(d, isDraft){
     nameInput.select();
   }
   wireSelect("s-backend", v => apply({ backend: v }));
-  wireSelect("s-model",   v => apply({ model: v }));
+  wireModelSelect(d, isDraft, apply);
   wireSelect("s-think",   v => apply({ think: v }));
   const wire = (sel, fn) => { const el = b.querySelector(sel); if(el) el.onchange = fn; };
   wire("#s-sandbox", e => apply({ sandbox: e.target.checked ? "on" : "off" }));

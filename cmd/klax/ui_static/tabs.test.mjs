@@ -160,3 +160,113 @@ test("active tabs center on entry and scope changes without overriding manual br
     delete globalThis.requestAnimationFrame;
   }
 });
+
+function modelRefreshHarness(){
+  const requests = [], notices = [], picks = [];
+  let root;
+  const classes = () => {
+    const names = new Set();
+    return { contains: name => names.has(name), add: name => names.add(name), remove: name => names.delete(name) };
+  };
+  function makeRoot(){
+    const action = { textContent: "" };
+    const menu = { classList: classes(), addEventListener(){}, querySelectorAll(selector){
+      assert.equal(selector, ".sselect-opt[data-value]", "refresh action must not enter the model selection handler");
+      return [];
+    } };
+    return {
+      isConnected: true, classList: classes(), dataset: {}, action, menu,
+      querySelector(selector){
+        if(selector === '[data-action="refresh"]') return action;
+        if(selector === ".sselect-menu") return menu;
+        if(selector === ".sselect-btn") return { addEventListener(){} };
+        throw new Error(selector);
+      },
+      set outerHTML(html){ this.isConnected = false; root = makeRoot(); root.html = html; },
+    };
+  }
+  root = makeRoot();
+  const context = vm.createContext({
+    document: { getElementById: () => root, querySelectorAll: () => [] },
+    esc: value => String(value),
+    api(path, options){
+      let resolve;
+      const promise = new Promise(done => { resolve = done; });
+      requests.push({ path, options, resolve });
+      return promise;
+    },
+  });
+  const source = readFileSync(new URL("./tabs.js", import.meta.url), "utf8")
+    .replace(/^import .*;\n/gm, "").replace(/^export /gm, "");
+  vm.runInContext(source, context);
+  context.onNotice = text => notices.push(text);
+  context.onPick = value => picks.push(value);
+  vm.runInContext("deps = { notice: onNotice };", context);
+  function show(backend, selected, isDraft = false){
+    root.isConnected = false; root = makeRoot(); root.classList.add("open");
+    context.view = { backend, model: selected, models: [{ value: "old", label: "Old" }] };
+    context.isDraft = isDraft;
+    vm.runInContext('draftView = isDraft ? view : null; draft = isDraft ? { name: "unsaved", model: view.model } : null; wireModelSelect(view, isDraft, onPick);', context);
+  }
+  return { context, requests, notices, picks, show, root: () => root,
+    run: code => vm.runInContext(code, context) };
+}
+
+test("model refresh is an action, preserves selection and draft, and saves no session settings", async () => {
+  const h = modelRefreshHarness();
+  h.show("codex", "pinned", true);
+  const pending = h.root().action.onclick();
+  await h.root().action.onclick();
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.root().action.textContent, "Обновление…");
+  assert.equal(h.requests[0].path, "/api/models/refresh");
+  assert.deepEqual(JSON.parse(h.requests[0].options.body), { backend: "codex" });
+  h.requests[0].resolve({ ok: true, json: async () => ({ models: [{ value: "new", label: "New" }] }) });
+  await pending;
+  assert.equal(h.context.view.model, "pinned");
+  assert.equal(h.run("draft.name"), "unsaved");
+  assert.equal(h.run("draftView.models[0].value"), "new");
+  assert.match(h.root().html, /data-value="pinned"/);
+  assert.match(h.root().html, /data-value="new"/);
+  assert.match(h.root().html, /data-action="refresh"/);
+  assert.equal(h.root().classList.contains("open"), true);
+  assert.deepEqual(h.picks, []);
+  assert.equal(h.root().action.textContent, "(обновить список)");
+});
+
+test("refresh response cannot replace another backend's menu", async () => {
+  const h = modelRefreshHarness();
+  h.show("codex", "pinned");
+  const pending = h.root().action.onclick();
+  h.show("claude", "opus");
+  h.requests[0].resolve({ ok: true, json: async () => ({ models: [{ value: "gpt-new", label: "New" }] }) });
+  await pending;
+  assert.equal(h.context.view.backend, "claude");
+  assert.equal(h.context.view.models[0].value, "old");
+  assert.equal(h.root().html, undefined);
+});
+
+test("refresh failures retain models and expose the reason", async () => {
+  const h = modelRefreshHarness();
+  h.show("claude", "opus");
+  const pending = h.root().action.onclick();
+  h.requests[0].resolve({ ok: false, text: async () => "CLI unavailable" });
+  await pending;
+  assert.equal(h.context.view.model, "opus");
+  assert.equal(h.context.view.models[0].value, "old");
+  assert.deepEqual(h.notices, ["CLI unavailable"]);
+  assert.equal(h.root().action.textContent, "(обновить список)");
+});
+
+test("refresh uses the current selection after settings re-render", async () => {
+  const h = modelRefreshHarness();
+  h.show("codex", "first");
+  const pending = h.root().action.onclick();
+  h.show("codex", "second");
+  assert.equal(h.root().action.textContent, "Обновление…");
+  h.requests[0].resolve({ ok: true, json: async () => ({ models: [{ value: "new", label: "New" }] }) });
+  await pending;
+  assert.equal(h.context.view.model, "second");
+  assert.match(h.root().html, /data-value="second"/);
+  assert.equal(h.context.view.models[0].value, "new");
+});

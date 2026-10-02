@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"html"
 	"regexp"
@@ -238,9 +239,7 @@ type modelEntry struct {
 	label string
 }
 
-// Claude models are launched by their bare CLI alias — the alias resolves to the
-// current model on its own (fable→claude-fable-5, opus→claude-opus-4-8, …), so
-// klax carries no window markers or per-model logic.
+// Initial choices until the first successful catalog refresh.
 var claudeModels = []modelEntry{
 	{"fable", "fable", "Fable"},
 	{"opus", "opus", "Opus"},
@@ -248,9 +247,6 @@ var claudeModels = []modelEntry{
 	{"haiku", "haiku", "Haiku"},
 }
 
-// Codex: the three GPT-5.6 variants (most-capable first) plus GPT-5.5 as an
-// explicit fallback. "По умолчанию" (empty) covers "let Codex decide". Bare
-// gpt-5.6 is intentionally absent — the local ChatGPT-account Codex rejects it.
 var codexModels = []modelEntry{
 	{"sol", "gpt-5.6-sol", "GPT-5.6 Sol"},
 	{"terra", "gpt-5.6-terra", "GPT-5.6 Terra"},
@@ -258,11 +254,28 @@ var codexModels = []modelEntry{
 	{"55", "gpt-5.5", "GPT-5.5"},
 }
 
-func modelsForBackend(backend string) []modelEntry {
+func (d *daemon) modelsForBackend(backend string) []modelEntry {
+	initial := claudeModels
 	if backend == "codex" {
-		return codexModels
+		initial = codexModels
 	}
-	return claudeModels
+	models := d.models.Models(backend)
+	if len(models) == 0 {
+		return initial
+	}
+	entries := make([]modelEntry, 0, len(models))
+	for _, m := range models {
+		sum := sha256.Sum256([]byte(m.Value))
+		alias := fmt.Sprintf("id%x", sum[:8])
+		for _, known := range initial {
+			if known.model == m.Value {
+				alias = known.alias
+				break
+			}
+		}
+		entries = append(entries, modelEntry{alias, m.Value, m.Label})
+	}
+	return entries
 }
 
 // Effort levels start at High: low/medium go unused in practice, and the
@@ -307,15 +320,15 @@ func (d *daemon) backendText(sk string, sess *session.Session) string {
 func (d *daemon) modelText(sk string, sess *session.Session) string {
 	def := d.scopeDefaults(sk)
 	backend := resolveSessionBackend(sess, def, d.cfg.GetDefaultBackend())
-	models := modelsForBackend(backend)
+	models := d.modelsForBackend(backend)
 
 	var sb strings.Builder
 	current := sess.ModelOverride
 	for _, m := range models {
 		if m.model == current {
-			fmt.Fprintf(&sb, "<b>/m_%s %s ✅</b>\n", m.alias, m.label)
+			fmt.Fprintf(&sb, "<b>/m_%s %s ✅</b>\n", m.alias, html.EscapeString(m.label))
 		} else {
-			fmt.Fprintf(&sb, "/m_%s %s\n", m.alias, m.label)
+			fmt.Fprintf(&sb, "/m_%s %s\n", m.alias, html.EscapeString(m.label))
 		}
 	}
 	if current == "" {
