@@ -485,7 +485,7 @@ function selectHTML(id, list, cur, withDefault, disabled){
     const refresh = id === "s-model" && o.value === "";
     return '<div class="sselect-opt'+(refresh ? " sselect-default" : "")+(o.value === cur ? " sel" : "")+'" data-value="'+esc(o.value)+'">'
       +'<span>'+esc(o.label)+'</span>'
-      +(refresh ? '<button type="button" class="model-refresh" data-action="refresh" title="Обновить список моделей" aria-label="Обновить список моделей"'+(disabled ? " disabled" : "")+'><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M20 12a8 8 0 1 0-2.3 5.7"/></svg></button>' : "")+'</div>';
+      +(refresh ? '<button type="button" class="model-refresh" data-action="refresh" title="Обновить список моделей" aria-label="Обновить список моделей"'+(disabled ? " disabled" : "")+'><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8M21 3v5h-5M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16M8 16H3v5"/></svg></button>' : "")+'</div>';
   }).join("");
   return '<div class="sselect'+(disabled ? " disabled" : "")+'" id="'+id+'" data-value="'+esc(cur)+'">'
     +'<button type="button" class="sselect-btn"'+(disabled ? " disabled" : "")+'><span class="sselect-cur">'+esc(curLabel)+'</span><span class="sselect-caret">▾</span></button>'
