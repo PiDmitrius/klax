@@ -325,6 +325,7 @@ func (d *daemon) thinkText(sk string, sess *session.Session) string {
 	} else {
 		fmt.Fprintf(&sb, "/t_default По умолчанию\n")
 	}
+	sb.WriteString("/t_update Обновить список\n")
 	for _, e := range efforts {
 		if e.model == current {
 			fmt.Fprintf(&sb, "<b>/t_%s %s ✅</b>\n", e.alias, e.label)

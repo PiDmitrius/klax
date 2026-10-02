@@ -137,9 +137,9 @@ cat >/dev/null
 			f.d.chatEvents = delivery.chatEvents
 			f.d.sendPause = delivery.sendPause
 			f.d.sendFails = delivery.sendFails
-			f.d.handleCommand(chatID, "", "/m_update")
+			f.d.handleCommand(chatID, "", "/t_update")
 			f.d.drainWg.Wait()
-			if len(tr.sendLog) != 1 || !strings.Contains(tr.sendLog[0].text, "new-model[1m]") || !strings.Contains(tr.sendLog[0].text, "/m_update") {
+			if len(tr.sendLog) != 1 || !strings.Contains(tr.sendLog[0].text, "new-model[1m]") || !strings.Contains(tr.sendLog[0].text, "/m_update") || !strings.Contains(tr.sendLog[0].text, "/t_update Обновить список") {
 				t.Fatal(tr.sendLog)
 			}
 			entries := f.d.modelsForBackend(backend)
@@ -284,5 +284,20 @@ func TestConcurrentModelEffortSettings(t *testing.T) {
 		if s.ModelOverride == "small" && s.ThinkOverride == "ultra" {
 			t.Fatalf("unsupported small/ultra saved at iteration %d, request errors: %v / %v", i, a, b)
 		}
+	}
+}
+
+func TestCatalogUpdateAliases(t *testing.T) {
+	for _, command := range []string{"/m_update", "/t_update"} {
+		got, _ := normalizeCommand(command, nil)
+		if got != "/m_update" {
+			t.Fatal(command, got)
+		}
+	}
+	d := newTestDaemon(t)
+	text := stripHTML(d.thinkText("user:test", &session.Session{}))
+	lines := strings.Split(text, "\n")
+	if !strings.HasPrefix(lines[0], "/t_default ") || lines[1] != "/t_update Обновить список" {
+		t.Fatal(text)
 	}
 }

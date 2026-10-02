@@ -49,8 +49,8 @@ func normalizeCommand(cmd string, args []string) (string, []string) {
 		return "/verbose", append([]string{cmd[len("/verbose_"):]}, args...)
 	case strings.HasPrefix(cmd, "/attachments_") && len(cmd) > len("/attachments_"):
 		return "/attachments", append([]string{cmd[len("/attachments_"):]}, args...)
-	case cmd == "/m_update":
-		return cmd, args
+	case cmd == "/m_update" || cmd == "/t_update":
+		return "/m_update", args
 	case strings.HasPrefix(cmd, "/m_") && len(cmd) > len("/m_"):
 		return "/__set_model", []string{cmd[len("/m_"):]}
 	case strings.HasPrefix(cmd, "/t_") && len(cmd) > len("/t_"):
@@ -214,7 +214,7 @@ func (d *daemon) handleModelsUpdate(chatID, msgID, sk string) {
 		text := "Модели " + backend + " обновлены."
 		current := d.store.Active(sk)
 		if current != nil && current.Created == sess.Created && effectiveBackendName(d.cfg, d.scopeDefaults(sk), current) == backend {
-			text += "\n\n" + d.modelText(sk, current)
+			text += "\n\n🤖 Модель:\n" + d.modelText(sk, current) + "\n🧠 Мышление:\n" + d.thinkText(sk, current)
 		}
 		d.sendMessage(chatID, msgID, text)
 	}()
