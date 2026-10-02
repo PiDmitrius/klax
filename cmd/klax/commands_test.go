@@ -433,3 +433,29 @@ func TestCWDCommandLocksAfterFirstMessage(t *testing.T) {
 		t.Fatalf("session CWD = %q after /cwd on a started session, want it to stay %q (locked, like /backend)", got, originalCWD)
 	}
 }
+
+func TestModelCommandsDecodeWithoutCatalog(t *testing.T) {
+	f := newAPIFixture(t, "", "", "")
+	f.d.models = nil
+	chatID := f.s.chatID("test")
+	for _, tc := range []struct{ command, model string }{
+		{"/m_mnwgc5lemuww64dvomwtkljvlmyw2xi", "claude-opus-5-5[1m]"},
+		{"/m_M5YHILJWFVZW63A", "gpt-6-sol"},
+		{"/m_update", "gpt-6-sol"},
+		{"/m_777q", "gpt-6-sol"},
+		{"/m_default", ""},
+		{"/model claude-sonnet-5", "claude-sonnet-5"},
+	} {
+		f.d.handleCommand(chatID, "", tc.command)
+		if got := f.d.store.Get("user:test", f.created).ModelOverride; got != tc.model {
+			t.Fatalf("%s: selected %q, want %q", tc.command, got, tc.model)
+		}
+		store, err := session.LoadStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := store.Get("user:test", f.created).ModelOverride; got != tc.model {
+			t.Fatalf("%s: persisted %q, want %q", tc.command, got, tc.model)
+		}
+	}
+}

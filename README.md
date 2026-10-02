@@ -116,7 +116,7 @@ Common fields:
 
 Runtime backend settings such as backend selection, model, thinking level, and sandbox mode are configured per session from chat via `/settings`.
 
-In the web UI, use the refresh icon beside **По умолчанию** in the model menu to refresh the selected backend’s available models. Claude and Codex catalogs are saved locally and shared by new-session settings, existing-session settings, and chat commands. The menu displays and selects exact model IDs returned by the backend (`model` for Codex, `resolvedModel` for Claude). Before the first refresh, only the default option is available. Refreshing preserves the selected model; a failed refresh keeps the previous catalog.
+In the web UI, use the refresh icon beside **По умолчанию** in the model menu to refresh the selected backend’s available models. Claude and Codex catalogs are saved locally and shared by new-session settings, existing-session settings, and chat commands. The menu displays and selects exact model IDs returned by the backend (`model` for Codex, `resolvedModel` for Claude). Chat selection commands use `/m_<base32>`: the full model ID encoded as Base32 without padding. `/m_default` selects the backend default; `/model <id>` accepts a model ID directly. Before the first refresh, only the default option is available. Refreshing preserves the selected model; a failed refresh keeps the previous catalog.
 
 ### Turn audit hook
 

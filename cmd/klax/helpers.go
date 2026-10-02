@@ -1,7 +1,7 @@
 package main
 
 import (
-	"crypto/sha256"
+	"encoding/base32"
 	"fmt"
 	"html"
 	"regexp"
@@ -239,12 +239,14 @@ type modelEntry struct {
 	label string
 }
 
+var modelCommandEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
+
 func (d *daemon) modelsForBackend(backend string) []modelEntry {
 	models := d.models.Models(backend)
 	entries := make([]modelEntry, 0, len(models))
 	for _, m := range models {
-		sum := sha256.Sum256([]byte(m.Value))
-		entries = append(entries, modelEntry{fmt.Sprintf("id%x", sum[:8]), m.Value, m.Value})
+		encoded := strings.ToLower(modelCommandEncoding.EncodeToString([]byte(m.Value)))
+		entries = append(entries, modelEntry{encoded, m.Value, m.Value})
 	}
 	return entries
 }

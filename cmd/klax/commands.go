@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/PiDmitrius/klax/internal/config"
 	"github.com/PiDmitrius/klax/internal/pathutil"
@@ -184,7 +185,7 @@ func (d *daemon) handleBackendSet(chatID, msgID, sk, name string) {
 	d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
 }
 
-func (d *daemon) handleModelSet(chatID, msgID, sk, alias string) {
+func (d *daemon) handleModelSet(chatID, msgID, sk, model string) {
 	sess := d.store.Active(sk)
 	if sess == nil {
 		d.sendMessage(chatID, msgID, "Нет активной сессии")
@@ -194,34 +195,15 @@ func (d *daemon) handleModelSet(chatID, msgID, sk, alias string) {
 		d.sendMessage(chatID, msgID, sessionBusyText)
 		return
 	}
-	if alias == "default" {
-		d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
-			def.Model = ""
-		})
-		sess = d.store.UpdateSession(sk, sess.Created, func(sess *session.Session) {
-			sess.ModelOverride = ""
-		})
-		if sess == nil {
-			return
-		}
-		d.saveStore()
-		d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
-		return
+	if model == "default" {
+		model = ""
 	}
-	def := d.scopeDefaults(sk)
-	backend := effectiveBackendName(d.cfg, def, sess)
-	resolved := alias
-	for _, m := range d.modelsForBackend(backend) {
-		if m.alias == alias {
-			resolved = m.model
-			break
-		}
-	}
+
 	d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
-		def.Model = resolved
+		def.Model = model
 	})
 	sess = d.store.UpdateSession(sk, sess.Created, func(sess *session.Session) {
-		sess.ModelOverride = resolved
+		sess.ModelOverride = model
 	})
 	if sess == nil {
 		return
@@ -742,7 +724,19 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		d.sendMessage(chatID, msgID, abortReplyText)
 
 	case "/__set_model":
-		d.handleModelSet(chatID, msgID, sk, args[0])
+		if len(args) != 1 {
+			return
+		}
+		model := args[0]
+		if model != "default" {
+			decoded, err := modelCommandEncoding.DecodeString(strings.ToUpper(model))
+			if err != nil || len(decoded) == 0 || !utf8.Valid(decoded) {
+				d.sendMessage(chatID, msgID, "Неверная команда выбора модели. Открой /model для актуального списка.")
+				return
+			}
+			model = string(decoded)
+		}
+		d.handleModelSet(chatID, msgID, sk, model)
 
 	case "/__set_think":
 		d.handleThinkSet(chatID, msgID, sk, args[0])
