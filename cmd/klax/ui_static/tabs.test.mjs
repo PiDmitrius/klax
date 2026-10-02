@@ -187,7 +187,7 @@ function modelRefreshHarness(){
   }
   root = makeRoot();
   const context = vm.createContext({
-    document: { getElementById: () => root, querySelectorAll: () => [] },
+    document: { getElementById: id => id === "s-model" ? root : null, querySelectorAll: () => [] },
     esc: value => String(value),
     api(path, options){
       let resolve;
@@ -275,4 +275,34 @@ test("refresh uses the current selection after settings re-render", async () => 
   assert.equal(h.context.view.model, "second");
   assert.match(h.root().html, /data-value="second"/);
   assert.equal(h.context.view.models[0].value, "new");
+});
+
+test("efforts follow model capabilities, including default and missing metadata", () => {
+  const h = modelRefreshHarness();
+  h.context.models = [
+    { value: "a", default: true, efforts: ["low", "high", "ultra"] },
+    { value: "b", efforts: ["high", "max"] },
+    { value: "c" },
+  ];
+  for(const [model, expected] of [["", ["low", "high", "ultra"]], ["b", ["high", "max"]], ["c", []], ["unknown", []]]){
+    h.context.selected = model;
+    assert.equal(h.run('JSON.stringify(modelEfforts({models, model: selected}).map(e => e.value))'), JSON.stringify(expected));
+  }
+  h.run('draft = { model: "a", think: "ultra" }; draftView = {models}; renderDraft = () => {}; draftApply({ model: "b" });');
+  assert.equal(h.run('draft.think'), "");
+  h.run('draft.think = "high"; draftApply({ model: "a" });');
+  assert.equal(h.run('draft.think'), "high");
+});
+
+test("catalog refresh updates effort options without changing selection", async () => {
+  const h = modelRefreshHarness();
+  h.show("codex", "pinned", true);
+  h.context.view.think = "ultra";
+  const pending = h.run('refreshModels("codex")');
+  h.requests[0].resolve({ok: true, json: async () => ({models: [{value: "pinned", label: "pinned", efforts: ["low", "high"]}]})});
+  await pending;
+  assert.equal(h.run('JSON.stringify(view.efforts.map(e => e.value))'), '["low","high"]');
+  assert.equal(h.context.view.think, "ultra");
+  assert.equal(h.run('draftView.models[0].efforts[0]'), "low");
+  assert.equal(h.picks.length, 0);
 });

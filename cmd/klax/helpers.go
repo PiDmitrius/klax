@@ -263,29 +263,17 @@ func resolveModelCommand(entries []modelEntry, token string) (string, bool) {
 	return model, model != ""
 }
 
-// Effort levels start at High: low/medium go unused in practice, and the
-// separate "По умолчанию" (empty) choice already covers "let the CLI decide".
-// The CLI enum still accepts the lower levels — klax simply doesn't offer them.
-var claudeEfforts = []modelEntry{
-	{"high", "high", "High"},
-	{"xhigh", "xhigh", "Extra High"},
-	{"max", "max", "Max"},
-}
-
-// Codex GPT-5.6 exposes the deeper Max/Ultra reasoning levels on top of High/
-// Extra High; low/medium stay omitted, "По умолчанию" covers the CLI default.
-var codexEfforts = []modelEntry{
-	{"high", "high", "High"},
-	{"xhigh", "xhigh", "Extra High"},
-	{"max", "max", "Max"},
-	{"ultra", "ultra", "Ultra"},
-}
-
-func effortsForBackend(backend string) []modelEntry {
-	if backend == "codex" {
-		return codexEfforts
+func (d *daemon) effortsForModel(backend, model string) []modelEntry {
+	for _, m := range d.models.Models(backend) {
+		if (model != "" && m.Value == model) || (model == "" && m.Default) {
+			entries := make([]modelEntry, 0, len(m.Efforts))
+			for _, effort := range m.Efforts {
+				entries = append(entries, modelEntry{effort, effort, effort})
+			}
+			return entries
+		}
 	}
-	return claudeEfforts
+	return nil
 }
 
 func (d *daemon) backendText(sk string, sess *session.Session) string {
@@ -328,7 +316,7 @@ func (d *daemon) modelText(sk string, sess *session.Session) string {
 func (d *daemon) thinkText(sk string, sess *session.Session) string {
 	def := d.scopeDefaults(sk)
 	backend := resolveSessionBackend(sess, def, d.cfg.GetDefaultBackend())
-	efforts := effortsForBackend(backend)
+	efforts := d.effortsForModel(backend, sess.ModelOverride)
 
 	var sb strings.Builder
 	current := sess.ThinkOverride

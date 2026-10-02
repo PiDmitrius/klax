@@ -399,6 +399,10 @@ function openDraft(){
     renderDraft(d);
   }).catch(() => { if(draft) document.getElementById("sbody").innerHTML = '<div class="shint">Не удалось загрузить настройки</div>'; });
 }
+function modelEfforts(d){
+  const model = (d.models || []).find(m => d.model ? m.value === d.model : m.default);
+  return (model?.efforts || []).map(value => ({ value, label: value }));
+}
 // renderDraft paints the draft dialog by overlaying the pending `draft` values onto the cached
 // server option-lists (draftView), then reusing the shared renderSettings in draft mode.
 function renderDraft(view){
@@ -424,6 +428,7 @@ function draftApply(patch){
     fetchDraft(patch.backend).then(d => { if(draft) renderDraft(d); }).catch(() => {});
     return;
   }
+  if("model" in patch && !modelEfforts({ models: draftView?.models, model: draft.model }).some(e => e.value === draft.think)) draft.think = "";
   renderDraft();
 }
 // onModalOk is the shared OK button: confirm-and-create for a draft, plain close for a real session.
@@ -555,6 +560,12 @@ async function refreshModels(backend){
     if(view && view.d.backend === backend && view.root.isConnected){
       if(models){
         view.d.models = models;
+        view.d.efforts = modelEfforts(view.d);
+        const think = document.getElementById("s-think");
+        if(think){
+          think.outerHTML = selectHTML("s-think", view.d.efforts, view.d.think, true, !!(view.d.busy || view.d.read_only));
+          wireSelect("s-think", v => view.apply({ think: v }));
+        }
         if(view.isDraft && draftView) draftView.models = models;
       }
       const open = view.root.classList.contains("open");
@@ -590,6 +601,7 @@ function closeSettings(){
 }
 
 function renderSettings(d, isDraft){
+  d.efforts = modelEfforts(d);
   if(isDraft){ if(!draft) return; } else if(settingsFor !== d.created) return;
   // In draft mode every control edits the pending `draft` object (nothing exists to PATCH yet);
   // for a real session each change applies immediately via patchSettings.

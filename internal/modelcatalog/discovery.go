@@ -16,8 +16,11 @@ import (
 )
 
 type Model struct {
-	Value string `json:"value"`
-	Label string `json:"label"`
+	Value         string   `json:"value"`
+	Label         string   `json:"label"`
+	Efforts       []string `json:"efforts,omitempty"`
+	Default       bool     `json:"default,omitempty"`
+	DefaultEffort string   `json:"default_effort,omitempty"`
 }
 
 // Fetch reads CLI control messages only; it never submits a user turn.
@@ -147,8 +150,13 @@ func (p *protocol) codex() ([]Model, error) {
 		}
 		var result struct {
 			Data []struct {
-				Model  string `json:"model"`
-				Hidden bool   `json:"hidden"`
+				Model         string `json:"model"`
+				Hidden        bool   `json:"hidden"`
+				IsDefault     bool   `json:"isDefault"`
+				DefaultEffort string `json:"defaultReasoningEffort"`
+				Efforts       []struct {
+					Value string `json:"reasoningEffort"`
+				} `json:"supportedReasoningEfforts"`
 			} `json:"data"`
 			NextCursor string `json:"nextCursor"`
 		}
@@ -160,7 +168,11 @@ func (p *protocol) codex() ([]Model, error) {
 		}
 		for _, m := range result.Data {
 			if !m.Hidden {
-				models = append(models, Model{m.Model, m.Model})
+				entry := Model{Value: m.Model, Label: m.Model, Default: m.IsDefault, DefaultEffort: m.DefaultEffort}
+				for _, effort := range m.Efforts {
+					entry.Efforts = append(entry.Efforts, effort.Value)
+				}
+				models = append(models, entry)
 			}
 		}
 		cursor = result.NextCursor
@@ -187,7 +199,9 @@ func (p *protocol) claude() ([]Model, error) {
 				Error     string `json:"error"`
 				Response  struct {
 					Models []struct {
-						ResolvedModel string `json:"resolvedModel"`
+						ResolvedModel string   `json:"resolvedModel"`
+						Value         string   `json:"value"`
+						Efforts       []string `json:"supportedEffortLevels"`
 					} `json:"models"`
 				} `json:"response"`
 			} `json:"response"`
@@ -209,7 +223,13 @@ func (p *protocol) claude() ([]Model, error) {
 			}
 			if !seen[m.ResolvedModel] {
 				seen[m.ResolvedModel] = true
-				models = append(models, Model{m.ResolvedModel, m.ResolvedModel})
+				models = append(models, Model{Value: m.ResolvedModel, Label: m.ResolvedModel, Efforts: m.Efforts, Default: m.Value == "default"})
+			} else if m.Value == "default" {
+				for i := range models {
+					if models[i].Value == m.ResolvedModel {
+						models[i].Default = true
+					}
+				}
 			}
 		}
 		return models, nil

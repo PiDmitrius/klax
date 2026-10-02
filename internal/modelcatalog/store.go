@@ -49,7 +49,7 @@ func (s *Store) Models(backend string) []Model {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return slices.Clone(s.models[backend])
+	return cloneModels(s.models[backend])
 }
 
 func (s *Store) Refresh(ctx context.Context, backend string) ([]Model, error) {
@@ -81,7 +81,7 @@ func (s *Store) refresh(ctx context.Context, backend string, fetch func(context.
 	for key, list := range s.models {
 		next[key] = list
 	}
-	next[backend] = slices.Clone(models)
+	next[backend] = cloneModels(models)
 	data, err := json.MarshalIndent(next, "", "  ")
 	if err != nil {
 		return nil, err
@@ -110,4 +110,12 @@ func (s *Store) refresh(ctx context.Context, backend string, fetch func(context.
 	}
 	s.models = next
 	return models, nil
+}
+
+func cloneModels(models []Model) []Model {
+	out := slices.Clone(models)
+	for i := range out {
+		out[i].Efforts = slices.Clone(out[i].Efforts)
+	}
+	return out
 }

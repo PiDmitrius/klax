@@ -16,13 +16,13 @@ import (
 func TestCodexPagesAndNotifications(t *testing.T) {
 	input := `{"id":1,"result":{}}
 {"method":"notification","params":{}}
-{"id":2,"result":{"data":[{"model":"gpt-a","displayName":"A"},{"model":"hidden","displayName":"Hidden","hidden":true}],"nextCursor":"page2"}}
+{"id":2,"result":{"data":[{"model":"gpt-a","displayName":"A","isDefault":true,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"high"}]},{"model":"hidden","displayName":"Hidden","hidden":true}],"nextCursor":"page2"}}
 {"id":3,"result":{"data":[{"model":"gpt-b","displayName":"B"}],"nextCursor":null}}
 `
 	var sent bytes.Buffer
 	p := protocol{json.NewEncoder(&sent), bufio.NewScanner(strings.NewReader(input))}
 	got, err := p.codex()
-	if err != nil || !reflect.DeepEqual(got, []Model{{"gpt-a", "gpt-a"}, {"gpt-b", "gpt-b"}}) {
+	if err != nil || !reflect.DeepEqual(got, []Model{{Value: "gpt-a", Label: "gpt-a", Default: true, DefaultEffort: "medium", Efforts: []string{"low", "high"}}, {Value: "gpt-b", Label: "gpt-b"}}) {
 		t.Fatal(got, err)
 	}
 	dec := json.NewDecoder(&sent)
@@ -46,12 +46,12 @@ func TestCodexPagesAndNotifications(t *testing.T) {
 func TestClaudeUsesResolvedIDsAndDeduplicates(t *testing.T) {
 	input := `{"type":"system","subtype":"init"}
 {"type":"control_response","response":{"request_id":"other","subtype":"success"}}
-{"type":"control_response","response":{"request_id":"models","subtype":"success","response":{"models":[{"value":"default","displayName":"Default","resolvedModel":"claude-opus-example[1m]"},{"value":"opus[1m]","displayName":"Opus","resolvedModel":"claude-opus-example[1m]"},{"value":"claude-example-1[1m]","displayName":"Example","resolvedModel":"claude-example-1"}]}}}
+{"type":"control_response","response":{"request_id":"models","subtype":"success","response":{"models":[{"value":"default","displayName":"Default","resolvedModel":"claude-opus-example[1m]","supportsEffort":true,"supportedEffortLevels":["high","max"]},{"value":"opus[1m]","displayName":"Opus","resolvedModel":"claude-opus-example[1m]"},{"value":"claude-example-1[1m]","displayName":"Example","resolvedModel":"claude-example-1"}]}}}
 `
 	var sent bytes.Buffer
 	p := protocol{json.NewEncoder(&sent), bufio.NewScanner(strings.NewReader(input))}
 	got, err := p.claude()
-	if err != nil || !reflect.DeepEqual(got, []Model{{"claude-opus-example[1m]", "claude-opus-example[1m]"}, {"claude-example-1", "claude-example-1"}}) {
+	if err != nil || !reflect.DeepEqual(got, []Model{{Value: "claude-opus-example[1m]", Label: "claude-opus-example[1m]", Default: true, Efforts: []string{"high", "max"}}, {Value: "claude-example-1", Label: "claude-example-1"}}) {
 		t.Fatal(got, err)
 	}
 	var req struct {

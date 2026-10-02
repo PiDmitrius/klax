@@ -234,11 +234,19 @@ func (d *daemon) handleModelSet(chatID, msgID, sk, model string) {
 		model = ""
 	}
 
+	backend := effectiveBackendName(d.cfg, d.scopeDefaults(sk), sess)
+	resetThink := model != sess.ModelOverride && !validOption(d.effortsForModel(backend, model), sess.ThinkOverride)
 	d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
 		def.Model = model
+		if resetThink {
+			def.Think = ""
+		}
 	})
 	sess = d.store.UpdateSession(sk, sess.Created, func(sess *session.Session) {
 		sess.ModelOverride = model
+		if resetThink {
+			sess.ThinkOverride = ""
+		}
 	})
 	if sess == nil {
 		return
@@ -273,18 +281,15 @@ func (d *daemon) handleThinkSet(chatID, msgID, sk, alias string) {
 	}
 	def := d.scopeDefaults(sk)
 	backend := effectiveBackendName(d.cfg, def, sess)
-	resolved := alias
-	for _, e := range effortsForBackend(backend) {
-		if e.alias == alias {
-			resolved = e.model
-			break
-		}
+	if !validOption(d.effortsForModel(backend, sess.ModelOverride), alias) {
+		d.sendMessage(chatID, msgID, "Уровень мышления недоступен для выбранной модели. Открой /think для актуального списка.")
+		return
 	}
 	d.store.UpdateScopeDefaults(sk, func(def *session.ScopeDefaults) {
-		def.Think = resolved
+		def.Think = alias
 	})
 	sess = d.store.UpdateSession(sk, sess.Created, func(sess *session.Session) {
-		sess.ThinkOverride = resolved
+		sess.ThinkOverride = alias
 	})
 	if sess == nil {
 		return

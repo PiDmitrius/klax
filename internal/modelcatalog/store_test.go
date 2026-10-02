@@ -18,7 +18,7 @@ func TestRefreshDurableAndFailuresPreserveCatalog(t *testing.T) {
 	load := func(models []Model) func(context.Context, string) ([]Model, error) {
 		return func(context.Context, string) ([]Model, error) { return models, nil }
 	}
-	original := []Model{{"old", "Old"}}
+	original := []Model{{Value: "old", Label: "Old", Default: true, Efforts: []string{"high", "max"}}}
 	for _, backend := range []string{"codex", "claude"} {
 		if _, err = s.refresh(context.Background(), backend, load(original)); err != nil {
 			t.Fatal(err)
@@ -30,7 +30,7 @@ func TestRefreshDurableAndFailuresPreserveCatalog(t *testing.T) {
 	}
 	failures := []func(context.Context, string) ([]Model, error){
 		func(context.Context, string) ([]Model, error) { return nil, errors.New("offline") },
-		load(nil), load([]Model{{"missing-label", ""}}), load([]Model{{"same", "One"}, {"same", "Two"}}),
+		load(nil), load([]Model{{Value: "missing-label", Label: ""}}), load([]Model{{Value: "same", Label: "One"}, {Value: "same", Label: "Two"}}),
 	}
 	for _, fetch := range failures {
 		if _, err = s.refresh(context.Background(), "codex", fetch); err == nil {
@@ -42,7 +42,7 @@ func TestRefreshDurableAndFailuresPreserveCatalog(t *testing.T) {
 		}
 	}
 	s.path = filepath.Join(path, "impossible")
-	if _, err = s.refresh(context.Background(), "codex", load([]Model{{"new", "New"}})); err == nil {
+	if _, err = s.refresh(context.Background(), "codex", load([]Model{{Value: "new", Label: "New"}})); err == nil {
 		t.Fatal("save unexpectedly succeeded")
 	}
 	if !reflect.DeepEqual(s.Models("codex"), original) {
@@ -57,6 +57,10 @@ func TestRefreshDurableAndFailuresPreserveCatalog(t *testing.T) {
 	}
 	copy := s.Models("codex")
 	copy[0].Value = "changed"
+	copy[0].Efforts[0] = "changed"
+	if s.Models("codex")[0].Efforts[0] != "high" {
+		t.Fatal("caller mutated efforts")
+	}
 	if s.Models("codex")[0].Value != "old" {
 		t.Fatal("caller mutated catalog")
 	}
@@ -72,12 +76,12 @@ func TestRefreshSerializesPerBackendWithoutBlockingReaders(t *testing.T) {
 		_, err := s.refresh(context.Background(), "codex", func(context.Context, string) ([]Model, error) {
 			close(entered)
 			<-release
-			return []Model{{"code", "Code"}}, nil
+			return []Model{{Value: "code", Label: "Code"}}, nil
 		})
 		done <- err
 	}()
 	<-entered
-	fetch := func(context.Context, string) ([]Model, error) { return []Model{{"chat", "Chat"}}, nil }
+	fetch := func(context.Context, string) ([]Model, error) { return []Model{{Value: "chat", Label: "Chat"}}, nil }
 	if _, err := s.refresh(context.Background(), "codex", fetch); !errors.Is(err, ErrUpdating) {
 		t.Fatal(err)
 	}

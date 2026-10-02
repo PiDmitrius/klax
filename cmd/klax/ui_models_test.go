@@ -166,3 +166,74 @@ cat >/dev/null
 		})
 	}
 }
+
+func TestModelEffortsDriveSettingsAndCommands(t *testing.T) {
+	for _, backend := range []string{"codex", "claude"} {
+		t.Run(backend, func(t *testing.T) {
+			f := newAPIFixture(t, "", "", "")
+			catalog := map[string][]modelcatalog.Model{backend: {
+				{Value: "large", Label: "large", Default: true, Efforts: []string{"low", "high", "ultra"}},
+				{Value: "small", Label: "small", Efforts: []string{"high"}},
+				{Value: "plain", Label: "plain"},
+			}}
+			data, err := json.Marshal(catalog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(f.dir, "effort-models.json")
+			if err = os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			f.d.models, err = modelcatalog.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.d.store.UpdateSession("user:test", f.created, func(s *session.Session) { s.Backend = backend })
+			view, _ := f.d.uiSessionSettings("user:test", f.created)
+			if len(view.Efforts) != 3 || view.Efforts[0].Value != "low" {
+				t.Fatal(view.Efforts)
+			}
+			draft := f.d.uiDraftSettings("user:test", f.s.chatID("test"), backend)
+			if len(draft.Efforts) != 3 {
+				t.Fatal(draft.Efforts)
+			}
+			chatID := f.s.chatID("test")
+			f.d.handleCommand(chatID, "", "/t_ultra")
+			if got := f.d.store.Get("user:test", f.created).ThinkOverride; got != "ultra" {
+				t.Fatal(got)
+			}
+			if err = f.d.applyUISessionSettings("user:test", f.created, uiSettingsPatch{Model: str2("small")}); err != nil {
+				t.Fatal(err)
+			}
+			sess := f.d.store.Get("user:test", f.created)
+			if sess.ThinkOverride != "" {
+				t.Fatal("unsupported effort retained", sess)
+			}
+			text := f.d.thinkText("user:test", sess)
+			if !strings.Contains(text, "/t_high") || strings.Contains(text, "/t_ultra") {
+				t.Fatal(text)
+			}
+			if err = f.d.applyUISessionSettings("user:test", f.created, uiSettingsPatch{Think: str2("ultra")}); err == nil {
+				t.Fatal("unsupported effort accepted")
+			}
+			f.d.handleCommand(chatID, "", "/t_ultra")
+			if f.d.store.Get("user:test", f.created).ThinkOverride != "" {
+				t.Fatal("messenger accepted unsupported effort")
+			}
+			f.d.handleCommand(chatID, "", "/t_high")
+			f.d.handleCommand(chatID, "", "/model plain")
+			sess = f.d.store.Get("user:test", f.created)
+			if sess.ThinkOverride != "" {
+				t.Fatal("messenger retained unsupported effort")
+			}
+			view, _ = f.d.uiSessionSettings("user:test", f.created)
+			if len(view.Efforts) != 0 {
+				t.Fatal(view.Efforts)
+			}
+			f.d.models = nil
+			if len(f.d.effortsForModel(backend, "")) != 0 {
+				t.Fatal("fabricated efforts")
+			}
+		})
+	}
+}

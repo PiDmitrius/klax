@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/PiDmitrius/klax/internal/modelcatalog"
 	"github.com/PiDmitrius/klax/internal/pathutil"
 	"github.com/PiDmitrius/klax/internal/session"
 )
@@ -31,19 +32,19 @@ type uiSettings struct {
 	// Read-only facts shown as "additional parameters" (settings dialog): the model the
 	// backend ACTUALLY answered with last (may differ from the selected default) and the
 	// resolved session UUID. Both empty until the first response lands.
-	AssignedModel string             `json:"assigned_model,omitempty"`
-	SessionID     string             `json:"session_id,omitempty"`
-	Sandbox       string             `json:"sandbox"`
-	TTY           bool               `json:"tty"`
-	CWD           string             `json:"cwd"`    // ~-abbreviated for display; the server re-expands ~ on save
-	Prompt        string             `json:"prompt"` // append-system-prompt
-	Busy          bool               `json:"busy"`
-	BackendLocked bool               `json:"backend_locked"` // first message already sent
-	CWDLocked     bool               `json:"cwd_locked"`     // first message already sent
-	TTYAvailable  bool               `json:"tty_available"`  // backend == claude
-	Backends      []uiSettingsOption `json:"backends"`
-	Models        []uiSettingsOption `json:"models"`
-	Efforts       []uiSettingsOption `json:"efforts"`
+	AssignedModel string               `json:"assigned_model,omitempty"`
+	SessionID     string               `json:"session_id,omitempty"`
+	Sandbox       string               `json:"sandbox"`
+	TTY           bool                 `json:"tty"`
+	CWD           string               `json:"cwd"`    // ~-abbreviated for display; the server re-expands ~ on save
+	Prompt        string               `json:"prompt"` // append-system-prompt
+	Busy          bool                 `json:"busy"`
+	BackendLocked bool                 `json:"backend_locked"` // first message already sent
+	CWDLocked     bool                 `json:"cwd_locked"`     // first message already sent
+	TTYAvailable  bool                 `json:"tty_available"`  // backend == claude
+	Backends      []uiSettingsOption   `json:"backends"`
+	Models        []modelcatalog.Model `json:"models"`
+	Efforts       []uiSettingsOption   `json:"efforts"`
 	// Groups this session belongs to. The set of EXISTING names is deliberately not sent: the client
 	// already derives it from the sessions snapshot for the scope menu, and a second derivation here
 	// would order Cyrillic differently (Go lowercases and compares bytes; the browser uses
@@ -126,8 +127,8 @@ func (d *daemon) uiSessionSettings(sk string, created int64) (*uiSettings, bool)
 		CWDLocked:     sess.Messages > 0,
 		TTYAvailable:  backend == "claude",
 		Backends:      []uiSettingsOption{{Value: "claude", Label: "Claude"}, {Value: "codex", Label: "Codex"}},
-		Models:        uiSettingsOptions(d.modelsForBackend(backend)),
-		Efforts:       uiSettingsOptions(effortsForBackend(backend)),
+		Models:        d.models.Models(backend),
+		Efforts:       uiSettingsOptions(d.effortsForModel(backend, sess.ModelOverride)),
 		Groups:        sess.Groups,
 	}, true
 }
@@ -168,8 +169,8 @@ func (d *daemon) uiDraftSettings(sk, chatID, backendOverride string) *uiSettings
 		CWD:          pathutil.TildePathsInText(d.defaultSessionCWD(chatID, sk)),
 		TTYAvailable: backend == "claude",
 		Backends:     []uiSettingsOption{{Value: "claude", Label: "Claude"}, {Value: "codex", Label: "Codex"}},
-		Models:       uiSettingsOptions(d.modelsForBackend(backend)),
-		Efforts:      uiSettingsOptions(effortsForBackend(backend)),
+		Models:       d.models.Models(backend),
+		Efforts:      uiSettingsOptions(d.effortsForModel(backend, model)),
 	}
 }
 
@@ -268,8 +269,20 @@ func (d *daemon) validateSettingsPatch(cur *session.Session, backend string, bus
 	if p.Model != nil && *p.Model != "" && (r.backendChanged || *p.Model != cur.ModelOverride) && !validOption(d.modelsForBackend(r.backend), *p.Model) {
 		return r, &uiErr{http.StatusBadRequest, "Неизвестная модель"}
 	}
-	if p.Think != nil && *p.Think != "" && !validOption(effortsForBackend(r.backend), *p.Think) {
+	model := cur.ModelOverride
+	if r.backendChanged {
+		model = ""
+	}
+	if p.Model != nil {
+		model = *p.Model
+	}
+	efforts := d.effortsForModel(r.backend, model)
+	if p.Think != nil && *p.Think != "" && (r.backendChanged || model != cur.ModelOverride || *p.Think != cur.ThinkOverride) && !validOption(efforts, *p.Think) {
 		return r, &uiErr{http.StatusBadRequest, "Неизвестный уровень мышления"}
+	}
+	if p.Think == nil && p.Model != nil && model != cur.ModelOverride && !validOption(efforts, cur.ThinkOverride) {
+		empty := ""
+		r.p.Think = &empty
 	}
 	if p.Sandbox != nil && *p.Sandbox != "on" && *p.Sandbox != "off" {
 		return r, &uiErr{http.StatusBadRequest, "sandbox: on или off"}

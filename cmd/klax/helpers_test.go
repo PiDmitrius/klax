@@ -25,7 +25,7 @@ import (
 // t.Setenv can register the restore-on-cleanup.
 func newTestDaemon(t *testing.T) *daemon {
 	t.Setenv("KLAX_CONFIG_DIR", t.TempDir())
-	data, err := json.Marshal(map[string][]modelcatalog.Model{"codex": {{Value: "gpt-5.6-sol", Label: "gpt-5.6-sol"}}})
+	data, err := json.Marshal(map[string][]modelcatalog.Model{"codex": {{Value: "gpt-5.6-sol", Label: "gpt-5.6-sol", Default: true, Efforts: []string{"low", "medium", "high", "xhigh", "max", "ultra"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestThinkTextHighlightsSelectedEffortWithoutDefaultSuffix(t *testing.T) {
 
 	text := d.thinkText(chatID, &session.Session{ThinkOverride: "high"})
 
-	if !strings.Contains(text, "<b>/t_high High ✅</b>") {
+	if !strings.Contains(text, "<b>/t_high high ✅</b>") {
 		t.Fatalf("selected effort is not highlighted: %q", text)
 	}
 	if strings.Contains(text, "По умолчанию (") {
@@ -185,7 +185,7 @@ func TestSettingsTextContainsBackendModelAndThinkSections(t *testing.T) {
 		"🔒 Sandbox:",
 		"<b>/backend_codex ✅</b>",
 		fmt.Sprintf("<b>/m_%s gpt-5.6-sol ✅</b>", d.modelsForBackend("codex")[0].alias),
-		"<b>/t_high High ✅</b>",
+		"<b>/t_high high ✅</b>",
 		"<b>/sandbox_on ✅</b>",
 	} {
 		if !strings.Contains(text, want) {
