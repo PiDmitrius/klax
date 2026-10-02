@@ -332,17 +332,17 @@ func (d *daemon) thinkText(sk string, sess *session.Session) string {
 
 	var sb strings.Builder
 	current := sess.ThinkOverride
+	if current == "" {
+		fmt.Fprintf(&sb, "<b>/t_default По умолчанию ✅</b>\n")
+	} else {
+		fmt.Fprintf(&sb, "/t_default По умолчанию\n")
+	}
 	for _, e := range efforts {
 		if e.model == current {
 			fmt.Fprintf(&sb, "<b>/t_%s %s ✅</b>\n", e.alias, e.label)
 		} else {
 			fmt.Fprintf(&sb, "/t_%s %s\n", e.alias, e.label)
 		}
-	}
-	if current == "" {
-		fmt.Fprintf(&sb, "<b>/t_default По умолчанию ✅</b>\n")
-	} else {
-		fmt.Fprintf(&sb, "/t_default По умолчанию\n")
 	}
 	return sb.String()
 }
