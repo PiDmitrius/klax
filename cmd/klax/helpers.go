@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/base32"
 	"fmt"
 	"html"
@@ -245,10 +246,24 @@ func (d *daemon) modelsForBackend(backend string) []modelEntry {
 	models := d.models.Models(backend)
 	entries := make([]modelEntry, 0, len(models))
 	for _, m := range models {
-		encoded := strings.ToLower(modelCommandEncoding.EncodeToString([]byte(m.Value)))
+		sum := sha256.Sum256([]byte(m.Value))
+		encoded := strings.ToLower(modelCommandEncoding.EncodeToString(sum[:8]))
 		entries = append(entries, modelEntry{encoded, m.Value, m.Value})
 	}
 	return entries
+}
+
+func resolveModelCommand(entries []modelEntry, token string) (string, bool) {
+	model := ""
+	for _, entry := range entries {
+		if entry.alias == strings.ToLower(token) {
+			if model != "" {
+				return "", false
+			}
+			model = entry.model
+		}
+	}
+	return model, model != ""
 }
 
 // Effort levels start at High: low/medium go unused in practice, and the
@@ -309,6 +324,7 @@ func (d *daemon) modelText(sk string, sess *session.Session) string {
 	} else {
 		fmt.Fprintf(&sb, "/m_default По умолчанию\n")
 	}
+	sb.WriteString("/m_update Обновить список моделей\n")
 	return sb.String()
 }
 

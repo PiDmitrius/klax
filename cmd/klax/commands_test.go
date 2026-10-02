@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/PiDmitrius/klax/internal/config"
@@ -434,15 +435,17 @@ func TestCWDCommandLocksAfterFirstMessage(t *testing.T) {
 	}
 }
 
-func TestModelCommandsDecodeWithoutCatalog(t *testing.T) {
+func TestModelCommandsResolveCatalog(t *testing.T) {
 	f := newAPIFixture(t, "", "", "")
-	f.d.models = nil
 	chatID := f.s.chatID("test")
+	token := f.d.modelsForBackend("codex")[0].alias
+	if len(token) != 13 {
+		t.Fatal(token)
+	}
 	for _, tc := range []struct{ command, model string }{
-		{"/m_mnwgc5lemuww64dvomwtkljvlmyw2xi", "claude-opus-5-5[1m]"},
-		{"/m_M5YHILJWFVZW63A", "gpt-6-sol"},
-		{"/m_update", "gpt-6-sol"},
-		{"/m_777q", "gpt-6-sol"},
+		{"/m_" + token, "gpt-5.6-sol"},
+		{"/m_" + strings.ToUpper(token), "gpt-5.6-sol"},
+		{"/m_777q", "gpt-5.6-sol"},
 		{"/m_default", ""},
 		{"/model claude-sonnet-5", "claude-sonnet-5"},
 	} {
@@ -457,5 +460,22 @@ func TestModelCommandsDecodeWithoutCatalog(t *testing.T) {
 		if got := store.Get("user:test", f.created).ModelOverride; got != tc.model {
 			t.Fatalf("%s: persisted %q, want %q", tc.command, got, tc.model)
 		}
+	}
+}
+
+func TestModelCommandRejectsAmbiguousOrMissing(t *testing.T) {
+	entries := []modelEntry{{alias: "same", model: "first"}, {alias: "same", model: "second"}}
+	for _, token := range []string{"same", "absent"} {
+		if model, ok := resolveModelCommand(entries, token); ok || model != "" {
+			t.Fatal(model, ok)
+		}
+	}
+	f := newAPIFixture(t, "", "", "")
+	token := f.d.modelsForBackend("codex")[0].alias
+	f.d.handleCommand(f.s.chatID("test"), "", "/model custom-model")
+	f.d.models = nil
+	f.d.handleCommand(f.s.chatID("test"), "", "/m_"+token)
+	if got := f.d.store.Get("user:test", f.created).ModelOverride; got != "custom-model" {
+		t.Fatal(got)
 	}
 }

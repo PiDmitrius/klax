@@ -79,7 +79,7 @@ type daemon struct {
 	runnersMu    sync.Mutex
 	mu           sync.Mutex
 	draining     bool           // stop accepting new tasks, wait for current to finish
-	drainWg      sync.WaitGroup // tracks active sessionRunners for drain
+	drainWg      sync.WaitGroup // tracks active sessionRunners and catalog refreshes for drain
 	sendPause    map[string]time.Time
 	sendFails    map[string]int
 	chatEvents   map[string]uint64

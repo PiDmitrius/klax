@@ -197,7 +197,7 @@ func TestSettingsTextContainsBackendModelAndThinkSections(t *testing.T) {
 	}
 	for _, want := range []string{
 		"✅</b>\n\n🤖",
-		"По умолчанию\n\n🧠",
+		"/m_update Обновить список моделей\n\n🧠",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("settings text should contain a single blank line between sections, missing %q in %q", want, text)

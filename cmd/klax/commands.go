@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/PiDmitrius/klax/internal/config"
 	"github.com/PiDmitrius/klax/internal/pathutil"
@@ -50,6 +49,8 @@ func normalizeCommand(cmd string, args []string) (string, []string) {
 		return "/verbose", append([]string{cmd[len("/verbose_"):]}, args...)
 	case strings.HasPrefix(cmd, "/attachments_") && len(cmd) > len("/attachments_"):
 		return "/attachments", append([]string{cmd[len("/attachments_"):]}, args...)
+	case cmd == "/m_update":
+		return cmd, args
 	case strings.HasPrefix(cmd, "/m_") && len(cmd) > len("/m_"):
 		return "/__set_model", []string{cmd[len("/m_"):]}
 	case strings.HasPrefix(cmd, "/t_") && len(cmd) > len("/t_"):
@@ -183,6 +184,40 @@ func (d *daemon) handleBackendSet(chatID, msgID, sk, name string) {
 	}
 	d.saveStore()
 	d.sendMessage(chatID, msgID, d.settingsText(chatID, sk, sess))
+}
+
+func (d *daemon) handleModelsUpdate(chatID, msgID, sk string) {
+	sess := d.store.Active(sk)
+	if sess == nil {
+		d.sendMessage(chatID, msgID, "Нет активной сессии")
+		return
+	}
+	if d.models == nil {
+		d.sendMessage(chatID, msgID, "Каталог моделей недоступен")
+		return
+	}
+	backend := effectiveBackendName(d.cfg, d.scopeDefaults(sk), sess)
+	d.mu.Lock()
+	if d.draining {
+		d.mu.Unlock()
+		d.sendMessage(chatID, msgID, "Перезапуск: обнови список после запуска.")
+		return
+	}
+	d.drainWg.Add(1)
+	d.mu.Unlock()
+	go func() {
+		defer d.drainWg.Done()
+		if _, err := d.models.Refresh(context.Background(), backend); err != nil {
+			d.sendMessage(chatID, msgID, "Не удалось обновить список моделей: "+html.EscapeString(err.Error()))
+			return
+		}
+		text := "Модели " + backend + " обновлены."
+		current := d.store.Active(sk)
+		if current != nil && current.Created == sess.Created && effectiveBackendName(d.cfg, d.scopeDefaults(sk), current) == backend {
+			text += "\n\n" + d.modelText(sk, current)
+		}
+		d.sendMessage(chatID, msgID, text)
+	}()
 }
 
 func (d *daemon) handleModelSet(chatID, msgID, sk, model string) {
@@ -723,18 +758,23 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		}
 		d.sendMessage(chatID, msgID, abortReplyText)
 
+	case "/m_update":
+		d.handleModelsUpdate(chatID, msgID, sk)
+
 	case "/__set_model":
 		if len(args) != 1 {
 			return
 		}
 		model := args[0]
 		if model != "default" {
-			decoded, err := modelCommandEncoding.DecodeString(strings.ToUpper(model))
-			if err != nil || len(decoded) == 0 || !utf8.Valid(decoded) {
-				d.sendMessage(chatID, msgID, "Неверная команда выбора модели. Открой /model для актуального списка.")
+			sess := d.store.Active(sk)
+			backend := effectiveBackendName(d.cfg, d.scopeDefaults(sk), sess)
+			resolved, ok := resolveModelCommand(d.modelsForBackend(backend), model)
+			if !ok {
+				d.sendMessage(chatID, msgID, "Модель не найдена или команда неоднозначна. Открой /model для актуального списка.")
 				return
 			}
-			model = string(decoded)
+			model = resolved
 		}
 		d.handleModelSet(chatID, msgID, sk, model)
 

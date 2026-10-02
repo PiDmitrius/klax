@@ -11,6 +11,7 @@ import (
 
 	"github.com/PiDmitrius/klax/internal/modelcatalog"
 	"github.com/PiDmitrius/klax/internal/session"
+	"github.com/PiDmitrius/klax/internal/transport"
 )
 
 func TestModelRefreshFeedsAllSelectorsAndKeepsSelection(t *testing.T) {
@@ -101,5 +102,67 @@ func TestNoBakedInModelCatalog(t *testing.T) {
 		if len(settings.Models) != 0 {
 			t.Fatalf("%s: fabricated model list: %+v", backend, settings.Models)
 		}
+	}
+}
+
+func TestModelUpdateCommand(t *testing.T) {
+	for _, backend := range []string{"claude", "codex"} {
+		t.Run(backend, func(t *testing.T) {
+			f := newAPIFixture(t, "", "", "")
+			f.d.store.UpdateSession("user:test", f.created, func(s *session.Session) { s.Backend = backend; s.ModelOverride = "keep-model" })
+			bin := filepath.Join(t.TempDir(), backend)
+			script := `#!/bin/sh
+IFS= read -r line
+printf '%s\n' '{"type":"control_response","response":{"request_id":"models","subtype":"success","response":{"models":[{"resolvedModel":"new-model[1m]"}]}}}'
+cat >/dev/null
+`
+			if backend == "codex" {
+				script = `#!/bin/sh
+IFS= read -r line
+printf '%s\n' '{"id":1,"result":{}}'
+IFS= read -r line
+IFS= read -r line
+printf '%s\n' '{"id":2,"result":{"data":[{"model":"new-model[1m]"}],"nextCursor":null}}'
+cat >/dev/null
+`
+			}
+			if err := os.WriteFile(bin, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", filepath.Dir(bin)+":"+os.Getenv("PATH"))
+			chatID := f.s.chatID("test")
+			tr := &fakeTransport{}
+			f.d.transports = map[string]transport.Transport{"ui": tr}
+			delivery := newTestDeliveryDaemon(tr)
+			f.d.chatEvents = delivery.chatEvents
+			f.d.sendPause = delivery.sendPause
+			f.d.sendFails = delivery.sendFails
+			f.d.handleCommand(chatID, "", "/m_update")
+			f.d.drainWg.Wait()
+			if len(tr.sendLog) != 1 || !strings.Contains(tr.sendLog[0].text, "new-model[1m]") || !strings.Contains(tr.sendLog[0].text, "/m_update") {
+				t.Fatal(tr.sendLog)
+			}
+			entries := f.d.modelsForBackend(backend)
+			if len(entries) != 1 || entries[0].model != "new-model[1m]" || len(entries[0].alias) != 13 {
+				t.Fatal(entries)
+			}
+			sess := f.d.store.Get("user:test", f.created)
+			if sess.ModelOverride != "keep-model" {
+				t.Fatal(sess.ModelOverride)
+			}
+			for _, text := range []string{f.d.modelText("user:test", sess), f.d.settingsText(chatID, "user:test", sess)} {
+				if !strings.Contains(text, "/m_update") || !strings.Contains(text, "new-model[1m]") {
+					t.Fatal(text)
+				}
+			}
+			if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			f.d.handleCommand(chatID, "", "/m_update")
+			f.d.drainWg.Wait()
+			if got := f.d.modelsForBackend(backend); len(got) != 1 || got[0] != entries[0] {
+				t.Fatal(got)
+			}
+		})
 	}
 }
