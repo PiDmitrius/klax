@@ -247,7 +247,7 @@ func (d *daemon) modelsForBackend(backend string) []modelEntry {
 	entries := make([]modelEntry, 0, len(models))
 	for _, m := range models {
 		sum := sha256.Sum256([]byte(m.Value))
-		encoded := strings.ToLower(modelCommandEncoding.EncodeToString(sum[:8]))
+		encoded := strings.ToLower(modelCommandEncoding.EncodeToString(sum[:5]))
 		entries = append(entries, modelEntry{encoded, m.Value, m.Value})
 	}
 	return entries

@@ -439,7 +439,7 @@ func TestModelCommandsResolveCatalog(t *testing.T) {
 	f := newAPIFixture(t, "", "", "")
 	chatID := f.s.chatID("test")
 	token := f.d.modelsForBackend("codex")[0].alias
-	if len(token) != 13 {
+	if len(token) != 8 {
 		t.Fatal(token)
 	}
 	for _, tc := range []struct{ command, model string }{

@@ -143,7 +143,7 @@ cat >/dev/null
 				t.Fatal(tr.sendLog)
 			}
 			entries := f.d.modelsForBackend(backend)
-			if len(entries) != 1 || entries[0].model != "new-model[1m]" || len(entries[0].alias) != 13 {
+			if len(entries) != 1 || entries[0].model != "new-model[1m]" || len(entries[0].alias) != 8 {
 				t.Fatal(entries)
 			}
 			sess := f.d.store.Get("user:test", f.created)
