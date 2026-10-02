@@ -82,7 +82,7 @@ func (b *ClaudeBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 	b.inTextBlock = false
 	args := BuildClaudeArgs(opts)
 
-	bin := findBinary("claude", []string{".local/bin/claude"})
+	bin := FindBinary("claude")
 	if bin == "" {
 		return nil, errors.New("claude not found. Install: curl -fsSL https://claude.ai/install.sh | bash")
 	}
@@ -390,8 +390,15 @@ func claudePlanInput(raw json.RawMessage) string {
 	return MarshalPlanProgress(done, len(parsed.Todos), current)
 }
 
-// findBinary looks for a binary by name, with fallback paths relative to $HOME.
-func findBinary(name string, homePaths []string) string {
+// FindBinary locates a backend CLI in PATH or its standard install directories.
+func FindBinary(name string) string {
+	var homePaths []string
+	switch name {
+	case "claude":
+		homePaths = []string{".local/bin/claude"}
+	case "codex":
+		homePaths = []string{".npm-global/bin/codex"}
+	}
 	if p, err := exec.LookPath(name); err == nil {
 		return p
 	}

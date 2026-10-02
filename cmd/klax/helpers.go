@@ -238,56 +238,42 @@ type modelEntry struct {
 	label string
 }
 
-// Claude models are launched by their bare CLI alias — the alias resolves to the
-// current model on its own (fable→claude-fable-5, opus→claude-opus-4-8, …), so
-// klax carries no window markers or per-model logic.
-var claudeModels = []modelEntry{
-	{"fable", "fable", "Fable"},
-	{"opus", "opus", "Opus"},
-	{"sonnet", "sonnet", "Sonnet"},
-	{"haiku", "haiku", "Haiku"},
-}
+var modelCommandUnsafe = regexp.MustCompile(`[^A-Za-z0-9]`)
 
-// Codex: the three GPT-5.6 variants (most-capable first) plus GPT-5.5 as an
-// explicit fallback. "По умолчанию" (empty) covers "let Codex decide". Bare
-// gpt-5.6 is intentionally absent — the local ChatGPT-account Codex rejects it.
-var codexModels = []modelEntry{
-	{"sol", "gpt-5.6-sol", "GPT-5.6 Sol"},
-	{"terra", "gpt-5.6-terra", "GPT-5.6 Terra"},
-	{"luna", "gpt-5.6-luna", "GPT-5.6 Luna"},
-	{"55", "gpt-5.5", "GPT-5.5"},
-}
-
-func modelsForBackend(backend string) []modelEntry {
-	if backend == "codex" {
-		return codexModels
+func (d *daemon) modelsForBackend(backend string) []modelEntry {
+	models := d.models.Models(backend)
+	entries := make([]modelEntry, 0, len(models))
+	for _, m := range models {
+		encoded := modelCommandUnsafe.ReplaceAllString(m.Value, "_")
+		entries = append(entries, modelEntry{encoded, m.Value, m.Value})
 	}
-	return claudeModels
+	return entries
 }
 
-// Effort levels start at High: low/medium go unused in practice, and the
-// separate "По умолчанию" (empty) choice already covers "let the CLI decide".
-// The CLI enum still accepts the lower levels — klax simply doesn't offer them.
-var claudeEfforts = []modelEntry{
-	{"high", "high", "High"},
-	{"xhigh", "xhigh", "Extra High"},
-	{"max", "max", "Max"},
-}
-
-// Codex GPT-5.6 exposes the deeper Max/Ultra reasoning levels on top of High/
-// Extra High; low/medium stay omitted, "По умолчанию" covers the CLI default.
-var codexEfforts = []modelEntry{
-	{"high", "high", "High"},
-	{"xhigh", "xhigh", "Extra High"},
-	{"max", "max", "Max"},
-	{"ultra", "ultra", "Ultra"},
-}
-
-func effortsForBackend(backend string) []modelEntry {
-	if backend == "codex" {
-		return codexEfforts
+func resolveModelCommand(entries []modelEntry, token string) (string, bool) {
+	model := ""
+	for _, entry := range entries {
+		if entry.alias == token {
+			if model != "" {
+				return "", false
+			}
+			model = entry.model
+		}
 	}
-	return claudeEfforts
+	return model, model != ""
+}
+
+func (d *daemon) effortsForModel(backend, model string) []modelEntry {
+	for _, m := range d.models.Models(backend) {
+		if (model != "" && m.Value == model) || (model == "" && m.Default) {
+			entries := make([]modelEntry, 0, len(m.Efforts))
+			for _, effort := range m.Efforts {
+				entries = append(entries, modelEntry{effort, effort, effort})
+			}
+			return entries
+		}
+	}
+	return nil
 }
 
 func (d *daemon) backendText(sk string, sess *session.Session) string {
@@ -307,21 +293,25 @@ func (d *daemon) backendText(sk string, sess *session.Session) string {
 func (d *daemon) modelText(sk string, sess *session.Session) string {
 	def := d.scopeDefaults(sk)
 	backend := resolveSessionBackend(sess, def, d.cfg.GetDefaultBackend())
-	models := modelsForBackend(backend)
+	models := d.modelsForBackend(backend)
 
 	var sb strings.Builder
 	current := sess.ModelOverride
-	for _, m := range models {
-		if m.model == current {
-			fmt.Fprintf(&sb, "<b>/m_%s %s ✅</b>\n", m.alias, m.label)
-		} else {
-			fmt.Fprintf(&sb, "/m_%s %s\n", m.alias, m.label)
-		}
-	}
 	if current == "" {
 		fmt.Fprintf(&sb, "<b>/m_default По умолчанию ✅</b>\n")
 	} else {
 		fmt.Fprintf(&sb, "/m_default По умолчанию\n")
+	}
+	sb.WriteString("/m_update Обновить список\n")
+	for _, m := range models {
+		if m.model == current {
+			fmt.Fprintf(&sb, "<b>/m_%s %s ✅</b>\n", m.alias, html.EscapeString(m.label))
+		} else {
+			fmt.Fprintf(&sb, "/m_%s %s\n", m.alias, html.EscapeString(m.label))
+		}
+	}
+	if current != "" && !validOption(models, current) {
+		fmt.Fprintf(&sb, "<b>%s ✅</b>\n", html.EscapeString(current))
 	}
 	return sb.String()
 }
@@ -329,10 +319,16 @@ func (d *daemon) modelText(sk string, sess *session.Session) string {
 func (d *daemon) thinkText(sk string, sess *session.Session) string {
 	def := d.scopeDefaults(sk)
 	backend := resolveSessionBackend(sess, def, d.cfg.GetDefaultBackend())
-	efforts := effortsForBackend(backend)
+	efforts := d.effortsForModel(backend, sess.ModelOverride)
 
 	var sb strings.Builder
 	current := sess.ThinkOverride
+	if current == "" {
+		fmt.Fprintf(&sb, "<b>/t_default По умолчанию ✅</b>\n")
+	} else {
+		fmt.Fprintf(&sb, "/t_default По умолчанию\n")
+	}
+	sb.WriteString("/t_update Обновить список\n")
 	for _, e := range efforts {
 		if e.model == current {
 			fmt.Fprintf(&sb, "<b>/t_%s %s ✅</b>\n", e.alias, e.label)
@@ -340,10 +336,8 @@ func (d *daemon) thinkText(sk string, sess *session.Session) string {
 			fmt.Fprintf(&sb, "/t_%s %s\n", e.alias, e.label)
 		}
 	}
-	if current == "" {
-		fmt.Fprintf(&sb, "<b>/t_default По умолчанию ✅</b>\n")
-	} else {
-		fmt.Fprintf(&sb, "/t_default По умолчанию\n")
+	if current != "" && !validOption(efforts, current) {
+		fmt.Fprintf(&sb, "<b>%s ✅</b>\n", html.EscapeString(current))
 	}
 	return sb.String()
 }

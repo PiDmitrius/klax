@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/PiDmitrius/klax/internal/modelcatalog"
 	"github.com/PiDmitrius/klax/internal/pathutil"
 	"github.com/PiDmitrius/klax/internal/session"
 )
@@ -31,19 +32,18 @@ type uiSettings struct {
 	// Read-only facts shown as "additional parameters" (settings dialog): the model the
 	// backend ACTUALLY answered with last (may differ from the selected default) and the
 	// resolved session UUID. Both empty until the first response lands.
-	AssignedModel string             `json:"assigned_model,omitempty"`
-	SessionID     string             `json:"session_id,omitempty"`
-	Sandbox       string             `json:"sandbox"`
-	TTY           bool               `json:"tty"`
-	CWD           string             `json:"cwd"`    // ~-abbreviated for display; the server re-expands ~ on save
-	Prompt        string             `json:"prompt"` // append-system-prompt
-	Busy          bool               `json:"busy"`
-	BackendLocked bool               `json:"backend_locked"` // first message already sent
-	CWDLocked     bool               `json:"cwd_locked"`     // first message already sent
-	TTYAvailable  bool               `json:"tty_available"`  // backend == claude
-	Backends      []uiSettingsOption `json:"backends"`
-	Models        []uiSettingsOption `json:"models"`
-	Efforts       []uiSettingsOption `json:"efforts"`
+	AssignedModel string               `json:"assigned_model,omitempty"`
+	SessionID     string               `json:"session_id,omitempty"`
+	Sandbox       string               `json:"sandbox"`
+	TTY           bool                 `json:"tty"`
+	CWD           string               `json:"cwd"`    // ~-abbreviated for display; the server re-expands ~ on save
+	Prompt        string               `json:"prompt"` // append-system-prompt
+	Busy          bool                 `json:"busy"`
+	BackendLocked bool                 `json:"backend_locked"` // first message already sent
+	CWDLocked     bool                 `json:"cwd_locked"`     // first message already sent
+	TTYAvailable  bool                 `json:"tty_available"`  // backend == claude
+	Backends      []uiSettingsOption   `json:"backends"`
+	Models        []modelcatalog.Model `json:"models"`
 	// Groups this session belongs to. The set of EXISTING names is deliberately not sent: the client
 	// already derives it from the sessions snapshot for the scope menu, and a second derivation here
 	// would order Cyrillic differently (Go lowercases and compares bytes; the browser uses
@@ -84,14 +84,6 @@ func draftHasFields(p uiSettingsPatch) bool {
 		p.Sandbox != nil || p.TTY != nil || p.CWD != nil || p.Prompt != nil || p.Groups != nil
 }
 
-func uiSettingsOptions(entries []modelEntry) []uiSettingsOption {
-	out := make([]uiSettingsOption, 0, len(entries))
-	for _, e := range entries {
-		out = append(out, uiSettingsOption{Value: e.model, Label: e.label})
-	}
-	return out
-}
-
 func validOption(entries []modelEntry, value string) bool {
 	for _, e := range entries {
 		if e.model == value {
@@ -126,8 +118,7 @@ func (d *daemon) uiSessionSettings(sk string, created int64) (*uiSettings, bool)
 		CWDLocked:     sess.Messages > 0,
 		TTYAvailable:  backend == "claude",
 		Backends:      []uiSettingsOption{{Value: "claude", Label: "Claude"}, {Value: "codex", Label: "Codex"}},
-		Models:        uiSettingsOptions(modelsForBackend(backend)),
-		Efforts:       uiSettingsOptions(effortsForBackend(backend)),
+		Models:        d.models.Models(backend),
 		Groups:        sess.Groups,
 	}, true
 }
@@ -168,8 +159,7 @@ func (d *daemon) uiDraftSettings(sk, chatID, backendOverride string) *uiSettings
 		CWD:          pathutil.TildePathsInText(d.defaultSessionCWD(chatID, sk)),
 		TTYAvailable: backend == "claude",
 		Backends:     []uiSettingsOption{{Value: "claude", Label: "Claude"}, {Value: "codex", Label: "Codex"}},
-		Models:       uiSettingsOptions(modelsForBackend(backend)),
-		Efforts:      uiSettingsOptions(effortsForBackend(backend)),
+		Models:       d.models.Models(backend),
 	}
 }
 
@@ -192,25 +182,39 @@ func (d *daemon) applyUISessionSettings(sk string, created int64, p uiSettingsPa
 // applyUISessionSettingsCore runs the validation + in-memory mutation but does NOT persist — the
 // caller owns the save + broadcast.
 func (d *daemon) applyUISessionSettingsCore(sk string, created int64, p uiSettingsPatch) error {
-	sess := d.store.Get(sk, created)
-	if sess == nil {
+	if d.store.Get(sk, created) == nil {
 		return &uiErr{http.StatusNotFound, "Сессия не найдена"}
 	}
-	backend := resolveSessionBackend(sess, d.scopeDefaults(sk), d.cfg.GetDefaultBackend())
-	// Validate the WHOLE patch (incl. cwd I/O) BEFORE taking the store lock, then apply the resolved
-	// result in a single UpdateSession — so a rejected patch never half-changes the session.
-	r, err := validateSettingsPatch(sess, backend, d.isSessionBusy(sk, created), p)
-	if err != nil {
-		return err
+	def := d.scopeDefaults(sk)
+	busy := d.isSessionBusy(sk, created)
+	var cwd string
+	if p.CWD != nil {
+		var err error
+		cwd, err = resolveWorkingDir(*p.CWD)
+		if err != nil {
+			return &uiErr{http.StatusBadRequest, err.Error()}
+		}
 	}
-	// Re-check the cwd lock under the SAME lock as the mutation: a message could have
-	// started and finished running between the snapshot validated above and this call.
-	_, err = d.store.UpdateSessionChecked(sk, created,
+	// Resolve filesystem paths outside the lock; validate settings against the state being changed.
+	var r resolvedPatch
+	_, err := d.store.UpdateSessionChecked(sk, created,
 		func(cur *session.Session) error {
 			if p.CWD != nil && cur.Messages > 0 {
 				return &uiErr{http.StatusConflict, "Рабочую директорию нельзя изменить после первого сообщения."}
 			}
-			return nil
+			check := p
+			check.CWD = nil
+			if busy && p.CWD != nil {
+				return &uiErr{http.StatusConflict, "Сессия занята — параметры запуска нельзя менять до завершения."}
+			}
+			backend := resolveSessionBackend(cur, def, d.cfg.GetDefaultBackend())
+			var err error
+			r, err = d.validateSettingsPatch(cur, backend, busy, check)
+			r.p.CWD = p.CWD
+			if p.CWD != nil {
+				r.cwd = cwd
+			}
+			return err
 		},
 		func(cur *session.Session) { applySettingsPatch(cur, r) },
 	)
@@ -242,7 +246,7 @@ type resolvedPatch struct {
 // validateSettingsPatch validates `p` against `cur`'s current state (`backend` = its effective
 // backend, `busy` gates run-affecting changes) and resolves the derived values. It performs the cwd
 // filesystem check here so the later mutation holds no lock during I/O. It never mutates `cur`.
-func validateSettingsPatch(cur *session.Session, backend string, busy bool, p uiSettingsPatch) (resolvedPatch, error) {
+func (d *daemon) validateSettingsPatch(cur *session.Session, backend string, busy bool, p uiSettingsPatch) (resolvedPatch, error) {
 	r := resolvedPatch{p: p, name: cur.Name, cwd: cur.CWD, prompt: cur.AppendSystemPrompt, backend: backend}
 	if p.Name != nil {
 		r.name = strings.TrimSpace(*p.Name)
@@ -265,11 +269,23 @@ func validateSettingsPatch(cur *session.Session, backend string, busy bool, p ui
 		r.backendChanged = true
 	}
 	// model/think are validated against the EFFECTIVE (possibly new) backend.
-	if p.Model != nil && *p.Model != "" && !validOption(modelsForBackend(r.backend), *p.Model) {
+	if p.Model != nil && *p.Model != "" && (r.backendChanged || *p.Model != cur.ModelOverride) && !validOption(d.modelsForBackend(r.backend), *p.Model) {
 		return r, &uiErr{http.StatusBadRequest, "Неизвестная модель"}
 	}
-	if p.Think != nil && *p.Think != "" && !validOption(effortsForBackend(r.backend), *p.Think) {
+	model := cur.ModelOverride
+	if r.backendChanged {
+		model = ""
+	}
+	if p.Model != nil {
+		model = *p.Model
+	}
+	efforts := d.effortsForModel(r.backend, model)
+	if p.Think != nil && *p.Think != "" && (r.backendChanged || model != cur.ModelOverride || *p.Think != cur.ThinkOverride) && !validOption(efforts, *p.Think) {
 		return r, &uiErr{http.StatusBadRequest, "Неизвестный уровень мышления"}
+	}
+	if p.Think == nil && p.Model != nil && model != cur.ModelOverride && !validOption(efforts, cur.ThinkOverride) {
+		empty := ""
+		r.p.Think = &empty
 	}
 	if p.Sandbox != nil && *p.Sandbox != "on" && *p.Sandbox != "off" {
 		return r, &uiErr{http.StatusBadRequest, "sandbox: on или off"}

@@ -23,6 +23,7 @@ import (
 	"github.com/PiDmitrius/klax/internal/config"
 	"github.com/PiDmitrius/klax/internal/inbound"
 	"github.com/PiDmitrius/klax/internal/max"
+	"github.com/PiDmitrius/klax/internal/modelcatalog"
 	"github.com/PiDmitrius/klax/internal/runner"
 	"github.com/PiDmitrius/klax/internal/sessfiles"
 	"github.com/PiDmitrius/klax/internal/session"
@@ -63,6 +64,7 @@ type runnerKey struct {
 }
 
 type daemon struct {
+	models       *modelcatalog.Store
 	cfg          *config.Config
 	state        *session.State
 	transports   map[string]transport.Transport // "tg" -> tg.Bot, "mx" -> max.Bot
@@ -77,7 +79,7 @@ type daemon struct {
 	runnersMu    sync.Mutex
 	mu           sync.Mutex
 	draining     bool           // stop accepting new tasks, wait for current to finish
-	drainWg      sync.WaitGroup // tracks active sessionRunners for drain
+	drainWg      sync.WaitGroup // tracks active sessionRunners and catalog refreshes for drain
 	sendPause    map[string]time.Time
 	sendFails    map[string]int
 	chatEvents   map[string]uint64
@@ -535,6 +537,11 @@ func runDaemon() {
 		log.Fatalf("cannot load sessions: %v", err)
 	}
 
+	models, err := modelcatalog.Open(filepath.Join(session.StoreDir(), "models.json"))
+	if err != nil {
+		log.Fatalf("cannot load model catalog: %v", err)
+	}
+
 	// Build identity maps from config.
 	tgIdents := make(map[int64]string)
 	maxIdents := make(map[int64]string)
@@ -634,6 +641,7 @@ func runDaemon() {
 	}
 
 	d := &daemon{
+		models:     models,
 		cfg:        cfg,
 		state:      session.LoadState(),
 		transports: transports,

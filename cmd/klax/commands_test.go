@@ -433,3 +433,47 @@ func TestCWDCommandLocksAfterFirstMessage(t *testing.T) {
 		t.Fatalf("session CWD = %q after /cwd on a started session, want it to stay %q (locked, like /backend)", got, originalCWD)
 	}
 }
+
+func TestModelCommandsResolveCatalog(t *testing.T) {
+	f := newAPIFixture(t, "", "", "")
+	chatID := f.s.chatID("test")
+	token := f.d.modelsForBackend("codex")[0].alias
+	if token != "gpt_5_6_sol" {
+		t.Fatal(token)
+	}
+	for _, tc := range []struct{ command, model string }{
+		{"/m_" + token, "gpt-5.6-sol"},
+		{"/m_777q", "gpt-5.6-sol"},
+		{"/m_default", ""},
+		{"/model claude-sonnet-5", "claude-sonnet-5"},
+	} {
+		f.d.handleCommand(chatID, "", tc.command)
+		if got := f.d.store.Get("user:test", f.created).ModelOverride; got != tc.model {
+			t.Fatalf("%s: selected %q, want %q", tc.command, got, tc.model)
+		}
+		store, err := session.LoadStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := store.Get("user:test", f.created).ModelOverride; got != tc.model {
+			t.Fatalf("%s: persisted %q, want %q", tc.command, got, tc.model)
+		}
+	}
+}
+
+func TestModelCommandRejectsAmbiguousOrMissing(t *testing.T) {
+	entries := []modelEntry{{alias: "same", model: "first"}, {alias: "same", model: "second"}}
+	for _, token := range []string{"same", "absent"} {
+		if model, ok := resolveModelCommand(entries, token); ok || model != "" {
+			t.Fatal(model, ok)
+		}
+	}
+	f := newAPIFixture(t, "", "", "")
+	token := f.d.modelsForBackend("codex")[0].alias
+	f.d.handleCommand(f.s.chatID("test"), "", "/model custom-model")
+	f.d.models = nil
+	f.d.handleCommand(f.s.chatID("test"), "", "/m_"+token)
+	if got := f.d.store.Get("user:test", f.created).ModelOverride; got != "custom-model" {
+		t.Fatal(got)
+	}
+}

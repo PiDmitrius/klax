@@ -1,12 +1,15 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/PiDmitrius/klax/internal/config"
+	"github.com/PiDmitrius/klax/internal/modelcatalog"
 	"github.com/PiDmitrius/klax/internal/pathutil"
 	"github.com/PiDmitrius/klax/internal/session"
 	"github.com/PiDmitrius/klax/internal/ym"
@@ -22,7 +25,20 @@ import (
 // t.Setenv can register the restore-on-cleanup.
 func newTestDaemon(t *testing.T) *daemon {
 	t.Setenv("KLAX_CONFIG_DIR", t.TempDir())
+	data, err := json.Marshal(map[string][]modelcatalog.Model{"codex": {{Value: "gpt-5.6-sol", Label: "gpt-5.6-sol", Default: true, Efforts: []string{"low", "medium", "high", "xhigh", "max", "ultra"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "models.json")
+	if err = os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	models, err := modelcatalog.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return &daemon{
+		models:     models,
 		cfg:        &config.Config{DefaultBackend: "codex", DefaultCWD: "/tmp"},
 		store:      &session.Store{Chats: map[string]*session.ChatSessions{}, Scope: map[string]*session.ScopeDefaults{}},
 		groupChats: map[string]string{},
@@ -40,7 +56,7 @@ func TestModelTextHighlightsSelectedModelWithoutDefaultSuffix(t *testing.T) {
 
 	text := d.modelText(chatID, &session.Session{ModelOverride: "gpt-5.6-sol"})
 
-	if !strings.Contains(text, "<b>/m_sol GPT-5.6 Sol ✅</b>") {
+	if !strings.Contains(text, fmt.Sprintf("<b>/m_%s gpt-5.6-sol ✅</b>", d.modelsForBackend("codex")[0].alias)) {
 		t.Fatalf("selected model is not highlighted: %q", text)
 	}
 	if strings.Contains(text, "По умолчанию (") {
@@ -61,7 +77,7 @@ func TestThinkTextHighlightsSelectedEffortWithoutDefaultSuffix(t *testing.T) {
 
 	text := d.thinkText(chatID, &session.Session{ThinkOverride: "high"})
 
-	if !strings.Contains(text, "<b>/t_high High ✅</b>") {
+	if !strings.Contains(text, "<b>/t_high high ✅</b>") {
 		t.Fatalf("selected effort is not highlighted: %q", text)
 	}
 	if strings.Contains(text, "По умолчанию (") {
@@ -168,8 +184,8 @@ func TestSettingsTextContainsBackendModelAndThinkSections(t *testing.T) {
 		"🧠 Мышление:",
 		"🔒 Sandbox:",
 		"<b>/backend_codex ✅</b>",
-		"<b>/m_sol GPT-5.6 Sol ✅</b>",
-		"<b>/t_high High ✅</b>",
+		fmt.Sprintf("<b>/m_%s gpt-5.6-sol ✅</b>", d.modelsForBackend("codex")[0].alias),
+		"<b>/t_high high ✅</b>",
 		"<b>/sandbox_on ✅</b>",
 	} {
 		if !strings.Contains(text, want) {
@@ -181,7 +197,7 @@ func TestSettingsTextContainsBackendModelAndThinkSections(t *testing.T) {
 	}
 	for _, want := range []string{
 		"✅</b>\n\n🤖",
-		"По умолчанию\n\n🧠",
+		"gpt-5.6-sol ✅</b>\n\n🧠",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("settings text should contain a single blank line between sections, missing %q in %q", want, text)
@@ -648,5 +664,43 @@ func TestLegacyGroupAttachmentsTrueMigratesToAny(t *testing.T) {
 	})
 	if got := d.groupAttachmentMode(chatID); got != "any" {
 		t.Fatalf("legacy true mode = %q, want any", got)
+	}
+}
+
+func TestModelCommandCharactersAndMenuOrder(t *testing.T) {
+	for _, tc := range []struct{ value, want string }{
+		{"claude-opus-5-5[1m]", "claude_opus_5_5_1m_"},
+		{"Model.A/B+1_тест", "Model_A_B_1_____"},
+	} {
+		if got := modelCommandUnsafe.ReplaceAllString(tc.value, "_"); got != tc.want {
+			t.Fatalf("%q: %q", tc.value, got)
+		}
+	}
+	d := newTestDaemon(t)
+	for _, model := range []string{"", "gpt-5.6-sol"} {
+		text := stripHTML(d.modelText("user:test", &session.Session{Backend: "codex", ModelOverride: model}))
+		lines := strings.Split(strings.TrimSpace(text), "\n")
+		if len(lines) != 3 || !strings.HasPrefix(lines[0], "/m_default ") || lines[1] != "/m_update Обновить список" || !strings.HasPrefix(lines[2], "/m_gpt_5_6_sol ") {
+			t.Fatal(text)
+		}
+	}
+}
+
+func TestSettingsShowOverridesMissingFromCatalog(t *testing.T) {
+	for _, empty := range []bool{false, true} {
+		d := newTestDaemon(t)
+		if empty {
+			d.models = nil
+		}
+		sess := &session.Session{Backend: "codex", ModelOverride: "custom<model>", ThinkOverride: "custom<effort>"}
+		text := d.settingsText("ui:test", "user:test", sess)
+		for _, want := range []string{"<b>custom&lt;model&gt; ✅</b>", "<b>custom&lt;effort&gt; ✅</b>"} {
+			if !strings.Contains(text, want) {
+				t.Fatal(text)
+			}
+		}
+		if strings.Contains(text, "По умолчанию ✅") {
+			t.Fatal("default incorrectly marked", text)
+		}
 	}
 }

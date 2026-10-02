@@ -473,7 +473,7 @@ func (d *daemon) createUISessionAtomic(sk, chatID string, patch uiSettingsPatch)
 		CWD:           d.defaultSessionCWD(chatID, sk),
 	}
 	if draftHasFields(patch) {
-		r, err := validateSettingsPatch(sess, backend, false, patch) // fresh session: never busy/locked
+		r, err := d.validateSettingsPatch(sess, backend, false, patch) // fresh session: never busy/locked
 		if err != nil {
 			return nil, err
 		}
@@ -802,6 +802,7 @@ func (s *uiServer) routes() http.Handler {
 	mux.HandleFunc("/api/close", s.handleClose)
 	mux.HandleFunc("/api/sessions", s.handleSessions)
 	mux.HandleFunc("/api/settings", s.handleSettings)
+	mux.HandleFunc("/api/models/refresh", s.handleModelsRefresh)
 	mux.HandleFunc("/api/system", s.handleSystem)
 	mux.HandleFunc("/api/system/check", s.handleSystemCheck)
 	mux.HandleFunc("/api/system/update", s.handleSystemUpdate)
