@@ -44,7 +44,6 @@ type uiSettings struct {
 	TTYAvailable  bool                 `json:"tty_available"`  // backend == claude
 	Backends      []uiSettingsOption   `json:"backends"`
 	Models        []modelcatalog.Model `json:"models"`
-	Efforts       []uiSettingsOption   `json:"efforts"`
 	// Groups this session belongs to. The set of EXISTING names is deliberately not sent: the client
 	// already derives it from the sessions snapshot for the scope menu, and a second derivation here
 	// would order Cyrillic differently (Go lowercases and compares bytes; the browser uses
@@ -85,14 +84,6 @@ func draftHasFields(p uiSettingsPatch) bool {
 		p.Sandbox != nil || p.TTY != nil || p.CWD != nil || p.Prompt != nil || p.Groups != nil
 }
 
-func uiSettingsOptions(entries []modelEntry) []uiSettingsOption {
-	out := make([]uiSettingsOption, 0, len(entries))
-	for _, e := range entries {
-		out = append(out, uiSettingsOption{Value: e.model, Label: e.label})
-	}
-	return out
-}
-
 func validOption(entries []modelEntry, value string) bool {
 	for _, e := range entries {
 		if e.model == value {
@@ -128,7 +119,6 @@ func (d *daemon) uiSessionSettings(sk string, created int64) (*uiSettings, bool)
 		TTYAvailable:  backend == "claude",
 		Backends:      []uiSettingsOption{{Value: "claude", Label: "Claude"}, {Value: "codex", Label: "Codex"}},
 		Models:        d.models.Models(backend),
-		Efforts:       uiSettingsOptions(d.effortsForModel(backend, sess.ModelOverride)),
 		Groups:        sess.Groups,
 	}, true
 }
@@ -170,7 +160,6 @@ func (d *daemon) uiDraftSettings(sk, chatID, backendOverride string) *uiSettings
 		TTYAvailable: backend == "claude",
 		Backends:     []uiSettingsOption{{Value: "claude", Label: "Claude"}, {Value: "codex", Label: "Codex"}},
 		Models:       d.models.Models(backend),
-		Efforts:      uiSettingsOptions(d.effortsForModel(backend, model)),
 	}
 }
 

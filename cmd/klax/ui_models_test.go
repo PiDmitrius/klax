@@ -190,12 +190,12 @@ func TestModelEffortsDriveSettingsAndCommands(t *testing.T) {
 			}
 			f.d.store.UpdateSession("user:test", f.created, func(s *session.Session) { s.Backend = backend })
 			view, _ := f.d.uiSessionSettings("user:test", f.created)
-			if len(view.Efforts) != 3 || view.Efforts[0].Value != "low" {
-				t.Fatal(view.Efforts)
+			if len(view.Models[0].Efforts) != 3 || view.Models[0].Efforts[0] != "low" {
+				t.Fatal(view.Models)
 			}
 			draft := f.d.uiDraftSettings("user:test", f.s.chatID("test"), backend)
-			if len(draft.Efforts) != 3 {
-				t.Fatal(draft.Efforts)
+			if len(draft.Models[0].Efforts) != 3 {
+				t.Fatal(draft.Models)
 			}
 			chatID := f.s.chatID("test")
 			f.d.handleCommand(chatID, "", "/t_ultra")
@@ -227,8 +227,8 @@ func TestModelEffortsDriveSettingsAndCommands(t *testing.T) {
 				t.Fatal("messenger retained unsupported effort")
 			}
 			view, _ = f.d.uiSessionSettings("user:test", f.created)
-			if len(view.Efforts) != 0 {
-				t.Fatal(view.Efforts)
+			if len(view.Models[2].Efforts) != 0 {
+				t.Fatal(view.Models)
 			}
 			f.d.models = nil
 			if len(f.d.effortsForModel(backend, "")) != 0 {

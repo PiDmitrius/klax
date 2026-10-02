@@ -310,6 +310,9 @@ func (d *daemon) modelText(sk string, sess *session.Session) string {
 			fmt.Fprintf(&sb, "/m_%s %s\n", m.alias, html.EscapeString(m.label))
 		}
 	}
+	if current != "" && !validOption(models, current) {
+		fmt.Fprintf(&sb, "<b>%s ✅</b>\n", html.EscapeString(current))
+	}
 	return sb.String()
 }
 
@@ -332,6 +335,9 @@ func (d *daemon) thinkText(sk string, sess *session.Session) string {
 		} else {
 			fmt.Fprintf(&sb, "/t_%s %s\n", e.alias, e.label)
 		}
+	}
+	if current != "" && !validOption(efforts, current) {
+		fmt.Fprintf(&sb, "<b>%s ✅</b>\n", html.EscapeString(current))
 	}
 	return sb.String()
 }

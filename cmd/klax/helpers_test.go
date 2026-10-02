@@ -685,3 +685,22 @@ func TestModelCommandCharactersAndMenuOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestSettingsShowOverridesMissingFromCatalog(t *testing.T) {
+	for _, empty := range []bool{false, true} {
+		d := newTestDaemon(t)
+		if empty {
+			d.models = nil
+		}
+		sess := &session.Session{Backend: "codex", ModelOverride: "custom<model>", ThinkOverride: "custom<effort>"}
+		text := d.settingsText("ui:test", "user:test", sess)
+		for _, want := range []string{"<b>custom&lt;model&gt; ✅</b>", "<b>custom&lt;effort&gt; ✅</b>"} {
+			if !strings.Contains(text, want) {
+				t.Fatal(text)
+			}
+		}
+		if strings.Contains(text, "По умолчанию ✅") {
+			t.Fatal("default incorrectly marked", text)
+		}
+	}
+}

@@ -16,11 +16,10 @@ import (
 )
 
 type Model struct {
-	Value         string   `json:"value"`
-	Label         string   `json:"label"`
-	Efforts       []string `json:"efforts,omitempty"`
-	Default       bool     `json:"default,omitempty"`
-	DefaultEffort string   `json:"default_effort,omitempty"`
+	Value   string   `json:"value"`
+	Label   string   `json:"label"`
+	Efforts []string `json:"efforts,omitempty"`
+	Default bool     `json:"default,omitempty"`
 }
 
 // Fetch reads CLI control messages only; it never submits a user turn.
@@ -150,11 +149,10 @@ func (p *protocol) codex() ([]Model, error) {
 		}
 		var result struct {
 			Data []struct {
-				Model         string `json:"model"`
-				Hidden        bool   `json:"hidden"`
-				IsDefault     bool   `json:"isDefault"`
-				DefaultEffort string `json:"defaultReasoningEffort"`
-				Efforts       []struct {
+				Model     string `json:"model"`
+				Hidden    bool   `json:"hidden"`
+				IsDefault bool   `json:"isDefault"`
+				Efforts   []struct {
 					Value string `json:"reasoningEffort"`
 				} `json:"supportedReasoningEfforts"`
 			} `json:"data"`
@@ -168,7 +166,7 @@ func (p *protocol) codex() ([]Model, error) {
 		}
 		for _, m := range result.Data {
 			if !m.Hidden {
-				entry := Model{Value: m.Model, Label: m.Model, Default: m.IsDefault, DefaultEffort: m.DefaultEffort}
+				entry := Model{Value: m.Model, Label: m.Model, Default: m.IsDefault}
 				for _, effort := range m.Efforts {
 					entry.Efforts = append(entry.Efforts, effort.Value)
 				}

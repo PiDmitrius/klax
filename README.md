@@ -116,7 +116,11 @@ Common fields:
 
 Runtime backend settings such as backend selection, model, thinking level, and sandbox mode are configured per session from chat via `/settings`.
 
-In the web UI, use the refresh icon beside **По умолчанию** in the model menu to refresh the selected backend’s available models. Claude and Codex catalogs are saved locally and shared by new-session settings, existing-session settings, and chat commands. The menu displays and selects exact model IDs returned by the backend (`model` for Codex, `resolvedModel` for Claude). Chat selection commands use `/m_<base32>`: the full model ID encoded as Base32 without padding. `/m_default` selects the backend default; `/model <id>` accepts a model ID directly. Before the first refresh, only the default option is available. Refreshing preserves the selected model; a failed refresh keeps the previous catalog.
+Use the refresh icon beside **По умолчанию** in either the model or thinking menu, or `/m_update` / `/t_update` in chat, to refresh the selected backend’s shared catalog of models and supported effort levels. Catalogs are saved locally and shared by new-session settings, existing-session settings, and chat commands. Lists start with the default option; chat lists place the update command second. Refreshing preserves selected values, including values absent from the catalog; a failed refresh keeps the previous catalog.
+
+Models use the exact IDs returned by the backend (`model` for Codex, `resolvedModel` for Claude). Selection commands use `/m_<id>` with each character outside `A-Za-z0-9` replaced by `_`; case is preserved and ambiguous commands are rejected. `/m_default` selects the backend default. `/model <id>` also accepts an ID outside the catalog for manual selection.
+
+Thinking options use the selected model’s supported effort values. `/t_default` delegates the choice to the backend. Switching models resets an unsupported effort to default. Before the first catalog refresh, only default options are available; existing overrides remain visible.
 
 ### Turn audit hook
 

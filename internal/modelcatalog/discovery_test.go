@@ -22,7 +22,7 @@ func TestCodexPagesAndNotifications(t *testing.T) {
 	var sent bytes.Buffer
 	p := protocol{json.NewEncoder(&sent), bufio.NewScanner(strings.NewReader(input))}
 	got, err := p.codex()
-	if err != nil || !reflect.DeepEqual(got, []Model{{Value: "gpt-a", Label: "gpt-a", Default: true, DefaultEffort: "medium", Efforts: []string{"low", "high"}}, {Value: "gpt-b", Label: "gpt-b"}}) {
+	if err != nil || !reflect.DeepEqual(got, []Model{{Value: "gpt-a", Label: "gpt-a", Default: true, Efforts: []string{"low", "high"}}, {Value: "gpt-b", Label: "gpt-b"}}) {
 		t.Fatal(got, err)
 	}
 	dec := json.NewDecoder(&sent)
