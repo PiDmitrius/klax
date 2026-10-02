@@ -22,7 +22,7 @@ func TestCodexPagesAndNotifications(t *testing.T) {
 	var sent bytes.Buffer
 	p := protocol{json.NewEncoder(&sent), bufio.NewScanner(strings.NewReader(input))}
 	got, err := p.codex()
-	if err != nil || !reflect.DeepEqual(got, []Model{{"gpt-a", "A"}, {"gpt-b", "B"}}) {
+	if err != nil || !reflect.DeepEqual(got, []Model{{"gpt-a", "gpt-a"}, {"gpt-b", "gpt-b"}}) {
 		t.Fatal(got, err)
 	}
 	dec := json.NewDecoder(&sent)
@@ -43,15 +43,15 @@ func TestCodexPagesAndNotifications(t *testing.T) {
 	}
 }
 
-func TestClaudePreservesReturnedValues(t *testing.T) {
+func TestClaudeUsesResolvedIDsAndDeduplicates(t *testing.T) {
 	input := `{"type":"system","subtype":"init"}
 {"type":"control_response","response":{"request_id":"other","subtype":"success"}}
-{"type":"control_response","response":{"request_id":"models","subtype":"success","response":{"models":[{"value":"default","displayName":"Default"},{"value":"opus[1m]","displayName":"Opus"},{"value":"claude-example-1","displayName":"Example"}]}}}
+{"type":"control_response","response":{"request_id":"models","subtype":"success","response":{"models":[{"value":"default","displayName":"Default","resolvedModel":"claude-opus-example[1m]"},{"value":"opus[1m]","displayName":"Opus","resolvedModel":"claude-opus-example[1m]"},{"value":"claude-example-1[1m]","displayName":"Example","resolvedModel":"claude-example-1"}]}}}
 `
 	var sent bytes.Buffer
 	p := protocol{json.NewEncoder(&sent), bufio.NewScanner(strings.NewReader(input))}
 	got, err := p.claude()
-	if err != nil || !reflect.DeepEqual(got, []Model{{"opus[1m]", "Opus"}, {"claude-example-1", "Example"}}) {
+	if err != nil || !reflect.DeepEqual(got, []Model{{"claude-opus-example[1m]", "claude-opus-example[1m]"}, {"claude-example-1", "claude-example-1"}}) {
 		t.Fatal(got, err)
 	}
 	var req struct {
@@ -76,6 +76,7 @@ func TestInvalidResponses(t *testing.T) {
 		{"error", `{"id":1,"error":{"code":-1,"message":"denied"}}`, false},
 		{"missing list", "{\"id\":1,\"result\":{}}\n{\"id\":2,\"result\":{}}", false},
 		{"EOF", "{\"id\":1,\"result\":{}}\n", false},
+		{"unresolved Claude alias", `{"type":"control_response","response":{"request_id":"models","subtype":"success","response":{"models":[{"value":"opus","displayName":"Opus"}]}}}`, true},
 		{"claude error", `{"type":"control_response","response":{"request_id":"models","subtype":"error","error":"denied"}}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

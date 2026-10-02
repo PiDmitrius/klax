@@ -147,9 +147,8 @@ func (p *protocol) codex() ([]Model, error) {
 		}
 		var result struct {
 			Data []struct {
-				Model       string `json:"model"`
-				DisplayName string `json:"displayName"`
-				Hidden      bool   `json:"hidden"`
+				Model  string `json:"model"`
+				Hidden bool   `json:"hidden"`
 			} `json:"data"`
 			NextCursor string `json:"nextCursor"`
 		}
@@ -161,7 +160,7 @@ func (p *protocol) codex() ([]Model, error) {
 		}
 		for _, m := range result.Data {
 			if !m.Hidden {
-				models = append(models, Model{m.Model, m.DisplayName})
+				models = append(models, Model{m.Model, m.Model})
 			}
 		}
 		cursor = result.NextCursor
@@ -188,8 +187,7 @@ func (p *protocol) claude() ([]Model, error) {
 				Error     string `json:"error"`
 				Response  struct {
 					Models []struct {
-						Value       string `json:"value"`
-						DisplayName string `json:"displayName"`
+						ResolvedModel string `json:"resolvedModel"`
 					} `json:"models"`
 				} `json:"response"`
 			} `json:"response"`
@@ -204,9 +202,14 @@ func (p *protocol) claude() ([]Model, error) {
 			return nil, fmt.Errorf("initialize: %s", msg.Response.Error)
 		}
 		var models []Model
+		seen := map[string]bool{}
 		for _, m := range msg.Response.Response.Models {
-			if m.Value != "default" {
-				models = append(models, Model{m.Value, m.DisplayName})
+			if m.ResolvedModel == "" {
+				return nil, errors.New("Claude CLI did not return resolvedModel; update Claude CLI")
+			}
+			if !seen[m.ResolvedModel] {
+				seen[m.ResolvedModel] = true
+				models = append(models, Model{m.ResolvedModel, m.ResolvedModel})
 			}
 		}
 		return models, nil

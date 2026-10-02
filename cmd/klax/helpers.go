@@ -239,41 +239,12 @@ type modelEntry struct {
 	label string
 }
 
-// Initial choices until the first successful catalog refresh.
-var claudeModels = []modelEntry{
-	{"fable", "fable", "Fable"},
-	{"opus", "opus", "Opus"},
-	{"sonnet", "sonnet", "Sonnet"},
-	{"haiku", "haiku", "Haiku"},
-}
-
-var codexModels = []modelEntry{
-	{"sol", "gpt-5.6-sol", "GPT-5.6 Sol"},
-	{"terra", "gpt-5.6-terra", "GPT-5.6 Terra"},
-	{"luna", "gpt-5.6-luna", "GPT-5.6 Luna"},
-	{"55", "gpt-5.5", "GPT-5.5"},
-}
-
 func (d *daemon) modelsForBackend(backend string) []modelEntry {
-	initial := claudeModels
-	if backend == "codex" {
-		initial = codexModels
-	}
 	models := d.models.Models(backend)
-	if len(models) == 0 {
-		return initial
-	}
 	entries := make([]modelEntry, 0, len(models))
 	for _, m := range models {
 		sum := sha256.Sum256([]byte(m.Value))
-		alias := fmt.Sprintf("id%x", sum[:8])
-		for _, known := range initial {
-			if known.model == m.Value {
-				alias = known.alias
-				break
-			}
-		}
-		entries = append(entries, modelEntry{alias, m.Value, m.Label})
+		entries = append(entries, modelEntry{fmt.Sprintf("id%x", sum[:8]), m.Value, m.Value})
 	}
 	return entries
 }

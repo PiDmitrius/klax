@@ -25,7 +25,7 @@ func TestModelRefreshFeedsAllSelectorsAndKeepsSelection(t *testing.T) {
 	script := `#!/bin/sh
 IFS= read -r line
 case "$line" in *'"subtype":"initialize"'*) ;; *) exit 1 ;; esac
-printf '%s\n' '{"type":"control_response","response":{"request_id":"models","subtype":"success","response":{"models":[{"value":"default","displayName":"Default"},{"value":"new-model[1m]","displayName":"New <Model>"}]}}}'
+printf '%s\n' '{"type":"control_response","response":{"request_id":"models","subtype":"success","response":{"models":[{"value":"default","displayName":"Default","resolvedModel":"new-model[1m]"},{"value":"alias","displayName":"New <Model>","resolvedModel":"new-model[1m]"}]}}}'
 cat >/dev/null
 `
 	if err = os.WriteFile(bin, []byte(script), 0700); err != nil {
@@ -42,7 +42,7 @@ cat >/dev/null
 		t.Fatal(err, w.Body.String())
 	}
 	settings, ok := f.d.uiSessionSettings("user:test", f.created)
-	if !ok || settings.Model != "opus" || len(settings.Models) != 1 || settings.Models[0].Value != "new-model[1m]" {
+	if !ok || settings.Model != "opus" || len(settings.Models) != 1 || settings.Models[0].Value != "new-model[1m]" || settings.Models[0].Label != "new-model[1m]" {
 		t.Fatal(settings)
 	}
 	draft := f.d.uiDraftSettings("user:test", f.s.chatID("test"), "claude")
@@ -51,7 +51,7 @@ cat >/dev/null
 	}
 	sess := f.d.store.Get("user:test", f.created)
 	text := f.d.modelText("user:test", sess)
-	if !strings.Contains(text, "New &lt;Model&gt;") {
+	if !strings.Contains(text, "new-model[1m]") || strings.Contains(text, "New &lt;Model&gt;") {
 		t.Fatal(text)
 	}
 	if _, err = f.d.validateSettingsPatch(sess, "claude", false, uiSettingsPatch{Model: str2("opus")}); err != nil {
@@ -90,5 +90,16 @@ cat >/dev/null
 	patch := fmt.Sprintf(`{"session":%d,"model":"new-model[1m]"}`, f.created)
 	if w := f.request("/api/settings", patch, "access"); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
+	}
+}
+
+func TestNoBakedInModelCatalog(t *testing.T) {
+	d := newTestDaemon(t)
+	d.models = nil
+	for _, backend := range []string{"codex", "claude"} {
+		settings := d.uiDraftSettings("user:test", "ui:test", backend)
+		if len(settings.Models) != 0 {
+			t.Fatalf("%s: fabricated model list: %+v", backend, settings.Models)
+		}
 	}
 }

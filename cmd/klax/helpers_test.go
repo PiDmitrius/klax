@@ -1,12 +1,15 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/PiDmitrius/klax/internal/config"
+	"github.com/PiDmitrius/klax/internal/modelcatalog"
 	"github.com/PiDmitrius/klax/internal/pathutil"
 	"github.com/PiDmitrius/klax/internal/session"
 	"github.com/PiDmitrius/klax/internal/ym"
@@ -22,7 +25,20 @@ import (
 // t.Setenv can register the restore-on-cleanup.
 func newTestDaemon(t *testing.T) *daemon {
 	t.Setenv("KLAX_CONFIG_DIR", t.TempDir())
+	data, err := json.Marshal(map[string][]modelcatalog.Model{"codex": {{Value: "gpt-5.6-sol", Label: "gpt-5.6-sol"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "models.json")
+	if err = os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	models, err := modelcatalog.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return &daemon{
+		models:     models,
 		cfg:        &config.Config{DefaultBackend: "codex", DefaultCWD: "/tmp"},
 		store:      &session.Store{Chats: map[string]*session.ChatSessions{}, Scope: map[string]*session.ScopeDefaults{}},
 		groupChats: map[string]string{},
@@ -40,7 +56,7 @@ func TestModelTextHighlightsSelectedModelWithoutDefaultSuffix(t *testing.T) {
 
 	text := d.modelText(chatID, &session.Session{ModelOverride: "gpt-5.6-sol"})
 
-	if !strings.Contains(text, "<b>/m_sol GPT-5.6 Sol ✅</b>") {
+	if !strings.Contains(text, fmt.Sprintf("<b>/m_%s gpt-5.6-sol ✅</b>", d.modelsForBackend("codex")[0].alias)) {
 		t.Fatalf("selected model is not highlighted: %q", text)
 	}
 	if strings.Contains(text, "По умолчанию (") {
@@ -168,7 +184,7 @@ func TestSettingsTextContainsBackendModelAndThinkSections(t *testing.T) {
 		"🧠 Мышление:",
 		"🔒 Sandbox:",
 		"<b>/backend_codex ✅</b>",
-		"<b>/m_sol GPT-5.6 Sol ✅</b>",
+		fmt.Sprintf("<b>/m_%s gpt-5.6-sol ✅</b>", d.modelsForBackend("codex")[0].alias),
 		"<b>/t_high High ✅</b>",
 		"<b>/sandbox_on ✅</b>",
 	} {
