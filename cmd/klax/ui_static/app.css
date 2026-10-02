@@ -216,9 +216,10 @@
   .tab.tabsettle { transition: transform .18s cubic-bezier(.2,.7,.3,1), box-shadow .18s ease; }
   body.dragging-tab, body.dragging-tab .tab { cursor: grabbing; user-select: none; }
   .stop { margin-left: 10px; }
-  .stop, #cbar .send.cancel-send { height: auto; padding: 2px 8px; font-size: 12px; border-radius: 6px; cursor: pointer;
-          background: var(--error-bg); color: var(--error-fg); border: 1px solid var(--border); }
-  @media (hover: hover) { .stop:hover, #cbar .send.cancel-send:hover { border-color: var(--accent); filter: none; } }
+  .stop, #cbar .send.cancel-send, .model-refresh { height: auto; padding: 2px 8px; font-size: 12px; border-radius: 6px; cursor: pointer;
+          border: 1px solid var(--border); }
+  .stop, #cbar .send.cancel-send { background: var(--error-bg); color: var(--error-fg); }
+  @media (hover: hover) { .stop:hover, #cbar .send.cancel-send:hover, .model-refresh:hover { border-color: var(--accent); filter: none; } }
 
   /* Centred conversation column — on wide desktop the chat does not span the
      whole screen, so left (klax) and right (user) messages stay close. */
@@ -480,6 +481,11 @@
                  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   @media (hover: hover) { .sselect-opt:hover { background: var(--tool-bg); } }
   .sselect-opt.sel { color: var(--accent); font-weight: 600; }
+  .sselect-default { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .sselect-default > span { overflow: hidden; text-overflow: ellipsis; }
+  .model-refresh { flex: none; background: var(--tool-bg); color: var(--fg); }
+  .model-refresh svg { vertical-align: -2px; }
+  .model-refresh:disabled { opacity: .45; cursor: default; }
   /* Groups: a row of chips plus one "+" that opens the existing groups. Nothing is typed as prose,
      so there is no comma syntax to get wrong and no ambiguity about what is already applied. */
   /* One height for EVERY child of the row (chip, +, the inline input) so replacing + with the input

@@ -169,7 +169,7 @@ function modelRefreshHarness(){
     return { contains: name => names.has(name), add: name => names.add(name), remove: name => names.delete(name) };
   };
   function makeRoot(){
-    const action = { textContent: "" };
+    const action = { attrs: {}, setAttribute(key, value){ this.attrs[key] = value; } };
     const menu = { classList: classes(), addEventListener(){}, querySelectorAll(selector){
       assert.equal(selector, ".sselect-opt[data-value]", "refresh action must not enter the model selection handler");
       return [];
@@ -215,10 +215,13 @@ function modelRefreshHarness(){
 test("model refresh is an action, preserves selection and draft, and saves no session settings", async () => {
   const h = modelRefreshHarness();
   h.show("codex", "pinned", true);
-  const pending = h.root().action.onclick();
-  await h.root().action.onclick();
+  let stopped = false;
+  const pending = h.root().action.onclick({ stopPropagation(){ stopped = true; } });
+  assert.equal(stopped, true);
+  assert.equal(h.root().action.disabled, true);
+  await h.root().action.onclick({ stopPropagation(){} });
   assert.equal(h.requests.length, 1);
-  assert.equal(h.root().action.textContent, "Обновление…");
+  assert.equal(h.root().action.title, "Обновление…");
   assert.equal(h.requests[0].path, "/api/models/refresh");
   assert.deepEqual(JSON.parse(h.requests[0].options.body), { backend: "codex" });
   h.requests[0].resolve({ ok: true, json: async () => ({ models: [{ value: "new", label: "New" }] }) });
@@ -228,16 +231,19 @@ test("model refresh is an action, preserves selection and draft, and saves no se
   assert.equal(h.run("draftView.models[0].value"), "new");
   assert.match(h.root().html, /data-value="pinned"/);
   assert.match(h.root().html, /data-value="new"/);
-  assert.match(h.root().html, /data-action="refresh"/);
+  assert.match(h.root().html, /data-value=""><span>По умолчанию<\/span><button[^>]*data-action="refresh"/);
+  assert.doesNotMatch(h.root().html, /ssep|\(обновить список\)/);
+  assert.equal(h.root().action.disabled, false);
+  assert.equal(h.root().action.attrs["aria-busy"], "false");
   assert.equal(h.root().classList.contains("open"), true);
   assert.deepEqual(h.picks, []);
-  assert.equal(h.root().action.textContent, "(обновить список)");
+  assert.equal(h.root().action.title, "Обновить список моделей");
 });
 
 test("refresh response cannot replace another backend's menu", async () => {
   const h = modelRefreshHarness();
   h.show("codex", "pinned");
-  const pending = h.root().action.onclick();
+  const pending = h.root().action.onclick({ stopPropagation(){} });
   h.show("claude", "opus");
   h.requests[0].resolve({ ok: true, json: async () => ({ models: [{ value: "gpt-new", label: "New" }] }) });
   await pending;
@@ -249,21 +255,21 @@ test("refresh response cannot replace another backend's menu", async () => {
 test("refresh failures retain models and expose the reason", async () => {
   const h = modelRefreshHarness();
   h.show("claude", "opus");
-  const pending = h.root().action.onclick();
+  const pending = h.root().action.onclick({ stopPropagation(){} });
   h.requests[0].resolve({ ok: false, text: async () => "CLI unavailable" });
   await pending;
   assert.equal(h.context.view.model, "opus");
   assert.equal(h.context.view.models[0].value, "old");
   assert.deepEqual(h.notices, ["CLI unavailable"]);
-  assert.equal(h.root().action.textContent, "(обновить список)");
+  assert.equal(h.root().action.title, "Обновить список моделей");
 });
 
 test("refresh uses the current selection after settings re-render", async () => {
   const h = modelRefreshHarness();
   h.show("codex", "first");
-  const pending = h.root().action.onclick();
+  const pending = h.root().action.onclick({ stopPropagation(){} });
   h.show("codex", "second");
-  assert.equal(h.root().action.textContent, "Обновление…");
+  assert.equal(h.root().action.title, "Обновление…");
   h.requests[0].resolve({ ok: true, json: async () => ({ models: [{ value: "new", label: "New" }] }) });
   await pending;
   assert.equal(h.context.view.model, "second");

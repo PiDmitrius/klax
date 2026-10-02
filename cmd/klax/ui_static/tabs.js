@@ -481,8 +481,12 @@ function selectHTML(id, list, cur, withDefault, disabled){
   if(withDefault && cur && !opts.some(o => o.value === cur)) opts.push({ value: cur, label: cur });
   const curOpt = opts.find(o => o.value === cur);
   const curLabel = curOpt ? curOpt.label : (cur || "—");
-  let menu = opts.map(o => '<div class="sselect-opt'+(o.value === cur ? " sel" : "")+'" data-value="'+esc(o.value)+'">'+esc(o.label)+'</div>').join("");
-  if(id === "s-model") menu += '<div class="ssep"></div><div class="sselect-opt" data-action="refresh">(обновить список)</div>';
+  const menu = opts.map(o => {
+    const refresh = id === "s-model" && o.value === "";
+    return '<div class="sselect-opt'+(refresh ? " sselect-default" : "")+(o.value === cur ? " sel" : "")+'" data-value="'+esc(o.value)+'">'
+      +'<span>'+esc(o.label)+'</span>'
+      +(refresh ? '<button type="button" class="model-refresh" data-action="refresh" title="Обновить список моделей" aria-label="Обновить список моделей"'+(disabled ? " disabled" : "")+'><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M20 12a8 8 0 1 0-2.3 5.7"/></svg></button>' : "")+'</div>';
+  }).join("");
   return '<div class="sselect'+(disabled ? " disabled" : "")+'" id="'+id+'" data-value="'+esc(cur)+'">'
     +'<button type="button" class="sselect-btn"'+(disabled ? " disabled" : "")+'><span class="sselect-cur">'+esc(curLabel)+'</span><span class="sselect-caret">▾</span></button>'
     +'<div class="sselect-menu hidden">'+menu+'</div></div>';
@@ -507,6 +511,7 @@ function wireSelect(id, onPick){
   menu.addEventListener("click", e => e.stopPropagation()); // a click on the menu chrome (padding/scrollbar) must not close it
   menu.querySelectorAll(".sselect-opt[data-value]").forEach(opt => opt.addEventListener("click", e => {
     e.stopPropagation();
+    if(e.target.closest("button")) return;
     menu.classList.add("hidden"); root.classList.remove("open");
     const v = opt.dataset.value;
     if(v !== root.dataset.value) onPick(v);
@@ -518,14 +523,26 @@ function wireModelSelect(d, isDraft, apply){
   modelMenu = { root, d, isDraft, apply };
   wireSelect("s-model", v => apply({ model: v }));
   const action = root.querySelector('[data-action="refresh"]');
-  action.textContent = refreshingModels.has(d.backend) ? "Обновление…" : "(обновить список)";
-  if(!root.classList.contains("disabled")) action.onclick = () => refreshModels(d.backend);
+  setModelRefreshState(root, d.backend);
+  action.onclick = e => {
+    e.stopPropagation();
+    if(!action.disabled) return refreshModels(d.backend);
+  };
+}
+
+function setModelRefreshState(root, backend){
+  const action = root.querySelector('[data-action="refresh"]');
+  const updating = refreshingModels.has(backend);
+  action.disabled = updating || root.classList.contains("disabled");
+  action.title = updating ? "Обновление…" : "Обновить список моделей";
+  action.setAttribute("aria-label", action.title);
+  action.setAttribute("aria-busy", String(updating));
 }
 
 async function refreshModels(backend){
   if(refreshingModels.has(backend)) return;
   refreshingModels.add(backend);
-  modelMenu.root.querySelector('[data-action="refresh"]').textContent = "Обновление…";
+  setModelRefreshState(modelMenu.root, backend);
   let models;
   try {
     const r = await api("/api/models/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ backend }) });
