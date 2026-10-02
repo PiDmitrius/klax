@@ -197,7 +197,7 @@ func TestSettingsTextContainsBackendModelAndThinkSections(t *testing.T) {
 	}
 	for _, want := range []string{
 		"✅</b>\n\n🤖",
-		"/m_update Обновить список моделей\n\n🧠",
+		"gpt-5.6-sol ✅</b>\n\n🧠",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("settings text should contain a single blank line between sections, missing %q in %q", want, text)
@@ -664,5 +664,24 @@ func TestLegacyGroupAttachmentsTrueMigratesToAny(t *testing.T) {
 	})
 	if got := d.groupAttachmentMode(chatID); got != "any" {
 		t.Fatalf("legacy true mode = %q, want any", got)
+	}
+}
+
+func TestModelCommandCharactersAndMenuOrder(t *testing.T) {
+	for _, tc := range []struct{ value, want string }{
+		{"claude-opus-5-5[1m]", "claude_opus_5_5_1m_"},
+		{"Model.A/B+1_тест", "Model_A_B_1_____"},
+	} {
+		if got := modelCommandUnsafe.ReplaceAllString(tc.value, "_"); got != tc.want {
+			t.Fatalf("%q: %q", tc.value, got)
+		}
+	}
+	d := newTestDaemon(t)
+	for _, model := range []string{"", "gpt-5.6-sol"} {
+		text := stripHTML(d.modelText("user:test", &session.Session{Backend: "codex", ModelOverride: model}))
+		lines := strings.Split(strings.TrimSpace(text), "\n")
+		if len(lines) != 3 || !strings.HasPrefix(lines[0], "/m_default ") || lines[1] != "/m_update Обновить список" || !strings.HasPrefix(lines[2], "/m_gpt_5_6_sol ") {
+			t.Fatal(text)
+		}
 	}
 }

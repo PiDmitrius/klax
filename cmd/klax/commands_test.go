@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"github.com/PiDmitrius/klax/internal/config"
@@ -439,12 +438,11 @@ func TestModelCommandsResolveCatalog(t *testing.T) {
 	f := newAPIFixture(t, "", "", "")
 	chatID := f.s.chatID("test")
 	token := f.d.modelsForBackend("codex")[0].alias
-	if len(token) != 8 {
+	if token != "gpt_5_6_sol" {
 		t.Fatal(token)
 	}
 	for _, tc := range []struct{ command, model string }{
 		{"/m_" + token, "gpt-5.6-sol"},
-		{"/m_" + strings.ToUpper(token), "gpt-5.6-sol"},
 		{"/m_777q", "gpt-5.6-sol"},
 		{"/m_default", ""},
 		{"/model claude-sonnet-5", "claude-sonnet-5"},

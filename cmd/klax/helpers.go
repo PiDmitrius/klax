@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/base32"
 	"fmt"
 	"html"
 	"regexp"
@@ -240,14 +238,13 @@ type modelEntry struct {
 	label string
 }
 
-var modelCommandEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
+var modelCommandUnsafe = regexp.MustCompile(`[^A-Za-z0-9]`)
 
 func (d *daemon) modelsForBackend(backend string) []modelEntry {
 	models := d.models.Models(backend)
 	entries := make([]modelEntry, 0, len(models))
 	for _, m := range models {
-		sum := sha256.Sum256([]byte(m.Value))
-		encoded := strings.ToLower(modelCommandEncoding.EncodeToString(sum[:5]))
+		encoded := modelCommandUnsafe.ReplaceAllString(m.Value, "_")
 		entries = append(entries, modelEntry{encoded, m.Value, m.Value})
 	}
 	return entries
@@ -256,7 +253,7 @@ func (d *daemon) modelsForBackend(backend string) []modelEntry {
 func resolveModelCommand(entries []modelEntry, token string) (string, bool) {
 	model := ""
 	for _, entry := range entries {
-		if entry.alias == strings.ToLower(token) {
+		if entry.alias == token {
 			if model != "" {
 				return "", false
 			}
@@ -312,6 +309,12 @@ func (d *daemon) modelText(sk string, sess *session.Session) string {
 
 	var sb strings.Builder
 	current := sess.ModelOverride
+	if current == "" {
+		fmt.Fprintf(&sb, "<b>/m_default По умолчанию ✅</b>\n")
+	} else {
+		fmt.Fprintf(&sb, "/m_default По умолчанию\n")
+	}
+	sb.WriteString("/m_update Обновить список\n")
 	for _, m := range models {
 		if m.model == current {
 			fmt.Fprintf(&sb, "<b>/m_%s %s ✅</b>\n", m.alias, html.EscapeString(m.label))
@@ -319,12 +322,6 @@ func (d *daemon) modelText(sk string, sess *session.Session) string {
 			fmt.Fprintf(&sb, "/m_%s %s\n", m.alias, html.EscapeString(m.label))
 		}
 	}
-	if current == "" {
-		fmt.Fprintf(&sb, "<b>/m_default По умолчанию ✅</b>\n")
-	} else {
-		fmt.Fprintf(&sb, "/m_default По умолчанию\n")
-	}
-	sb.WriteString("/m_update Обновить список моделей\n")
 	return sb.String()
 }
 
