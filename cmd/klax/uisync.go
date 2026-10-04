@@ -742,7 +742,7 @@ func (s *uiServer) handleTranscript(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		start := max(0, end-limit)
-		for start > 0 && p.groups[start].Ord.last {
+		for start > 0 && p.groups[start].Head != nil && p.groups[start].Head.queueOnly {
 			start-- // a window starts at a transcript position, which no queued turn can move below
 		}
 		resp.At, resp.More = s.d.uiHub.cursor(at), start > 0

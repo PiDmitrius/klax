@@ -61,7 +61,7 @@ export function renderModel(turns, watermark, holdSplits, joinHeldSplits, ctxWin
       // System notices belong exclusively to the notification stack, never the timeline.
       if(t.role === "notice") continue;
       // A standalone carries no data-pos, so it never drives read-advance and is not counted as unread.
-      items.push({ kind: "bubble", cls: blockCls(t), text: t.text || "", md: t.role !== "tool", time: t.time });
+      items.push({ kind: "bubble", key: t.key, cls: blockCls(t), text: t.text || "", md: t.role !== "tool", time: t.time });
       continue;
     }
     const blocks_ = t.blocks || [];
@@ -199,9 +199,9 @@ function reuseImages(root, bySrc){
   });
 }
 
-function renderKey(it, index){
+function renderKey(it){
   if(it.kind === "turn") return "turn:" + it.seq;
-  if(it.kind === "bubble") return "bubble:" + index + ":" + it.cls;
+  if(it.kind === "bubble") return "bubble:" + it.key;
   return "";
 }
 
@@ -340,8 +340,8 @@ export function paint(col, items, onStop){
   const nodes = reusableNodes(col);
   const desired = []; // ordered final nodes, reconciled into `col` in place (no fragment detach)
   const fresh = [];   // freshly-built nodes that may hold NEW <img> elements to reconnect
-  items.forEach((it, index) => {
-    const key = renderKey(it, index);
+  items.forEach(it => {
+    const key = renderKey(it);
     const sig = renderSig(it);
     const old = key && nodes.get(key);
     if(old && old.dataset.renderSig === sig){

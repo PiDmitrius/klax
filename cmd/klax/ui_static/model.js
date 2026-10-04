@@ -46,7 +46,7 @@ export class TurnModel {
       s.rows = [];
       for(const g of s.groups){
         if(g.head) s.rows.push({ ...g.head, blocks: g.blocks });
-        for(const r of g.rows) s.rows.push(r);
+        g.rows.forEach((r, i) => s.rows.push({ ...r, key: g.key + ":" + i }));
       }
     }
     return s.rows;
@@ -117,7 +117,10 @@ export class TurnModel {
       if(rows + size > n) break;
       rows += size; groups++;
     }
-    while(groups > 0 && s.groups[groups].ord[0] === null) groups--; // the range starts at a transcript position
+    // The range starts at a transcript position: not at a queued turn, which sorts last or shares
+    // the event of the transcript turn after it.
+    const queued = i => s.groups[i].ord[0] === null || s.groups[i].ord[0] === s.groups[i + 1]?.ord[0];
+    while(groups > 0 && queued(groups)) groups--;
     if(!groups) return 0;
     s.groups = s.groups.slice(groups);
     s.from = s.groups[0].ord;

@@ -14,7 +14,7 @@ test("ord sorts by record, then seq; a null record sorts last", () => {
   assert.equal(ordParam([5200, 89]), "5200,89");
 });
 
-test("turns flattens groups into user rows with blocks followed by their standalone rows", () => {
+test("turns flattens groups into user rows with blocks followed by their standalone rows, keyed by group and index", () => {
   const m = new TurnModel();
   m.loadWindow(1, window([
     { key: "t:1:0", ord: [-1, 0], head: null, blocks: null, rows: [{ role: "system", text: "intro" }] },
@@ -22,6 +22,7 @@ test("turns flattens groups into user rows with blocks followed by their standal
   ]));
   assert.deepEqual(m.turns(1).map(t => t.role + ":" + (t.seq || t.text)), ["system:intro", "user:5", "tool:note"]);
   assert.deepEqual(m.turns(1)[1].blocks, [{ id: "a" }]);
+  assert.deepEqual([m.turns(1)[0].key, m.turns(1)[2].key], ["t:1:0:0", "t:1:5:0"]);
 });
 
 test("a group delta keeps the prefix, appends the suffix, cuts to n and merges the header", () => {
@@ -108,6 +109,15 @@ test("a delta for an array shorter than it expects asks for a reload", () => {
 });
 
 test("eviction keeps the range starting at a transcript position", () => {
+  const q = new TurnModel();
+  q.loadWindow(1, window([
+    { key: "t:1:5", ord: [5, 5], head: head(5) },
+    { key: "t:1:6", ord: [9, 6], head: head(6, "err") },
+    { key: "t:1:7", ord: [9, 7], head: head(7) },
+  ]));
+  assert.equal(q.evictTop(1, 1), 0);
+  assert.deepEqual(q.rangeStart(1), [5, 5]);
+
   const m = new TurnModel();
   m.loadWindow(1, window([
     { key: "t:1:5", ord: [5, 5], head: head(5) },
