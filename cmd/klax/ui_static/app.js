@@ -861,11 +861,8 @@ async function onSessionsList(list){
   }
   const affected = new Set();
   let activeReadAdvanced = false;
-  // A session that left the strip is gone: drop its model, loads and pending events.
   for(const c of Object.keys(loaded).concat(Object.keys(loading)).map(Number)){
-    if(c === active || list.some(s => s.created === c)) continue;
-    winReq[c] = (winReq[c] || 0) + 1;
-    model.drop(c); delete loaded[c]; delete loading[c]; delete buffered[c]; delete skips[c];
+    if(!list.some(s => s.created === c)) forgetSession(c);
   }
   for(const s of list){
     // Cross-tab / cross-device read sync: adopt the server's durable read watermark when it is
@@ -945,8 +942,15 @@ function leaveActive(){
 }
 function dropActive(){
   if(!active) return;
-  model.drop(active); markRead(active); delete loaded[active]; dropDraft(active);
+  markRead(active); dropDraft(active);
   active = 0;
+}
+// forgetSession drops a gone session's model, loads and pending events; a load or retry still in
+// flight sees its request superseded and stops.
+function forgetSession(c){
+  winReq[c] = (winReq[c] || 0) + 1;
+  model.drop(c);
+  delete loaded[c]; delete loading[c]; delete refreshing[c]; delete buffered[c]; delete skips[c];
 }
 
 // setEmptyScope: an empty group view stays put instead of teleporting to root, which would be
@@ -1124,7 +1128,7 @@ async function afterClose(created){
   // strip order, and select it before the strip update so onSessionsList keeps it.
   const wasActive = created === active;
   const next = wasActive ? neighborCreated(created) : 0;
-  model.drop(created); markRead(created); delete loaded[created]; dropDraft(created, true);
+  forgetSession(created); markRead(created); dropDraft(created, true);
   if(wasActive){
     active = 0;
     if(next) await selectSession(next);

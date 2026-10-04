@@ -251,3 +251,19 @@ test("a long-failing refresh keeps retrying with a bounded pause", async () => {
   assert.equal(h.run("delays.at(-1)"), 32000);
   assert.equal(h.run("model.has(1) && loaded[1]"), true);
 });
+
+test("closing the active session stops its pending refresh", async () => {
+  const h = harness();
+  h.run("sessionList = [{ created: 1 }, { created: 2 }]");
+  const load = h.run("loadTranscript(1)");
+  h.respond(0, { at: "1.10", from: [-1, 0], to: null, more: false, groups: [group(5, ["a"])] });
+  await load;
+  h.run("loaded[1] = true; active = 1; globalThis.timers = []; setTimeout = fn => { timers.push(fn); return 0; }; neighborIn = () => 0; markRead = () => {}; dropDraft = () => {}");
+  const refresh = h.run("refreshWindow(1)");
+  h.respond(1, {}, false);
+  await refresh;
+  await h.run("onSessionsList([{ created: 2 }])");
+  h.run("timers.forEach(fn => fn())");
+  assert.deepEqual(h.requests.slice(2).map(r => r.url).filter(u => /session=1/.test(u)), []);
+  assert.equal(h.run("model.has(1) || !!refreshing[1] || !!loading[1]"), false);
+});
