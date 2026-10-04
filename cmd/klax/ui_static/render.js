@@ -47,7 +47,7 @@ export function decodePos(p){ p = p || 0; return { turn: Math.floor(p / POS_MULT
 // `holdSplits` preserves group boundaries that used to be separated by the unread divider for one
 // live frame after the divider disappears. That lets the line fade out before the two bubble pieces
 // merge back into one.
-export function renderModel(turns, watermark, holdSplits, joinHeldSplits){
+export function renderModel(turns, watermark, holdSplits, joinHeldSplits, ctxWindowHint){
   const items = [];
   let queuePos = 0, divided = false;
   // The last context we actually know — the most recent turn's own measured value (the exact
@@ -113,7 +113,7 @@ export function renderModel(turns, watermark, holdSplits, joinHeldSplits){
     // A running turn learns its window only when it completes, so it measures its own tokens
     // against the last window a turn actually ran with.
     const ctxLine = (t.state === "done" || t.state === "err") ? contextText(t.ctx_used, t.ctx_window)
-      : t.state === "run" ? contextText(t.ctx_used || lastCtxUsed, t.ctx_window || lastCtxWindow)
+      : t.state === "run" ? contextText(t.ctx_used || lastCtxUsed, t.ctx_window || lastCtxWindow || ctxWindowHint)
       : "";
     const note = t.state === "enq" ? "в очереди · " + queuePos
       : t.state === "unknown" ? "статус неизвестен" : undefined;
@@ -386,8 +386,8 @@ export function paint(col, items, onStop){
   reconcileChildren(col, desired);
 }
 
-export function renderSession(col, turns, unreadAfter, onStop, holdSplits, joinHeldSplits){
-  paint(col, renderModel(turns, unreadAfter, holdSplits, joinHeldSplits), onStop);
+export function renderSession(col, turns, unreadAfter, onStop, holdSplits, joinHeldSplits, ctxWindowHint){
+  paint(col, renderModel(turns, unreadAfter, holdSplits, joinHeldSplits, ctxWindowHint), onStop);
 }
 
 // --- smooth live updates (FLIP) ---

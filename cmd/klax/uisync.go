@@ -740,6 +740,9 @@ func (s *uiServer) handleTranscript(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		start := max(0, end-limit)
+		for start > 0 && p.groups[start].Ord.last {
+			start-- // a window starts at a transcript position, which no queued turn can move below
+		}
 		resp.At, resp.To, resp.More = s.d.uiHub.cursor(at), before, start > 0
 		resp.Groups = slices.Clone(p.groups[start:end])
 		resp.From = uiOrd{event: -1} // the history start: everything below is covered

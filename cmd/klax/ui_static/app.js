@@ -51,6 +51,8 @@ let after = "", generation = 0, pendingSelect = 0;
 let tabs = new Map(), tabOrder = []; // the strip as published: tab wire objects by created, and their order
 const winReq = {}, loading = {}, buffered = {}, skips = {};
 const restoreAfterResync = new Set(); // sessions whose windows a resync still owes
+const refreshing = {}; // created -> a window is being replaced in place; the old DOM stays until it is done
+let shownSession = 0; // the session the log DOM shows
 const affectedNow = new Set();
 let bottomJumpFrame = 0;
 let stick = true, pendingRender = false, readOnScroll = true;
@@ -271,7 +273,7 @@ function noMotion(){ return { motionMS: 0, mergeHeldSplits: false, holdSplits: n
 // repositioning must not be animated over.
 function rerender(created, live, opts){
   opts = opts || {};
-  if(created !== active || !loaded[created]) return noMotion();
+  if(created !== active || !loaded[created] || refreshing[created]) return noMotion();
   if(!live && liveBusy && created === active && !opts.forceStructural){
     liveDirty = true;
     return noMotion();
@@ -291,7 +293,9 @@ function rerender(created, live, opts){
   const hadDivider = anchorLive && !!col.querySelector(".readline");
   const snap = live ? beginShift(col) : null;
   const holdSplits = opts.holdSplits || (!opts.noHoldSplits && hadDivider && rawUnreadCount(active) === 0 && snap && snap.holdSplits && snap.holdSplits.size ? snap.holdSplits : null);
-  renderSession(col, model.turns(active), readThrough[active], activeReadOnly() ? null : stopTurn, holdSplits, !!opts.joinHeldSplits);
+  const tab = sessionList.find(s => s.created === active);
+  shownSession = active;
+  renderSession(col, model.turns(active), readThrough[active], activeReadOnly() ? null : stopTurn, holdSplits, !!opts.joinHeldSplits, tab && tab.ctx_window);
   watchInlineImages(col);
   if(moreFor[active]){ // older history exists → a "load earlier" button at the top
     const m = document.createElement("button");
@@ -503,10 +507,47 @@ async function fetchTranscript(created){
   }
 }
 
-// reloadWindow replaces a session with a fresh window after a delta for a group it lost track of.
+// reloadWindow replaces a session with a fresh window after a delta for a group it lost track of,
+// or after a resync.
 function reloadWindow(created){
+  if(loaded[created] && model.has(created)){ refreshWindow(created); return; }
   delete transcriptLoads[created];
   loadTranscript(created);
+}
+
+// refreshWindow replaces a held session's window in place: the view keeps its position and the
+// history it held before is paged back in. Failing that, the session loads afresh.
+async function refreshWindow(created){
+  const req = winReq[created] = (winReq[created] || 0) + 1;
+  const cover = model.rangeStart(created);
+  refreshing[created] = req;
+  const e = beginLoad(created, null);
+  let data = null;
+  try {
+    data = await fetchRange(created, "&limit=" + CAP);
+    if(req !== winReq[created]) return;
+    if(!data) throw new Error("stale window");
+    model.loadWindow(created, data);
+    moreFor[created] = !!data.more;
+  } catch(err){
+    if(req !== winReq[created]) return;
+    delete refreshing[created];
+    model.drop(created); delete loaded[created];
+    if(created === active) showTranscriptStatus("Не удалось загрузить историю", true);
+    return;
+  } finally { endLoad(created, e, data); }
+  try {
+    while(cover && moreFor[created] && ordLess(cover, model.rangeStart(created)) && req === winReq[created]){
+      const start = ordParam(model.rangeStart(created));
+      await loadOlder(created);
+      if(ordParam(model.rangeStart(created)) === start) break; // a page failed: keep what is loaded
+    }
+    await ensureLineLoaded(created);
+  } catch(err){}
+  if(refreshing[created] !== req) return;
+  delete refreshing[created];
+  if(created === active) showTranscriptStatus();
+  rerenderStructural(created, true);
 }
 
 // loadOlder pages in the previous CAP-group page and merges it. `showTop` (the manual "load earlier"
@@ -527,7 +568,7 @@ async function loadOlder(created, showTop){
     if(!data) return;
     model.loadPage(created, data);
     moreFor[created] = !!data.more;
-    if(created === active && loaded[created]){
+    if(created === active && loaded[created] && !refreshing[created]){
       const prev = stick; stick = false; // never snap to the bottom after loading old history
       rerenderStructural(created, true);
       stick = prev;
@@ -744,7 +785,8 @@ async function selectSession(created){
     // positions the view — jump to the divider if unread, else the bottom).
     await loadTranscript(created);
   } else {
-    showTranscriptStatus();
+    // While its window is refreshed in place the log still shows another session: keep it hidden.
+    showTranscriptStatus(refreshing[created] && shownSession !== created ? "Загрузка истории…" : "");
     // Already loaded: returning to unread jumps to the "новые сообщения" divider, else the bottom.
     const hadUnread = rawUnreadCount(created) > 0;
     if(hadUnread) jumpToUnread(created);
@@ -895,21 +937,22 @@ async function bootState(){
   await onSessionsList(data.sessions || []);
 }
 
-// resync discards the whole model and reloads from a snapshot, then reloads the windows of the
-// sessions that were held or loading. Startup is a resync with nothing held.
+// resync reloads the strip from a snapshot, refreshes held sessions in place (keeping the view) and
+// loads the ones that were loading. Startup is a resync with nothing held.
 async function resync(){
   generation++;
   for(const c of Object.keys(loaded).filter(k => loaded[k]).concat(Object.keys(loading)).map(Number)) restoreAfterResync.add(c);
   if(active) restoreAfterResync.add(active);
-  for(const c of restoreAfterResync){ winReq[c] = (winReq[c] || 0) + 1; model.drop(c); delete loaded[c]; }
-  for(const m of [loading, buffered, skips, transcriptLoads, loadingOlder]) for(const k of Object.keys(m)) delete m[k];
+  for(const c of restoreAfterResync) winReq[c] = (winReq[c] || 0) + 1;
+  for(const m of [loading, buffered, skips, transcriptLoads, loadingOlder, refreshing]) for(const k of Object.keys(m)) delete m[k];
   after = "";
   await bootState();
   const keep = [...restoreAfterResync];
   restoreAfterResync.clear();
   for(const c of keep){
     if(!sessionList.some(s => s.created === c)) continue;
-    if(c === active) selectLater(c);
+    if(loaded[c] && model.has(c)) refreshWindow(c);
+    else if(c === active) selectLater(c);
     else loadTranscript(c);
   }
 }

@@ -407,3 +407,21 @@ func TestSyncNoticeReleasesHeldPoll(t *testing.T) {
 		t.Fatal("a notice did not release the held poll")
 	}
 }
+
+// A window never starts at a queued turn: once that turn reaches the transcript its position would
+// fall below the range and the client would drop it.
+func TestSyncWindowStartsAtTranscriptPosition(t *testing.T) {
+	f := newSyncFixture(t)
+	f.write("s1", "u:first", "one")
+	sr := f.d.getRunner("user:alice", f.created)
+	for i := range 4 {
+		if _, _, _, _, err := sr.store.Enqueue("ui:alice", "", fmt.Sprint("n", i), fmt.Sprint("queued ", i), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.state()
+	w := f.window(f.created, "&limit=2")
+	if w.From.last || len(w.Groups) < 3 {
+		t.Fatalf("window from=%+v with %d groups, want it to start at the transcript turn", w.From, len(w.Groups))
+	}
+}

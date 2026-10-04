@@ -69,7 +69,7 @@ test("login fragment replaces cached management token and is absent from request
 
 test("authorization loss clears the credential and reloads the initialized app once",async()=>{
   const h=harness("manager");h.respond(0);await tick();
-  const first=h.ctx.api("/api/sessions"),second=h.ctx.api("/api/tail");
+  const first=h.ctx.api("/api/state"),second=h.ctx.api("/api/changes");
   h.respond(1,401);h.respond(2,401);await Promise.all([first,second]);
   assert.equal(h.reloads(),1);
   assert.equal(h.ctx.getToken(),"");
@@ -105,7 +105,7 @@ test("login navigation works from the gate and supersedes pending authentication
 test("a delayed unauthorized response cannot invalidate a replacement credential",async()=>{
   const h=harness();
   h.ctx.setToken("old");
-  const pending=h.ctx.api("/api/sessions");
+  const pending=h.ctx.api("/api/state");
   h.ctx.setToken("new");h.respond(0,401);await pending;
   assert.equal(h.ctx.getToken(),"new");
   assert.equal(h.reloads(),0);

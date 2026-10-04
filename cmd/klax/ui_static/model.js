@@ -117,6 +117,7 @@ export class TurnModel {
       if(rows + size > n) break;
       rows += size; groups++;
     }
+    while(groups > 0 && s.groups[groups].ord[0] === null) groups--; // the range starts at a transcript position
     if(!groups) return 0;
     s.groups = s.groups.slice(groups);
     s.from = s.groups[0].ord;

@@ -165,3 +165,8 @@ test("a running turn measures its tokens against the last window a turn ran with
   const lines = items.filter(i => i.kind === "turn").map(i => i.ctxLine);
   assert.deepEqual(lines, ["📊 Контекст: 10% (100k/1000k)", "📊 Контекст: 150k", "📊 Контекст: 20% (200k/1000k)"]);
 });
+
+test("a running turn without a known window uses the tab's window", () => {
+  const items = renderModel([{ seq: 1, role: "user", state: "run", ctx_used: 200000, blocks: [{ id: "c", role: "tool" }] }], undefined, null, false, 1000000);
+  assert.equal(items.find(i => i.kind === "turn").ctxLine, "📊 Контекст: 20% (200k/1000k)");
+});

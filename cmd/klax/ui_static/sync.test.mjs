@@ -10,6 +10,7 @@ function harness(){
   const requests = [];
   const context = vm.createContext({
     TurnModel, ordLess, ordParam, applyMerge, cursorEpoch, cursorSeq, pos, answerBlock, console, setTimeout, clearTimeout,
+    requestAnimationFrame: () => 0, cancelAnimationFrame() {},
     api: url => new Promise(resolve => requests.push({ url, resolve })),
     parsePos: () => 0, selectionInLog: () => false, isReadOnly: () => true, filterScope: l => l, parseHash: () => ({}),
     reconcileSessions() {}, renderChip() {}, showNotice() {}, systemRestartNotice: () => "",
@@ -160,4 +161,56 @@ test("tab patches and orders rebuild the strip from the snapshot", async () => {
   `);
   assert.equal(h.run("JSON.stringify(strips)"), JSON.stringify([[{ created: 3, name: "three" }, { created: 1, name: "one", read_through: "2.0" }]]));
   assert.equal(h.run("tabs.has(2)"), false);
+});
+
+test("a resync refreshes a held session in place", async () => {
+  const h = harness();
+  const load = h.run("loadTranscript(1)");
+  h.respond(0, { at: "1.10", from: [5, 5], to: null, more: false, groups: [group(5, ["a"])] });
+  await load;
+  h.run("loaded[1] = true");
+  const sync = h.run("resync()");
+  h.respond(1, { at: "2.1", started: 2, sessions: [{ created: 1 }] });
+  await sync;
+  assert.equal(h.run("loaded[1] && model.has(1)"), true);
+  assert.match(h.requests[2].url, /transcript\?session=1&limit=/);
+  h.respond(2, { at: "2.2", from: [5, 5], to: null, more: false, groups: [group(5, ["a", "b"])] });
+  for(let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.run("loaded[1]"), true);
+  assert.deepEqual(Array.from(h.run("blocks(5)")), ["a", "b"]);
+});
+
+test("a refresh renders once after paging back its range and stops on a failed page", async () => {
+  const h = harness();
+  h.run("globalThis.renders = 0; rerenderStructural = () => { renders++; }");
+  const load = h.run("loadTranscript(1)");
+  h.respond(0, { at: "1.10", from: [-1, 0], to: null, more: false, groups: [group(2, []), group(5, ["a"])] });
+  await load;
+  h.run("renders = 0; loaded[1] = true");
+  const refresh = h.run("refreshWindow(1)");
+  h.respond(1, { at: "1.11", from: [5, 5], to: null, more: true, groups: [group(5, ["a"])] });
+  for(let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.match(h.requests[2].url, /before=5%2C5/);
+  h.respond(2, {}, false);
+  await refresh;
+  assert.equal(h.requests.length, 3);
+  assert.equal(h.run("renders"), 1);
+  assert.equal(h.run("refreshing[1]"), undefined);
+});
+
+test("switching to a tab whose window is being refreshed shows loading until it is done", async () => {
+  const h = harness();
+  h.run("globalThis.statuses = []; showTranscriptStatus = (m = '') => statuses.push(m); sessionList = [{ created: 1 }, { created: 2 }]");
+  const load = h.run("loadTranscript(2)");
+  h.respond(0, { at: "1.10", from: [-1, 0], to: null, more: false, groups: [group(5, ["a"])] });
+  await load;
+  h.run("loaded[2] = true; active = 1");
+  const refresh = h.run("refreshWindow(2)");
+  await h.run("selectSession(2)");
+  assert.equal(h.run("statuses.at(-1)"), "Загрузка истории…");
+  await h.run("selectSession(2)");
+  assert.equal(h.run("statuses.at(-1)"), "Загрузка истории…");
+  h.respond(1, { at: "1.11", from: [-1, 0], to: null, more: false, groups: [group(5, ["a"])] });
+  await refresh;
+  assert.equal(h.run("statuses.at(-1)"), "");
 });

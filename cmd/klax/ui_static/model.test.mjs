@@ -107,3 +107,16 @@ test("a delta for an array shorter than it expects asks for a reload", () => {
   assert.equal(m.applyGroup(1, { key: "t:1:5", ord: [2, 5], blocks: { set: { 2: { id: "c" } } } }), false);
   assert.deepEqual(m.turns(1)[0].blocks.map(b => b.id), ["a"]);
 });
+
+test("eviction keeps the range starting at a transcript position", () => {
+  const m = new TurnModel();
+  m.loadWindow(1, window([
+    { key: "t:1:5", ord: [5, 5], head: head(5) },
+    { key: "t:1:6", ord: [null, 6], head: head(6, "enq") },
+    { key: "t:1:7", ord: [null, 7], head: head(7, "enq") },
+  ]));
+  assert.equal(m.evictTop(1, 2), 0);
+  assert.deepEqual(m.rangeStart(1), [5, 5]);
+  assert.ok(m.applyGroup(1, { key: "t:1:6", ord: [9, 6], head: { state: "run" } }));
+  assert.deepEqual(m.turns(1).map(t => t.seq), [5, 6, 7]);
+});
