@@ -8,7 +8,7 @@ import { cursorEpoch, cursorSeq } from "./events.js";
 function harness(){
   const requests = [], painted = [], statuses = [], focused = [];
   const context = vm.createContext({
-    TurnModel, ordLess, ordParam, cursorEpoch, cursorSeq, console, setTimeout, clearTimeout,
+    TurnModel, ordLess, ordParam, cursorEpoch, cursorSeq, console, setTimeout, clearTimeout, AbortController,
     api: url => new Promise(resolve => requests.push({ url, resolve })),
     parsePos: () => 0,
     selectionInLog: () => false,

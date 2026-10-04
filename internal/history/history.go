@@ -1,7 +1,7 @@
 // Package history turns a backend's session JSONL (Claude transcript or Codex
-// rollout) into a common, UI-renderable list of turns. It is the read model
-// behind the web UI's read model, so reopening the window restores the full
-// session and any of them can be continued.
+// rollout) into a common, UI-renderable list of turns. It feeds the web UI's read
+// model (buildReadModel), so reopening the window restores the full session and any
+// of them can be continued.
 package history
 
 import (

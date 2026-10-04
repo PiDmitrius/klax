@@ -11,10 +11,8 @@ import (
 )
 
 // uiBlock is one answer block (assistant narration / tool call / system note) under a
-// user turn. ID is a STABLE content-derived dedup key (blockID): the same block hashes
-// identically whether it arrives in a reload's transcript or a live poll event, so the
-// client can drop the duplicate across the reload-read/poll race.
-// EventSeq is filled by the client on live apply (= the event's seq); absent on reload.
+// user turn. ID is a STABLE content-derived key (blockID): the same block hashes identically
+// on every build.
 type uiBlock struct {
 	ID    string             `json:"id"`
 	Role  string             `json:"role"` // assistant|tool|system|error
@@ -161,50 +159,6 @@ func groupTurns(items []history.Item) []groupedTurn {
 		}
 	}
 	return out
-}
-
-// transcriptPresence returns durable seqs whose user record is present in this
-// transcript projection. It uses durable coordinates, legacy markers, and the
-// same matcher as reconciliation for not-yet-bound records.
-func transcriptPresence(items []history.Item, queueTurns []sessfiles.Turn) map[int64]bool {
-	present := make(map[int64]bool)
-	byCoord := make(map[string]sessfiles.Turn)
-	byMarker := make(map[string]sessfiles.Turn)
-	transcripts := make(map[string][2]string)
-	var end int64
-	for _, t := range queueTurns {
-		if t.Bound {
-			byCoord[coordinateKey(t.Backend, t.Session, t.Event)] = t
-		}
-		if t.Marker != "" {
-			byMarker[t.Marker] = t
-		}
-	}
-	for _, it := range items {
-		if it.Role != "user" {
-			continue // only user records carry coordinates, markers and bindings
-		}
-		if it.Event >= end {
-			end = it.Event + 1
-		}
-		if it.Backend != "" && it.Session != "" {
-			transcripts[it.Backend+"\x00"+it.Session] = [2]string{it.Backend, it.Session}
-		}
-		if t, ok := byCoord[coordinateKey(it.Backend, it.Session, it.Event)]; ok && t.RecordDigest == it.RecordDigest {
-			present[t.Seq] = true
-		}
-		if it.Marker != "" {
-			if t, ok := byMarker[it.Marker]; ok {
-				present[t.Seq] = true
-			}
-		}
-	}
-	for _, bs := range transcripts {
-		for _, p := range proposeBindings(queueTurns, items, bs[0], bs[1], end) {
-			present[p.Seq] = true
-		}
-	}
-	return present
 }
 
 // buildReadModel turns a session's grouped transcript into read-model rows: it joins each user

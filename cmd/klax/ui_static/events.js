@@ -12,7 +12,7 @@ export function cursorEpoch(c){ return String(c || "").split(".")[0]; }
 export function cursorSeq(c){ return Number(String(c || "").split(".")[1]) || 0; }
 
 // changesLoop drives the host:
-//   after()/generation()           the cursor and the resync generation it belongs to
+//   after()                        the cursor
 //   apply(events, at)              apply a response's events in order, then advance after to at
 //   resync()                       reload from a snapshot (resolves when done)
 //   onAuthFail, onHealth(ok, fails)
@@ -25,7 +25,7 @@ export async function changesLoop(host){
     // hang `await r.json()` and wedge the one live loop.
     const ac = new AbortController();
     const t = setTimeout(() => ac.abort(), POLL_ABORT_MS);
-    const gen = host.generation(), after = host.after();
+    const after = host.after();
     try {
       const r = await api("/api/changes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ after }), signal: ac.signal });
       if(r.status === 401){ if(host.onAuthFail) host.onAuthFail(); return; }
@@ -33,7 +33,6 @@ export async function changesLoop(host){
       const data = await r.json();
       backoff = 0;
       health(true);
-      if(gen !== host.generation()) continue;
       if(data.resync || cursorEpoch(data.at) !== cursorEpoch(after)){ await host.resync(); continue; }
       host.apply(data.events || [], data.at);
     } catch(e){

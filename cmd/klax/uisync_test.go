@@ -30,7 +30,6 @@ func (o *uiOrd) UnmarshalJSON(b []byte) error {
 type syncWindow struct {
 	At     string    `json:"at"`
 	From   uiOrd     `json:"from"`
-	To     *uiOrd    `json:"to"`
 	More   bool      `json:"more"`
 	Groups []uiGroup `json:"groups"`
 }
@@ -373,9 +372,6 @@ func TestSyncWindowPaging(t *testing.T) {
 		before := w.From
 		ord := fmt.Sprintf("%d,%d", before.event, before.seq)
 		w = f.window(f.created, "&limit=3&before="+ord)
-		if w.To == nil || *w.To != before {
-			t.Fatalf("page to = %+v, want %+v", w.To, before)
-		}
 		got = append(slices.Clone(w.Groups), got...)
 	}
 	sameGroups(t, got, all.Groups)
@@ -423,5 +419,22 @@ func TestSyncWindowStartsAtTranscriptPosition(t *testing.T) {
 	w := f.window(f.created, "&limit=2")
 	if w.From.last || len(w.Groups) < 3 {
 		t.Fatalf("window from=%+v with %d groups, want it to start at the transcript turn", w.From, len(w.Groups))
+	}
+}
+
+// A role's strip is published from its first request, so a user without read-only clients adds no
+// read-only tab events to the ring.
+func TestSyncReadOnlyStripPublishedOnDemand(t *testing.T) {
+	f := newSyncFixture(t)
+	at, _ := f.state()
+	f.d.renameSession("user:alice", f.created, "renamed")
+	f.changes(at)
+	u := f.d.uiHub.userSync("alice")
+	if u.tabs[roleRO] != nil {
+		t.Fatal("read-only strip published without a read-only request")
+	}
+	after, _ := f.d.uiHub.parseAfter(at)
+	if ev, _, _ := f.d.uiHub.collect("alice", after, roleRO); len(ev) != 0 {
+		t.Fatalf("read-only events without a read-only client: %d", len(ev))
 	}
 }

@@ -347,6 +347,7 @@ type uiUserSync struct {
 	detMu sync.Mutex
 	pub   map[int64]*uiPubSession
 	tabs  [2]*uiTabs
+	roles [2]bool // roles that requested state; a role's strip is published from its first request
 
 	ring      []uiRingEvent
 	ringBytes int
@@ -428,12 +429,6 @@ func (h *uiHub) collect(user string, after uint64, role int8) (events []json.Raw
 		}
 	}
 	return events, at, false
-}
-
-func (h *uiHub) at() uint64 {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.seq
 }
 
 func (h *uiHub) cursor(seq uint64) string {
@@ -525,18 +520,20 @@ func (h *uiHub) waitPollsPast(seq uint64, timeout time.Duration) {
 
 // uiSync runs the detector for a user under its mutex and then cut (if any) with the published
 // state and the seq it corresponds to.
-func (d *daemon) uiSync(user, sk string, cut func(u *uiUserSync, at uint64)) {
-	h := d.uiHub
-	u := h.userSync(user)
+func (d *daemon) uiSync(user, sk string, role int8, cut func(u *uiUserSync, at uint64)) {
+	u := d.uiHub.userSync(user)
 	u.detMu.Lock()
 	defer u.detMu.Unlock()
-	d.uiDetectLocked(user, sk, u)
+	u.roles[role] = true
+	at := d.uiDetectLocked(user, sk, u)
 	if cut != nil {
-		cut(u, h.at())
+		cut(u, at)
 	}
 }
 
-func (d *daemon) uiDetectLocked(user, sk string, u *uiUserSync) {
+// uiDetectLocked publishes the user's changes and returns the seq the published state corresponds
+// to; a notice appended later gets a higher seq.
+func (d *daemon) uiDetectLocked(user, sk string, u *uiUserSync) uint64 {
 	h := d.uiHub
 	var evs []uiPending
 	sessions := d.store.SessionsFor(sk)
@@ -566,15 +563,19 @@ func (d *daemon) uiDetectLocked(user, sk string, u *uiUserSync) {
 		}
 	}
 	for _, role := range []int8{roleRW, roleRO} {
+		if !u.roles[role] {
+			continue
+		}
 		tabs, tabEvs := diffTabs(role, u.tabs[role], d.sessionsSnapshot(sk, sessions, rowsOf, role == roleRO))
 		u.tabs[role] = tabs
 		evs = append(evs, tabEvs...)
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if len(evs) > 0 {
-		h.mu.Lock()
 		h.appendLocked(user, u, evs)
-		h.mu.Unlock()
 	}
+	return h.seq
 }
 
 // --- handlers ---
@@ -597,7 +598,7 @@ func (s *uiServer) handleState(w http.ResponseWriter, r *http.Request) {
 		Version  string          `json:"version"`
 		Sessions json.RawMessage `json:"sessions"`
 	}
-	s.d.uiSync(user, sk, func(u *uiUserSync, at uint64) {
+	s.d.uiSync(user, sk, roleOf(readOnly), func(u *uiUserSync, at uint64) {
 		resp.At, resp.Sessions = s.d.uiHub.cursor(at), u.tabs[roleOf(readOnly)].wire()
 	})
 	resp.Started, resp.Startup, resp.Version = s.d.uiHub.epoch, s.d.startupKind, version
@@ -642,7 +643,7 @@ func (s *uiServer) handleChanges(w http.ResponseWriter, r *http.Request) {
 	deadline := time.NewTimer(uiPollHold)
 	defer deadline.Stop()
 	answer := func() bool {
-		s.d.uiSync(user, sk, nil)
+		s.d.uiSync(user, sk, role, nil)
 		events, at, resync := h.collect(user, after, role)
 		switch {
 		case resync:
@@ -721,12 +722,11 @@ func (s *uiServer) handleTranscript(w http.ResponseWriter, r *http.Request) {
 	var resp struct {
 		At     string    `json:"at"`
 		From   uiOrd     `json:"from"`
-		To     *uiOrd    `json:"to"`
 		More   bool      `json:"more"`
 		Groups []uiGroup `json:"groups"`
 	}
 	found := false
-	s.d.uiSync(user, sk, func(u *uiUserSync, at uint64) {
+	s.d.uiSync(user, sk, roleOf(s.readOnly(r)), func(u *uiUserSync, at uint64) {
 		p := u.pub[created]
 		if p == nil {
 			return
@@ -743,7 +743,7 @@ func (s *uiServer) handleTranscript(w http.ResponseWriter, r *http.Request) {
 		for start > 0 && p.groups[start].Ord.last {
 			start-- // a window starts at a transcript position, which no queued turn can move below
 		}
-		resp.At, resp.To, resp.More = s.d.uiHub.cursor(at), before, start > 0
+		resp.At, resp.More = s.d.uiHub.cursor(at), start > 0
 		resp.Groups = slices.Clone(p.groups[start:end])
 		resp.From = uiOrd{event: -1} // the history start: everything below is covered
 		if start > 0 {

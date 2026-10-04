@@ -60,9 +60,8 @@ export function renderModel(turns, watermark, holdSplits, joinHeldSplits, ctxWin
     if(t.role !== "user"){
       // System notices belong exclusively to the notification stack, never the timeline.
       if(t.role === "notice") continue;
-      // `key` is the standalone's live eventSeq (render-key stability only); it carries no data-pos
-      // so it never drives read-advance, and it is not counted as unread.
-      items.push({ kind: "bubble", cls: blockCls(t), text: t.text || "", md: t.role !== "tool", time: t.time, key: t.eventSeq });
+      // A standalone carries no data-pos, so it never drives read-advance and is not counted as unread.
+      items.push({ kind: "bubble", cls: blockCls(t), text: t.text || "", md: t.role !== "tool", time: t.time });
       continue;
     }
     const blocks_ = t.blocks || [];
@@ -202,9 +201,7 @@ function reuseImages(root, bySrc){
 
 function renderKey(it, index){
   if(it.kind === "turn") return "turn:" + it.seq;
-  // Prefer the event seq over the list index: it keeps the key stable when items above
-  // (the unread divider) come and go, which node reuse and FLIP shifts both rely on.
-  if(it.kind === "bubble") return "bubble:" + (it.key !== undefined ? "e" + it.key : index) + ":" + it.cls;
+  if(it.kind === "bubble") return "bubble:" + index + ":" + it.cls;
   return "";
 }
 
@@ -220,7 +217,7 @@ function renderSig(it){
       })),
     });
   }
-  if(it.kind === "bubble") return JSON.stringify({ cls: it.cls, text: it.text, md: it.md, time: it.time, key: it.key });
+  if(it.kind === "bubble") return JSON.stringify({ cls: it.cls, text: it.text, md: it.md, time: it.time });
   return "";
 }
 

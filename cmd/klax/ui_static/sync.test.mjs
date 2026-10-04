@@ -9,7 +9,7 @@ import { pos, answerBlock } from "./render.js";
 function harness(){
   const requests = [];
   const context = vm.createContext({
-    TurnModel, ordLess, ordParam, applyMerge, cursorEpoch, cursorSeq, pos, answerBlock, console, setTimeout, clearTimeout,
+    TurnModel, ordLess, ordParam, applyMerge, cursorEpoch, cursorSeq, pos, answerBlock, console, setTimeout, clearTimeout, AbortController,
     requestAnimationFrame: () => 0, cancelAnimationFrame() {},
     api: url => new Promise(resolve => requests.push({ url, resolve })),
     parsePos: () => 0, selectionInLog: () => false, isReadOnly: () => true, filterScope: l => l, parseHash: () => ({}),
@@ -180,20 +180,28 @@ test("a resync refreshes a held session in place", async () => {
   assert.deepEqual(Array.from(h.run("blocks(5)")), ["a", "b"]);
 });
 
-test("a refresh renders once after paging back its range and stops on a failed page", async () => {
+test("a refresh keeps the old view when paging back fails, then swaps and renders once", async () => {
   const h = harness();
   h.run("globalThis.renders = 0; rerenderStructural = () => { renders++; }");
   const load = h.run("loadTranscript(1)");
   h.respond(0, { at: "1.10", from: [-1, 0], to: null, more: false, groups: [group(2, []), group(5, ["a"])] });
   await load;
   h.run("renders = 0; loaded[1] = true");
-  const refresh = h.run("refreshWindow(1)");
-  h.respond(1, { at: "1.11", from: [5, 5], to: null, more: true, groups: [group(5, ["a"])] });
+  const failed = h.run("refreshWindow(1)");
+  h.respond(1, { at: "1.11", from: [5, 5], more: true, groups: [group(5, ["a"])] });
   for(let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
   assert.match(h.requests[2].url, /before=5%2C5/);
   h.respond(2, {}, false);
-  await refresh;
-  assert.equal(h.requests.length, 3);
+  await failed;
+  assert.deepEqual(Array.from(h.run("seqs()")), [2, 5]);
+  assert.equal(h.run("renders"), 0);
+  const retry = h.run("refreshWindow(1, 1)");
+  h.respond(3, { at: "1.12", from: [5, 5], more: true, groups: [group(5, ["a", "b"])] });
+  for(let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
+  h.respond(4, { at: "1.12", from: [-1, 0], more: false, groups: [group(2, [])] });
+  await retry;
+  assert.deepEqual(Array.from(h.run("seqs()")), [2, 5]);
+  assert.deepEqual(Array.from(h.run("blocks(5)")), ["a", "b"]);
   assert.equal(h.run("renders"), 1);
   assert.equal(h.run("refreshing[1]"), undefined);
 });

@@ -450,14 +450,24 @@ function endLoad(created, e, data){
   applySessionEvents(created, buf);
   flushAffected();
 }
-// fetchRange requests a window or page; null when a resync or a server restart made it stale, or
-// the session is gone.
-async function fetchRange(created, query){
+// fetchJSON bounds a whole request, body included, so a half-open socket cannot wedge a load.
+async function fetchJSON(url){
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), 30000);
+  try {
+    const r = await api(url, { signal: ac.signal });
+    if(!r.ok) throw new Error(url + " HTTP " + r.status);
+    return await r.json();
+  } finally { clearTimeout(t); }
+}
+
+// fetchRange requests a window or a page before `before`; null when a resync or a server restart
+// made it stale, or the session is gone.
+async function fetchRange(created, limit, before){
   const gen = generation;
-  const r = await api("/api/transcript?session=" + created + query);
-  if(!r.ok) throw new Error("transcript HTTP " + r.status);
-  const data = await r.json();
+  const data = await fetchJSON("/api/transcript?session=" + created + (before ? "&before=" + encodeURIComponent(ordParam(before)) : "") + "&limit=" + limit);
   if(gen !== generation || cursorEpoch(data.at) !== cursorEpoch(after) || !sessionList.some(s => s.created === created)) return null;
+  data.to = before || null;
   return data;
 }
 
@@ -470,7 +480,7 @@ async function fetchTranscript(created){
   const e = beginLoad(created, null);
   let data = null;
   try {
-    data = await fetchRange(created, "&limit=" + CAP);
+    data = await fetchRange(created, CAP, null);
     if(req !== winReq[created]) data = null;
     if(data){
       model.loadWindow(created, data);
@@ -515,35 +525,44 @@ function reloadWindow(created){
   loadTranscript(created);
 }
 
-// refreshWindow replaces a held session's window in place: the view keeps its position and the
-// history it held before is paged back in. Failing that, the session loads afresh.
-async function refreshWindow(created){
+// refreshWindow replaces a held session's window in place: the new window and the history the
+// session held before are loaded aside while its events wait in the buffer, then swapped in and
+// rendered once, so the view keeps its position. A failed load keeps the old view and retries.
+async function refreshWindow(created, attempt = 0){
   const req = winReq[created] = (winReq[created] || 0) + 1;
   const cover = model.rangeStart(created);
   refreshing[created] = req;
   const e = beginLoad(created, null);
-  let data = null;
+  const aside = new TurnModel(), loads = [];
+  let more = false;
   try {
-    data = await fetchRange(created, "&limit=" + CAP);
-    if(req !== winReq[created]) return;
-    if(!data) throw new Error("stale window");
-    model.loadWindow(created, data);
-    moreFor[created] = !!data.more;
+    const w = await fetchRange(created, CAP, null);
+    if(!w) throw new Error("stale window");
+    aside.loadWindow(created, w);
+    loads.push(w);
+    more = !!w.more;
+    while(cover && more && ordLess(cover, aside.rangeStart(created))){
+      const page = await fetchRange(created, CAP, aside.rangeStart(created));
+      if(!page) throw new Error("stale page");
+      aside.loadPage(created, page);
+      loads.push(page);
+      more = !!page.more;
+    }
   } catch(err){
     if(req !== winReq[created]) return;
+    if(attempt < 5){ setTimeout(() => { if(winReq[created] === req && refreshing[created] === req) refreshWindow(created, attempt + 1); }, 1000 << attempt); return; }
     delete refreshing[created];
     model.drop(created); delete loaded[created];
+    endLoad(created, e, null);
     if(created === active) showTranscriptStatus("Не удалось загрузить историю", true);
     return;
-  } finally { endLoad(created, e, data); }
-  try {
-    while(cover && moreFor[created] && ordLess(cover, model.rangeStart(created)) && req === winReq[created]){
-      const start = ordParam(model.rangeStart(created));
-      await loadOlder(created);
-      if(ordParam(model.rangeStart(created)) === start) break; // a page failed: keep what is loaded
-    }
-    await ensureLineLoaded(created);
-  } catch(err){}
+  }
+  if(req !== winReq[created]) return;
+  model.byCreated[created] = aside.byCreated[created];
+  moreFor[created] = more;
+  for(const l of loads.slice(1)) (skips[created] = skips[created] || []).push({ at: cursorSeq(l.at), from: l.from, to: l.to });
+  endLoad(created, e, loads[0]);
+  try { await ensureLineLoaded(created); } catch(err){}
   if(refreshing[created] !== req) return;
   delete refreshing[created];
   if(created === active) showTranscriptStatus();
@@ -563,7 +582,7 @@ async function loadOlder(created, showTop){
   const e = beginLoad(created, before);
   let data = null;
   try {
-    data = await fetchRange(created, "&before=" + encodeURIComponent(ordParam(before)) + "&limit=" + CAP);
+    data = await fetchRange(created, CAP, before);
     if(req !== winReq[created] || !model.has(created) || ordParam(model.rangeStart(created)) !== ordParam(before)) data = null;
     if(!data) return;
     model.loadPage(created, data);
@@ -637,7 +656,7 @@ function bubblesAbove(created, upto){
 // rawUnreadCount unchanged); whole turn groups are evicted and the held range starts after them.
 // Callers run this only with a CURRENT DOM (post-render / scroll), never on the pre-render model.
 function capWindow(created){
-  if(!created || readThrough[created] === undefined) return 0; // no watermark yet — cannot prove a row is read
+  if(!created || readThrough[created] === undefined || refreshing[created]) return 0; // no watermark yet — cannot prove a row is read
   const arr = model.turns(created);
   if(bubblesAbove(created, arr.length) <= WIN_MAX) return 0; // WHEN: hold up to WIN_MAX bubbles before trimming at all
   const fu = firstUnreadRow(created); // NEVER evict at/after the unread line
@@ -926,9 +945,7 @@ function setEmptyScope(on){
 // bootState loads the snapshot: the strip and the cursor live events continue from. A changed
 // server start shows the restart banner.
 async function bootState(){
-  const r = await api("/api/state");
-  if(!r.ok) throw new Error("state HTTP " + r.status);
-  const data = await r.json();
+  const data = await fetchJSON("/api/state");
   if(serverStarted !== null && data.started !== serverStarted) showNotice(systemRestartNotice(data.startup, data.version));
   saveServerStarted(data.started);
   after = data.at;
@@ -1038,7 +1055,6 @@ function setDegraded(on){
 // the poll host events.js drives
 const host = {
   after: () => after,
-  generation: () => generation,
   apply: applyEvents,
   resync,
   onAffected: set => {
