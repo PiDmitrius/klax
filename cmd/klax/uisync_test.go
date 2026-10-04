@@ -158,7 +158,7 @@ func (r replica) apply(t *testing.T, created int64, evs []uiEventJSON) {
 			delete(r, ev.Removed.Key)
 		case ev.Group != nil:
 			g, held := r[ev.Group.Key]
-			if !held && ev.Group.From > 0 {
+			if !held && ev.Group.Create == nil {
 				t.Fatalf("delta for a group the replica lacks: %+v", ev.Group)
 			}
 			if !held {
@@ -254,13 +254,55 @@ func TestSyncIdlePollReturnsSameAt(t *testing.T) {
 	}
 }
 
-func TestSyncRenameSendsOnlySessions(t *testing.T) {
+func TestSyncRenameSendsOnlyTheName(t *testing.T) {
 	f := newSyncFixture(t)
 	at, _ := f.state()
 	f.d.renameSession("user:alice", f.created, "renamed")
 	c := f.changes(at)
-	if len(c.Events) != 1 || c.Events[0].Sessions == nil || !strings.Contains(string(c.Events[0].Sessions), `"renamed"`) {
-		t.Fatalf("rename events = %+v", c.Events)
+	if want := fmt.Sprintf(`{"created":%d,"name":"renamed"}`, f.created); len(c.Events) != 1 || string(c.Events[0].Tab) != want {
+		t.Fatalf("rename events = %+v, want %s", c.Events, want)
+	}
+}
+
+// The strip replayed from tab patches and orders equals a fresh snapshot.
+func TestSyncTabsReplayEqualsState(t *testing.T) {
+	f := newSyncFixture(t)
+	at, list := f.state()
+	tabs := map[int64][]byte{}
+	var order []int64
+	for _, s := range list {
+		tabs[s.Created], _ = json.Marshal(s)
+		order = append(order, s.Created)
+	}
+	added := f.d.store.New("user:alice", "two", "/tmp/proj", session.ScopeDefaults{})
+	f.d.renameSession("user:alice", f.created, "renamed")
+	f.d.store.UpdateSession("user:alice", f.created, func(s *session.Session) { s.Groups = []string{"g"} })
+	f.d.uiPoke("alice")
+	c := f.changes(at)
+	f.d.store.UpdateSession("user:alice", f.created, func(s *session.Session) { s.Groups = nil })
+	if err := f.d.closeSession("user:alice", added.Created); err != nil {
+		t.Fatal(err)
+	}
+	c2 := f.changes(c.At)
+	for _, ev := range append(c.Events, c2.Events...) {
+		switch {
+		case ev.Tab != nil:
+			var id struct{ Created int64 }
+			_ = json.Unmarshal(ev.Tab, &id)
+			tabs[id.Created] = applyMerge(tabs[id.Created], ev.Tab)
+		case ev.Tabs != nil:
+			order = ev.Tabs
+		}
+	}
+	_, fresh := f.state()
+	var got []uiSessionInfo
+	for _, c := range order {
+		var s uiSessionInfo
+		_ = json.Unmarshal(tabs[c], &s)
+		got = append(got, s)
+	}
+	if !wireEqual(got, fresh) {
+		t.Fatalf("replayed strip differs from a snapshot\n got %+v\nwant %+v", got, fresh)
 	}
 }
 
@@ -296,8 +338,8 @@ func TestSyncSessionLifecycleEvents(t *testing.T) {
 			t.Fatalf("closed session streamed group events: %+v", ev)
 		}
 	}
-	if len(c.Events) != 1 || c.Events[0].Sessions == nil {
-		t.Fatalf("close events = %+v, want one strip", c.Events)
+	if n := len(c.Events); n == 0 || c.Events[n-1].Tabs == nil {
+		t.Fatalf("close events = %+v, want the new order last", c.Events)
 	}
 }
 
@@ -310,8 +352,8 @@ func TestSyncSessionWindowLeavesTurnsAlone(t *testing.T) {
 	f.d.store.UpdateSession("user:alice", f.created, func(s *session.Session) { s.ContextWindow = 1_000_000 })
 	f.d.uiPoke("alice")
 	c := f.changes(at)
-	if len(c.Events) != 1 || c.Events[0].Sessions == nil {
-		t.Fatalf("window change events = %+v, want only the strip", c.Events)
+	if want := fmt.Sprintf(`{"created":%d,"ctx_window":1000000}`, f.created); len(c.Events) != 1 || string(c.Events[0].Tab) != want {
+		t.Fatalf("window change events = %+v, want only %s", c.Events, want)
 	}
 }
 

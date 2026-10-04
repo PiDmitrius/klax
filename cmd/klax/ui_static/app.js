@@ -3,7 +3,7 @@
 // The whole old state machine (runningTurn/doneTurns/queuedTurns/tmpTurn/renderedPending/readMark/
 // insertAnswer/breakMerge) is gone — a turn's truth is model turn.state.
 
-import { TurnModel, ordLess, ordParam } from "./model.js";
+import { TurnModel, ordLess, ordParam, applyMerge } from "./model.js";
 import { renderSession, answerBlock, beginShift, playShift, fadeOutDivider, DIVIDER_FADE_MS, pos, parsePos, decodePos } from "./render.js";
 import { esc } from "./markdown.js";
 import { changesLoop, cursorEpoch, cursorSeq } from "./events.js";
@@ -48,6 +48,7 @@ let active = 0;
 // of a session is in flight its events inside the requested range wait in `buffered`; an applied
 // load leaves a skip (its `at` and range) so events it already contains are not applied twice.
 let after = "", generation = 0, pendingSelect = 0;
+let tabs = new Map(), tabOrder = []; // the strip as published: tab wire objects by created, and their order
 const winReq = {}, loading = {}, buffered = {}, skips = {};
 const restoreAfterResync = new Set(); // sessions whose windows a resync still owes
 const affectedNow = new Set();
@@ -889,6 +890,8 @@ async function bootState(){
   if(serverStarted !== null && data.started !== serverStarted) showNotice(systemRestartNotice(data.startup, data.version));
   saveServerStarted(data.started);
   after = data.at;
+  tabs = new Map((data.sessions || []).map(t => [t.created, t]));
+  tabOrder = (data.sessions || []).map(t => t.created);
   await onSessionsList(data.sessions || []);
 }
 
@@ -911,12 +914,19 @@ async function resync(){
   }
 }
 
-// applyEvents applies one changes response in ring order and advances the cursor.
+// applyEvents applies one changes response in ring order and advances the cursor. Tab patches and
+// orders rebuild the strip, which is reconciled once per response.
 function applyEvents(events, at){
+  let strip = false;
   for(const ev of events){
     if(ev.notice !== undefined) onNoticeEvent(ev.notice);
-    else if(ev.sessions) onSessionsList(ev.sessions).catch(e => console.error("klax sessions", e));
+    else if(ev.tab){ tabs.set(ev.tab.created, applyMerge(tabs.get(ev.tab.created), ev.tab)); strip = true; }
+    else if(ev.tabs){ tabOrder = ev.tabs; strip = true; }
     else if(ev.session) routeSessionEvent(ev);
+  }
+  if(strip){
+    for(const c of [...tabs.keys()]) if(!tabOrder.includes(c)) tabs.delete(c);
+    onSessionsList(tabOrder.map(c => tabs.get(c)).filter(Boolean)).catch(e => console.error("klax sessions", e));
   }
   after = at;
   const seq = cursorSeq(at);

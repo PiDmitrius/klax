@@ -12,6 +12,26 @@ export function ordLess(a, b){
 
 export function ordParam(o){ return (o[0] === null ? "null" : o[0]) + "," + o[1]; }
 
+// applyMerge applies a JSON Merge Patch to an object: a key set to null is dropped.
+export function applyMerge(obj, patch){
+  const out = { ...(obj || {}) };
+  for(const k in patch){ if(patch[k] === null) delete out[k]; else out[k] = patch[k]; }
+  return out;
+}
+
+// applyArray applies an array delta: patches by index, then the elements appended from `start`,
+// then a shorter length. Every step is positional, so a repeated delta changes nothing. Null when
+// the array is too short for the delta: the client lost track of it.
+function applyArray(arr, d){
+  if(!d) return arr;
+  if(arr.length < (d.start || 0) || Object.keys(d.set || {}).some(i => +i >= arr.length)) return null;
+  const out = arr.slice();
+  for(const i in (d.set || {})) out[i] = applyMerge(out[i], d.set[i]);
+  if(d.append){ out.length = d.start || 0; for(const e of d.append) out.push(e); }
+  if(d.length !== undefined) out.length = d.length;
+  return out;
+}
+
 export class TurnModel {
   constructor(){ this.byCreated = {}; }
 
@@ -50,24 +70,29 @@ export class TurnModel {
     s.rows = null;
   }
 
-  // applyGroup applies one group event; returns false when the session lost track of that group
-  // (a delta for a group it should hold but does not) and needs a fresh window.
+  // applyGroup applies one group event — a full create, or patches of the head, blocks and rows;
+  // returns false when the session lost track of that group (a patch for a group it should hold but
+  // does not) and needs a fresh window.
   applyGroup(created, d){
     const s = this.byCreated[created];
     if(!s) return true;
     const i = s.groups.findIndex(g => g.key === d.key);
     if(i < 0){
       if(ordLess(d.ord, s.from)) return true;
-      if(d.from > 0) return false;
-      s.groups.push({ key: d.key, ord: d.ord, head: d.head || null, blocks: (d.blocks || []).slice(0, d.n), rows: d.rows || [] });
+      if(!d.create) return false;
+      s.groups.push(normGroup({ key: d.key, ord: d.ord, ...d.create }));
     } else {
       const g = s.groups[i];
       if(ordLess(d.ord, s.from)){ s.groups.splice(i, 1); s.rows = null; return true; }
-      g.ord = d.ord;
-      if(d.head) g.head = d.head;
-      else if(d.ctx && g.head) g.head = { ...g.head, ctx_used: d.ctx[0], ctx_window: d.ctx[1] };
-      g.blocks = g.blocks.slice(0, d.from).concat(d.blocks || []).slice(0, d.n);
-      if(d.rows) g.rows = d.rows;
+      if(d.create) s.groups[i] = normGroup({ key: d.key, ord: d.ord, ...d.create });
+      else {
+        const blocks = applyArray(g.blocks, d.blocks), rows = applyArray(g.rows, d.rows);
+        if(!blocks || !rows) return false;
+        g.ord = d.ord;
+        if(d.head) g.head = applyMerge(g.head, d.head);
+        g.blocks = blocks;
+        g.rows = rows;
+      }
     }
     s.groups.sort((a, b) => ordLess(a.ord, b.ord) ? -1 : 1);
     s.rows = null;

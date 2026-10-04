@@ -2,8 +2,9 @@ package main
 
 import (
 	"encoding/json"
-	"reflect"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/PiDmitrius/klax/internal/session"
@@ -108,35 +109,86 @@ func TestGroupRowsKeysAndOrd(t *testing.T) {
 	}
 }
 
+// applyMerge applies a merge patch to a wire object, as the client does.
+func applyMerge(base []byte, patch json.RawMessage) []byte {
+	m := map[string]json.RawMessage{}
+	_ = json.Unmarshal(base, &m)
+	var p map[string]json.RawMessage
+	_ = json.Unmarshal(patch, &p)
+	for k, v := range p {
+		if string(v) == "null" {
+			delete(m, k)
+		} else {
+			m[k] = v
+		}
+	}
+	out, _ := json.Marshal(m)
+	return out
+}
+
+func applyArray[T any](xs []T, d *uiArrayDelta) []T {
+	if d == nil {
+		return xs
+	}
+	w := wireList(xs)
+	for i, p := range d.Set {
+		n, _ := strconv.Atoi(i)
+		w[n] = applyMerge(w[n], p)
+	}
+	if d.Append != nil {
+		w = w[:d.Start]
+	}
+	for _, e := range d.Append {
+		w = append(w, e)
+	}
+	if d.Length != nil {
+		w = w[:*d.Length]
+	}
+	out := make([]T, len(w))
+	for i, e := range w {
+		_ = json.Unmarshal(e, &out[i])
+	}
+	return out
+}
+
 // applyDelta is the client's rule for one group event.
 func applyDelta(g *uiGroup, d *uiGroupDelta) {
 	g.Ord = d.Ord
+	if d.Create != nil {
+		g.Head, g.Blocks, g.Rows = d.Create.Head, d.Create.Blocks, d.Create.Rows
+		return
+	}
 	if d.Head != nil {
-		g.Head = d.Head
-	} else if d.Ctx != nil {
-		h := *g.Head
-		h.CtxUsed, h.CtxWindow = d.Ctx[0], d.Ctx[1]
+		hb, _ := json.Marshal(g.Head)
+		var h uiTurn
+		_ = json.Unmarshal(applyMerge(hb, d.Head), &h)
 		g.Head = &h
 	}
-	g.Blocks = append(slices.Clone(g.Blocks[:d.From]), d.Blocks...)[:d.N]
-	if d.Rows != nil {
-		g.Rows = *d.Rows
-	}
+	g.Blocks, g.Rows = applyArray(g.Blocks, d.Blocks), applyArray(g.Rows, d.Rows)
 }
 
-// A changed group sends only its changed block suffix and its header only when it changed; a
-// vanished group is removed after the group events; replaying the deltas reproduces the new value.
-func TestDiffGroupsSendsChangedSuffix(t *testing.T) {
+func wireEqual(a, b any) bool {
+	x, _ := json.Marshal(a)
+	y, _ := json.Marshal(b)
+	return string(x) == string(y)
+}
+
+// A changed group sends only the fields and blocks that changed: a header patch, element patches
+// by index, appended blocks and a shorter length; a new group is created in full, a vanished one is
+// removed after the group events, and replaying the deltas reproduces the new value.
+func TestDiffGroupsSendsOnlyChanges(t *testing.T) {
 	block := func(id, text string) uiBlock { return uiBlock{ID: id, Role: "assistant", Text: text} }
-	head := func(state string) *uiTurn { return &uiTurn{Role: "user", Seq: 5, State: state} }
+	head := func(state string) *uiTurn { return &uiTurn{Role: "user", Seq: 5, Text: "long prompt", State: state} }
 	old := []uiGroup{
 		{Key: "t:1:4", Ord: uiOrd{event: 1, seq: 4}, Head: &uiTurn{Role: "user", Seq: 4, State: "done"}},
-		{Key: "t:1:5", Ord: uiOrd{event: 2, seq: 5}, Head: head("run"), Blocks: []uiBlock{block("a", "A"), block("b", "B")}},
+		{Key: "t:1:5", Ord: uiOrd{event: 2, seq: 5}, Head: head("run"), Blocks: []uiBlock{block("a", "A"), block("b", "B"), block("c", "C")}},
 		{Key: "t:1:-9", Ord: uiOrd{event: 3, seq: -9}, Head: &uiTurn{Role: "user", Seq: -9}},
 	}
+	next := head("done")
+	next.CtxUsed = 900
 	cur := []uiGroup{
 		old[0],
-		{Key: "t:1:5", Ord: uiOrd{event: 2, seq: 5}, Head: head("done"), Blocks: []uiBlock{block("a", "A"), block("b", "B2"), block("c", "C")}},
+		{Key: "t:1:5", Ord: uiOrd{event: 2, seq: 5}, Head: next, Blocks: []uiBlock{block("a", "A"), {ID: "b", Role: "assistant", Text: "B", Time: "t1"}, block("c", "C"), block("d", "D")}},
 		{Key: "t:1:6", Ord: uiOrd{event: 3, seq: 6}, Head: &uiTurn{Role: "user", Seq: 6, State: "done"}},
 	}
 	evs := diffGroups(1, old, cur)
@@ -144,15 +196,18 @@ func TestDiffGroupsSendsChangedSuffix(t *testing.T) {
 		t.Fatalf("events = %+v, want two group deltas then one removal", evs)
 	}
 	d := evs[0].ev.Group
-	if d.Key != "t:1:5" || d.From != 1 || d.N != 3 || len(d.Blocks) != 2 || d.Head == nil || d.Head.State != "done" {
-		t.Fatalf("changed group delta = %+v", d)
+	if string(d.Head) != `{"ctx_used":900,"state":"done"}` {
+		t.Fatalf("head patch = %s, want only the changed fields", d.Head)
+	}
+	if d.Blocks == nil || len(d.Blocks.Set) != 1 || string(d.Blocks.Set["1"]) != `{"time":"t1"}` || len(d.Blocks.Append) != 1 || d.Blocks.Start != 3 || d.Blocks.Length != nil {
+		t.Fatalf("blocks delta = %+v, want one field patch and one appended block", d.Blocks)
 	}
 	g := old[1]
 	applyDelta(&g, d)
-	if !reflect.DeepEqual(g.Head, cur[1].Head) || !reflect.DeepEqual(g.Blocks, cur[1].Blocks) {
+	if !wireEqual(g, cur[1]) {
 		t.Fatalf("replayed group = %+v, want %+v", g, cur[1])
 	}
-	if n := evs[1].ev.Group; n.Key != "t:1:6" || n.From != 0 || n.Head == nil {
+	if n := evs[1].ev.Group; n.Key != "t:1:6" || n.Create == nil || n.Create.Head == nil {
 		t.Fatalf("new group delta = %+v", n)
 	}
 	if rm := evs[2].ev.Removed; rm.Key != "t:1:-9" || rm.Ord != old[2].Ord {
@@ -160,15 +215,33 @@ func TestDiffGroupsSendsChangedSuffix(t *testing.T) {
 	}
 	shrunk := []uiGroup{old[0], {Key: "t:1:5", Ord: old[1].Ord, Head: old[1].Head, Blocks: old[1].Blocks[:1]}, old[2]}
 	evs = diffGroups(1, old, shrunk)
-	if len(evs) != 1 || evs[0].ev.Group.From != 1 || evs[0].ev.Group.N != 1 || evs[0].ev.Group.Head != nil {
+	if len(evs) != 1 || evs[0].ev.Group.Head != nil || evs[0].ev.Group.Blocks.Length == nil || *evs[0].ev.Group.Blocks.Length != 1 {
 		t.Fatalf("shrunk group delta = %+v", evs)
-	}
-	used := []uiGroup{old[0], {Key: "t:1:5", Ord: old[1].Ord, Head: &uiTurn{Role: "user", Seq: 5, State: "run", CtxUsed: 900}, Blocks: old[1].Blocks}, old[2]}
-	evs = diffGroups(1, old, used)
-	if len(evs) != 1 || evs[0].ev.Group.Head != nil || evs[0].ev.Group.Ctx == nil || *evs[0].ev.Group.Ctx != [2]int{900, 0} {
-		t.Fatalf("context-only delta = %+v, want ctx without the head", evs)
 	}
 	if evs := diffGroups(1, old, old); len(evs) != 0 {
 		t.Fatalf("unchanged groups produced %d events", len(evs))
+	}
+}
+
+// A tab patch carries only the changed fields (null for a dropped one); a new tab arrives whole
+// and membership changes send the order.
+func TestDiffTabsSendsOnlyChanges(t *testing.T) {
+	a := uiSessionInfo{Created: 1, Name: "one", Unread: 3, ReadThrough: "1.0"}
+	b := uiSessionInfo{Created: 2, Name: "two"}
+	pub, evs := diffTabs(roleRW, nil, []uiSessionInfo{a, b})
+	if len(evs) != 0 {
+		t.Fatalf("first publication sent %d events", len(evs))
+	}
+	a.Unread, a.ReadThrough = 0, "2.0"
+	c := uiSessionInfo{Created: 3, Name: "three"}
+	_, evs = diffTabs(roleRW, pub, []uiSessionInfo{a, c})
+	if len(evs) != 3 {
+		t.Fatalf("events = %+v, want two tab patches and the order", evs)
+	}
+	if got := string(evs[0].ev.Tab); got != `{"created":1,"read_through":"2.0","unread":null}` {
+		t.Fatalf("tab patch = %s", got)
+	}
+	if !strings.Contains(string(evs[1].ev.Tab), `"name":"three"`) || !slices.Equal(evs[2].ev.Tabs, []int64{1, 3}) || evs[2].role != roleRW {
+		t.Fatalf("new tab and order = %s %v", evs[1].ev.Tab, evs[2].ev.Tabs)
 	}
 }

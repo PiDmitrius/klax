@@ -69,7 +69,7 @@ func TestUIRingEvictionFloorsPerRole(t *testing.T) {
 	big := json.RawMessage(`"` + strings.Repeat("x", uiRingSoftBytes/uiRingMinEvents) + `"`)
 	h.mu.Lock()
 	for i := 0; i < 2*uiRingMinEvents; i++ {
-		h.appendLocked("alice", u, []uiPending{{role: roleRO, ev: uiEventJSON{Sessions: big}}})
+		h.appendLocked("alice", u, []uiPending{{role: roleRO, ev: uiEventJSON{Tab: big}}})
 	}
 	h.mu.Unlock()
 	if len(u.ring) < uiRingMinEvents || u.floor[roleRO] == 0 {
@@ -86,7 +86,7 @@ func TestUIRingEvictionFloorsPerRole(t *testing.T) {
 	}
 	h.mu.Lock()
 	for i := 0; i < 2*uiRingMinEvents; i++ {
-		h.appendLocked("alice", u, []uiPending{{role: roleShared, ev: uiEventJSON{Sessions: big}}})
+		h.appendLocked("alice", u, []uiPending{{role: roleShared, ev: uiEventJSON{Tab: big}}})
 	}
 	h.mu.Unlock()
 	if u.floor[roleRW] == 0 {

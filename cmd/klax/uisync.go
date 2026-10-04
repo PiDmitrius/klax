@@ -130,33 +130,98 @@ func groupRows(created int64, rows []uiTurn) []uiGroup {
 	return out
 }
 
-// headEqual compares two heads apart from their context usage, which a group delta carries on
-// its own so a running turn's growing usage never resends the user's text.
-func headEqual(a, b *uiTurn) bool {
-	if a == nil || b == nil {
-		return a == b
+// Deltas carry only what changed relative to the published value: an object as a JSON Merge
+// Patch of its wire form (changed keys, null for a dropped key), an array as patches of the
+// elements that changed by index, the elements appended, and the new length when it shrank.
+
+// mergePatch returns the merge patch turning wire object a into b, or nil when they are equal.
+func mergePatch(a, b []byte) json.RawMessage {
+	if bytes.Equal(a, b) {
+		return nil
 	}
-	x, y := *a, *b
-	x.CtxUsed, x.CtxWindow, y.CtxUsed, y.CtxWindow = 0, 0, 0, 0
-	return reflect.DeepEqual(x, y)
+	var ma, mb map[string]json.RawMessage
+	_ = json.Unmarshal(a, &ma)
+	if json.Unmarshal(b, &mb) != nil {
+		return nil
+	}
+	patch := make(map[string]json.RawMessage)
+	for k, v := range mb {
+		if !bytes.Equal(ma[k], v) {
+			patch[k] = v
+		}
+	}
+	for k := range ma {
+		if _, ok := mb[k]; !ok {
+			patch[k] = json.RawMessage("null")
+		}
+	}
+	if len(patch) == 0 {
+		return nil
+	}
+	out, _ := json.Marshal(patch)
+	return out
 }
 
-func ctxOf(h *uiTurn) [2]int {
-	if h == nil {
-		return [2]int{}
-	}
-	return [2]int{h.CtxUsed, h.CtxWindow}
+// uiArrayDelta: Append starts at index Start, so applying a delta twice is harmless.
+type uiArrayDelta struct {
+	Set    map[string]json.RawMessage `json:"set,omitempty"`
+	Start  int                        `json:"start,omitempty"`
+	Append []json.RawMessage          `json:"append,omitempty"`
+	Length *int                       `json:"length,omitempty"`
 }
 
-type uiGroupDelta struct {
-	Key    string    `json:"key"`
-	Ord    uiOrd     `json:"ord"`
-	Head   *uiTurn   `json:"head,omitempty"`
-	Ctx    *[2]int   `json:"ctx,omitempty"` // [used, window] when only the head's context changed
-	N      int       `json:"n"`
-	From   int       `json:"from"`
+func wireList[T any](xs []T) [][]byte {
+	out := make([][]byte, len(xs))
+	for i, x := range xs {
+		out[i], _ = json.Marshal(x)
+	}
+	return out
+}
+
+// arrayDelta returns the delta turning old into cur, or nil when they are equal.
+func arrayDelta[T any](old, cur []T) *uiArrayDelta {
+	if reflect.DeepEqual(old, cur) || (len(old) == 0 && len(cur) == 0) {
+		return nil
+	}
+	ow, cw := wireList(old), wireList(cur)
+	d := &uiArrayDelta{}
+	for i := 0; i < len(ow) && i < len(cw); i++ {
+		if p := mergePatch(ow[i], cw[i]); p != nil {
+			if d.Set == nil {
+				d.Set = make(map[string]json.RawMessage)
+			}
+			d.Set[strconv.Itoa(i)] = p
+		}
+	}
+	for _, e := range cw[min(len(ow), len(cw)):] {
+		d.Start = len(ow)
+		d.Append = append(d.Append, e)
+	}
+	if len(cw) < len(ow) {
+		n := len(cw)
+		d.Length = &n
+	}
+	if d.Set == nil && d.Append == nil && d.Length == nil {
+		return nil
+	}
+	return d
+}
+
+type uiGroupBody struct {
+	Head   *uiTurn   `json:"head"`
 	Blocks []uiBlock `json:"blocks"`
-	Rows   *[]uiTurn `json:"rows,omitempty"`
+	Rows   []uiTurn  `json:"rows"`
+}
+
+// uiGroupDelta creates a group in full or patches its head, blocks and rows; key and ord address
+// it either way.
+type uiGroupDelta struct {
+	Key    string          `json:"key"`
+	Ord    uiOrd           `json:"ord"`
+	Create *uiGroupBody    `json:"create,omitempty"`
+	Head   json.RawMessage `json:"head,omitempty"`
+	Blocks *uiArrayDelta   `json:"blocks,omitempty"`
+	Rows   *uiArrayDelta   `json:"rows,omitempty"`
 }
 
 type uiRemoved struct {
@@ -166,12 +231,13 @@ type uiRemoved struct {
 
 // uiEventJSON is the wire form of one ring event; exactly one payload field is set.
 type uiEventJSON struct {
-	Seq      uint64          `json:"seq"`
-	Session  int64           `json:"session,omitempty"`
-	Group    *uiGroupDelta   `json:"group,omitempty"`
-	Removed  *uiRemoved      `json:"removed,omitempty"`
-	Sessions json.RawMessage `json:"sessions,omitempty"`
-	Notice   string          `json:"notice,omitempty"`
+	Seq     uint64          `json:"seq"`
+	Session int64           `json:"session,omitempty"`
+	Group   *uiGroupDelta   `json:"group,omitempty"`
+	Removed *uiRemoved      `json:"removed,omitempty"`
+	Tab     json.RawMessage `json:"tab,omitempty"`  // patch of one tab, always with its created
+	Tabs    []int64         `json:"tabs,omitempty"` // the tab order, when membership or order changed
+	Notice  string          `json:"notice,omitempty"`
 }
 
 type uiPending struct {
@@ -190,36 +256,19 @@ func diffGroups(created int64, old, cur []uiGroup) []uiPending {
 	live := make(map[string]bool, len(cur))
 	for _, g := range cur {
 		live[g.Key] = true
-		d := &uiGroupDelta{Key: g.Key, Ord: g.Ord, N: len(g.Blocks)}
+		d := &uiGroupDelta{Key: g.Key, Ord: g.Ord}
 		o := byKey[g.Key]
 		if o == nil {
-			d.Head, d.Blocks = g.Head, g.Blocks
-			if len(g.Rows) > 0 {
-				d.Rows = &g.Rows
-			}
+			d.Create = &uiGroupBody{Head: g.Head, Blocks: g.Blocks, Rows: g.Rows}
 		} else {
-			from := 0
-			for from < len(g.Blocks) && from < len(o.Blocks) && reflect.DeepEqual(g.Blocks[from], o.Blocks[from]) {
-				from++
+			if !reflect.DeepEqual(o.Head, g.Head) {
+				oh, _ := json.Marshal(o.Head)
+				gh, _ := json.Marshal(g.Head)
+				d.Head = mergePatch(oh, gh)
 			}
-			headChanged, rowsChanged := !headEqual(o.Head, g.Head), !reflect.DeepEqual(o.Rows, g.Rows)
-			ctxChanged := ctxOf(o.Head) != ctxOf(g.Head)
-			if from == len(g.Blocks) && len(o.Blocks) == len(g.Blocks) && !headChanged && !ctxChanged && !rowsChanged && o.Ord == g.Ord {
+			d.Blocks, d.Rows = arrayDelta(o.Blocks, g.Blocks), arrayDelta(o.Rows, g.Rows)
+			if d.Head == nil && d.Blocks == nil && d.Rows == nil && o.Ord == g.Ord {
 				continue
-			}
-			d.From, d.Blocks = from, g.Blocks[from:]
-			if headChanged {
-				d.Head = g.Head
-			} else if ctxChanged {
-				c := ctxOf(g.Head)
-				d.Ctx = &c
-			}
-			if rowsChanged {
-				rows := g.Rows
-				if rows == nil {
-					rows = []uiTurn{}
-				}
-				d.Rows = &rows
 			}
 		}
 		out = append(out, uiPending{role: roleShared, ev: uiEventJSON{Session: created, Group: d}})
@@ -230,6 +279,55 @@ func diffGroups(created int64, old, cur []uiGroup) []uiPending {
 		}
 	}
 	return out
+}
+
+// uiTabs is one role's published tab strip: the order and each tab's wire form.
+type uiTabs struct {
+	order []int64
+	entry map[int64][]byte
+}
+
+func (t *uiTabs) wire() json.RawMessage {
+	var b bytes.Buffer
+	b.WriteByte('[')
+	for i, c := range t.order {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.Write(t.entry[c])
+	}
+	b.WriteByte(']')
+	return b.Bytes()
+}
+
+// diffTabs publishes a role's strip and returns its tab patches, then its order if that changed.
+func diffTabs(role int8, old *uiTabs, list []uiSessionInfo) (*uiTabs, []uiPending) {
+	cur := &uiTabs{order: make([]int64, len(list)), entry: make(map[int64][]byte, len(list))}
+	for i, t := range list {
+		cur.order[i] = t.Created
+		cur.entry[t.Created], _ = json.Marshal(t)
+	}
+	if old == nil {
+		return cur, nil
+	}
+	var out []uiPending
+	for _, c := range cur.order {
+		before := old.entry[c]
+		if before == nil {
+			before = []byte("{}")
+		}
+		if p := mergePatch(before, cur.entry[c]); p != nil {
+			var m map[string]json.RawMessage
+			_ = json.Unmarshal(p, &m)
+			m["created"], _ = json.Marshal(c)
+			tab, _ := json.Marshal(m)
+			out = append(out, uiPending{role: role, ev: uiEventJSON{Tab: tab}})
+		}
+	}
+	if !slices.Equal(old.order, cur.order) {
+		out = append(out, uiPending{role: role, ev: uiEventJSON{Tabs: slices.Clone(cur.order)}})
+	}
+	return cur, out
 }
 
 type uiRingEvent struct {
@@ -243,12 +341,12 @@ type uiPubSession struct {
 	groups []uiGroup
 }
 
-// uiUserSync is one user's published state and event ring. pub and sessions belong to the
+// uiUserSync is one user's published state and event ring. pub and tabs belong to the
 // detector (detMu); ring, ringBytes and floor belong to uiHub.mu.
 type uiUserSync struct {
-	detMu    sync.Mutex
-	pub      map[int64]*uiPubSession
-	sessions [2]json.RawMessage
+	detMu sync.Mutex
+	pub   map[int64]*uiPubSession
+	tabs  [2]*uiTabs
 
 	ring      []uiRingEvent
 	ringBytes int
@@ -468,14 +566,9 @@ func (d *daemon) uiDetectLocked(user, sk string, u *uiUserSync) {
 		}
 	}
 	for _, role := range []int8{roleRW, roleRO} {
-		data, err := json.Marshal(d.sessionsSnapshot(sk, sessions, rowsOf, role == roleRO))
-		if err != nil || bytes.Equal(data, u.sessions[role]) {
-			continue
-		}
-		if u.sessions[role] != nil {
-			evs = append(evs, uiPending{role: role, ev: uiEventJSON{Sessions: data}})
-		}
-		u.sessions[role] = data
+		tabs, tabEvs := diffTabs(role, u.tabs[role], d.sessionsSnapshot(sk, sessions, rowsOf, role == roleRO))
+		u.tabs[role] = tabs
+		evs = append(evs, tabEvs...)
 	}
 	if len(evs) > 0 {
 		h.mu.Lock()
@@ -505,7 +598,7 @@ func (s *uiServer) handleState(w http.ResponseWriter, r *http.Request) {
 		Sessions json.RawMessage `json:"sessions"`
 	}
 	s.d.uiSync(user, sk, func(u *uiUserSync, at uint64) {
-		resp.At, resp.Sessions = s.d.uiHub.cursor(at), u.sessions[roleOf(readOnly)]
+		resp.At, resp.Sessions = s.d.uiHub.cursor(at), u.tabs[roleOf(readOnly)].wire()
 	})
 	resp.Started, resp.Startup, resp.Version = s.d.uiHub.epoch, s.d.startupKind, version
 	w.Header().Set("Content-Type", "application/json")

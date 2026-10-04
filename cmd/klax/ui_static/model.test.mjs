@@ -27,10 +27,10 @@ test("turns flattens groups into user rows with blocks followed by their standal
 test("a group delta keeps the prefix, appends the suffix, cuts to n and merges the header", () => {
   const m = new TurnModel();
   m.loadWindow(1, window([{ key: "t:1:5", ord: [2, 5], head: head(5, "run"), blocks: [{ id: "a" }, { id: "b" }] }]));
-  assert.ok(m.applyGroup(1, { key: "t:1:5", ord: [2, 5], head: head(5, "done"), n: 3, from: 1, blocks: [{ id: "b2" }, { id: "c" }] }));
+  assert.ok(m.applyGroup(1, { key: "t:1:5", ord: [2, 5], head: { state: "done" }, blocks: { set: { 1: { id: "b2" } }, start: 2, append: [{ id: "c" }] } }));
   assert.deepEqual(m.turns(1)[0].blocks.map(b => b.id), ["a", "b2", "c"]);
   assert.equal(m.turns(1)[0].state, "done");
-  assert.ok(m.applyGroup(1, { key: "t:1:5", ord: [2, 5], n: 1, from: 1, blocks: [] }));
+  assert.ok(m.applyGroup(1, { key: "t:1:5", ord: [2, 5], blocks: { length: 1 } }));
   assert.deepEqual(m.turns(1)[0].blocks.map(b => b.id), ["a"]);
   assert.equal(m.turns(1)[0].state, "done");
 });
@@ -38,17 +38,17 @@ test("a group delta keeps the prefix, appends the suffix, cuts to n and merges t
 test("new groups insert in ord order; older ones are left to paging; a lost delta asks for a reload", () => {
   const m = new TurnModel();
   m.loadWindow(1, window([{ key: "t:1:5", ord: [2, 5], head: head(5) }]));
-  assert.ok(m.applyGroup(1, { key: "t:1:7", ord: [null, 7], head: head(7, "enq"), n: 0, from: 0, blocks: [] }));
-  assert.ok(m.applyGroup(1, { key: "t:1:6", ord: [3, 6], head: head(6), n: 0, from: 0, blocks: [] }));
-  assert.ok(m.applyGroup(1, { key: "t:1:1", ord: [0, 1], head: head(1), n: 0, from: 0, blocks: [] }));
+  assert.ok(m.applyGroup(1, { key: "t:1:7", ord: [null, 7], create: { head: head(7, "enq"), blocks: [] } }));
+  assert.ok(m.applyGroup(1, { key: "t:1:6", ord: [3, 6], create: { head: head(6), blocks: [] } }));
+  assert.ok(m.applyGroup(1, { key: "t:1:1", ord: [0, 1], create: { head: head(1), blocks: [] } }));
   assert.deepEqual(m.turns(1).map(t => t.seq), [5, 6, 7]);
-  assert.equal(m.applyGroup(1, { key: "t:1:9", ord: [4, 9], n: 2, from: 1, blocks: [{}] }), false);
+  assert.equal(m.applyGroup(1, { key: "t:1:9", ord: [4, 9], blocks: { start: 1, append: [{}] } }), false);
 });
 
 test("a held group moving below the range is dropped; removal drops a key", () => {
   const m = new TurnModel();
   m.loadWindow(1, window([{ key: "t:1:5", ord: [2, 5], head: head(5) }, { key: "t:1:22", ord: [null, 22], head: head(22, "enq") }]));
-  assert.ok(m.applyGroup(1, { key: "t:1:22", ord: [1, 22], n: 0, from: 0, blocks: [] }));
+  assert.ok(m.applyGroup(1, { key: "t:1:22", ord: [1, 22] }));
   assert.deepEqual(m.turns(1).map(t => t.seq), [5]);
   assert.deepEqual(m.rangeStart(1), [2, 5]);
   m.applyRemoved(1, "t:1:5");
@@ -76,17 +76,34 @@ test("a page drops a held copy of a key it carries; a window from the history st
   m.loadPage(1, { from: [1, 1], to: [5, 5], groups: [{ key: "t:1:22", ord: [3, 22], head: head(22) }] });
   assert.deepEqual(m.turns(1).map(t => t.seq), [22, 5]);
   m.loadWindow(1, { from: [-1, 0], groups: [{ key: "t:1:7", ord: [null, 7], head: head(7, "err") }] });
-  assert.ok(m.applyGroup(1, { key: "t:1:7", ord: [4, 7], n: 0, from: 0, blocks: [] }));
-  assert.ok(m.applyGroup(1, { key: "t:1:8", ord: [4, 8], head: head(8), n: 0, from: 0, blocks: [] }));
+  assert.ok(m.applyGroup(1, { key: "t:1:7", ord: [4, 7] }));
+  assert.ok(m.applyGroup(1, { key: "t:1:8", ord: [4, 8], create: { head: head(8), blocks: [] } }));
   assert.deepEqual(m.turns(1).map(t => t.seq), [7, 8]);
 });
 
 test("a context-only delta updates the head's usage and keeps its text", () => {
   const m = new TurnModel();
   m.loadWindow(1, window([{ key: "t:1:5", ord: [2, 5], head: { ...head(5, "run"), text: "long prompt" }, blocks: [{ id: "a" }] }]));
-  assert.ok(m.applyGroup(1, { key: "t:1:5", ord: [2, 5], ctx: [900, 0], n: 1, from: 1, blocks: [] }));
+  assert.ok(m.applyGroup(1, { key: "t:1:5", ord: [2, 5], head: { ctx_used: 900 } }));
   const t = m.turns(1)[0];
   assert.equal(t.text, "long prompt");
   assert.equal(t.ctx_used, 900);
   assert.deepEqual(t.blocks.map(b => b.id), ["a"]);
+});
+
+test("a repeated group delta changes nothing", () => {
+  const m = new TurnModel();
+  m.loadWindow(1, window([{ key: "t:1:5", ord: [2, 5], head: head(5, "run"), blocks: [{ id: "a" }] }]));
+  const d = { key: "t:1:5", ord: [2, 5], head: { state: "done" }, blocks: { start: 1, append: [{ id: "b" }] } };
+  m.applyGroup(1, d);
+  m.applyGroup(1, d);
+  assert.deepEqual(m.turns(1)[0].blocks.map(b => b.id), ["a", "b"]);
+});
+
+test("a delta for an array shorter than it expects asks for a reload", () => {
+  const m = new TurnModel();
+  m.loadWindow(1, window([{ key: "t:1:5", ord: [2, 5], head: head(5, "run"), blocks: [{ id: "a" }] }]));
+  assert.equal(m.applyGroup(1, { key: "t:1:5", ord: [2, 5], blocks: { start: 3, append: [{ id: "d" }] } }), false);
+  assert.equal(m.applyGroup(1, { key: "t:1:5", ord: [2, 5], blocks: { set: { 2: { id: "c" } } } }), false);
+  assert.deepEqual(m.turns(1)[0].blocks.map(b => b.id), ["a"]);
 });
