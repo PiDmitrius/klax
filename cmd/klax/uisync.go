@@ -432,13 +432,13 @@ func (h *uiHub) collect(user string, after uint64, role int8) (events []json.Raw
 }
 
 func (h *uiHub) cursor(seq uint64) string {
-	return strconv.FormatInt(h.epoch, 10) + "." + strconv.FormatUint(seq, 10)
+	return h.epoch + "." + strconv.FormatUint(seq, 10)
 }
 
 // parseAfter reads a client cursor; ok is false for another epoch or a malformed value.
 func (h *uiHub) parseAfter(v string) (uint64, bool) {
 	e, s, found := strings.Cut(v, ".")
-	if !found || e != strconv.FormatInt(h.epoch, 10) {
+	if !found || e != h.epoch {
 		return 0, false
 	}
 	seq, err := strconv.ParseUint(s, 10, 64)
@@ -593,7 +593,6 @@ func (s *uiServer) handleState(w http.ResponseWriter, r *http.Request) {
 	}
 	var resp struct {
 		At       string          `json:"at"`
-		Started  int64           `json:"started"`
 		Startup  string          `json:"startup"`
 		Version  string          `json:"version"`
 		Sessions json.RawMessage `json:"sessions"`
@@ -601,7 +600,7 @@ func (s *uiServer) handleState(w http.ResponseWriter, r *http.Request) {
 	s.d.uiSync(user, sk, roleOf(readOnly), func(u *uiUserSync, at uint64) {
 		resp.At, resp.Sessions = s.d.uiHub.cursor(at), u.tabs[roleOf(readOnly)].wire()
 	})
-	resp.Started, resp.Startup, resp.Version = s.d.uiHub.epoch, s.d.startupKind, version
+	resp.Startup, resp.Version = s.d.startupKind, version
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 }

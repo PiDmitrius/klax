@@ -111,7 +111,7 @@ test("a failed snapshot during resync keeps the sessions to restore", async () =
   h.respond(1, {}, false);
   await assert.rejects(first);
   const second = h.run("resync()");
-  h.respond(2, { at: "2.1", started: 2, sessions: [{ created: 1 }] });
+  h.respond(2, { at: "2.1", sessions: [{ created: 1 }] });
   await second;
   assert.match(h.requests[3].url, /transcript\?session=1&/);
 });
@@ -141,7 +141,7 @@ test("a resync raises a kept read watermark from the snapshot", async () => {
   await load;
   assert.equal(h.run("readThrough[1]"), 1e6);
   const sync = h.run("resync()");
-  h.respond(1, { at: "2.1", started: 2, sessions: [{ created: 1, read_through: "9.0" }] });
+  h.respond(1, { at: "2.1", sessions: [{ created: 1, read_through: "9.0" }] });
   await sync;
   assert.equal(h.run("readThrough[1]"), 9e6);
 });
@@ -170,7 +170,7 @@ test("a resync refreshes a held session in place", async () => {
   await load;
   h.run("loaded[1] = true");
   const sync = h.run("resync()");
-  h.respond(1, { at: "2.1", started: 2, sessions: [{ created: 1 }] });
+  h.respond(1, { at: "2.1", sessions: [{ created: 1 }] });
   await sync;
   assert.equal(h.run("loaded[1] && model.has(1)"), true);
   assert.match(h.requests[2].url, /transcript\?session=1&limit=/);

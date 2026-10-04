@@ -78,8 +78,8 @@ func uiUserForKey(sk string) string {
 }
 
 // uiHub owns the live channel: per-user wake channels for held polls, the per-user sync state and
-// event rings (uisync.go), and the read-model cache. epoch is the process lifetime — a restart
-// changes it, so a client cursor from another process resyncs. polls are the held requests.
+// event rings (uisync.go), and the read-model cache. epoch is a random id of the process — a
+// restart changes it, so a client cursor from another process resyncs. polls are the held requests.
 // uiUnreadKey keys the read-model cache. readModelEntry caches a session's built rows by the
 // transcript's AND queue's (mtime,size), so an unchanged session's rows cost two os.Stat calls, not a
 // transcript read + rebuild.
@@ -103,7 +103,7 @@ type readModelEntry struct {
 
 type uiHub struct {
 	mu        sync.Mutex
-	epoch     int64
+	epoch     string
 	seq       uint64
 	notify    map[string]chan struct{} // per-user wake channel (closed-channel broadcast)
 	users     map[string]*uiUserSync
@@ -114,9 +114,20 @@ type uiHub struct {
 	rmBuild   uint64
 }
 
+// newEpoch returns 8 random characters of [A-Za-z0-9]: compared only for equality, never parsed.
+func newEpoch() string {
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	var b [8]byte
+	rand.Read(b[:])
+	for i := range b {
+		b[i] = alphabet[int(b[i])%len(alphabet)]
+	}
+	return string(b[:])
+}
+
 func newUIHub() *uiHub {
 	return &uiHub{
-		epoch:     time.Now().UnixNano(), // unique per process so a restart is always detectable
+		epoch:     newEpoch(),
 		notify:    make(map[string]chan struct{}),
 		users:     make(map[string]*uiUserSync),
 		polls:     make(map[*uiPoll]struct{}),

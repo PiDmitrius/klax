@@ -9,6 +9,7 @@ import (
 	_ "image/png"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -134,10 +135,13 @@ func TestWaitPollsPastReleasesWhenPollsMoveOn(t *testing.T) {
 
 func TestUICursorRoundTrip(t *testing.T) {
 	h := newUIHub()
+	if !regexp.MustCompile(`^[A-Za-z0-9]{8}$`).MatchString(h.epoch) {
+		t.Fatalf("epoch %q is not 8 characters of [A-Za-z0-9]", h.epoch)
+	}
 	if seq, ok := h.parseAfter(h.cursor(42)); !ok || seq != 42 {
 		t.Fatalf("parseAfter(cursor(42)) = %d, %v", seq, ok)
 	}
-	for _, v := range []string{"", "42", fmt.Sprintf("%d.42", h.epoch+1), fmt.Sprintf("%d.x", h.epoch)} {
+	for _, v := range []string{"", "42", newEpoch() + ".42", h.epoch + ".x"} {
 		if _, ok := h.parseAfter(v); ok {
 			t.Fatalf("parseAfter(%q) accepted a cursor from another process or a malformed one", v)
 		}

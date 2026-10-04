@@ -20,21 +20,9 @@ import { neighborIn } from "./selection.js";
 import { initDebug } from "./debug.js";
 
 const model = new TurnModel();
-const SERVER_STARTED_KEY = "klax_server_started";
-let serverStarted = loadServerStarted();
-
-function loadServerStarted(){
-  try {
-    const value = sessionStorage.getItem(SERVER_STARTED_KEY), parsed = Number(value);
-    return value !== null && Number.isFinite(parsed) ? parsed : null;
-  }
-  catch(_){ return null; }
-}
-
-function saveServerStarted(value){
-  serverStarted = value;
-  try { sessionStorage.setItem(SERVER_STARTED_KEY, String(value)); } catch(_){}
-}
+const SERVER_EPOCH_KEY = "klax_server_epoch";
+let serverEpoch = null;
+try { serverEpoch = sessionStorage.getItem(SERVER_EPOCH_KEY); } catch(_){}
 const loaded = {};        // created -> transcript loaded?
 const transcriptLoads = {}; // created -> shared initial-load promise
 const readThrough = {};   // created -> encoded (turn,block) read watermark (pos()); undefined until seeded
@@ -969,11 +957,13 @@ function setEmptyScope(on){
 }
 
 // bootState loads the snapshot: the strip and the cursor live events continue from. A changed
-// server start shows the restart banner.
+// server epoch shows the restart banner.
 async function bootState(){
   const data = await fetchJSON("/api/state");
-  if(serverStarted !== null && data.started !== serverStarted) showNotice(systemRestartNotice(data.startup, data.version));
-  saveServerStarted(data.started);
+  const epoch = cursorEpoch(data.at);
+  if(serverEpoch !== null && epoch !== serverEpoch) showNotice(systemRestartNotice(data.startup, data.version));
+  serverEpoch = epoch;
+  try { sessionStorage.setItem(SERVER_EPOCH_KEY, epoch); } catch(_){}
   after = data.at;
   tabs = new Map((data.sessions || []).map(t => [t.created, t]));
   tabOrder = (data.sessions || []).map(t => t.created);

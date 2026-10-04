@@ -379,7 +379,7 @@ func TestSyncWindowPaging(t *testing.T) {
 
 func TestSyncResyncAcrossProcesses(t *testing.T) {
 	f := newSyncFixture(t)
-	for _, after := range []string{"", fmt.Sprintf("%d.1", f.d.uiHub.epoch+1)} {
+	for _, after := range []string{"", newEpoch() + ".1"} {
 		if c := f.changes(after); !c.Resync {
 			t.Fatalf("after %q: %+v, want resync", after, c)
 		}

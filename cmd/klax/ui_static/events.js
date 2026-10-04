@@ -6,8 +6,7 @@ import { api } from "./base.js";
 
 const POLL_ABORT_MS = 30000; // > server hold (~25s); bounds a wedged request
 
-// cursorEpoch / cursorSeq split an "<epoch>.<seq>" cursor. The epoch is a nanosecond timestamp,
-// beyond exact Number range, so it stays a string.
+// cursorEpoch / cursorSeq split an "<epoch>.<seq>" cursor; the epoch is an opaque process id.
 export function cursorEpoch(c){ return String(c || "").split(".")[0]; }
 export function cursorSeq(c){ return Number(String(c || "").split(".")[1]) || 0; }
 

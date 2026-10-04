@@ -41,7 +41,7 @@ func TestSPASystemControlsAndNoticeStack(t *testing.T) {
 	if !strings.Contains(string(app), `systemRestartNotice(data.startup, data.version)`) {
 		t.Fatal("daemon restart must close the system modal before showing its result")
 	}
-	if !strings.Contains(string(app), `sessionStorage.getItem(SERVER_STARTED_KEY)`) {
+	if !strings.Contains(string(app), `sessionStorage.getItem(SERVER_EPOCH_KEY)`) {
 		t.Fatal("daemon epoch must survive a page reload")
 	}
 	system, err := moduleFS.ReadFile("ui_static/system.js")

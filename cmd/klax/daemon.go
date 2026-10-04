@@ -641,6 +641,7 @@ func runDaemon() {
 	}
 
 	d := &daemon{
+		system:     newSystemState(time.Now()),
 		models:     models,
 		cfg:        cfg,
 		state:      session.LoadState(),
