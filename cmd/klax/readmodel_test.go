@@ -109,9 +109,8 @@ func TestReadModelRunningVsStale(t *testing.T) {
 	if len(busy) != 1 || busy[0].State != "run" {
 		t.Fatalf("busy newest run should be run: %+v", busy)
 	}
-	// Running: the last (in-progress) block is held, so only the earlier settled block shows and it
-	// has a stable id. The dots stand in for the block still being generated.
-	if len(busy[0].Blocks) != 1 || busy[0].Blocks[0].ID == "" || busy[0].Blocks[0].Role != "assistant" {
+	// Running: the last (in-progress) block is held, so only the earlier settled block shows. The dots stand in for the block still being generated.
+	if len(busy[0].Blocks) != 1 || busy[0].Blocks[0].Role != "assistant" {
 		t.Fatalf("running turn should show only settled blocks (last held): %+v", busy[0].Blocks)
 	}
 	// Idle (a missed MarkDone → resolved done): the turn is settled, so ALL blocks show — nothing
@@ -246,19 +245,6 @@ func TestReadModelContextFromToolOnlyBlock(t *testing.T) {
 	}
 }
 
-// blockID is stable for identical content and includes the turn seq.
-func TestBlockIDStable(t *testing.T) {
-	if a, b := blockID(5, "assistant", "answer", nil), blockID(5, "assistant", "answer", nil); a != b || a == "" {
-		t.Fatalf("blockID not stable: %q vs %q", a, b)
-	}
-	if blockID(5, "assistant", "answer", nil) == blockID(6, "assistant", "answer", nil) {
-		t.Fatal("blockID must include the turn seq")
-	}
-	if blockID(5, "assistant", "answer", nil) == blockID(5, "assistant", "other", nil) {
-		t.Fatal("blockID must include the text")
-	}
-}
-
 // groupTurns nests answer/tool blocks under their user turn and keeps non-answer
 // system notices as their own top-level unit.
 func TestGroupTurns(t *testing.T) {
@@ -325,12 +311,9 @@ func TestErrBlockCanonicalReasons(t *testing.T) {
 		{"backend failed", "backend failed"},
 	}
 	for _, tt := range tests {
-		got := errBlock(11, tt.reason)
+		got := errBlock(tt.reason)
 		if got.Text != tt.want {
 			t.Fatalf("errBlock(%q).Text = %q, want %q", tt.reason, got.Text, tt.want)
-		}
-		if wantID := blockID(11, "error", tt.want, nil); got.ID != wantID {
-			t.Fatalf("errBlock(%q).ID = %q, want %q", tt.reason, got.ID, wantID)
 		}
 	}
 }
@@ -340,7 +323,7 @@ func TestAppendHookWarningsOnlyAddsFinishFailure(t *testing.T) {
 		{Hook: "audit.turn.start", Status: "error", Reason: turnErrAuditStartFailed},
 		{Hook: "audit.turn.finish", Status: "error", Reason: turnWarnAuditFinishFailed, TS: time.Now().UnixNano()},
 	}
-	blocks := appendHookWarnings(nil, 7, failures)
+	blocks := appendHookWarnings(nil, failures)
 	if len(blocks) != 1 || blocks[0].Role != "system" || blocks[0].Kind != "error" {
 		t.Fatalf("hook warnings = %+v", blocks)
 	}
@@ -448,14 +431,6 @@ func TestReadModelRecoveredErrorIsNotTheOutcome(t *testing.T) {
 				t.Fatalf("terminal block = %q, want %q: %+v", last.Text, tc.want, turns[0].Blocks)
 			}
 		})
-	}
-}
-
-// blockID is canonical: a trailing-whitespace difference (live res.Text vs the trimmed
-// transcript text) must NOT change the id, or the reload-race duplicate final can't dedup.
-func TestBlockIDCanonical(t *testing.T) {
-	if blockID(7, "assistant", "answer", nil) != blockID(7, "assistant", "answer\n\n ", nil) {
-		t.Fatal("blockID must be canonical across trailing whitespace")
 	}
 }
 

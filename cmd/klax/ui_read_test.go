@@ -177,18 +177,18 @@ func wireEqual(a, b any) bool {
 // by index, appended blocks and a shorter length; a new group is created in full, a vanished one is
 // removed after the group events, and replaying the deltas reproduces the new value.
 func TestDiffGroupsSendsOnlyChanges(t *testing.T) {
-	block := func(id, text string) uiBlock { return uiBlock{ID: id, Role: "assistant", Text: text} }
+	block := func(text string) uiBlock { return uiBlock{Role: "assistant", Text: text} }
 	head := func(state string) *uiTurn { return &uiTurn{Role: "user", Seq: 5, Text: "long prompt", State: state} }
 	old := []uiGroup{
 		{Key: "t:1:4", Ord: uiOrd{event: 1, seq: 4}, Head: &uiTurn{Role: "user", Seq: 4, State: "done"}},
-		{Key: "t:1:5", Ord: uiOrd{event: 2, seq: 5}, Head: head("run"), Blocks: []uiBlock{block("a", "A"), block("b", "B"), block("c", "C")}},
+		{Key: "t:1:5", Ord: uiOrd{event: 2, seq: 5}, Head: head("run"), Blocks: []uiBlock{block("A"), block("B"), block("C")}},
 		{Key: "t:1:-9", Ord: uiOrd{event: 3, seq: -9}, Head: &uiTurn{Role: "user", Seq: -9}},
 	}
 	next := head("done")
 	next.CtxUsed = 900
 	cur := []uiGroup{
 		old[0],
-		{Key: "t:1:5", Ord: uiOrd{event: 2, seq: 5}, Head: next, Blocks: []uiBlock{block("a", "A"), {ID: "b", Role: "assistant", Text: "B", Time: "t1"}, block("c", "C"), block("d", "D")}},
+		{Key: "t:1:5", Ord: uiOrd{event: 2, seq: 5}, Head: next, Blocks: []uiBlock{block("A"), {Role: "assistant", Text: "B", Time: "t1"}, block("C"), block("D")}},
 		{Key: "t:1:6", Ord: uiOrd{event: 3, seq: 6}, Head: &uiTurn{Role: "user", Seq: 6, State: "done"}},
 	}
 	evs := diffGroups(1, old, cur)

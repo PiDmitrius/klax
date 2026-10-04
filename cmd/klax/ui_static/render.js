@@ -213,7 +213,7 @@ function renderSig(it){
         divider: g.divider,
         cls: g.cls, tool: g.tool, time: g.time, startPos: g.startPos, maxPos: g.maxPos,
         joinPrev: !!g.joinPrev, joinNext: !!g.joinNext,
-        blocks: (g.blocks || []).map(b => ({ id: b.id, role: b.role, text: b.text, kind: b.kind, time: b.time })),
+        blocks: (g.blocks || []).map(b => ({ role: b.role, text: b.text, kind: b.kind, time: b.time })),
       })),
     });
   }
@@ -305,7 +305,7 @@ function buildTurn(it, onStop, old){
     }
     const fk = "g:" + g.startPos;
     const sig = childSig("g", { cls: g.cls, tool: g.tool, time: g.time, maxPos: g.maxPos,
-      blocks: (g.blocks || []).map(b => ({ id: b.id, role: b.role, text: b.text, kind: b.kind, time: b.time })) });
+      blocks: (g.blocks || []).map(b => ({ role: b.role, text: b.text, kind: b.kind, time: b.time })) });
     const node = putBubble(fk, sig, g.cls, g.time, g.maxPos, () => ({
       html: g.blocks.map(b => g.tool ? esc(b.text || "") : mdSafe(b.text || "")).join(g.tool ? "<br>" : ""),
       raw: g.blocks.map(b => b.text || "").join(g.tool ? "\n" : "\n\n"),

@@ -92,8 +92,8 @@ type uiGroup struct {
 	Key    string    `json:"key"`
 	Ord    uiOrd     `json:"ord"`
 	Head   *uiTurn   `json:"head"`
-	Blocks []uiBlock `json:"blocks"`
-	Rows   []uiTurn  `json:"rows"`
+	Blocks []uiBlock `json:"blocks,omitempty"`
+	Rows   []uiTurn  `json:"rows,omitempty"`
 }
 
 func groupRows(created int64, rows []uiTurn) []uiGroup {
@@ -209,8 +209,8 @@ func arrayDelta[T any](old, cur []T) *uiArrayDelta {
 
 type uiGroupBody struct {
 	Head   *uiTurn   `json:"head"`
-	Blocks []uiBlock `json:"blocks"`
-	Rows   []uiTurn  `json:"rows"`
+	Blocks []uiBlock `json:"blocks,omitempty"`
+	Rows   []uiTurn  `json:"rows,omitempty"`
 }
 
 // uiGroupDelta creates a group in full or patches its head, blocks and rows; key and ord address

@@ -1,9 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"fmt"
-	"strings"
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/history"
@@ -11,10 +8,8 @@ import (
 )
 
 // uiBlock is one answer block (assistant narration / tool call / system note) under a
-// user turn. ID is a STABLE content-derived key (blockID): the same block hashes identically
-// on every build.
+// user turn; it is addressed by its index in the turn.
 type uiBlock struct {
-	ID    string             `json:"id"`
 	Role  string             `json:"role"` // assistant|tool|system|error
 	Text  string             `json:"text,omitempty"`
 	Tools []history.ToolCall `json:"tools,omitempty"`
@@ -39,25 +34,12 @@ type uiTurn struct {
 	queueOnly bool      // a durable turn the transcript has not recorded
 }
 
-// blockID hashes CANONICAL block content (role/text/tools) — callers must hash BEFORE any
-// per-response /api/file capability-ref rewriting (refs change every render), so a block
-// produced live and the same block re-read from the transcript share one id.
-func blockID(seq int64, role, text string, tools []history.ToolCall) string {
-	text = strings.TrimSpace(text) // history.Load trims assistant text; hash the same canonical form
-	h := sha256.New()
-	fmt.Fprintf(h, "%d\x00%s\x00%s", seq, role, text)
-	for _, t := range tools {
-		fmt.Fprintf(h, "\x00%s\x00%s", t.Name, t.Label)
-	}
-	return fmt.Sprintf("%d:%x", seq, h.Sum(nil)[:8])
-}
-
 // errBlock is the terminal block of an aborted/errored turn, so a reload shows why it
 // stopped (mirrors the messenger "❌ Прервано") instead of a silently-frozen turn. A cancelled
 // turn is the user's own choice, not a failure: the same block in a neutral kind.
-func errBlock(seq int64, reason string) uiBlock {
+func errBlock(reason string) uiBlock {
 	if reason == turnErrCancelled {
-		return uiBlock{ID: blockID(seq, "system", "Отменено", nil), Role: "system", Kind: "cancelled", Text: "Отменено"}
+		return uiBlock{Role: "system", Kind: "cancelled", Text: "Отменено"}
 	}
 	switch reason {
 	case "", turnErrAborted:
@@ -71,19 +53,16 @@ func errBlock(seq int64, reason string) uiBlock {
 	case turnErrBackendFailed:
 		reason = "Ошибка backend"
 	}
-	return uiBlock{ID: blockID(seq, "error", reason, nil), Role: "error", Text: reason}
+	return uiBlock{Role: "error", Text: reason}
 }
 
-func appendHookWarnings(blocks []uiBlock, seq int64, failures []sessfiles.HookFailure) []uiBlock {
+func appendHookWarnings(blocks []uiBlock, failures []sessfiles.HookFailure) []uiBlock {
 	for _, failure := range failures {
 		if failure.Hook != "audit.turn.finish" || failure.Status != "error" {
 			continue
 		}
 		text := turnWarnAuditFinishText
-		blocks = append(blocks, uiBlock{
-			ID: blockID(seq, "system", failure.Reason, nil), Role: "system",
-			Text: text, Kind: "error", Time: time.Unix(0, failure.TS).Format(time.RFC3339),
-		})
+		blocks = append(blocks, uiBlock{Role: "system", Text: text, Kind: "error", Time: time.Unix(0, failure.TS).Format(time.RFC3339)})
 	}
 	return blocks
 }
@@ -279,11 +258,11 @@ func (d *daemon) buildReadModel(sk string, created int64, grouped []groupedTurn,
 		case "enq", "run":
 			missing = append(missing, ut)
 		case "err": // a queued turn aborted before it ran — show it with why it stopped
-			ut.Blocks = append(ut.Blocks, errBlock(t.Seq, t.Reason))
+			ut.Blocks = append(ut.Blocks, errBlock(t.Reason))
 			missing = append(missing, ut)
 		case "done":
 			if !t.Bound {
-				ut.Blocks = appendHookWarnings(ut.Blocks, t.Seq, t.HookFailures)
+				ut.Blocks = appendHookWarnings(ut.Blocks, t.HookFailures)
 				missing = append(missing, ut)
 			}
 		}
@@ -312,20 +291,17 @@ func (d *daemon) userRow(store *sessfiles.Store, sk string, created int64, g gro
 	// Split an assistant item's text and each tool into separate blocks, matching the
 	// live progress stream (one narration block, one block per tool) so a block's id is
 	// computed over the same canonical shape in both the transcript and the live event.
-	// The id hashes CANONICAL raw text; the displayed text gets the same outbound
-	// file-ref rewrite the live final applies, so reloaded agent files stay sealed refs.
+	// The displayed text gets the same outbound file-ref rewrite the live final applies, so
+	// reloaded agent files stay sealed refs.
 	for _, b := range g.blocks {
 		if b.Role == "assistant" {
 			if b.Text != "" || len(b.Tools) == 0 {
 				text, published := d.rewriteOutboundForUI(sk, created, seq, b.Text)
 				keep = keep && published
-				ut.Blocks = append(ut.Blocks, uiBlock{
-					ID: blockID(seq, "assistant", b.Text, nil), Role: "assistant",
-					Text: text, Time: b.Time,
-				})
+				ut.Blocks = append(ut.Blocks, uiBlock{Role: "assistant", Text: text, Time: b.Time})
 			}
 			for _, tc := range b.Tools {
-				ut.Blocks = append(ut.Blocks, uiBlock{ID: blockID(seq, "tool", tc.Label, nil), Role: "tool", Text: tc.Label, Time: b.Time})
+				ut.Blocks = append(ut.Blocks, uiBlock{Role: "tool", Text: tc.Label, Time: b.Time})
 			}
 			// The per-turn context "cut line" comes from the last assistant block's usage —
 			// including a tool-only block (a codex turn whose final token_count lands on a
@@ -341,13 +317,13 @@ func (d *daemon) userRow(store *sessfiles.Store, sk string, created int64, g gro
 			}
 			continue
 		}
-		ut.Blocks = append(ut.Blocks, uiBlock{ID: blockID(seq, b.Role, b.Text, b.Tools), Role: b.Role, Text: b.Text, Tools: b.Tools, Kind: b.Kind, Time: b.Time})
+		ut.Blocks = append(ut.Blocks, uiBlock{Role: b.Role, Text: b.Text, Tools: b.Tools, Kind: b.Kind, Time: b.Time})
 	}
 	if state == "err" && !explainedByTranscript(reason, g.blocks) {
-		ut.Blocks = append(ut.Blocks, errBlock(seq, reason))
+		ut.Blocks = append(ut.Blocks, errBlock(reason))
 	}
 	if ok {
-		ut.Blocks = appendHookWarnings(ut.Blocks, seq, matched.HookFailures)
+		ut.Blocks = appendHookWarnings(ut.Blocks, matched.HookFailures)
 	}
 	// While the turn is still RUNNING, hold back only the most-recent assistant text block:
 	// the message currently being generated is represented by the working dots, not shown as
