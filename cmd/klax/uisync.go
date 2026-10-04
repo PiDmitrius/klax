@@ -690,6 +690,9 @@ func writeChanges(w http.ResponseWriter, at string, events []json.RawMessage) {
 	}
 	b.WriteString("}\n")
 	_, _ = w.Write(b.Bytes())
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush() // out before the poll leaves, so a restart waiting on held polls has sent it
+	}
 }
 
 // handleTranscript returns a window of a session's turn groups cut from the published state: the

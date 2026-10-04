@@ -632,9 +632,9 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	}
 	backendStarted := time.Now()
 
-	// Durable-tail content comes from the backend's transcript FILE, which klax does not own the
+	// Live UI content comes from the backend's transcript FILE, which klax does not own the
 	// write timing of. Two consequences we cover here: (a) a brand-new session has no transcript
-	// address (sess.ID) until the run ends, so its first turn could not be tail-rendered mid-run —
+	// address (sess.ID) until the run ends, so its first turn could not be rendered mid-run —
 	// OnSessionID persists the id the moment the backend announces it, making the transcript
 	// addressable at once; (b) a stdout progress event can precede the matching transcript append,
 	// so a poke tied only to stdout can rebuild too early and miss the block until the next event —

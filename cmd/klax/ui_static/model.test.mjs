@@ -45,14 +45,13 @@ test("new groups insert in ord order; older ones are left to paging; a lost delt
   assert.equal(m.applyGroup(1, { key: "t:1:9", ord: [4, 9], blocks: { start: 1, append: [{}] } }), false);
 });
 
-test("a held group moving below the range is dropped; removal drops a key", () => {
+test("a held group moving below the range asks for a reload; removal drops a key", () => {
   const m = new TurnModel();
   m.loadWindow(1, window([{ key: "t:1:5", ord: [2, 5], head: head(5) }, { key: "t:1:22", ord: [null, 22], head: head(22, "enq") }]));
-  assert.ok(m.applyGroup(1, { key: "t:1:22", ord: [1, 22] }));
-  assert.deepEqual(m.turns(1).map(t => t.seq), [5]);
-  assert.deepEqual(m.rangeStart(1), [2, 5]);
+  assert.equal(m.applyGroup(1, { key: "t:1:22", ord: [1, 22] }), false);
+  assert.deepEqual(m.turns(1).map(t => t.seq), [5, 22]);
   m.applyRemoved(1, "t:1:5");
-  assert.deepEqual(m.turns(1), []);
+  assert.deepEqual(m.turns(1).map(t => t.seq), [22]);
 });
 
 test("a page replaces its range and extends the start; eviction drops whole groups", () => {

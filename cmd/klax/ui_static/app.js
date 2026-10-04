@@ -43,11 +43,11 @@ const readGraceUntil = {}, readGraceTimer = {};
 const readReportTimer = {}; // created -> pending POST /api/read debounce timer
 const READ_GRACE_MS = 1600;
 let active = 0;
-// Live channel. `after` is the ring cursor every applied snapshot/changes response advances;
-// `generation` changes on resync so a response from before it is dropped. While a window or page
-// of a session is in flight its events inside the requested range wait in `buffered`; an applied
-// load leaves a skip (its `at` and range) so events it already contains are not applied twice.
-let after = "", generation = 0, pendingSelect = 0;
+// Live channel. `after` is the ring cursor every applied snapshot/changes response advances. While
+// a window or page of a session is in flight its events inside the requested range wait in
+// `buffered`; an applied load leaves a skip (its `at` and range) so events it already contains are
+// not applied twice.
+let after = "", pendingSelect = 0;
 let tabs = new Map(), tabOrder = []; // the strip as published: tab wire objects by created, and their order
 const winReq = {}, loading = {}, buffered = {}, skips = {};
 const restoreAfterResync = new Set(); // sessions whose windows a resync still owes
@@ -422,7 +422,8 @@ function showTranscriptStatus(message = "", retry = false){
 
 function loadTranscript(created){
   if(!transcriptLoads[created]){
-    transcriptLoads[created] = fetchTranscript(created).finally(() => { delete transcriptLoads[created]; });
+    const p = fetchTranscript(created).finally(() => { if(transcriptLoads[created] === p) delete transcriptLoads[created]; });
+    transcriptLoads[created] = p;
   }
   return transcriptLoads[created];
 }
@@ -464,9 +465,8 @@ async function fetchJSON(url){
 // fetchRange requests a window or a page before `before`; null when a resync or a server restart
 // made it stale, or the session is gone.
 async function fetchRange(created, limit, before){
-  const gen = generation;
   const data = await fetchJSON("/api/transcript?session=" + created + (before ? "&before=" + encodeURIComponent(ordParam(before)) : "") + "&limit=" + limit);
-  if(gen !== generation || cursorEpoch(data.at) !== cursorEpoch(after) || !sessionList.some(s => s.created === created)) return null;
+  if(cursorEpoch(data.at) !== cursorEpoch(after) || !sessionList.some(s => s.created === created)) return null;
   data.to = before || null;
   return data;
 }
@@ -527,7 +527,8 @@ function reloadWindow(created){
 
 // refreshWindow replaces a held session's window in place: the new window and the history the
 // session held before are loaded aside while its events wait in the buffer, then swapped in and
-// rendered once, so the view keeps its position. A failed load keeps the old view and retries.
+// rendered once with the visible message kept where it was. A failed load keeps the old view and
+// retries with a growing pause.
 async function refreshWindow(created, attempt = 0){
   const req = winReq[created] = (winReq[created] || 0) + 1;
   const cover = model.rangeStart(created);
@@ -550,11 +551,8 @@ async function refreshWindow(created, attempt = 0){
     }
   } catch(err){
     if(req !== winReq[created]) return;
-    if(attempt < 5){ setTimeout(() => { if(winReq[created] === req && refreshing[created] === req) refreshWindow(created, attempt + 1); }, 1000 << attempt); return; }
-    delete refreshing[created];
-    model.drop(created); delete loaded[created];
-    endLoad(created, e, null);
-    if(created === active) showTranscriptStatus("Не удалось загрузить историю", true);
+    if(attempt === 2) showNotice("Не удалось обновить историю сессии — повторяю", "warning");
+    setTimeout(() => { if(winReq[created] === req && refreshing[created] === req) refreshWindow(created, attempt + 1); }, 1000 << Math.min(attempt, 5));
     return;
   }
   if(req !== winReq[created]) return;
@@ -565,8 +563,32 @@ async function refreshWindow(created, attempt = 0){
   try { await ensureLineLoaded(created); } catch(err){}
   if(refreshing[created] !== req) return;
   delete refreshing[created];
+  const anchor = created === active && shownSession === created && !stick ? viewAnchor() : null;
   if(created === active) showTranscriptStatus();
   rerenderStructural(created, true);
+  if(anchor) restoreAnchor(anchor);
+}
+
+// viewAnchor records the first message visible in the log and its offset from the log's top;
+// restoreAnchor scrolls so that message is back at the same offset.
+function viewAnchor(){
+  const log = document.getElementById("log"), col = logcol();
+  if(!log || !col) return null;
+  const top = log.getBoundingClientRect().top;
+  for(const el of col.children){
+    if(el.dataset && /^turn:/.test(el.dataset.renderKey || "") && el.getBoundingClientRect().bottom > top) return { key: el.dataset.renderKey, offset: el.getBoundingClientRect().top - top };
+  }
+  return null;
+}
+function restoreAnchor(a){
+  const log = document.getElementById("log"), col = logcol();
+  if(!log || !col) return;
+  for(const el of col.children){
+    if(el.dataset && el.dataset.renderKey === a.key){
+      log.scrollTop += el.getBoundingClientRect().top - log.getBoundingClientRect().top - a.offset;
+      return;
+    }
+  }
 }
 
 // loadOlder pages in the previous CAP-group page and merges it. `showTop` (the manual "load earlier"
@@ -957,7 +979,6 @@ async function bootState(){
 // resync reloads the strip from a snapshot, refreshes held sessions in place (keeping the view) and
 // loads the ones that were loading. Startup is a resync with nothing held.
 async function resync(){
-  generation++;
   for(const c of Object.keys(loaded).filter(k => loaded[k]).concat(Object.keys(loading)).map(Number)) restoreAfterResync.add(c);
   if(active) restoreAfterResync.add(active);
   for(const c of restoreAfterResync) winReq[c] = (winReq[c] || 0) + 1;

@@ -79,10 +79,8 @@ func TestEnqueueToSessionBindsExplicitTarget(t *testing.T) {
 	}
 }
 
-// A messenger DM (no nonce) is echoed to the UI hub as a "user" event the instant
-// it is accepted, so it shows up live in the web UI — not only on a reload.
-// A mapped messenger DM lands in the durable log; the read model (the tail's source, not a live
-// echo event) renders it as the user's bubble with the original text.
+// A mapped messenger DM lands in the durable log; the read model (the live channel's source)
+// renders it as the user's bubble with the original text.
 func TestEnqueueToSessionRendersMessengerDMInReadModel(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	tp := &fakeTransport{}
@@ -112,8 +110,8 @@ func TestEnqueueToSessionRendersMessengerDMInReadModel(t *testing.T) {
 	}
 }
 
-// An inbound image the user sends lands in the durable log and the read model (the tail's source,
-// not a live echo event) renders it as a markdown image — never the 📎 file fallback.
+// An inbound image the user sends lands in the durable log and the read model (the live channel's
+// source) renders it as a markdown image — never the 📎 file fallback.
 func TestEnqueueToSessionRendersInboundImageAsMarkdown(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	tp := &fakeTransport{}
@@ -155,7 +153,7 @@ func TestEnqueueToSessionRendersInboundImageAsMarkdown(t *testing.T) {
 }
 
 // Aborting a session marks every still-queued turn err in the durable log; the read model (which
-// the tail delivers) then renders both as error turns — no live error event needed.
+// the live channel publishes) then renders both as error turns — no live error event needed.
 func TestAbortSessionMarksQueuedTurnsErrInReadModel(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	tp := &fakeTransport{}

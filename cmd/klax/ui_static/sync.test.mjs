@@ -222,3 +222,32 @@ test("switching to a tab whose window is being refreshed shows loading until it 
   await refresh;
   assert.equal(h.run("statuses.at(-1)"), "");
 });
+
+test("the visible message keeps its offset when history grows above it", () => {
+  const h = harness();
+  h.run(`
+    globalThis.fake = { shift: 0 };
+    const node = (key, top) => ({ dataset: { renderKey: key }, getBoundingClientRect: () => ({ top: top + fake.shift - log.scrollTop, bottom: top + 50 + fake.shift - log.scrollTop }) });
+    const log = { scrollTop: 300, getBoundingClientRect: () => ({ top: 0 }) };
+    const col = { children: [node("turn:1", 0), node("turn:2", 280), node("turn:3", 400)] };
+    document.getElementById = id => id === "log" ? log : col;
+    globalThis.fakeLog = log;
+  `);
+  const anchor = h.run("viewAnchor()");
+  assert.equal(anchor.key, "turn:2");
+  h.run("fake.shift = 700; restoreAnchor(" + JSON.stringify(anchor) + ")");
+  assert.equal(h.run("fakeLog.scrollTop"), 1000);
+});
+
+test("a long-failing refresh keeps retrying with a bounded pause", async () => {
+  const h = harness();
+  const load = h.run("loadTranscript(1)");
+  h.respond(0, { at: "1.10", from: [-1, 0], to: null, more: false, groups: [group(5, ["a"])] });
+  await load;
+  h.run("loaded[1] = true; globalThis.delays = []; setTimeout = (fn, ms) => { delays.push(ms); return 0; }; showNotice = () => {}");
+  const refresh = h.run("refreshWindow(1, 25)");
+  h.respond(1, {}, false);
+  await refresh;
+  assert.equal(h.run("delays.at(-1)"), 32000);
+  assert.equal(h.run("model.has(1) && loaded[1]"), true);
+});

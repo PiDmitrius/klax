@@ -83,7 +83,7 @@ export class TurnModel {
       s.groups.push(normGroup({ key: d.key, ord: d.ord, ...d.create }));
     } else {
       const g = s.groups[i];
-      if(ordLess(d.ord, s.from)){ s.groups.splice(i, 1); s.rows = null; return true; }
+      if(ordLess(d.ord, s.from)) return false; // a held group moved below the range: the history was renumbered
       if(d.create) s.groups[i] = normGroup({ key: d.key, ord: d.ord, ...d.create });
       else {
         const blocks = applyArray(g.blocks, d.blocks), rows = applyArray(g.rows, d.rows);

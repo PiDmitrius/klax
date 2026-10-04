@@ -385,7 +385,7 @@ func (d *daemon) dropReadModel(sk string, created int64) {
 	d.uiHub.rmMu.Unlock()
 }
 
-// watchRunTranscript pokes the user's tail whenever the active run's transcript FILE changes, so a
+// watchRunTranscript pokes the user's held polls whenever the active run's transcript FILE changes, so a
 // block that lands in the file wakes the held poll even when no further stdout progress event
 // follows (klax does not own the transcript write, and a stdout event can precede the file append).
 // A brand-new session has no transcript address (id) at run start, so it waits for idKnown first.
