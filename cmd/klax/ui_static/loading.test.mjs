@@ -2,12 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { TurnModel } from "./model.js";
+import { TurnModel, ordLess, ordParam } from "./model.js";
+import { cursorEpoch, cursorSeq } from "./events.js";
 
 function harness(){
   const requests = [], painted = [], statuses = [], focused = [];
   const context = vm.createContext({
-    TurnModel, console, setTimeout, clearTimeout,
+    TurnModel, ordLess, ordParam, cursorEpoch, cursorSeq, console, setTimeout, clearTimeout,
     api: url => new Promise(resolve => requests.push({ url, resolve })),
     parsePos: () => 0,
     selectionInLog: () => false,
@@ -21,6 +22,7 @@ function harness(){
     .split('\napplyTheme((() =>')[0];
   vm.runInContext(source + `
     sessionList = [1, 2, 3].map(created => ({created}));
+    after = "1.0";
     loaded[1] = true;
     rememberScroll = () => {};
     restoreScroll = () => {};
@@ -33,9 +35,9 @@ function harness(){
     globalThis.read = created => readThrough[created];
     globalThis.setSessions = ids => { sessionList = ids.map(created => ({created})); };
   `, context);
-  const respond = (index, { ok = true, more = false, offset = 0 } = {}) => {
+  const respond = (index, { ok = true, more = false } = {}) => {
     requests[index].resolve({ ok, status: ok ? 200 : 503,
-      json: async () => ({ turns: [], more, offset, read_through: "0.0" }) });
+      json: async () => ({ at: "1.1", from: [-1, 0], to: null, more, groups: [] }) });
   };
   return { context, requests, painted, statuses, focused, respond };
 }
@@ -79,7 +81,7 @@ test("failure offers retry and leaves the transcript unloaded", async () => {
 test("returning to a loading tab waits for the same history and then displays it", async () => {
   const h = harness();
   const first = h.context.select(2);
-  h.respond(0, { more: true, offset: 20 });
+  h.respond(0, { more: true });
   await new Promise(resolve => setImmediate(resolve));
   await h.context.select(1);
   const back = h.context.select(2);
@@ -95,7 +97,7 @@ test("returning to a loading tab waits for the same history and then displays it
 test("initial history pagination stays loading and surfaces a failed page", async () => {
   const h = harness();
   const first = h.context.select(2);
-  h.respond(0, { more: true, offset: 20 });
+  h.respond(0, { more: true });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(h.requests.length, 2);
   assert.equal(h.context.ready(2), false);
@@ -111,7 +113,7 @@ test("initial history pagination stays loading and surfaces a failed page", asyn
 test("closing a session during initial pagination cannot restore it", async () => {
   const h = harness();
   const first = h.context.select(2);
-  h.respond(0, { more: true, offset: 20 });
+  h.respond(0, { more: true });
   await new Promise(resolve => setImmediate(resolve));
   await h.context.select(1);
   h.context.setSessions([1, 3]);

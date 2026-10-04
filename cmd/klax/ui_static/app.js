@@ -1,12 +1,12 @@
-// app.js — bootstrap + wiring. Owns the model, the active-session render flow, and the tail host
-// (per-session content cursors + the notice cursor + onAffected); ties compose + tabs together.
+// app.js — bootstrap + wiring. Owns the model, the active-session render flow, and the live-channel
+// host (the `after` cursor, window/page loads, event routing); ties compose + tabs together.
 // The whole old state machine (runningTurn/doneTurns/queuedTurns/tmpTurn/renderedPending/readMark/
 // insertAnswer/breakMerge) is gone — a turn's truth is model turn.state.
 
-import { TurnModel } from "./model.js";
+import { TurnModel, ordLess, ordParam } from "./model.js";
 import { renderSession, answerBlock, beginShift, playShift, fadeOutDivider, DIVIDER_FADE_MS, pos, parsePos, decodePos } from "./render.js";
 import { esc } from "./markdown.js";
-import { tailLoop } from "./events.js";
+import { changesLoop, cursorEpoch, cursorSeq } from "./events.js";
 import { api, hasCoarsePointer, copyText, flashCopied, bindButtonActivation } from "./base.js";
 import { initAuth, isReadOnly } from "./auth.js";
 import { selectionInLog } from "./scroll.js";
@@ -20,7 +20,6 @@ import { neighborIn } from "./selection.js";
 import { initDebug } from "./debug.js";
 
 const model = new TurnModel();
-const tailClient = globalThis.crypto && globalThis.crypto.randomUUID ? globalThis.crypto.randomUUID() : String(Date.now()) + "-" + Math.random();
 const SERVER_STARTED_KEY = "klax_server_started";
 let serverStarted = loadServerStarted();
 
@@ -44,9 +43,14 @@ const readGraceUntil = {}, readGraceTimer = {};
 const readReportTimer = {}; // created -> pending POST /api/read debounce timer
 const READ_GRACE_MS = 1600;
 let active = 0;
-const tailCursors = {};                // created -> "<turn>.<block>.<state>.<trail>[.<head>.<settled>]" durable content cursor
-let noticeCursor = "";                 // ring cursor for transient notices (tailLoop)
-let sessRev = 0;                       // last session-strip revision rendered (tailLoop; server returns it early on a strip change)
+// Live channel. `after` is the ring cursor every applied snapshot/changes response advances;
+// `generation` changes on resync so a response from before it is dropped. While a window or page
+// of a session is in flight its events inside the requested range wait in `buffered`; an applied
+// load leaves a skip (its `at` and range) so events it already contains are not applied twice.
+let after = "", generation = 0, pendingSelect = 0;
+const winReq = {}, loading = {}, buffered = {}, skips = {};
+const restoreAfterResync = new Set(); // sessions whose windows a resync still owes
+const affectedNow = new Set();
 let bottomJumpFrame = 0;
 let stick = true, pendingRender = false, readOnScroll = true;
 let readScrollTimer = 0, readTouching = false, readScrollReady = 0;
@@ -60,14 +64,14 @@ let liveRenderRAF = 0, liveRenderCreated = 0;
 const COMMIT_MS = 200;
 const MERGE_JOIN_MS = 180;
 let liveBusy = false, liveDirty = false, liveGateTimer = 0;
-let sessionList = []; // last /api/sessions list — for hash-change validity + lookups
+let sessionList = []; // last session strip — for hash-change validity + lookups
 let pendingOutboxRecovery = null;
-const offsetFor = {}, moreFor = {}; // created -> first-loaded turn index + has-older-history flag (pagination)
+const moreFor = {}; // created -> has-older-history flag (pagination)
 const loadingOlder = {}; // created -> a loadOlder() is in flight (guards the auto-load-on-scroll + the initial fill)
 // Timeline window (anchored on the "непрочитанные сообщения" line = the read watermark). Measured in
 // BUBBLES (a user turn = its message bubble + one per answer block/tool call; a standalone = 1) — the
-// unit the user sees, so one big turn counts as many, not one. CAP is the loadOlder page in TURNS
-// (server pagination unit).
+// unit the user sees, so one big turn counts as many, not one. CAP is the loadOlder page in turn
+// groups (server pagination unit).
 //   - everything at/below the line (all unread) is ALWAYS kept;
 //   - ≥ KEEP_ABOVE bubbles of read context are kept above the line (rounded up to a turn boundary);
 //   - older rows evict from the top once total bubbles exceed WIN_MAX (never the viewport-to-bottom range);
@@ -83,32 +87,6 @@ let rebaselineComposerResize = () => {};
 function logcol(){ return document.getElementById("logcol"); }
 function getActive(){ return active; }
 
-// stateCode mirrors the server (readmodel.go): the tail cursor carries the boundary turn's state
-// code so a pure enq→run transition (no new block) still advances the cursor and re-delivers the
-// turn once — otherwise the bubble stays "queued" until the first block or a reload.
-function stateCode(s){ return s === "run" ? "r" : s === "done" ? "d" : s === "err" ? "x" : "e"; }
-
-// tailPos is the durable "<turn>.<block>.<state>.<trail>[.<head>.<settled>]" content cursor to resume the live
-// tail from — it MIRRORS the server's tailCursor. The anchor (turn/block/state) is the OLDEST
-// unsettled turn (enq/run) so a still-running turn behind a newer queued one keeps getting its blocks
-// + completion; `head` (the newest turn) is appended only when it is past the anchor, so an
-// already-seen queued turn is not re-flagged new. block -1 for a turn with no answer blocks yet.
-function tailPos(rows){
-  let head = 0, turn = 0, block = -1, state = "", trail = 0, anchored = false;
-  for(const t of (rows || [])){
-    // `seq > 0` mirrors the server's tailCursor (only positive durable seqs anchor); a legacy negative
-    // synthetic seq counts as trailing, exactly like a standalone, so client seed == server cursor.
-    if(t.role === "user" && t.seq > 0){
-      head = t.seq; trail = 0;
-      if(!anchored){ turn = t.seq; block = (t.blocks || []).length - 1; state = t.state; anchored = t.state === "enq" || t.state === "run"; }
-    }
-    else trail++;
-  }
-  const base = turn + "." + block + "." + stateCode(state) + "." + trail;
-  if(!anchored || turn === head) return base;
-  const settled = (rows || []).filter(t => t.role === "user" && t.seq > turn && t.seq <= head && t.state !== "enq" && t.state !== "run").length;
-  return base + "." + head + "." + settled;
-}
 function sameSession(a, b){ return String(a) === String(b); }
 function documentVisible(){ return typeof document === "undefined" || document.visibilityState !== "hidden"; }
 function clearReadGrace(created){
@@ -426,16 +404,6 @@ function stopTurn(state, seq){
   }, () => { showNotice("Не удалось отменить сообщение", "error"); return false; });
 }
 
-function sessionContextHint(created, list){
-  const s = (list || sessionList).find(x => x.created === created);
-  if(!s || !s.ctx_used) return null;
-  return { used: s.ctx_used, window: s.ctx_window || 0 };
-}
-
-function hasRunningTurn(created){
-  return model.turns(created).some(t => t.role === "user" && t.state === "run");
-}
-
 function showTranscriptStatus(message = "", retry = false){
   const box = document.getElementById("transcriptstatus");
   box.querySelector("span").textContent = message;
@@ -454,28 +422,70 @@ function loadTranscript(created){
   return transcriptLoads[created];
 }
 
+// beginLoad/endLoad bracket a window or page request: events of the session inside the requested
+// range are buffered meanwhile; an applied load (data) leaves its skip, and once no load is left the
+// buffered events are applied in order. A window request supersedes every earlier load of the
+// session, so a stale one neither holds the buffer nor touches it when it finishes.
+function beginLoad(created, before){
+  const e = { before };
+  if(before === null){ loading[created] = [e]; delete loadingOlder[created]; }
+  else (loading[created] = loading[created] || []).push(e);
+  return e;
+}
+function endLoad(created, e, data){
+  const list = loading[created] || [];
+  const i = list.indexOf(e);
+  if(i < 0) return;
+  list.splice(i, 1);
+  if(data) (skips[created] = skips[created] || []).push({ at: cursorSeq(data.at), from: data.from, to: data.to });
+  if(list.length) return;
+  delete loading[created];
+  const buf = buffered[created] || [];
+  delete buffered[created];
+  applySessionEvents(created, buf);
+  flushAffected();
+}
+// fetchRange requests a window or page; null when a resync or a server restart made it stale, or
+// the session is gone.
+async function fetchRange(created, query){
+  const gen = generation;
+  const r = await api("/api/transcript?session=" + created + query);
+  if(!r.ok) throw new Error("transcript HTTP " + r.status);
+  const data = await r.json();
+  if(gen !== generation || cursorEpoch(data.at) !== cursorEpoch(after) || !sessionList.some(s => s.created === created)) return null;
+  return data;
+}
+
 async function fetchTranscript(created){
+  // A newer window request supersedes this one. A session CLOSED while this was in flight was
+  // already torn down — repopulating it would leave a dead session with a live model and a `loaded`
+  // flag nothing would ever clear. Leaving a group is different — the session still exists, so its
+  // state is deliberately kept.
+  const req = winReq[created] = (winReq[created] || 0) + 1;
+  const e = beginLoad(created, null);
+  let data = null;
   try {
-    const r = await api("/api/transcript?session=" + created + "&limit=" + CAP);
-    if(!r.ok) throw new Error("transcript HTTP " + r.status);
-    const data = await r.json();
-    // The session may have been CLOSED while this was in flight. `dropActive` already tore its state
-    // down; repopulating it here would leave a dead session with a live model and a `loaded` flag,
-    // which nothing would ever clear. Leaving a group is different — the session still exists, so
-    // its state is deliberately kept.
-    if(!sessionList.some(s => s.created === created)) return;
-    model.reconcile(created, data.turns || []);
-    offsetFor[created] = data.offset || 0;
-    moreFor[created] = !!data.more;
-    // Seed this tab's durable tail cursor from its loaded rows. Each loaded tab has its own cursor,
-    // so lazy-loading one session cannot skip content for any other session.
-    tailCursors[created] = tailPos(data.turns || []); // where the live tail resumes for this tab
+    data = await fetchRange(created, "&limit=" + CAP);
+    if(req !== winReq[created]) data = null;
+    if(data){
+      model.loadWindow(created, data);
+      moreFor[created] = !!data.more;
+    }
+  } catch(err){
+    if(created === active && req === winReq[created]) showTranscriptStatus("Не удалось загрузить историю", true);
+    return;
+  } finally { endLoad(created, e, data); }
+  if(!data) return;
+  try {
     // Seed the durable read watermark from the server (NOT "all read"): the unread divider then
     // survives reload/restart. Establish it once; later live reads advance it. With content and
     // watermark now known, position the active view — jump to the divider if there is unread.
-    if(readThrough[created] === undefined) readThrough[created] = parsePos(data.read_through);
+    if(readThrough[created] === undefined){
+      const s = sessionList.find(x => x.created === created);
+      readThrough[created] = parsePos(s && s.read_through);
+    }
     await ensureLineLoaded(created); // guarantee the unread line + KEEP_ABOVE context are in the window
-    if(!sessionList.some(s => s.created === created)) return;
+    if(!sessionList.some(s => s.created === created) || req !== winReq[created]) return;
     loaded[created] = true;
     if(created === active){
       showTranscriptStatus();
@@ -487,29 +497,34 @@ async function fetchTranscript(created){
     // (No explicit capWindow here: positioning above fires a scroll event that re-caps once the DOM
     // is real; capWindow's fits-the-viewport guard needs that real geometry to avoid dropping visible
     // rows on a fresh/short load.)
-  } catch(e){
+  } catch(err){
     if(created === active) showTranscriptStatus("Не удалось загрузить историю", true);
   }
 }
 
-// loadOlder pages in the previous CAP-turn page and PREPENDS it, keeping the viewport stable (the
-// scroll position is nudged by the height the prepended content added). Guarded so the scroll-driven
-// auto-load and the initial fill can't overlap requests.
-// loadOlder pages in the previous CAP-turn page and PREPENDS it. `showTop` (the manual "load earlier"
+// reloadWindow replaces a session with a fresh window after a delta for a group it lost track of.
+function reloadWindow(created){
+  delete transcriptLoads[created];
+  loadTranscript(created);
+}
+
+// loadOlder pages in the previous CAP-group page and merges it. `showTop` (the manual "load earlier"
 // button) reveals the just-loaded rows at the top of the viewport; otherwise (scroll-driven auto-load)
 // the viewport is kept stable by nudging the scroll by the added height. Guarded against overlap.
 async function loadOlder(created, showTop){
-  if(!offsetFor[created] || loadingOlder[created]) return; // nothing older, or a load already in flight
-  loadingOlder[created] = true;
+  // Nothing older, a page already in flight, or a window on its way that will replace the range.
+  if(!moreFor[created] || loadingOlder[created] || !model.has(created) || (loading[created] || []).some(l => l.before === null)) return;
+  const token = loadingOlder[created] = {};
   const log = document.getElementById("log");
   const oldH = (created === active && log) ? log.scrollHeight : 0;
+  const req = winReq[created], before = model.rangeStart(created);
+  const e = beginLoad(created, before);
+  let data = null;
   try {
-    const r = await api("/api/transcript?session=" + created + "&before=" + offsetFor[created] + "&limit=" + CAP);
-    if(!r.ok) throw new Error("transcript HTTP " + r.status);
-    const data = await r.json();
-    if(!sessionList.some(s => s.created === created)) return;
-    model.prepend(created, data.turns || []);
-    offsetFor[created] = data.offset || 0;
+    data = await fetchRange(created, "&before=" + encodeURIComponent(ordParam(before)) + "&limit=" + CAP);
+    if(req !== winReq[created] || !model.has(created) || ordParam(model.rangeStart(created)) !== ordParam(before)) data = null;
+    if(!data) return;
+    model.loadPage(created, data);
     moreFor[created] = !!data.more;
     if(created === active && loaded[created]){
       const prev = stick; stick = false; // never snap to the bottom after loading old history
@@ -520,9 +535,12 @@ async function loadOlder(created, showTop){
         else log.scrollTop += log.scrollHeight - oldH;   // scroll-driven: keep the current view stable
       }
     }
-  } catch(e){
-    if(!loaded[created]) throw e;
-  } finally { loadingOlder[created] = false; }
+  } catch(err){
+    if(!loaded[created]) throw err;
+  } finally {
+    endLoad(created, e, data);
+    if(loadingOlder[created] === token) delete loadingOlder[created];
+  }
 }
 
 // rawUnreadCount is the true unread model (line-to-bottom): it drives the in-log divider,
@@ -574,7 +592,7 @@ function bubblesAbove(created, upto){
 // show far more than KEEP_ABOVE bubbles, so the bubble budget alone would drop VISIBLE rows and undo a
 // manual "load earlier" (contract B4). A background tab has no viewport, so it is bounded by the
 // bubble budget once large. Unread/line/divider/badge are never disturbed (evicted rows are read →
-// rawUnreadCount unchanged); each evicted row is one transcript page-unit, so offsetFor advances.
+// rawUnreadCount unchanged); whole turn groups are evicted and the held range starts after them.
 // Callers run this only with a CURRENT DOM (post-render / scroll), never on the pre-render model.
 function capWindow(created){
   if(!created || readThrough[created] === undefined) return 0; // no watermark yet — cannot prove a row is read
@@ -600,10 +618,7 @@ function capWindow(created){
   }
   if(cut <= 0) return 0;
   const removed = model.evictTop(created, cut);
-  if(removed > 0){
-    offsetFor[created] = (offsetFor[created] || 0) + removed;
-    moreFor[created] = true;
-  }
+  if(removed > 0) moreFor[created] = true;
   return removed;
 }
 // ensureLineLoaded guarantees the unread line (plus ≥ KEEP_ABOVE bubbles of read context above it) is
@@ -740,7 +755,7 @@ async function selectSession(created){
   }
 }
 
-// onSessionsList is the SINGLE reconcile path for both /api/sessions and the live `sessions` event:
+// onSessionsList is the SINGLE reconcile path for both the snapshot and the live `sessions` event:
 // it redraws the strip and, if the active session left this window (closed anywhere, or dropped out
 // of the current group), picks a replacement so the tab is never stuck on a session it cannot show.
 // It NEVER awaits: `selectSession` assigns the active session synchronously and only awaits the
@@ -762,12 +777,13 @@ async function onSessionsList(list){
   }
   const affected = new Set();
   let activeReadAdvanced = false;
+  // A session that left the strip is gone: drop its model, loads and pending events.
+  for(const c of Object.keys(loaded).concat(Object.keys(loading)).map(Number)){
+    if(c === active || list.some(s => s.created === c)) continue;
+    winReq[c] = (winReq[c] || 0) + 1;
+    model.drop(c); delete loaded[c]; delete loading[c]; delete buffered[c]; delete skips[c];
+  }
   for(const s of list){
-    const oldCtx = sessionContextHint(s.created, oldList);
-    const newCtx = sessionContextHint(s.created, list);
-    if(loaded[s.created] && hasRunningTurn(s.created) && ((oldCtx && oldCtx.used) !== (newCtx && newCtx.used) || (oldCtx && oldCtx.window) !== (newCtx && newCtx.window))){
-      affected.add(s.created);
-    }
     // Cross-tab / cross-device read sync: adopt the server's durable read watermark when it is
     // AHEAD of ours — another browser tab (or the messenger) read further. Monotonic (never
     // regresses our own, maybe-not-yet-reported, reading), so the divider + badge here catch up.
@@ -792,6 +808,11 @@ async function onSessionsList(list){
     if(gone) dropActive();
     else leaveActive(); // still exists elsewhere: bank what is in the composer before letting go
     if(next) selectLater(next); // not awaited: `active` is set synchronously, the transcript follows
+  }
+  if(pendingSelect && list.some(s => s.created === pendingSelect)){
+    const c = pendingSelect;
+    pendingSelect = 0;
+    if(c !== active) selectLater(c);
   }
   if(!active && visible.length){
     // Restore priority: explicit URL hash → this scope's last-viewed tab (localStorage) →
@@ -856,11 +877,81 @@ function setEmptyScope(on){
       : 'В группе «' + esc(name) + '» нет сессий.');
 }
 
-async function syncSessions(){
-  try {
-    const r = await api("/api/sessions");
-    if(r.ok) await onSessionsList(await r.json());
-  } catch(e){}
+// bootState loads the snapshot: the strip and the cursor live events continue from. A changed
+// server start shows the restart banner.
+async function bootState(){
+  const r = await api("/api/state");
+  if(!r.ok) throw new Error("state HTTP " + r.status);
+  const data = await r.json();
+  if(serverStarted !== null && data.started !== serverStarted) showNotice(systemRestartNotice(data.startup, data.version));
+  saveServerStarted(data.started);
+  after = data.at;
+  await onSessionsList(data.sessions || []);
+}
+
+// resync discards the whole model and reloads from a snapshot, then reloads the windows of the
+// sessions that were held or loading. Startup is a resync with nothing held.
+async function resync(){
+  generation++;
+  for(const c of Object.keys(loaded).filter(k => loaded[k]).concat(Object.keys(loading)).map(Number)) restoreAfterResync.add(c);
+  if(active) restoreAfterResync.add(active);
+  for(const c of restoreAfterResync){ winReq[c] = (winReq[c] || 0) + 1; model.drop(c); delete loaded[c]; }
+  for(const m of [loading, buffered, skips, transcriptLoads, loadingOlder]) for(const k of Object.keys(m)) delete m[k];
+  after = "";
+  await bootState();
+  const keep = [...restoreAfterResync];
+  restoreAfterResync.clear();
+  for(const c of keep){
+    if(!sessionList.some(s => s.created === c)) continue;
+    if(c === active) selectLater(c);
+    else loadTranscript(c);
+  }
+}
+
+// applyEvents applies one changes response in ring order and advances the cursor.
+function applyEvents(events, at){
+  for(const ev of events){
+    if(ev.notice !== undefined) onNoticeEvent(ev.notice);
+    else if(ev.sessions) onSessionsList(ev.sessions).catch(e => console.error("klax sessions", e));
+    else if(ev.session) routeSessionEvent(ev);
+  }
+  after = at;
+  const seq = cursorSeq(at);
+  for(const c of Object.keys(skips)){
+    if(loading[c]) continue; // buffered events still need the skips
+    skips[c] = skips[c].filter(s => s.at > seq);
+    if(!skips[c].length) delete skips[c];
+  }
+  flushAffected();
+}
+
+function eventOrd(ev){ return ev.group ? ev.group.ord : ev.removed ? ev.removed.ord : null; }
+
+function routeSessionEvent(ev){
+  const c = ev.session;
+  if(loading[c] && loading[c].some(l => !l.before || ordLess(eventOrd(ev), l.before))){
+    (buffered[c] = buffered[c] || []).push(ev);
+    return;
+  }
+  applySessionEvents(c, [ev]);
+}
+
+function applySessionEvents(created, evs){
+  for(const ev of evs){
+    if(!model.has(created)) continue;
+    const o = eventOrd(ev);
+    if((skips[created] || []).some(s => ev.seq <= s.at && !ordLess(o, s.from) && (!s.to || ordLess(o, s.to)))) continue;
+    if(ev.removed) model.applyRemoved(created, ev.removed.key);
+    else if(!model.applyGroup(created, ev.group)){ reloadWindow(created); return; }
+    affectedNow.add(created);
+  }
+}
+
+function flushAffected(){
+  if(!affectedNow.size) return;
+  const set = new Set(affectedNow);
+  affectedNow.clear();
+  host.onAffected(set);
 }
 
 // noticeText turns a command-output notice (Telegram HTML) into plain text with line breaks.
@@ -890,21 +981,13 @@ function setDegraded(on){
 
 // the poll host events.js drives
 const host = {
-  client: tailClient,
-  started: () => serverStarted,
-  setStarted: saveServerStarted,
-  model,
-  ctx: {
-    onSessions: list => { onSessionsList(list).catch(e => console.error("klax sessions", e)); },
-    onNotice: onNoticeEvent,
-  },
-  // tailLoop: per-session durable content cursors (loaded tabs only) + the transient-notice cursor.
-  cursors: () => { const c = {}; for(const k in loaded){ if(loaded[k] && tailCursors[k]) c[k] = tailCursors[k]; } return c; },
-  setTailCursor: (id, cur) => { tailCursors[id] = cur; },
-  noticeCursor: () => noticeCursor, setNoticeCursor: c => { noticeCursor = c; },
-  sessRev: () => sessRev, setSessRev: v => { sessRev = v; },
+  after: () => after,
+  generation: () => generation,
+  apply: applyEvents,
+  resync,
   onAffected: set => {
     for(const c of set){
+      if(!loaded[c]) continue;
       if(c === active){
         if(documentVisible() && (stick || bottomJumpFrame)){
           markRead(c);
@@ -922,7 +1005,6 @@ const host = {
     }
     refreshStrip();
   },
-  onRestart: (kind, version) => showNotice(systemRestartNotice(kind, version)),
   // Show the amber logo only after the 2nd consecutive failure, so a single dropped poll
   // (or a fast daemon restart the next poll rides through) never flashes it; clear on any
   // good poll. The poll loop keeps retrying regardless — this is purely the visible signal.
@@ -935,14 +1017,18 @@ const host = {
 // server broadcast: badges dropped the moment you read, the chip kept the stale number.
 function refreshStrip(){ updateComposerAccess(activeReadOnly()); renderTabs(active); renderChip(sessionList, badgeCount); }
 
-async function onNewSession(created){ await syncSessions(); await selectSession(created); }
+// A new session is selected once the strip carries it.
+async function onNewSession(created){
+  if(sessionList.some(s => s.created === created)) await selectSession(created);
+  else pendingSelect = created;
+}
 // The neighbour rule itself lives in selection.js so it can be tested without the UI; here it is
 // only ever applied to the CURRENT scope's order.
 function neighborCreated(closed){ return neighborIn(filterScope(sessionList), closed); }
 async function afterClose(created){
   // Closing the ACTIVE tab focuses its neighbor (left, else right) — not a jump to the first tab.
   // Closing a background tab never moves focus. Compute the neighbor while `closed` is still in the
-  // strip order, select it before syncSessions so onSessionsList keeps it (no auto-pick of the first).
+  // strip order, and select it before the strip update so onSessionsList keeps it.
   const wasActive = created === active;
   const next = wasActive ? neighborCreated(created) : 0;
   model.drop(created); markRead(created); delete loaded[created]; dropDraft(created, true);
@@ -950,7 +1036,6 @@ async function afterClose(created){
     active = 0;
     if(next) await selectSession(next);
   }
-  await syncSessions();
 }
 
 function start(){
@@ -1087,7 +1172,6 @@ function start(){
       resetReadScroll();
       flushRead(active); // push the read watermark now, before the tab may freeze/close
     } else {
-      syncSessions();
       if(active){
         if(rawUnreadCount(active) > 0){
           stick = false;
@@ -1099,7 +1183,7 @@ function start(){
       }
     }
   });
-  syncSessions().then(() => tailLoop(host)); // durable-tail live channel (POST /api/tail)
+  resync().catch(() => {}).finally(() => changesLoop(host)); // snapshot, then the live channel (POST /api/changes)
 }
 
 applyTheme((() => { try { return localStorage.getItem("klax_theme2"); } catch(e){ return null; } })() || "light");

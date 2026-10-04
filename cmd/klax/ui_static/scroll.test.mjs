@@ -35,6 +35,8 @@ function harness(){
     reportRead = () => {};
     rerenderStructural = () => calls.push("render");
     commitLive = () => calls.push("animate");
+    globalThis.startTurn = () => model.loadWindow(1, { from: [-1, 0], groups: [{ key: "t:1:1", ord: [0, 1], head: { seq: 1, role: "user", state: "run" } }] });
+    globalThis.addBlock = text => { const n = model.turns(1)[0].blocks.length; model.applyGroup(1, { key: "t:1:1", ord: [0, 1], n: n + 1, from: n, blocks: [{ text }] }); };
   `, context);
   function tick(ms){
     const end = now + ms;
@@ -131,10 +133,10 @@ test("held touch and live animations postpone read mutations", () => {
 test("watching the bottom stays read with a resting finger and programmatic scroll timers", () => {
   const h = harness();
   h.log.scrollTop = 1400;
-  h.run('model.upsertUser(1, { seq: 1 }, "run"); model.appendBlock(1, 1, { text: "answer" })');
+  h.run('startTurn(); addBlock("answer")');
   h.run("readTouching = true");
   assert.equal(h.run("markReadActual(1)"), true);
-  h.run('model.appendBlock(1, 1, { text: "next" })');
+  h.run('addBlock("next")');
   h.run("readTouching = false; scheduleReadProgress()");
   assert.equal(h.run("markReadActual(1)"), true);
   assert.equal(h.run("readThrough[1]"), pos(1, 1));
@@ -158,7 +160,7 @@ test("continuous live commits keep watermarks current and allow window maintenan
   h.run(`
     markRead = markReadActual; commitLive = commitLiveActual;
     readThrough[1] = 0; stick = true;
-    model.upsertUser(1, { seq: 1 }, "run");
+    startTurn();
     rerender = () => {
       const sc = document.getElementById("log"), col = document.getElementById("logcol");
       col.offsetHeight += 40;
@@ -170,7 +172,7 @@ test("continuous live commits keep watermarks current and allow window maintenan
     };
   `);
   for(let i = 0; i < 120; i++){
-    h.run('model.appendBlock(1, 1, { text: "next" }); host.onAffected(new Set([1]))');
+    h.run('addBlock("next"); host.onAffected(new Set([1]))');
     h.tick(50);
     assert.equal(h.run("readThrough[1]"), pos(1, i));
   }
@@ -180,7 +182,7 @@ test("continuous live commits keep watermarks current and allow window maintenan
 
 test("explicit lifecycle reads bypass a held touch and leave no deferred work after reset", () => {
   const h = harness();
-  h.run('model.upsertUser(1, { seq: 1 }, "run"); model.appendBlock(1, 1, { text: "answer" })');
+  h.run('startTurn(); addBlock("answer")');
   h.run("readTouching = true; scheduleReadProgress()");
   assert.equal(h.run("markReadActual(1, true)"), true);
   assert.equal(h.run("readThrough[1]"), pos(1, 0));
@@ -227,10 +229,10 @@ test("large histories are capped after reaching bottom, not in the approach zone
 test("blocks received during the jump are read without starting read grace", () => {
   const h = harness();
   h.run(`toggleToBottom = () => {}; markRead = markReadActual;
-    model.upsertUser(1, { seq: 1 }, "run");
-    model.appendBlock(1, 1, { text: "first" }); jumpToBottom();`);
+    startTurn();
+    addBlock("first"); jumpToBottom();`);
   h.tick(100);
-  h.run('model.appendBlock(1, 1, { text: "next" }); host.onAffected(new Set([1]))');
+  h.run('addBlock("next"); host.onAffected(new Set([1]))');
   assert.equal(h.run("rawUnreadCount(1)"), 0);
   assert.equal(h.run("inReadGrace(1)"), false);
 });
@@ -265,14 +267,4 @@ test("typing a space does not cancel the jump but wheel navigation does", () => 
   assert.notEqual(h.run("bottomJumpFrame"), 0);
   h.logEvents.wheel();
   assert.equal(h.run("bottomJumpFrame"), 0);
-});
-
-test("tail cursor mirrors the server, counting settled turns between the running anchor and head", () => {
-  const h = harness();
-  assert.equal(h.run(`tailPos([
-    { seq: 1, role: "user", state: "run", blocks: [{}] },
-    { seq: 2, role: "user", state: "err", blocks: [{ kind: "cancelled" }] },
-    { seq: 3, role: "user", state: "enq" },
-  ])`), "1.0.r.0.3.1");
-  assert.equal(h.run(`tailPos([{ seq: 1, role: "user", state: "run", blocks: [{}] }, { seq: 2, role: "user", state: "enq" }])`), "1.0.r.0.2.0");
 });

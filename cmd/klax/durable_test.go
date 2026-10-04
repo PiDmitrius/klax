@@ -47,7 +47,7 @@ func TestRemoveSessionStoreLatchesRunnerStore(t *testing.T) {
 	}
 	d.removeSessionStore("tg:1", created) // simulates close/nuke teardown (runner present)
 	// The in-flight run's late terminal mark goes through the SAME sr.store instance.
-	if err := sr.store.MarkDone(seq); !errors.Is(err, sessfiles.ErrRemoved) {
+	if err := sr.store.MarkDone(seq, 0); !errors.Is(err, sessfiles.ErrRemoved) {
 		t.Fatalf("MarkDone after removeSessionStore = %v, want ErrRemoved", err)
 	}
 }

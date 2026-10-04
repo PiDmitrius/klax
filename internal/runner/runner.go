@@ -395,7 +395,7 @@ type RunOptions struct {
 	SuppressNarrationProgress bool   // keep final-answer text buffered instead of streaming it as narration
 	// OnSessionID, if set, is called once with the backend session id the moment the run first
 	// learns it (the system/init event), BEFORE the run finishes. It lets the caller persist the id
-	// early so a brand-new session's transcript becomes addressable mid-run (durable-tail streaming).
+	// early so a brand-new session's transcript becomes addressable mid-run (live UI streaming).
 	OnSessionID func(string)
 }
 

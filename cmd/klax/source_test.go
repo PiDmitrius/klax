@@ -101,7 +101,8 @@ func TestEnqueueToSessionRendersMessengerDMInReadModel(t *testing.T) {
 	d.enqueueToSession("tg:1", "100", "hi there", nil, created, "") // mapped messenger DM: no nonce
 
 	found := false
-	for _, ut := range d.readModel("user:alice", sess) {
+	rows, _, _ := d.readModelBuild("user:alice", sess)
+	for _, ut := range rows {
 		if ut.Role == "user" && ut.Text == "hi there" {
 			found = true
 		}
@@ -133,7 +134,8 @@ func TestEnqueueToSessionRendersInboundImageAsMarkdown(t *testing.T) {
 	d.enqueueToSession("tg:1", "100", "", []attachment{{filename: "image.png", data: png}}, created, "")
 
 	found := false
-	for _, ut := range d.readModel("user:alice", sess) {
+	rows, _, _ := d.readModelBuild("user:alice", sess)
+	for _, ut := range rows {
 		if ut.Role != "user" {
 			continue
 		}
@@ -174,7 +176,8 @@ func TestAbortSessionMarksQueuedTurnsErrInReadModel(t *testing.T) {
 	}
 
 	errs := 0
-	for _, ut := range d.readModel("user:alice", sess) {
+	rows, _, _ := d.readModelBuild("user:alice", sess)
+	for _, ut := range rows {
 		if ut.State == "err" {
 			errs++
 		}

@@ -40,7 +40,7 @@ func TestRemovedStoreNotResurrected(t *testing.T) {
 	if _, err := os.Stat(s.dir); !os.IsNotExist(err) {
 		t.Fatalf("dir should be gone after Remove")
 	}
-	if err := s.MarkDone(seq); !errors.Is(err, ErrRemoved) {
+	if err := s.MarkDone(seq, 0); !errors.Is(err, ErrRemoved) {
 		t.Fatalf("MarkDone after Remove = %v, want ErrRemoved", err)
 	}
 	if _, _, _, _, err := s.Enqueue("tg:1", "", "n2", "again", nil); !errors.Is(err, ErrRemoved) {
@@ -127,7 +127,7 @@ func TestReplayClassifies(t *testing.T) {
 	s := Open("user:alice", 7)
 	sA, _, _, _, _ := s.Enqueue("tg:1", "", "a", "A", nil)
 	s.MarkRun(sA)
-	s.MarkDone(sA)                       // A: complete → skipped
+	s.MarkDone(sA, 0)                    // A: complete → skipped
 	s.Enqueue("tg:1", "", "b", "B", nil) // B: enq only → reenqueue
 	sC, _, _, _, _ := s.Enqueue("tg:1", "", "c", "C", nil)
 	s.MarkRun(sC) // C: run, no terminal → recover
@@ -170,7 +170,7 @@ func TestAppendAfterTornTailStartsCleanRecord(t *testing.T) {
 	f, _ := os.OpenFile(s.queuePath(), os.O_APPEND|os.O_WRONLY, 0600)
 	_, _ = f.WriteString(`{"ev":"bind","seq":1`)
 	_ = f.Close()
-	if err := s.MarkDone(seq); err != nil {
+	if err := s.MarkDone(seq, 0); err != nil {
 		t.Fatal(err)
 	}
 	turns, err := Open("user:alice", 2).InboundLog()
@@ -221,7 +221,7 @@ func TestHookFailuresFoldWithoutDuplicatingTerminalState(t *testing.T) {
 	if err := s.MarkRun(finishSeq); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.MarkDone(finishSeq); err != nil {
+	if err := s.MarkDone(finishSeq, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.MarkHookError(finishSeq, "audit.turn.finish", "audit-finish-failed"); err != nil {

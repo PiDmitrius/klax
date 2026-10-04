@@ -40,10 +40,13 @@ expresses it, so an entry can be checked and can be proven stale.
 
 ## Web UI
 
-5. **Live delivery and reload are one path.** The client long-polls `/api/tail` with per-session
-   durable cursors; `buildReadModel` (`cmd/klax/readmodel.go`) rebuilds rows by joining
-   `queue.jsonl` with the backend transcript. Forbidden: an in-memory ring, a global cursor, or a
-   separate reload path.
+5. **Live delivery and reload are one path.** `buildReadModel` (`cmd/klax/readmodel.go`) rebuilds
+   rows by joining `queue.jsonl` with the backend transcript; the detector (`cmd/klax/uisync.go`)
+   publishes them as turn groups and appends each change to a per-user event ring. Snapshots
+   (`/api/state`), windows (`/api/transcript`) and the events after a cursor (`/api/changes`) are
+   all cut from the same published groups, so applying the events after a snapshot in order equals
+   a reload. A cursor from another process or behind the ring resyncs. Forbidden: a separate reload
+   path, per-client state on the server, or a turn row copying a session-level value.
 
 6. **The unread axis is the durable `(turn_seq, block)`,** encoded `pos = turn * POS_MULT + block`
    (`cmd/klax/ui_static/render.js`). Forbidden: a second position scheme, and forbidden: re-zeroing

@@ -1,4 +1,4 @@
-// tabs.js — the tab strip, /api/sessions reconcile, new/close, and the per-session
+// tabs.js — the tab strip reconcile, new/close, and the per-session
 // settings modal (engine/model/effort/sandbox/tty/cwd/prompt + context gauge), ported
 // from the monolith. deps: { select(created), onNew(created), afterClose(created),
 // notice(text) }.

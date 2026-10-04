@@ -110,14 +110,16 @@ export function renderModel(turns, watermark, holdSplits, joinHeldSplits){
     // the gap, still the bottom line. A running turn with no tokens of its own yet falls back to
     // lastCtx — the previous turn's final value, already known and already shown on its line.
     // It is NOT a group — buildItem renders it after the dots indicator.
-    const finalCtx = contextText(t.ctx_used, t.ctx_window);
-    const ctxLine = (t.state === "done" || t.state === "err") ? finalCtx
-      : t.state === "run" ? (finalCtx || contextText(lastCtxUsed, lastCtxWindow))
+    // A running turn learns its window only when it completes, so it measures its own tokens
+    // against the last window a turn actually ran with.
+    const ctxLine = (t.state === "done" || t.state === "err") ? contextText(t.ctx_used, t.ctx_window)
+      : t.state === "run" ? contextText(t.ctx_used || lastCtxUsed, t.ctx_window || lastCtxWindow)
       : "";
     const note = t.state === "enq" ? "в очереди · " + queuePos
       : t.state === "unknown" ? "статус неизвестен" : undefined;
     items.push({ kind: "turn", seq: t.seq, text: t.text || "", time: t.time, groups, state: t.state, note, ctxLine, ctxTime: lastGroupTime });
-    if(t.ctx_used){ lastCtxUsed = t.ctx_used; lastCtxWindow = t.ctx_window; } // carry the known context forward to a later running turn
+    if(t.ctx_used) lastCtxUsed = t.ctx_used; // carry the known context forward to a later running turn
+    if(t.ctx_window) lastCtxWindow = t.ctx_window;
   }
   return items;
 }

@@ -1,126 +1,104 @@
-// model.js — the per-session read model: one ordered array of turns per session, the
-// single client-side source of truth. Pure data + idempotent/monotonic patch ops; no
-// DOM, no fetch. The server (transcript ⋈ queue.jsonl) is authoritative: reconcile()
-// replaces a session from a reload, and the live events patch it (upsertUser / setState /
-// appendBlock). This replaces the old runningTurn/doneTurns/queuedTurns/
-// tmpTurn machine — a turn's state is just `turn.state`.
+// model.js — the per-session read model, the single client-side source of truth. A session holds
+// the server's turn groups (a user row with its blocks, plus the standalone rows that follow it)
+// ordered by `ord`, and the start of the range it holds. Windows and pages replace a range; group
+// events patch one group. turns() is the flat row list render works on. Pure data; no DOM, no fetch.
 
-// Monotonic order: enq → run → done|err. A terminal state (rank 3) never regresses, so a
-// late progress/turn_start after a final can't un-finish a turn.
-const RANK = { enq: 1, run: 2, done: 3, err: 3 };
-
-export function isPending(state){ return state === "enq" || state === "run"; }
-
-function advance(cur, next){
-  if(cur === undefined) return next || cur;
-  if(!next) return cur;
-  if((RANK[cur] || 0) >= 3) return cur;                          // terminal wins
-  return (RANK[next] || 0) >= (RANK[cur] || 0) ? next : cur;
+// ordLess orders two group positions [event|null, seq]; a null event sorts after every event.
+export function ordLess(a, b){
+  if((a[0] === null) !== (b[0] === null)) return b[0] === null;
+  if(a[0] !== null && a[0] !== b[0]) return a[0] < b[0];
+  return a[1] < b[1];
 }
+
+export function ordParam(o){ return (o[0] === null ? "null" : o[0]) + "," + o[1]; }
 
 export class TurnModel {
   constructor(){ this.byCreated = {}; }
 
-  turns(created){ return this.byCreated[created] || []; }
   has(created){ return this.byCreated[created] !== undefined; }
   drop(created){ delete this.byCreated[created]; }
+  rangeStart(created){ const s = this.byCreated[created]; return s ? s.from : null; }
 
-  // reconcile replaces a session's turns from a reload's read-model rows (authoritative).
-  reconcile(created, rows){
-    this.byCreated[created] = (rows || []).map(normTurn);
-  }
-
-  // prepend inserts an older pagination page at the FRONT (load-earlier history).
-  prepend(created, rows){
-    const arr = this.byCreated[created] = this.byCreated[created] || [];
-    this.byCreated[created] = (rows || []).map(normTurn).concat(arr);
-  }
-
-  // evictTop drops the oldest n rows (windowing — early history unloaded from the timeline to keep
-  // a long session responsive). Returns the count actually removed. Each removed row is one
-  // transcript page-unit, so the caller advances its loadOlder offset by the return value; the
-  // caller also guarantees it never evicts an unread row (see app.js capWindow).
-  evictTop(created, n){
-    const arr = this.byCreated[created];
-    if(!arr || n <= 0) return 0;
-    n = Math.min(n, arr.length);
-    if(n <= 0) return 0;
-    this.byCreated[created] = arr.slice(n);
-    return n;
-  }
-
-  // replaceTail merges a live tail from /api/tail — the durable read model from the boundary turn
-  // onward. It drops the existing tail from that turn (with any trailing standalone rows) and
-  // appends the fresh rows, so a grown last turn and brand-new turns re-sync in ONE step — the SAME
-  // buildReadModel rows a reload uses, so live and reload can't disagree. Empty rows are a no-op.
-  // Client merges durable read-model rows, not transient events.
-  replaceTail(created, rows){
-    rows = (rows || []).map(normTurn);
-    if(!rows.length) return;
-    const arr = this.byCreated[created] || [];
-    let fromSeq;
-    for(const t of rows){ if(t.role === "user" && t.seq !== undefined){ fromSeq = t.seq; break; } }
-    if(fromSeq === undefined){ this.byCreated[created] = rows; return; } // no user anchor → replace whole
-    let cut = arr.length;
-    for(let i = 0; i < arr.length; i++){
-      const t = arr[i];
-      if(t.role === "user" && t.seq !== undefined && t.seq >= fromSeq){ cut = i; break; }
+  turns(created){
+    const s = this.byCreated[created];
+    if(!s) return [];
+    if(!s.rows){
+      s.rows = [];
+      for(const g of s.groups){
+        if(g.head) s.rows.push({ ...g.head, blocks: g.blocks });
+        for(const r of g.rows) s.rows.push(r);
+      }
     }
-    this.byCreated[created] = arr.slice(0, cut).concat(rows);
+    return s.rows;
   }
 
-  _seq(arr, seq){ for(const t of arr){ if(t.role === "user" && t.seq === seq) return t; } }
-
-  // upsertUser inserts or updates a user turn from a `user` event / send response.
-  upsertUser(created, fields, state){
-    const arr = this.byCreated[created] = this.byCreated[created] || [];
-    let t = this._seq(arr, fields.seq);
-    if(!t){ t = { seq: fields.seq, role: "user", blocks: [] }; arr.push(t); }
-    if(fields.text !== undefined) t.text = fields.text;
-    if(fields.time !== undefined) t.time = fields.time;
-    if(fields.eventSeq) t.eventSeq = fields.eventSeq;
-    t.state = advance(t.state, state);
-    return t;
+  // loadWindow replaces a session with the newest window.
+  loadWindow(created, w){
+    this.byCreated[created] = { groups: (w.groups || []).map(normGroup), from: w.from, rows: null };
   }
 
-  // setState advances a turn's state monotonically (turn_start / final / error).
-  setState(created, seq, state){
-    const t = this._seq(this.turns(created), seq);
-    if(t) t.state = advance(t.state, state);
+  // loadPage merges an older page: it replaces every held group inside [from, to) and every held
+  // copy of a key the page carries (a group that moved into the page's range).
+  loadPage(created, w){
+    const s = this.byCreated[created];
+    if(!s) return;
+    const inside = o => !ordLess(o, w.from) && (!w.to || ordLess(o, w.to));
+    const keys = new Set((w.groups || []).map(g => g.key));
+    s.groups = s.groups.filter(g => !inside(g.ord) && !keys.has(g.key)).concat((w.groups || []).map(normGroup));
+    s.groups.sort((a, b) => ordLess(a.ord, b.ord) ? -1 : 1);
+    if(ordLess(w.from, s.from)) s.from = w.from;
+    s.rows = null;
   }
 
-  // setContext updates the turn-level usage snapshot. It is intentionally separate from
-  // blocks: the working indicator and the final context line are per-turn UI, not per-bubble.
-  setContext(created, seq, used, window){
-    const t = this._seq(this.turns(created), seq);
-    if(!t) return;
-    if(used) t.ctx_used = used;
-    if(window) t.ctx_window = window;
+  // applyGroup applies one group event; returns false when the session lost track of that group
+  // (a delta for a group it should hold but does not) and needs a fresh window.
+  applyGroup(created, d){
+    const s = this.byCreated[created];
+    if(!s) return true;
+    const i = s.groups.findIndex(g => g.key === d.key);
+    if(i < 0){
+      if(ordLess(d.ord, s.from)) return true;
+      if(d.from > 0) return false;
+      s.groups.push({ key: d.key, ord: d.ord, head: d.head || null, blocks: (d.blocks || []).slice(0, d.n), rows: d.rows || [] });
+    } else {
+      const g = s.groups[i];
+      if(ordLess(d.ord, s.from)){ s.groups.splice(i, 1); s.rows = null; return true; }
+      g.ord = d.ord;
+      if(d.head) g.head = d.head;
+      g.blocks = g.blocks.slice(0, d.from).concat(d.blocks || []).slice(0, d.n);
+      if(d.rows) g.rows = d.rows;
+    }
+    s.groups.sort((a, b) => ordLess(a.ord, b.ord) ? -1 : 1);
+    s.rows = null;
+    return true;
   }
 
-  // appendBlock adds an answer block, deduped by block.id: a present id wins (a live
-  // eventSeq is attached to the existing block so unread still sees it), else it appends.
-  // Visual merging of consecutive same-role blocks is render's job, not the model's.
-  appendBlock(created, seq, block){
-    const t = this._seq(this.turns(created), seq);
-    if(!t) return;
-    const existing = block.id && t.blocks.find(b => b.id === block.id);
-    if(existing){ if(block.eventSeq) existing.eventSeq = block.eventSeq; return; }
-    t.blocks.push({ ...block });
+  applyRemoved(created, key){
+    const s = this.byCreated[created];
+    if(!s) return;
+    const i = s.groups.findIndex(g => g.key === key);
+    if(i >= 0){ s.groups.splice(i, 1); s.rows = null; }
   }
 
-  // appendStandalone adds a non-turn, non-durable row between turns.
-  appendStandalone(created, row){
-    const arr = this.byCreated[created] = this.byCreated[created] || [];
-    arr.push({ role: row.role || "system", kind: row.kind, text: row.text, eventSeq: row.eventSeq });
+  // evictTop drops whole groups covered by the oldest n rows (windowing — early history unloaded to
+  // keep a long session responsive) and raises the range start. Returns the rows actually removed.
+  evictTop(created, n){
+    const s = this.byCreated[created];
+    if(!s || n <= 0) return 0;
+    let groups = 0, rows = 0;
+    while(groups < s.groups.length - 1){
+      const g = s.groups[groups], size = (g.head ? 1 : 0) + g.rows.length;
+      if(rows + size > n) break;
+      rows += size; groups++;
+    }
+    if(!groups) return 0;
+    s.groups = s.groups.slice(groups);
+    s.from = s.groups[0].ord;
+    s.rows = null;
+    return rows;
   }
-
 }
 
-function normTurn(r){
-  return {
-    seq: r.seq, role: r.role, text: r.text, time: r.time, state: r.state, kind: r.kind,
-    eventSeq: r.eventSeq, ctx_used: r.ctx_used, ctx_window: r.ctx_window,
-    blocks: (r.blocks || []).map(b => ({ ...b })),
-  };
+function normGroup(g){
+  return { key: g.key, ord: g.ord, head: g.head || null, blocks: g.blocks || [], rows: g.rows || [] };
 }

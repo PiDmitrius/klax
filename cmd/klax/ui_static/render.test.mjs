@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { playShift } from "./render.js";
+import { playShift, renderModel } from "./render.js";
 
 test("shift animates the visible tail of a tall bubble and skips fully distant bubbles", () => {
   for(const [top, bottom, expected] of [[100, 400, 180], [-3000, 400, 180], [-3000, -2000, 0], [2000, 2300, 0]]){
@@ -154,4 +154,14 @@ test("a cancelled note neither drives read-advance nor opens the unread divider"
   assert.equal(note.className.split(" ").includes("cancelled"), true);
   assert.equal(note.dataset.pos, undefined);
   assert.equal(h.col.children.flatMap(t => t.children).some(c => c.className === "readline"), false);
+});
+
+test("a running turn measures its tokens against the last window a turn ran with", () => {
+  const items = renderModel([
+    { seq: 1, role: "user", state: "done", ctx_used: 100000, ctx_window: 1000000, blocks: [{ id: "a", role: "assistant" }] },
+    { seq: 2, role: "user", state: "done", ctx_used: 150000, blocks: [{ id: "b", role: "assistant" }] },
+    { seq: 3, role: "user", state: "run", ctx_used: 200000, blocks: [{ id: "c", role: "tool" }] },
+  ], undefined);
+  const lines = items.filter(i => i.kind === "turn").map(i => i.ctxLine);
+  assert.deepEqual(lines, ["📊 Контекст: 10% (100k/1000k)", "📊 Контекст: 150k", "📊 Контекст: 20% (200k/1000k)"]);
 });

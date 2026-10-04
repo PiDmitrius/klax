@@ -1,0 +1,82 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { TurnModel, ordLess, ordParam } from "./model.js";
+
+const head = (seq, state = "done") => ({ seq, role: "user", state });
+const window = groups => ({ from: groups.length ? groups[0].ord : [-1, 0], groups });
+
+test("ord sorts by record, then seq; a null record sorts last", () => {
+  assert.ok(ordLess([3, 1], [8, 2]));
+  assert.ok(ordLess([8, 2], [8, 3]));
+  assert.ok(ordLess([8, 3], [null, 4]));
+  assert.ok(!ordLess([null, 4], [9, 1]));
+  assert.equal(ordParam([null, 4]), "null,4");
+  assert.equal(ordParam([5200, 89]), "5200,89");
+});
+
+test("turns flattens groups into user rows with blocks followed by their standalone rows", () => {
+  const m = new TurnModel();
+  m.loadWindow(1, window([
+    { key: "t:1:0", ord: [-1, 0], head: null, blocks: null, rows: [{ role: "system", text: "intro" }] },
+    { key: "t:1:5", ord: [2, 5], head: head(5), blocks: [{ id: "a" }], rows: [{ role: "tool", text: "note" }] },
+  ]));
+  assert.deepEqual(m.turns(1).map(t => t.role + ":" + (t.seq || t.text)), ["system:intro", "user:5", "tool:note"]);
+  assert.deepEqual(m.turns(1)[1].blocks, [{ id: "a" }]);
+});
+
+test("a group delta keeps the prefix, appends the suffix, cuts to n and merges the header", () => {
+  const m = new TurnModel();
+  m.loadWindow(1, window([{ key: "t:1:5", ord: [2, 5], head: head(5, "run"), blocks: [{ id: "a" }, { id: "b" }] }]));
+  assert.ok(m.applyGroup(1, { key: "t:1:5", ord: [2, 5], head: head(5, "done"), n: 3, from: 1, blocks: [{ id: "b2" }, { id: "c" }] }));
+  assert.deepEqual(m.turns(1)[0].blocks.map(b => b.id), ["a", "b2", "c"]);
+  assert.equal(m.turns(1)[0].state, "done");
+  assert.ok(m.applyGroup(1, { key: "t:1:5", ord: [2, 5], n: 1, from: 1, blocks: [] }));
+  assert.deepEqual(m.turns(1)[0].blocks.map(b => b.id), ["a"]);
+  assert.equal(m.turns(1)[0].state, "done");
+});
+
+test("new groups insert in ord order; older ones are left to paging; a lost delta asks for a reload", () => {
+  const m = new TurnModel();
+  m.loadWindow(1, window([{ key: "t:1:5", ord: [2, 5], head: head(5) }]));
+  assert.ok(m.applyGroup(1, { key: "t:1:7", ord: [null, 7], head: head(7, "enq"), n: 0, from: 0, blocks: [] }));
+  assert.ok(m.applyGroup(1, { key: "t:1:6", ord: [3, 6], head: head(6), n: 0, from: 0, blocks: [] }));
+  assert.ok(m.applyGroup(1, { key: "t:1:1", ord: [0, 1], head: head(1), n: 0, from: 0, blocks: [] }));
+  assert.deepEqual(m.turns(1).map(t => t.seq), [5, 6, 7]);
+  assert.equal(m.applyGroup(1, { key: "t:1:9", ord: [4, 9], n: 2, from: 1, blocks: [{}] }), false);
+});
+
+test("a held group moving below the range is dropped; removal drops a key", () => {
+  const m = new TurnModel();
+  m.loadWindow(1, window([{ key: "t:1:5", ord: [2, 5], head: head(5) }, { key: "t:1:22", ord: [null, 22], head: head(22, "enq") }]));
+  assert.ok(m.applyGroup(1, { key: "t:1:22", ord: [1, 22], n: 0, from: 0, blocks: [] }));
+  assert.deepEqual(m.turns(1).map(t => t.seq), [5]);
+  assert.deepEqual(m.rangeStart(1), [2, 5]);
+  m.applyRemoved(1, "t:1:5");
+  assert.deepEqual(m.turns(1), []);
+});
+
+test("a page replaces its range and extends the start; eviction drops whole groups", () => {
+  const m = new TurnModel();
+  m.loadWindow(1, window([{ key: "t:1:5", ord: [5, 5], head: head(5) }, { key: "t:1:6", ord: [6, 6], head: head(6) }]));
+  m.loadPage(1, { from: [1, 1], to: [5, 5], groups: [
+    { key: "t:1:1", ord: [1, 1], head: head(1), rows: [{ role: "system", text: "s" }] },
+    { key: "t:1:3", ord: [3, 3], head: head(3) },
+  ] });
+  assert.deepEqual(m.rangeStart(1), [1, 1]);
+  assert.deepEqual(m.turns(1).map(t => t.seq || t.text), [1, "s", 3, 5, 6]);
+  assert.equal(m.evictTop(1, 1), 0);
+  assert.equal(m.evictTop(1, 3), 3);
+  assert.deepEqual(m.rangeStart(1), [5, 5]);
+  assert.deepEqual(m.turns(1).map(t => t.seq), [5, 6]);
+});
+
+test("a page drops a held copy of a key it carries; a window from the history start keeps moved groups", () => {
+  const m = new TurnModel();
+  m.loadWindow(1, window([{ key: "t:1:5", ord: [5, 5], head: head(5) }, { key: "t:1:22", ord: [null, 22], head: head(22, "enq") }]));
+  m.loadPage(1, { from: [1, 1], to: [5, 5], groups: [{ key: "t:1:22", ord: [3, 22], head: head(22) }] });
+  assert.deepEqual(m.turns(1).map(t => t.seq), [22, 5]);
+  m.loadWindow(1, { from: [-1, 0], groups: [{ key: "t:1:7", ord: [null, 7], head: head(7, "err") }] });
+  assert.ok(m.applyGroup(1, { key: "t:1:7", ord: [4, 7], n: 0, from: 0, blocks: [] }));
+  assert.ok(m.applyGroup(1, { key: "t:1:8", ord: [4, 8], head: head(8), n: 0, from: 0, blocks: [] }));
+  assert.deepEqual(m.turns(1).map(t => t.seq), [7, 8]);
+});
