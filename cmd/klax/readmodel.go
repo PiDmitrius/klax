@@ -142,9 +142,8 @@ func groupTurns(items []history.Item) []groupedTurn {
 
 // buildReadModel turns a session's grouped transcript into read-model rows: it joins each user
 // turn to its durable coordinate binding (or legacy marker), rewrites text to durable text + file
-// thumbnails, and gives every answer block its stable id. It also places turns the transcript hasn't
-// recorded (queued, just-started, cancelled or aborted before running) by turn_seq, so a reload
-// shows them.
+// thumbnails, and nests its answer blocks. It also places turns the transcript hasn't recorded
+// (queued, just-started, cancelled or aborted before running) by turn_seq, so a reload shows them.
 func (d *daemon) buildReadModel(sk string, created int64, grouped []groupedTurn, queueTurns []sessfiles.Turn, busy bool, memo *rowMemo) []uiTurn {
 	store := d.sessionStore(sk, created)
 	byMarker := make(map[string]sessfiles.Turn, len(queueTurns))
@@ -270,7 +269,7 @@ func (d *daemon) buildReadModel(sk string, created int64, grouped []groupedTurn,
 	return mergeQueueOnlyTurns(turns, missing)
 }
 
-// userRow builds one user turn's row: durable text and time, answer blocks with stable ids, and
+// userRow builds one user turn's row: durable text and time, answer blocks, and
 // the klax-side error and hook-warning blocks. keep is false when an attachment or a local file
 // link could not be published yet, which a later build may still do.
 func (d *daemon) userRow(store *sessfiles.Store, sk string, created int64, g groupedTurn, matched sessfiles.Turn, ok bool, seq int64, state, reason string) (ut uiTurn, keep bool) {
@@ -288,9 +287,8 @@ func (d *daemon) userRow(store *sessfiles.Store, sk string, created int64, g gro
 		}
 	}
 	ut = uiTurn{Seq: seq, Role: "user", Text: text, Time: turnAt, State: state}
-	// Split an assistant item's text and each tool into separate blocks, matching the
-	// live progress stream (one narration block, one block per tool) so a block's id is
-	// computed over the same canonical shape in both the transcript and the live event.
+	// Split an assistant item's text and each tool into separate blocks: one narration block,
+	// one block per tool.
 	// The displayed text gets the same outbound file-ref rewrite the live final applies, so
 	// reloaded agent files stay sealed refs.
 	for _, b := range g.blocks {

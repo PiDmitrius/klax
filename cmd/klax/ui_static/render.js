@@ -237,8 +237,8 @@ function stamp(node, key, sig){
 
 // Each turn child carries a FLIP key (data-flip) AND a content signature (data-csig). The key is an
 // independently animatable unit — answer groups are keyed by the durable position of their first
-// block, not by content-derived block IDs, so tool-label/text changes patch the same DOM node instead
-// of creating an entering replacement. When reading merges bubbles a divider used to split, the
+// block, so tool-label/text changes patch the same DOM node instead of creating an entering
+// replacement. When reading merges bubbles a divider used to split, the
 // merged bubble inherits the leading part's position key and stays put. The content signature gates
 // formatting and DOM replacement; join classes update separately without rebuilding bubble contents.
 function childSig(kind, extra){ return JSON.stringify([kind, extra]); }
