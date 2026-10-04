@@ -10,11 +10,10 @@ import (
 // uiBlock is one answer block (assistant narration / tool call / system note) under a
 // user turn; it is addressed by its index in the turn.
 type uiBlock struct {
-	Role  string             `json:"role"` // assistant|tool|system|error
-	Text  string             `json:"text,omitempty"`
-	Tools []history.ToolCall `json:"tools,omitempty"`
-	Kind  string             `json:"kind,omitempty"`
-	Time  string             `json:"time,omitempty"` // RFC3339; a merged answer bubble shows its LAST block's time
+	Role string `json:"role"` // assistant|tool|system|error
+	Text string `json:"text,omitempty"`
+	Kind string `json:"kind,omitempty"`
+	Time string `json:"time,omitempty"` // RFC3339; a merged answer bubble shows its LAST block's time
 }
 
 // uiTurn is one row of the read model. A user row carries the durable turn seq + state
@@ -315,7 +314,7 @@ func (d *daemon) userRow(store *sessfiles.Store, sk string, created int64, g gro
 			}
 			continue
 		}
-		ut.Blocks = append(ut.Blocks, uiBlock{Role: b.Role, Text: b.Text, Tools: b.Tools, Kind: b.Kind, Time: b.Time})
+		ut.Blocks = append(ut.Blocks, uiBlock{Role: b.Role, Text: b.Text, Kind: b.Kind, Time: b.Time})
 	}
 	if state == "err" && !explainedByTranscript(reason, g.blocks) {
 		ut.Blocks = append(ut.Blocks, errBlock(reason))
