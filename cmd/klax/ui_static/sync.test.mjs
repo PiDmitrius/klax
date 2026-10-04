@@ -131,3 +131,16 @@ test("a newer window that needs older history pages it in while a superseded pag
   h.respond(3, { at: "1.11", from: [-1, 0], to: [5, 5], more: false, groups: [] });
   await page;
 });
+
+test("a resync raises a kept read watermark from the snapshot", async () => {
+  const h = harness();
+  h.run("parsePos = s => s === '9.0' ? 9e6 : 1e6");
+  const load = h.run("loadTranscript(1)");
+  h.respond(0, { at: "1.10", from: [-1, 0], to: null, more: false, groups: [group(5, ["a"])] });
+  await load;
+  assert.equal(h.run("readThrough[1]"), 1e6);
+  const sync = h.run("resync()");
+  h.respond(1, { at: "2.1", started: 2, sessions: [{ created: 1, read_through: "9.0" }] });
+  await sync;
+  assert.equal(h.run("readThrough[1]"), 9e6);
+});

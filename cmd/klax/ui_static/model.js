@@ -65,6 +65,7 @@ export class TurnModel {
       if(ordLess(d.ord, s.from)){ s.groups.splice(i, 1); s.rows = null; return true; }
       g.ord = d.ord;
       if(d.head) g.head = d.head;
+      else if(d.ctx && g.head) g.head = { ...g.head, ctx_used: d.ctx[0], ctx_window: d.ctx[1] };
       g.blocks = g.blocks.slice(0, d.from).concat(d.blocks || []).slice(0, d.n);
       if(d.rows) g.rows = d.rows;
     }

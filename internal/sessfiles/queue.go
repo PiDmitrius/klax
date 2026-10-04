@@ -63,7 +63,7 @@ type Turn struct {
 	TS           int64
 	Last         string // enq|run|done|err
 	Reason       string
-	CtxWindow    int // context window the turn completed with, from its done record
+	CtxWindow    int // context window the turn ran with, from its terminal record
 	HookFailures []HookFailure
 	Backend      string
 	Session      string
@@ -204,8 +204,8 @@ func (s *Store) Bind(seq int64, backend, session string, event int64, recordDige
 func (s *Store) MarkDone(seq int64, ctxWindow int) error {
 	return s.mark(record{Ev: "done", Seq: seq, CtxWindow: ctxWindow})
 }
-func (s *Store) MarkErr(seq int64, reason string) error {
-	return s.mark(record{Ev: "err", Seq: seq, Reason: reason})
+func (s *Store) MarkErr(seq int64, reason string, ctxWindow int) error {
+	return s.mark(record{Ev: "err", Seq: seq, Reason: reason, CtxWindow: ctxWindow})
 }
 func (s *Store) MarkHookError(seq int64, hook, reason string) error {
 	return s.mark(record{Ev: "hook", Seq: seq, Hook: hook, Status: "error", Reason: reason})

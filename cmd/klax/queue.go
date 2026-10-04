@@ -402,7 +402,7 @@ func (d *daemon) abortSession(sk string, created int64, closing bool) bool {
 	if sr != nil {
 		for _, qm := range queued {
 			qm.completion.fail("aborted")
-			if err := sr.store.MarkErr(qm.turnSeq, turnErrAborted); err != nil && !errors.Is(err, sessfiles.ErrRemoved) {
+			if err := sr.store.MarkErr(qm.turnSeq, turnErrAborted, 0); err != nil && !errors.Is(err, sessfiles.ErrRemoved) {
 				log.Printf("durable MarkErr aborted (%s/%d): %v", sk, created, err)
 			}
 			// The err is durable (MarkErr); the broadcastSessions below pokes the live channel, which
@@ -441,7 +441,7 @@ func (d *daemon) cancelQueued(sk string, created, seq int64) (found bool, err er
 	if !found {
 		return false, nil
 	}
-	if err := sr.store.MarkErr(seq, turnErrCancelled); err != nil {
+	if err := sr.store.MarkErr(seq, turnErrCancelled, 0); err != nil {
 		return true, err
 	}
 	sr.mu.Lock()
@@ -552,7 +552,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	if err != nil {
 		msg.completion.fail(turnErrAttachmentsMissing)
 		log.Printf("buildTurnPrompt (%s/%d): %v", sk, sess.Created, err)
-		if mErr := sr.store.MarkErr(msg.turnSeq, turnErrAttachmentsMissing); mErr != nil && !errors.Is(mErr, sessfiles.ErrRemoved) {
+		if mErr := sr.store.MarkErr(msg.turnSeq, turnErrAttachmentsMissing, 0); mErr != nil && !errors.Is(mErr, sessfiles.ErrRemoved) {
 			log.Printf("durable MarkErr (%s/%d): %v", sk, sess.Created, mErr)
 		}
 		del.Final(runner.RunResult{Error: errors.New(turnErrAttachmentsMissing)})
@@ -565,7 +565,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	if sess.ID != "" {
 		if _, cursor, snapErr := history.Snapshot(backend.Name(), sess.ID, sess.CWD); snapErr != nil {
 			log.Printf("transcript cursor (%s/%d): %v", sk, sess.Created, snapErr)
-			if mErr := sr.store.MarkErr(msg.turnSeq, turnErrRunStartFailed); mErr != nil && !errors.Is(mErr, sessfiles.ErrRemoved) {
+			if mErr := sr.store.MarkErr(msg.turnSeq, turnErrRunStartFailed, 0); mErr != nil && !errors.Is(mErr, sessfiles.ErrRemoved) {
 				log.Printf("durable MarkErr (%s/%d): %v", sk, sess.Created, mErr)
 			}
 			del.Final(runner.RunResult{Error: errors.New(turnErrRunStartFailed)})
@@ -578,7 +578,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	// the backend, or a crash would replay the (still enq) turn and duplicate work.
 	if err := sr.store.MarkRunMeta(msg.turnSeq, backend.Name(), sess.ID, promptcanon.Digest(prompt), fromEvent); err != nil {
 		log.Printf("durable MarkRun (%s/%d): %v", sk, sess.Created, err)
-		if mErr := sr.store.MarkErr(msg.turnSeq, turnErrRunStartFailed); mErr != nil && !errors.Is(mErr, sessfiles.ErrRemoved) {
+		if mErr := sr.store.MarkErr(msg.turnSeq, turnErrRunStartFailed, 0); mErr != nil && !errors.Is(mErr, sessfiles.ErrRemoved) {
 			log.Printf("durable MarkErr (%s/%d): %v", sk, sess.Created, mErr)
 		}
 		del.Final(runner.RunResult{Error: errors.New(turnErrRunStartFailed)})
@@ -736,12 +736,12 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	}
 
 	// Record the turn's terminal state in the durable queue so a future replay skips
-	// it; the done record keeps the context window this turn ran with. A failed append is
-	// logged, not fatal: ErrRemoved means a concurrent close deleted the session (record is
-	// moot); any other error means replay re-classifies.
+	// it; the record keeps the context window this turn ran with (for a failed run, the one it
+	// was started with). A failed append is logged, not fatal: ErrRemoved means a concurrent
+	// close deleted the session (record is moot); any other error means replay re-classifies.
 	var termErr error
 	if result.Error != nil {
-		termErr = sr.store.MarkErr(msg.turnSeq, turnErrorReason(result.Error))
+		termErr = sr.store.MarkErr(msg.turnSeq, turnErrorReason(result.Error), sess.ContextWindow)
 	} else {
 		termErr = sr.store.MarkDone(msg.turnSeq, ctxWindow)
 	}

@@ -787,12 +787,15 @@ async function onSessionsList(list){
     // Cross-tab / cross-device read sync: adopt the server's durable read watermark when it is
     // AHEAD of ours — another browser tab (or the messenger) read further. Monotonic (never
     // regresses our own, maybe-not-yet-reported, reading), so the divider + badge here catch up.
-    if(loaded[s.created] && s.read_through){
+    // A watermark kept across a resync is raised too, before its window reloads.
+    if(s.read_through && readThrough[s.created] !== undefined){
       const p = parsePos(s.read_through);
-      if(readThrough[s.created] === undefined || p > readThrough[s.created]){
+      if(p > readThrough[s.created]){
         readThrough[s.created] = p;
-        affected.add(s.created);
-        if(s.created === active) activeReadAdvanced = true;
+        if(loaded[s.created]){
+          affected.add(s.created);
+          if(s.created === active) activeReadAdvanced = true;
+        }
       }
     }
   }

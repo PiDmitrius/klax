@@ -113,8 +113,8 @@ func TestUIHubWakeOnNotice(t *testing.T) {
 func TestWaitPollsPastReleasesWhenPollsMoveOn(t *testing.T) {
 	h := newUIHub()
 	h.userSync("alice")
-	behind := h.registerPoll(0)
-	ahead := h.registerPoll(100)
+	behind, _ := h.enterPoll("alice", 0)
+	ahead, _ := h.enterPoll("bob", 100)
 	seq := h.noticeAll("restart")
 	done := make(chan struct{})
 	go func() { h.waitPollsPast(seq, time.Second); close(done) }()
@@ -123,13 +123,13 @@ func TestWaitPollsPastReleasesWhenPollsMoveOn(t *testing.T) {
 		t.Fatal("wait returned while a poll was still behind the notice")
 	case <-time.After(10 * time.Millisecond):
 	}
-	h.unregisterPoll(behind)
+	h.leavePoll(behind)
 	select {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("wait did not release once no poll was behind the notice")
 	}
-	h.unregisterPoll(ahead)
+	h.leavePoll(ahead)
 }
 
 func TestUICursorRoundTrip(t *testing.T) {
@@ -148,16 +148,22 @@ func TestUICursorRoundTrip(t *testing.T) {
 // per-connection state); a freed slot allows a new poll.
 func TestUIHubInflightCap(t *testing.T) {
 	h := newUIHub()
+	var last *uiPoll
 	for i := 0; i < uiMaxInflightPerUser; i++ {
-		if !h.enterPoll("alice") {
+		p, ok := h.enterPoll("alice", 0)
+		if !ok {
 			t.Fatalf("enterPoll refused at %d, under the cap", i)
 		}
+		last = p
 	}
-	if h.enterPoll("alice") {
+	if _, ok := h.enterPoll("alice", 0); ok {
 		t.Fatal("enterPoll must refuse past the cap")
 	}
-	h.leavePoll("alice")
-	if !h.enterPoll("alice") {
+	if _, ok := h.enterPoll("bob", 0); !ok {
+		t.Fatal("one user's polls must not count against another's cap")
+	}
+	h.leavePoll(last)
+	if _, ok := h.enterPoll("alice", 0); !ok {
 		t.Fatal("a freed slot must allow a new poll")
 	}
 }

@@ -14,10 +14,10 @@ func TestAbortedTurnDoesNotReplay(t *testing.T) {
 	s := Open("user:alice", 9)
 	a, _, _, _, _ := s.Enqueue("tg:1", "", "a", "A", nil)
 	b, _, _, _, _ := s.Enqueue("tg:1", "", "b", "B", nil)
-	if err := s.MarkErr(a, "aborted"); err != nil {
+	if err := s.MarkErr(a, "aborted", 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.MarkErr(b, "aborted"); err != nil {
+	if err := s.MarkErr(b, "aborted", 0); err != nil {
 		t.Fatal(err)
 	}
 	reenq, recovered, err := Open("user:alice", 9).Replay()

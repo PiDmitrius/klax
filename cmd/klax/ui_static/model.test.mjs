@@ -80,3 +80,13 @@ test("a page drops a held copy of a key it carries; a window from the history st
   assert.ok(m.applyGroup(1, { key: "t:1:8", ord: [4, 8], head: head(8), n: 0, from: 0, blocks: [] }));
   assert.deepEqual(m.turns(1).map(t => t.seq), [7, 8]);
 });
+
+test("a context-only delta updates the head's usage and keeps its text", () => {
+  const m = new TurnModel();
+  m.loadWindow(1, window([{ key: "t:1:5", ord: [2, 5], head: { ...head(5, "run"), text: "long prompt" }, blocks: [{ id: "a" }] }]));
+  assert.ok(m.applyGroup(1, { key: "t:1:5", ord: [2, 5], ctx: [900, 0], n: 1, from: 1, blocks: [] }));
+  const t = m.turns(1)[0];
+  assert.equal(t.text, "long prompt");
+  assert.equal(t.ctx_used, 900);
+  assert.deepEqual(t.blocks.map(b => b.id), ["a"]);
+});

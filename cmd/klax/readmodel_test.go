@@ -297,7 +297,7 @@ func TestReadModelAbortedSurfaced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sr.store.MarkErr(seq, "aborted"); err != nil {
+	if err := sr.store.MarkErr(seq, "aborted", 0); err != nil {
 		t.Fatal(err)
 	}
 	turns := testRM(d, created, nil, false)
@@ -368,7 +368,7 @@ func TestReadModelAbortedKeepsTurnOrder(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := sr.store.MarkErr(seq2, "aborted"); err != nil {
+	if err := sr.store.MarkErr(seq2, "aborted", 0); err != nil {
 		t.Fatal(err)
 	}
 	turns := testRM(d, created, []history.Item{
@@ -396,7 +396,7 @@ func TestReadModelUsesTranscriptTerminalError(t *testing.T) {
 		t.Fatal(err)
 	}
 	user := bindReadModelTurn(t, sr.store, seq, 1, "work")
-	if err := sr.store.MarkErr(seq, turnErrBackendFailed); err != nil {
+	if err := sr.store.MarkErr(seq, turnErrBackendFailed, 0); err != nil {
 		t.Fatal(err)
 	}
 	const detail = "Selected model is at capacity. (server_overloaded)"
@@ -432,7 +432,7 @@ func TestReadModelRecoveredErrorIsNotTheOutcome(t *testing.T) {
 				t.Fatal(err)
 			}
 			user := bindReadModelTurn(t, sr.store, seq, 1, "work")
-			if err := sr.store.MarkErr(seq, tc.reason); err != nil {
+			if err := sr.store.MarkErr(seq, tc.reason, 0); err != nil {
 				t.Fatal(err)
 			}
 			items := []history.Item{
@@ -480,7 +480,7 @@ func TestReadModelQueueOnlyTurnStaysOnItsPage(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := sr.store.MarkErr(seqs[1], turnErrCancelled); err != nil {
+	if err := sr.store.MarkErr(seqs[1], turnErrCancelled, 0); err != nil {
 		t.Fatal(err)
 	}
 	q, _ := sr.store.InboundLog()
@@ -529,7 +529,7 @@ func TestReadModelMemoMatchesFullBuild(t *testing.T) {
 			if err := sr.store.MarkDone(seq, 0); err != nil {
 				t.Fatal(err)
 			}
-		} else if err := sr.store.MarkErr(seq, turnErrBackendFailed); err != nil {
+		} else if err := sr.store.MarkErr(seq, turnErrBackendFailed, 0); err != nil {
 			t.Fatal(err)
 		}
 		check(text+" finished", false)

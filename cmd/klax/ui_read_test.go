@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -112,6 +113,10 @@ func applyDelta(g *uiGroup, d *uiGroupDelta) {
 	g.Ord = d.Ord
 	if d.Head != nil {
 		g.Head = d.Head
+	} else if d.Ctx != nil {
+		h := *g.Head
+		h.CtxUsed, h.CtxWindow = d.Ctx[0], d.Ctx[1]
+		g.Head = &h
 	}
 	g.Blocks = append(slices.Clone(g.Blocks[:d.From]), d.Blocks...)[:d.N]
 	if d.Rows != nil {
@@ -144,7 +149,7 @@ func TestDiffGroupsSendsChangedSuffix(t *testing.T) {
 	}
 	g := old[1]
 	applyDelta(&g, d)
-	if !headEqual(g.Head, cur[1].Head) || !slices.EqualFunc(g.Blocks, cur[1].Blocks, blockEqual) {
+	if !reflect.DeepEqual(g.Head, cur[1].Head) || !reflect.DeepEqual(g.Blocks, cur[1].Blocks) {
 		t.Fatalf("replayed group = %+v, want %+v", g, cur[1])
 	}
 	if n := evs[1].ev.Group; n.Key != "t:1:6" || n.From != 0 || n.Head == nil {
@@ -157,6 +162,11 @@ func TestDiffGroupsSendsChangedSuffix(t *testing.T) {
 	evs = diffGroups(1, old, shrunk)
 	if len(evs) != 1 || evs[0].ev.Group.From != 1 || evs[0].ev.Group.N != 1 || evs[0].ev.Group.Head != nil {
 		t.Fatalf("shrunk group delta = %+v", evs)
+	}
+	used := []uiGroup{old[0], {Key: "t:1:5", Ord: old[1].Ord, Head: &uiTurn{Role: "user", Seq: 5, State: "run", CtxUsed: 900}, Blocks: old[1].Blocks}, old[2]}
+	evs = diffGroups(1, old, used)
+	if len(evs) != 1 || evs[0].ev.Group.Head != nil || evs[0].ev.Group.Ctx == nil || *evs[0].ev.Group.Ctx != [2]int{900, 0} {
+		t.Fatalf("context-only delta = %+v, want ctx without the head", evs)
 	}
 	if evs := diffGroups(1, old, old); len(evs) != 0 {
 		t.Fatalf("unchanged groups produced %d events", len(evs))

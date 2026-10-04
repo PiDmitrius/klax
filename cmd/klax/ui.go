@@ -79,7 +79,7 @@ func uiUserForKey(sk string) string {
 
 // uiHub owns the live channel: per-user wake channels for held polls, the per-user sync state and
 // event rings (uisync.go), and the read-model cache. epoch is the process lifetime — a restart
-// changes it, so a client cursor from another process resyncs. inflight bounds concurrent held polls.
+// changes it, so a client cursor from another process resyncs. polls are the held requests.
 // uiUnreadKey keys the read-model cache. readModelEntry caches a session's built rows by the
 // transcript's AND queue's (mtime,size), so an unchanged session's rows cost two os.Stat calls, not a
 // transcript read + rebuild.
@@ -106,9 +106,8 @@ type uiHub struct {
 	epoch     int64
 	seq       uint64
 	notify    map[string]chan struct{} // per-user wake channel (closed-channel broadcast)
-	inflight  map[string]int           // per-user concurrently-held polls
 	users     map[string]*uiUserSync
-	polls     map[*uiPoll]struct{} // in-flight polls, for the restart-notice wait
+	polls     map[*uiPoll]struct{}
 	pollsWake chan struct{}
 	rmMu      sync.Mutex // guards rm and rmBuild (separate from mu — off the poll hot path)
 	rm        map[uiUnreadKey]readModelEntry
@@ -119,7 +118,6 @@ func newUIHub() *uiHub {
 	return &uiHub{
 		epoch:     time.Now().UnixNano(), // unique per process so a restart is always detectable
 		notify:    make(map[string]chan struct{}),
-		inflight:  make(map[string]int),
 		users:     make(map[string]*uiUserSync),
 		polls:     make(map[*uiPoll]struct{}),
 		pollsWake: make(chan struct{}),
@@ -138,28 +136,6 @@ func (h *uiHub) waitChan(user string) chan struct{} {
 		h.notify[user] = ch
 	}
 	return ch
-}
-
-// enterPoll/leavePoll bound concurrently-held polls per user.
-func (h *uiHub) enterPoll(user string) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.inflight[user] >= uiMaxInflightPerUser {
-		return false
-	}
-	h.inflight[user]++
-	return true
-}
-
-func (h *uiHub) leavePoll(user string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.inflight[user] > 0 {
-		h.inflight[user]--
-	}
-	if h.inflight[user] == 0 {
-		delete(h.inflight, user)
-	}
 }
 
 // uiNotifyAll pushes a notice to every UI user and returns its seq. No-op when the UI is off.

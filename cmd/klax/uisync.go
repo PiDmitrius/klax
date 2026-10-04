@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -129,26 +130,29 @@ func groupRows(created int64, rows []uiTurn) []uiGroup {
 	return out
 }
 
+// headEqual compares two heads apart from their context usage, which a group delta carries on
+// its own so a running turn's growing usage never resends the user's text.
 func headEqual(a, b *uiTurn) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	return a.Seq == b.Seq && a.Role == b.Role && a.Text == b.Text && a.Time == b.Time && a.State == b.State &&
-		a.Kind == b.Kind && a.CtxUsed == b.CtxUsed && a.CtxWindow == b.CtxWindow
+	x, y := *a, *b
+	x.CtxUsed, x.CtxWindow, y.CtxUsed, y.CtxWindow = 0, 0, 0, 0
+	return reflect.DeepEqual(x, y)
 }
 
-func blockEqual(a, b uiBlock) bool {
-	return a.ID == b.ID && a.Role == b.Role && a.Text == b.Text && a.Kind == b.Kind && a.Time == b.Time && slices.Equal(a.Tools, b.Tools)
-}
-
-func rowsEqual(a, b []uiTurn) bool {
-	return slices.EqualFunc(a, b, func(x, y uiTurn) bool { return headEqual(&x, &y) })
+func ctxOf(h *uiTurn) [2]int {
+	if h == nil {
+		return [2]int{}
+	}
+	return [2]int{h.CtxUsed, h.CtxWindow}
 }
 
 type uiGroupDelta struct {
 	Key    string    `json:"key"`
 	Ord    uiOrd     `json:"ord"`
 	Head   *uiTurn   `json:"head,omitempty"`
+	Ctx    *[2]int   `json:"ctx,omitempty"` // [used, window] when only the head's context changed
 	N      int       `json:"n"`
 	From   int       `json:"from"`
 	Blocks []uiBlock `json:"blocks"`
@@ -195,16 +199,20 @@ func diffGroups(created int64, old, cur []uiGroup) []uiPending {
 			}
 		} else {
 			from := 0
-			for from < len(g.Blocks) && from < len(o.Blocks) && blockEqual(g.Blocks[from], o.Blocks[from]) {
+			for from < len(g.Blocks) && from < len(o.Blocks) && reflect.DeepEqual(g.Blocks[from], o.Blocks[from]) {
 				from++
 			}
-			headChanged, rowsChanged := !headEqual(o.Head, g.Head), !rowsEqual(o.Rows, g.Rows)
-			if from == len(g.Blocks) && len(o.Blocks) == len(g.Blocks) && !headChanged && !rowsChanged && o.Ord == g.Ord {
+			headChanged, rowsChanged := !headEqual(o.Head, g.Head), !reflect.DeepEqual(o.Rows, g.Rows)
+			ctxChanged := ctxOf(o.Head) != ctxOf(g.Head)
+			if from == len(g.Blocks) && len(o.Blocks) == len(g.Blocks) && !headChanged && !ctxChanged && !rowsChanged && o.Ord == g.Ord {
 				continue
 			}
 			d.From, d.Blocks = from, g.Blocks[from:]
 			if headChanged {
 				d.Head = g.Head
+			} else if ctxChanged {
+				c := ctxOf(g.Head)
+				d.Ctx = &c
 			}
 			if rowsChanged {
 				rows := g.Rows
@@ -247,7 +255,12 @@ type uiUserSync struct {
 	floor     [2]uint64
 }
 
-type uiPoll struct{ after uint64 }
+// uiPoll is one held /api/changes request: the per-user cap counts them, and the restart-notice
+// wait reads their cursors.
+type uiPoll struct {
+	user  string
+	after uint64
+}
 
 func (h *uiHub) userSync(user string) *uiUserSync {
 	h.mu.Lock()
@@ -360,15 +373,25 @@ func (h *uiHub) noticeAll(text string) uint64 {
 	return h.seq
 }
 
-func (h *uiHub) registerPoll(after uint64) *uiPoll {
-	p := &uiPoll{after: after}
+// enterPoll registers a held poll unless the user is at uiMaxInflightPerUser.
+func (h *uiHub) enterPoll(user string, after uint64) (*uiPoll, bool) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for p := range h.polls {
+		if p.user == user {
+			n++
+		}
+	}
+	if n >= uiMaxInflightPerUser {
+		return nil, false
+	}
+	p := &uiPoll{user: user, after: after}
 	h.polls[p] = struct{}{}
-	h.mu.Unlock()
-	return p
+	return p, true
 }
 
-func (h *uiHub) unregisterPoll(p *uiPoll) {
+func (h *uiHub) leavePoll(p *uiPoll) {
 	h.mu.Lock()
 	delete(h.polls, p)
 	close(h.pollsWake)
@@ -515,13 +538,12 @@ func (s *uiServer) handleChanges(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"resync":true}` + "\n"))
 		return
 	}
-	if !h.enterPoll(user) {
+	poll, ok := h.enterPoll(user, after)
+	if !ok {
 		http.Error(w, "Too many concurrent polls", http.StatusTooManyRequests)
 		return
 	}
-	defer h.leavePoll(user)
-	poll := h.registerPoll(after)
-	defer h.unregisterPoll(poll)
+	defer h.leavePoll(poll)
 	role := roleOf(s.readOnly(r))
 	sk := s.d.sessionKey(s.chatID(user))
 	deadline := time.NewTimer(uiPollHold)

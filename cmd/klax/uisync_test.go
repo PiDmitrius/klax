@@ -239,7 +239,7 @@ func TestSyncReplayEqualsReload(t *testing.T) {
 	}
 	f.d.uiPoke("alice")
 	step("queued turn")
-	if err := sr.store.MarkErr(seq, turnErrCancelled); err != nil {
+	if err := sr.store.MarkErr(seq, turnErrCancelled, 0); err != nil {
 		t.Fatal(err)
 	}
 	step("cancelled turn")
