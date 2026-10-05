@@ -336,7 +336,15 @@ func (s *Store) saveLocked() error {
 	if closeErr != nil {
 		return closeErr
 	}
-	return os.Rename(f.Name(), path)
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	if err := os.Rename(f.Name(), path); err != nil {
+		return err
+	}
+	return dir.Sync()
 }
 
 func (s *Store) chat(chatID string) *ChatSessions {

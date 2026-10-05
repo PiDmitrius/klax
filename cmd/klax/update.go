@@ -90,11 +90,6 @@ func latestTag() (string, error) {
 	return tag, nil
 }
 
-// downloadRelease downloads the release binary for the current platform.
-func downloadRelease(tag string) (string, error) {
-	return downloadReleaseTo(tag, os.Stdout)
-}
-
 func downloadReleaseTo(tag string, out io.Writer) (string, error) {
 	arch := runtime.GOARCH
 	name := fmt.Sprintf("klax-%s-linux-%s", tag, arch)
@@ -179,6 +174,9 @@ func performUpdate(ctx context.Context, srcDir string, out io.Writer) updateResu
 }
 
 func performReleaseUpdate(ctx context.Context, tag string, out io.Writer) updateResult {
+	if !readsCurrentData(tag) {
+		return updateResult{Message: fmt.Sprintf("%s cannot read the current data; going back below %s needs a copy of the data dir taken with that release", tag, oldestDataRelease)}
+	}
 	binPath, err := downloadReleaseTo(tag, out)
 	if err != nil {
 		return updateResult{Message: fmt.Sprintf("download failed: %v", err)}
@@ -364,25 +362,9 @@ func runFallback() {
 	if !strings.HasPrefix(tag, "v") {
 		tag = "v" + tag
 	}
-	if !readsCurrentData(tag) {
-		fmt.Fprintf(os.Stderr, "%s cannot read the current data; going back below %s needs a copy of the data dir taken with that release\n", tag, oldestDataRelease)
-		os.Exit(1)
-	}
 	fmt.Printf("installing %s...\n", tag)
-
-	binPath, err := downloadRelease(tag)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "download failed: %v\n", err)
+	if res := performReleaseUpdate(context.Background(), tag, os.Stdout); !res.OK {
+		fmt.Fprintln(os.Stderr, res.Message)
 		os.Exit(1)
 	}
-	defer os.Remove(binPath)
-
-	install := exec.Command(binPath, "install")
-	install.Stdout = os.Stdout
-	install.Stderr = os.Stderr
-	if err := install.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "install failed: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println("daemon will restart via marker")
 }
