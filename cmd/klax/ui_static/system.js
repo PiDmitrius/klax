@@ -18,6 +18,7 @@ function codeValue(value){
 function row(label, value, opts){
   opts = opts || {};
   const el = document.createElement("div"); el.className = "sysrow";
+  if(opts.title) el.title = opts.title;
   const k = document.createElement("span"); k.className = "syskey"; k.textContent = label;
   const group = document.createElement("span"); group.className = "sysvalgroup";
   let v = opts.copy ? codeValue(value) : opts.link ? document.createElement("a") : document.createElement("span");
@@ -36,14 +37,24 @@ function elapsed(sec){
 }
 
 function ram(bytes){
-  return bytes === null || bytes === undefined ? "—" : (bytes / 1048576).toFixed(1) + " МиБ";
+  if(bytes === null || bytes === undefined) return "—";
+  const gib = bytes >= 1073741824;
+  return (bytes / (gib ? 1073741824 : 1048576)).toFixed(1) + (gib ? " ГиБ" : " МиБ");
 }
 
 function render(data){
   lastData = data;
   const body = $("sysbody"), u = data.update || {};
   body.textContent = "";
-  body.append(row("Версия", "v" + data.version, { copy: true }), row("Запущен", new Date(data.started_at).toLocaleString()), row("Работает", elapsed(data.uptime_sec)), row("RAM", ram(data.rss_bytes)), row("CPU Time", elapsed(data.cpu_time_sec)), row("Платформа", data.platform));
+  body.append(
+    row("Версия", "v" + data.version, { copy: true }),
+    row("Запущен", new Date(data.started_at).toLocaleString()),
+    row("Работает", elapsed(data.uptime_sec)),
+    row("Занят", elapsed(data.cpu_time_sec), { title: "Суммарное процессорное время klax по всем потокам" }),
+    row("Рабочая RAM", ram(data.rss_bytes)),
+    row("Максимум RAM", ram(data.rss_peak_bytes), { title: "Пиковая RAM процесса klax с момента запуска" }),
+    row("Платформа", data.platform)
+  );
   body.appendChild(Object.assign(document.createElement("div"), { className: "syssep" }));
   if(u.source_dir) body.append(row("Исходник", u.source_dir, { copy: true }));
   const check = document.createElement("button"); check.id = "syscheck"; check.className = "syscheck";

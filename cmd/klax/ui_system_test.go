@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -44,7 +45,14 @@ func TestSystemAPIAuthAndView(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
+	var before, after syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &before); err != nil {
+		t.Fatal(err)
+	}
 	h.ServeHTTP(rec, authSystemRequest(http.MethodGet, "/api/system"))
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &after); err != nil {
+		t.Fatal(err)
+	}
 	if rec.Code != http.StatusOK {
 		t.Fatalf("authenticated status = %d", rec.Code)
 	}
@@ -59,6 +67,10 @@ func TestSystemAPIAuthAndView(t *testing.T) {
 	var cpu float64
 	if err := json.Unmarshal(fields["rss_bytes"], &rss); err != nil || rss == 0 {
 		t.Fatalf("rss_bytes = %s, error = %v", fields["rss_bytes"], err)
+	}
+	var peak uint64
+	if err := json.Unmarshal(fields["rss_peak_bytes"], &peak); err != nil || peak == 0 || peak < uint64(before.Maxrss)*1024 || peak > uint64(after.Maxrss)*1024 {
+		t.Fatalf("rss_peak_bytes = %s, expected between %d and %d, error = %v", fields["rss_peak_bytes"], uint64(before.Maxrss)*1024, uint64(after.Maxrss)*1024, err)
 	}
 	if err := json.Unmarshal(fields["cpu_time_sec"], &cpu); err != nil || string(fields["cpu_time_sec"]) == "null" || cpu < 0 {
 		t.Fatalf("cpu_time_sec = %s, error = %v", fields["cpu_time_sec"], err)

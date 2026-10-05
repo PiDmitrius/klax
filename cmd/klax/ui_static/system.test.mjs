@@ -17,23 +17,26 @@ function harness(){
   return { rows, run: code => vm.runInContext(code, context) };
 }
 
-test("system display shows RSS and cumulative CPU time", () => {
+test("system display orders elapsed time, CPU time, current and peak RSS", () => {
   const h = harness();
-  h.run(`render({ version: "0.9.0", started_at: "2020-01-01T00:00:00Z", uptime_sec: 61,
-    rss_bytes: 20.25 * 1024 * 1024, cpu_time_sec: 61.25, platform: "linux/amd64", update: {} })`);
+  h.run(`render({ version: "0.9.0", started_at: "2020-01-01T00:00:00Z", uptime_sec: 990,
+    cpu_time_sec: 72, rss_bytes: 46.125 * 1024 * 1024, rss_peak_bytes: Math.round(1.1 * 1024 ** 3), platform: "linux/amd64", update: {} })`);
   const values = Object.fromEntries(h.rows.map(r => [r.label, r.value]));
-  assert.equal(values.RAM, "20.3 МиБ");
-  assert.equal(values["CPU Time"], "1 мин 1.3 с");
-  assert.equal(values["Работает"], "1 мин 1 с");
+  assert.deepEqual(h.rows.slice(2, 6).map(r => r.label), ["Работает", "Занят", "Рабочая RAM", "Максимум RAM"]);
+  assert.equal(values["Работает"], "16 мин 30 с");
+  assert.equal(values["Занят"], "1 мин 12 с");
+  assert.equal(values["Рабочая RAM"], "46.1 МиБ");
+  assert.equal(values["Максимум RAM"], "1.1 ГиБ");
   assert.equal(Object.hasOwn(values, "Процесс"), false);
 });
 
 test("unavailable resource metrics remain unknown", () => {
   const h = harness();
-  h.run('render({ rss_bytes: null, cpu_time_sec: null, update: {} })');
+  h.run('render({ rss_bytes: null, rss_peak_bytes: null, cpu_time_sec: null, update: {} })');
   const values = Object.fromEntries(h.rows.map(r => [r.label, r.value]));
-  assert.equal(values.RAM, "—");
-  assert.equal(values["CPU Time"], "—");
+  assert.equal(values["Рабочая RAM"], "—");
+  assert.equal(values["Максимум RAM"], "—");
+  assert.equal(values["Занят"], "—");
 });
 
 test("durations retain CPU fractions and carry rounded seconds", () => {

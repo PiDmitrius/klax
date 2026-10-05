@@ -246,8 +246,9 @@ block on the current turn's completion.
     "started_at": "2026-01-01T00:00:00Z",
     "uptime_sec": 60,
     "home": "/home/<user>",
-    "rss_bytes": 20971520,
     "cpu_time_sec": 0.42,
+    "rss_bytes": 20971520,
+    "rss_peak_bytes": 31457280,
     "platform": "linux/amd64",
     "update": {"mode": "release", "running": false, "ok": false, "checked": false, "checking": false}
   },
@@ -276,8 +277,9 @@ loading sessions. Both endpoints sample current system status:
 | `started_at` | Daemon start time in RFC 3339 format. |
 | `uptime_sec` | Whole seconds since daemon start. |
 | `home` | Server's home directory; the UI abbreviates paths under it to `~`. |
-| `rss_bytes` | Current resident memory (RSS), in bytes. |
 | `cpu_time_sec` | Cumulative user and system CPU time, in seconds, including fractions. |
+| `rss_bytes` | Current resident memory (RSS), in bytes. |
+| `rss_peak_bytes` | Peak resident memory since process start, in bytes. |
 | `platform` | Operating system and architecture, such as `linux/amd64`. |
 | `update` | Cached release checks and installation status. |
 

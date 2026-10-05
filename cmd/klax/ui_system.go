@@ -82,18 +82,19 @@ type systemInstallTarget struct {
 }
 
 type systemView struct {
-	Version    string           `json:"version"`
-	Startup    string           `json:"startup"`
-	StartedAt  string           `json:"started_at"`
-	UptimeSec  int64            `json:"uptime_sec"`
-	Home       string           `json:"home"`
-	RSSBytes   *uint64          `json:"rss_bytes"`
-	CPUTimeSec *float64         `json:"cpu_time_sec"`
-	Platform   string           `json:"platform"`
-	Update     systemUpdateView `json:"update"`
+	Version      string           `json:"version"`
+	Startup      string           `json:"startup"`
+	StartedAt    string           `json:"started_at"`
+	UptimeSec    int64            `json:"uptime_sec"`
+	Home         string           `json:"home"`
+	CPUTimeSec   *float64         `json:"cpu_time_sec"`
+	RSSBytes     *uint64          `json:"rss_bytes"`
+	RSSPeakBytes *uint64          `json:"rss_peak_bytes"`
+	Platform     string           `json:"platform"`
+	Update       systemUpdateView `json:"update"`
 }
 
-func processUsage() (rssBytes *uint64, cpuTimeSec *float64) {
+func processUsage() (rssBytes, rssPeakBytes *uint64, cpuTimeSec *float64) {
 	if data, err := os.ReadFile("/proc/self/statm"); err == nil {
 		var virtual, resident uint64
 		if _, err := fmt.Sscan(string(data), &virtual, &resident); err == nil {
@@ -105,12 +106,14 @@ func processUsage() (rssBytes *uint64, cpuTimeSec *float64) {
 	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err == nil {
 		seconds := time.Duration(usage.Utime.Nano() + usage.Stime.Nano()).Seconds()
 		cpuTimeSec = &seconds
+		peak := uint64(usage.Maxrss) * 1024
+		rssPeakBytes = &peak
 	}
 	return
 }
 
 func (d *daemon) systemView() systemView {
-	rss, cpu := processUsage()
+	rss, peak, cpu := processUsage()
 	home, _ := os.UserHomeDir()
 	st := d.systemState()
 	st.mu.Lock()
@@ -127,14 +130,15 @@ func (d *daemon) systemView() systemView {
 		releases = append(releases, systemReleaseView{Tag: release.Tag, Age: releaseAge(release.PublishedAt), URL: release.URL, Action: releaseAction(release.Tag), Source: "github"})
 	}
 	return systemView{
-		Version:    version,
-		Startup:    d.startupKind,
-		StartedAt:  st.startedAt.Format(time.RFC3339),
-		UptimeSec:  int64(time.Since(st.startedAt).Seconds()),
-		Home:       home,
-		RSSBytes:   rss,
-		CPUTimeSec: cpu,
-		Platform:   runtime.GOOS + "/" + runtime.GOARCH,
+		Version:      version,
+		Startup:      d.startupKind,
+		StartedAt:    st.startedAt.Format(time.RFC3339),
+		UptimeSec:    int64(time.Since(st.startedAt).Seconds()),
+		Home:         home,
+		CPUTimeSec:   cpu,
+		RSSBytes:     rss,
+		RSSPeakBytes: peak,
+		Platform:     runtime.GOOS + "/" + runtime.GOARCH,
 		Update: systemUpdateView{
 			Mode: mode, SourceDir: pathutil.TildePathsInText(d.cfg.SourceDir), Running: st.running,
 			StartedAt: formatSystemTime(st.updateStarted), FinishedAt: formatSystemTime(st.updateFinished),

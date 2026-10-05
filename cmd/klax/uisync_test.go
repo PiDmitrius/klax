@@ -169,7 +169,7 @@ func TestStateIncludesSystemSnapshot(t *testing.T) {
 	if update := decode(inState["update"]); update["current"] != nil {
 		t.Fatal("system update duplicates the running version")
 	}
-	for _, field := range []string{"uptime_sec", "rss_bytes", "cpu_time_sec"} {
+	for _, field := range []string{"uptime_sec", "cpu_time_sec", "rss_bytes", "rss_peak_bytes"} {
 		if inState[field] == nil || standalone[field] == nil {
 			t.Fatalf("missing sampled field %q", field)
 		}
