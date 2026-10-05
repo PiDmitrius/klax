@@ -1,4 +1,5 @@
 import { api, apiError, copyText, flashCopied, tildePath } from "./base.js";
+import { fmtDate, fmtTime } from "./markdown.js";
 import { isReadOnly } from "./auth.js";
 import { uiConfirm } from "./modal.js";
 
@@ -48,7 +49,7 @@ function render(data){
   body.textContent = "";
   body.append(
     row("Версия", "v" + data.version, { copy: true }),
-    row("Запущен", new Date(data.started_at).toLocaleString()),
+    row("Запущен", fmtDate(data.started_at) + " " + fmtTime(data.started_at)),
     row("Работает", elapsed(data.uptime_sec)),
     row("Занят", elapsed(data.cpu_time_sec), { title: "Суммарное процессорное время klax по всем потокам" }),
     row("Рабочая RAM", ram(data.rss_bytes)),

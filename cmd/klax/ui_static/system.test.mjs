@@ -3,13 +3,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { setHome, tildePath } from "./base.js";
+import { fmtDate, fmtTime } from "./markdown.js";
 
 function harness(){
   const rows = [];
   const body = { append: (...values) => rows.push(...values), appendChild() {} };
   const modal = { classList: { contains: () => true } };
   const context = vm.createContext({
-    rows, tildePath, isReadOnly: () => true, clearTimeout() {}, setTimeout: () => 0,
+    rows, tildePath, fmtDate, fmtTime, isReadOnly: () => true, clearTimeout() {}, setTimeout: () => 0,
     document: { getElementById: id => id === "sysbody" ? body : modal, createElement: () => ({}) },
   });
   const source = readFileSync(new URL("./system.js", import.meta.url), "utf8")
@@ -30,9 +31,10 @@ test("source directory stays absolute in data and is abbreviated for display", (
 
 test("system display orders elapsed time, CPU time, current and peak RSS", () => {
   const h = harness();
-  h.run(`render({ version: "0.9.0", started_at: "2020-01-01T00:00:00Z", uptime_sec: 990,
+  h.run(`render({ version: "0.9.0", started_at: new Date(2001, 1, 3, 4, 5, 6).toISOString(), uptime_sec: 990,
     cpu_time_sec: 72, rss_bytes: 46.125 * 1024 * 1024, rss_peak_bytes: Math.round(1.1 * 1024 ** 3), platform: "linux/amd64", update: {} })`);
   const values = Object.fromEntries(h.rows.map(r => [r.label, r.value]));
+  assert.equal(values["Запущен"], "2001.02.03 04:05:06");
   assert.deepEqual(h.rows.slice(2, 6).map(r => r.label), ["Работает", "Занят", "Рабочая RAM", "Максимум RAM"]);
   assert.equal(values["Работает"], "16 мин 30 с");
   assert.equal(values["Занят"], "1 мин 12 с");
