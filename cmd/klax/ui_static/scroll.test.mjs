@@ -27,6 +27,7 @@ function harness(){
   vm.runInContext(source + `
     active = 1; loaded[1] = loaded[2] = true; readThrough[1] = 0;
     globalThis.markReadActual = markRead;
+    globalThis.reportReadActual = reportRead;
     globalThis.commitLiveActual = commitLive;
     globalThis.rerenderStructuralActual = rerenderStructural;
     advanceReadThroughPastViewport = () => { calls.push("advance"); return true; };
@@ -74,6 +75,72 @@ test("a failed read-marker save displays the server error, while success is quie
   h.run("api = async () => ({ ok: true }); flushRead(1)");
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(h.calls, []);
+});
+
+test("read reports skip positions in flight and confirmed by the server", async () => {
+  const h = harness();
+  h.run(`
+    readThrough[1] = pos(2, 3);
+    globalThis.readResponses = [];
+    api = (url, opts) => { calls.push(opts); return new Promise(resolve => readResponses.push(resolve)); };
+    flushRead(1); flushRead(1);
+  `);
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0].keepalive, true);
+  h.run("readResponses[0]({ ok: true })");
+  await new Promise(resolve => setImmediate(resolve));
+  h.run("flushRead(1); flushRead(1)");
+  assert.equal(h.calls.length, 1);
+});
+
+test("new read progress is sent while an older report is in flight", async () => {
+  for(const order of [[0, 1], [1, 0]]){
+    const h = harness();
+    h.run(`
+      globalThis.readResponses = [];
+      api = (url, opts) => { calls.push(JSON.parse(opts.body).read_pos); return new Promise(resolve => readResponses.push(resolve)); };
+      readThrough[1] = pos(2, 3); flushRead(1);
+      readThrough[1] = pos(2, 4); flushRead(1);
+    `);
+    assert.deepEqual(h.calls, ["2.3", "2.4"]);
+    for(const i of order){
+      h.run(`readResponses[${i}]({ ok: true })`);
+      await new Promise(resolve => setImmediate(resolve));
+      h.run("flushRead(1)");
+      assert.equal(h.calls.length, 2);
+    }
+  }
+});
+
+test("a network failure leaves the read position available for retry", async () => {
+  const h = harness();
+  h.run(`
+    readThrough[1] = pos(2, 3);
+    api = () => { calls.push("failed"); return Promise.reject(new Error("offline")); };
+    flushRead(1);
+  `);
+  await new Promise(resolve => setImmediate(resolve));
+  h.run('api = async () => { calls.push("saved"); return { ok: true }; }; flushRead(1)');
+  await new Promise(resolve => setImmediate(resolve));
+  h.run("flushRead(1)");
+  assert.deepEqual(h.calls, ["failed", "saved"]);
+});
+
+test("flushing a pending read sends it immediately and cancels the debounce", async () => {
+  const h = harness();
+  h.run(`
+    reportRead = reportReadActual;
+    readThrough[1] = pos(2, 3);
+    api = async () => { calls.push("saved"); return { ok: true }; };
+    reportRead(1);
+  `);
+  h.tick(399);
+  assert.deepEqual(h.calls, []);
+  h.run("flushRead(1)");
+  await new Promise(resolve => setImmediate(resolve));
+  h.tick(400);
+  h.run("flushRead(1)");
+  assert.deepEqual(h.calls, ["saved"]);
 });
 
 test("bottom jump animates to settled geometry and has no persistent scroll lock", () => {

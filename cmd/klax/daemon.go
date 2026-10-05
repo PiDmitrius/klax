@@ -146,7 +146,7 @@ func connectTransport(name string, handshake func() error, onReady, onDone func(
 // announceStartup tells the messengers the daemon is up, without waiting: a send retries for up to
 // sendTimeout per user against an unreachable platform, and nothing on the startup path may block on
 // that. The UI reads the same fact from /api/state.
-func (d *daemon) announceStartup(text string) { go d.notifyAllUsers(text) }
+func (d *daemon) announceStartup(text string) { go d.notifyMessengerUsers(text) }
 
 // connect runs a transport's readiness check in the background and starts its poll loop when it
 // succeeds. Used at startup and by `/transports on`, so enabling always revalidates.
@@ -856,10 +856,14 @@ func (d *daemon) stopPoll(name string) {
 
 // notifyAllUsers sends a message to all allowed users on enabled platforms and returns the seq of
 // its UI notice. These are self-initiated messages (no replyTo).
-//
+func (d *daemon) notifyAllUsers(text string) uint64 {
+	d.notifyMessengerUsers(text)
+	return d.uiNotifyAll(text)
+}
+
 // Runs concurrently with the poll loops, and /transports mutates the disabled set under d.mu, so
 // that set is snapshotted under the lock rather than read live.
-func (d *daemon) notifyAllUsers(text string) uint64 {
+func (d *daemon) notifyMessengerUsers(text string) {
 	d.mu.Lock()
 	disabled := make(map[string]bool, len(d.disabled))
 	for k, v := range d.disabled {
@@ -894,7 +898,6 @@ func (d *daemon) notifyAllUsers(text string) uint64 {
 			d.sendMessage(chatID, "", text)
 		}
 	}
-	return d.uiNotifyAll(text)
 }
 
 // startDrain puts the daemon into draining mode.

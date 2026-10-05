@@ -4,15 +4,15 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { TurnModel, ordLess, applyMerge } from "./model.js";
 import { cursorEpoch, cursorSeq } from "./events.js";
-import { pos, answerBlock } from "./render.js";
+import { pos, parsePos, decodePos, answerBlock } from "./render.js";
 
 function harness(){
   const requests = [];
   const context = vm.createContext({
-    TurnModel, ordLess, applyMerge, cursorEpoch, cursorSeq, pos, answerBlock, console, setTimeout, clearTimeout, AbortController,
+    TurnModel, ordLess, applyMerge, cursorEpoch, cursorSeq, pos, parsePos, decodePos, answerBlock, console, setTimeout, clearTimeout, AbortController,
     requestAnimationFrame: () => 0, cancelAnimationFrame() {},
     api: url => new Promise(resolve => requests.push({ url, resolve })),
-    parsePos: () => 0, selectionInLog: () => false, isReadOnly: () => true, filterScope: l => l, parseHash: () => ({}),
+    selectionInLog: () => false, isReadOnly: () => true, filterScope: l => l, parseHash: () => ({}),
     reconcileSessions() {}, renderChip() {}, showNotice() {}, systemRestartNotice: () => "",
     writeHash() {}, storageKey: () => "session", loadDraft() {}, saveDraft() {}, setHome() {},
     document: { visibilityState: "visible", getElementById: () => null },
@@ -144,6 +144,17 @@ test("a resync raises a kept read watermark from the snapshot", async () => {
   h.respond(1, { at: "2.1", sessions: [{ klax_id: "1", read_pos: "9.0" }] });
   await sync;
   assert.equal(h.run("readThrough[1]"), 9e6);
+});
+
+test("published read positions confirm local progress without another report", async () => {
+  const h = harness();
+  h.run("active = '1'; readThrough[1] = pos(2, 3)");
+  for(const read_pos of ["2.3", "3.0", "1.0"]){
+    await h.run(`onSessionsList([{ klax_id: "1", read_pos: "${read_pos}" }])`);
+    h.run("flushRead('1')");
+    assert.equal(h.requests.length, 0);
+  }
+  assert.equal(h.run("readThrough[1]"), pos(3, 0));
 });
 
 test("tab patches and orders rebuild the strip from the snapshot", async () => {

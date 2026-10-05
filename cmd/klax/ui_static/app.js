@@ -29,6 +29,7 @@ const readThrough = {};   // klaxId -> encoded (turn,block) read watermark (pos(
 const unreadJump = {};    // klaxId -> one-shot scroll to the unread divider
 const readGraceUntil = {}, readGraceTimer = {};
 const readReportTimer = {}; // klaxId -> pending POST /api/read debounce timer
+const readSaved = {}, readSending = {}; // klaxId -> confirmed / in-flight read position
 const READ_GRACE_MS = 1600;
 let active = "";
 // Live channel. `after` is the ring cursor every applied snapshot/changes response advances. While
@@ -128,10 +129,8 @@ function modelMaxPos(klaxId){
   }
   return max;
 }
-// reportRead pushes the durable read watermark to the server (POST /api/read), debounced so a
-// scroll burst coalesces to one request. flushRead sends it immediately — used on tab-hide, before
-// the tab can freeze; `keepalive` lets that request outlive a backgrounding/close. The server
-// raises the watermark monotonically, so a late or duplicate report is a harmless no-op.
+// Read reports are debounced; tab-hide flushes pending progress with keepalive before freezing.
+// Confirmed positions and positions already in flight need no repeated report.
 function reportRead(klaxId){
   if(!klaxId || readThrough[klaxId] === undefined) return;
   if(readReportTimer[klaxId]) return;
@@ -140,9 +139,15 @@ function reportRead(klaxId){
 function flushRead(klaxId){
   if(!klaxId || readThrough[klaxId] === undefined) return;
   if(readReportTimer[klaxId]){ clearTimeout(readReportTimer[klaxId]); delete readReportTimer[klaxId]; }
-  const { turn, block } = decodePos(readThrough[klaxId]);
+  const p = readThrough[klaxId];
+  if(p <= Math.max(readSaved[klaxId] || 0, readSending[klaxId] || 0)) return;
+  readSending[klaxId] = p;
+  const { turn, block } = decodePos(p);
   api("/api/read", { method: "POST", keepalive: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ klax_id: klaxId, read_pos: turn + "." + block }) })
-    .then(r => { if(!r.ok) return apiError(r, "Не удалось сохранить отметку прочитанного").then(showNotice); }).catch(()=>{});
+    .then(r => {
+      if(r.ok) readSaved[klaxId] = Math.max(readSaved[klaxId] || 0, p);
+      else return apiError(r, "Не удалось сохранить отметку прочитанного").then(showNotice);
+    }).catch(()=>{}).finally(() => { if(readSending[klaxId] === p) delete readSending[klaxId]; });
 }
 function jumpToUnread(klaxId){ if(klaxId){ unreadJump[klaxId] = true; startReadGrace(klaxId); } }
 function focusComposer(){
@@ -858,8 +863,9 @@ async function onSessionsList(list){
     // AHEAD of ours — another browser tab (or the messenger) read further. Monotonic (never
     // regresses our own, maybe-not-yet-reported, reading), so the divider + badge here catch up.
     // A watermark kept across a resync is raised too, before its window reloads.
-    if(s.read_pos && readThrough[s.klax_id] !== undefined){
-      const p = parsePos(s.read_pos);
+    const p = parsePos(s.read_pos);
+    readSaved[s.klax_id] = Math.max(readSaved[s.klax_id] || 0, p);
+    if(readThrough[s.klax_id] !== undefined){
       if(p > readThrough[s.klax_id]){
         readThrough[s.klax_id] = p;
         if(loaded[s.klax_id]){
