@@ -235,7 +235,7 @@ type uiEventJSON struct {
 	KlaxID  string          `json:"klax_id,omitempty"`
 	Group   *uiGroupDelta   `json:"group,omitempty"`
 	Removed *uiRemoved      `json:"removed,omitempty"`
-	Tab     json.RawMessage `json:"tab,omitempty"`  // patch of one tab, always with its klax_id
+	Tab     json.RawMessage `json:"tab,omitempty"`  // patch of one tab
 	Tabs    []string        `json:"tabs,omitempty"` // the tab order, when membership or order changed
 	Notice  string          `json:"notice,omitempty"`
 }
@@ -319,9 +319,9 @@ func diffTabs(role int8, old *uiTabs, list []uiSessionInfo) (*uiTabs, []uiPendin
 		if p := mergePatch(before, cur.entry[c]); p != nil {
 			var m map[string]json.RawMessage
 			_ = json.Unmarshal(p, &m)
-			m["klax_id"], _ = json.Marshal(c)
+			delete(m, "klax_id")
 			tab, _ := json.Marshal(m)
-			out = append(out, uiPending{role: role, ev: uiEventJSON{Tab: tab}})
+			out = append(out, uiPending{role: role, ev: uiEventJSON{KlaxID: c, Tab: tab}})
 		}
 	}
 	if !slices.Equal(old.order, cur.order) {

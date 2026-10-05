@@ -205,8 +205,8 @@ test("tab patches and orders rebuild the strip from the snapshot", async () => {
     globalThis.strips = [];
     onSessionsList = async list => { strips.push(JSON.parse(JSON.stringify(list))); };
     applyEvents([
-      { seq: 11, tab: { klax_id: "1", unread: null, read_pos: "2.0" } },
-      { seq: 12, tab: { klax_id: "3", name: "three" } },
+      { seq: 11, klax_id: "1", tab: { unread: null, read_pos: "2.0" } },
+      { seq: 12, klax_id: "3", tab: { name: "three" } },
       { seq: 13, tabs: ["3", "1"] },
     ], "1.13");
   `);

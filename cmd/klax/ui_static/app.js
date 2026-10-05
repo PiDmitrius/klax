@@ -1003,7 +1003,7 @@ function applyEvents(events, at){
   let strip = false;
   for(const ev of events){
     if(ev.notice !== undefined) onNoticeEvent(ev.notice);
-    else if(ev.tab){ tabs.set(ev.tab.klax_id, applyMerge(tabs.get(ev.tab.klax_id), ev.tab)); strip = true; }
+    else if(ev.tab){ tabs.set(ev.klax_id, applyMerge(tabs.get(ev.klax_id) || { klax_id: ev.klax_id }, ev.tab)); strip = true; }
     else if(ev.tabs){ tabOrder = ev.tabs; strip = true; }
     else if(ev.klax_id) routeSessionEvent(ev);
   }

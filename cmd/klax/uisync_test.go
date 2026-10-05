@@ -328,7 +328,7 @@ func TestSyncRenameSendsOnlyTheName(t *testing.T) {
 	at, _ := f.state()
 	f.d.renameSession("user:alice", f.klaxID, "renamed")
 	c := f.changes(at)
-	if want := fmt.Sprintf(`{"klax_id":%q,"name":"renamed"}`, f.klaxID); len(c.Events) != 1 || string(c.Events[0].Tab) != want {
+	if want := `{"name":"renamed"}`; len(c.Events) != 1 || c.Events[0].KlaxID != f.klaxID || string(c.Events[0].Tab) != want {
 		t.Fatalf("rename events = %+v, want %s", c.Events, want)
 	}
 }
@@ -356,11 +356,18 @@ func TestSyncTabsReplayEqualsState(t *testing.T) {
 	for _, ev := range append(c.Events, c2.Events...) {
 		switch {
 		case ev.Tab != nil:
-			var id struct {
-				KlaxID string `json:"klax_id"`
+			var patch map[string]json.RawMessage
+			if err := json.Unmarshal(ev.Tab, &patch); err != nil {
+				t.Fatal(err)
 			}
-			_ = json.Unmarshal(ev.Tab, &id)
-			tabs[id.KlaxID] = applyMerge(tabs[id.KlaxID], ev.Tab)
+			if ev.KlaxID == "" || patch["klax_id"] != nil {
+				t.Fatalf("tab event address = %+v", ev)
+			}
+			before := tabs[ev.KlaxID]
+			if before == nil {
+				before = []byte(fmt.Sprintf(`{"klax_id":%q}`, ev.KlaxID))
+			}
+			tabs[ev.KlaxID] = applyMerge(before, ev.Tab)
 		case ev.Tabs != nil:
 			order = ev.Tabs
 		}
@@ -423,7 +430,7 @@ func TestSyncSessionWindowLeavesTurnsAlone(t *testing.T) {
 	f.d.store.UpdateSession("user:alice", f.klaxID, func(s *session.Session) { s.ContextWindow = 1_000_000 })
 	f.d.uiPoke("alice")
 	c := f.changes(at)
-	if want := fmt.Sprintf(`{"ctx_window":1000000,"klax_id":%q}`, f.klaxID); len(c.Events) != 1 || string(c.Events[0].Tab) != want {
+	if want := `{"ctx_window":1000000}`; len(c.Events) != 1 || c.Events[0].KlaxID != f.klaxID || string(c.Events[0].Tab) != want {
 		t.Fatalf("window change events = %+v, want only %s", c.Events, want)
 	}
 }

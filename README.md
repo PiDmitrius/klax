@@ -265,6 +265,15 @@ channel; `system` is sampled at request time. Uptime and resource measurements d
 not advance `at` or emit live events. A client that only lists sessions ignores
 `at` and `system`. With management access, an empty account gets an initial session.
 
+`/api/changes` events for one session (`group`, `removed`, `tab`) carry `klax_id`
+beside `seq`. The `tab` payload contains only changed fields:
+
+```json
+{"seq":42,"klax_id":"lOGezVsS","tab":{"busy":true}}
+```
+
+The `tabs` payload is the complete ordered list of session IDs.
+
 ### System status
 
 `GET /api/system` returns the same object as `system` in `/api/state`, without

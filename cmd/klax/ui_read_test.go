@@ -240,10 +240,10 @@ func TestDiffTabsSendsOnlyChanges(t *testing.T) {
 	if len(evs) != 3 {
 		t.Fatalf("events = %+v, want two tab patches and the order", evs)
 	}
-	if got := string(evs[0].ev.Tab); got != `{"klax_id":"a1","read_pos":"2.0","unread":null}` {
+	if got := string(evs[0].ev.Tab); evs[0].ev.KlaxID != a.KlaxID || got != `{"read_pos":"2.0","unread":null}` {
 		t.Fatalf("tab patch = %s", got)
 	}
-	if !strings.Contains(string(evs[1].ev.Tab), `"name":"three"`) || !slices.Equal(evs[2].ev.Tabs, []string{"a1", "c3"}) || evs[2].role != roleRW {
+	if evs[1].ev.KlaxID != c.KlaxID || !strings.Contains(string(evs[1].ev.Tab), `"name":"three"`) || !slices.Equal(evs[2].ev.Tabs, []string{"a1", "c3"}) || evs[2].role != roleRW {
 		t.Fatalf("new tab and order = %s %v", evs[1].ev.Tab, evs[2].ev.Tabs)
 	}
 }
