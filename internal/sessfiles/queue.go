@@ -38,6 +38,7 @@ type record struct {
 	Marker       string         `json:"marker,omitempty"`
 	TS           int64          `json:"ts,omitempty"`
 	Reason       string         `json:"reason,omitempty"`
+	CtxWindow    int            `json:"ctx_window,omitempty"`
 	Hook         string         `json:"hook,omitempty"`
 	Status       string         `json:"status,omitempty"`
 	Backend      string         `json:"backend,omitempty"`
@@ -62,6 +63,7 @@ type Turn struct {
 	TS           int64
 	Last         string // enq|run|done|err
 	Reason       string
+	CtxWindow    int // context window the turn ran with, from its terminal record
 	HookFailures []HookFailure
 	Backend      string
 	Session      string
@@ -199,9 +201,11 @@ func (s *Store) Bind(seq int64, backend, session string, event int64, recordDige
 	}
 	return s.appendRecord(record{Ev: "bind", Seq: seq, Backend: backend, Session: session, Event: &event, RecordDigest: recordDigest, TS: time.Now().UnixNano()})
 }
-func (s *Store) MarkDone(seq int64) error { return s.mark(record{Ev: "done", Seq: seq}) }
-func (s *Store) MarkErr(seq int64, reason string) error {
-	return s.mark(record{Ev: "err", Seq: seq, Reason: reason})
+func (s *Store) MarkDone(seq int64, ctxWindow int) error {
+	return s.mark(record{Ev: "done", Seq: seq, CtxWindow: ctxWindow})
+}
+func (s *Store) MarkErr(seq int64, reason string, ctxWindow int) error {
+	return s.mark(record{Ev: "err", Seq: seq, Reason: reason, CtxWindow: ctxWindow})
 }
 func (s *Store) MarkHookError(seq int64, hook, reason string) error {
 	return s.mark(record{Ev: "hook", Seq: seq, Hook: hook, Status: "error", Reason: reason})
@@ -360,7 +364,7 @@ func (q *queueProjection) fold(r record) {
 			t.Bound, t.Event, t.RecordDigest = true, *r.Event, r.RecordDigest
 		}
 	case "done", "err":
-		t.Last, t.Reason = r.Ev, r.Reason
+		t.Last, t.Reason, t.CtxWindow = r.Ev, r.Reason, r.CtxWindow
 	case "hook":
 		if r.Status != "error" {
 			return

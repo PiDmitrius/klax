@@ -55,7 +55,7 @@ func TestReadTokenPermissionsAndIdentity(t *testing.T) {
 	if w := f.request("/api/send", body, "invalid"); w.Code != 401 {
 		t.Fatal("invalid token accepted")
 	}
-	for _, path := range []string{"/api/auth", "/api/sessions", fmt.Sprintf("/api/settings?session=%d", f.created), fmt.Sprintf("/api/transcript?session=%d", f.created)} {
+	for _, path := range []string{"/api/auth", "/api/state", fmt.Sprintf("/api/settings?session=%d", f.created), fmt.Sprintf("/api/transcript?session=%d", f.created)} {
 		w := accessGet(f, path, "reader")
 		if w.Code != 200 {
 			t.Fatalf("read %s: %d %s", path, w.Code, w.Body.String())
@@ -96,14 +96,19 @@ func TestReaderWatermarksAreIndependentAndDurable(t *testing.T) {
 			t.Fatal(w.Code, w.Body.String())
 		}
 	}
+	var at string
 	snapshot := func(token string) uiSessionInfo {
 		t.Helper()
-		w := accessGet(f, "/api/sessions", token)
-		var list []uiSessionInfo
-		if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil || len(list) != 1 {
+		w := accessGet(f, "/api/state", token)
+		var state struct {
+			At       string          `json:"at"`
+			Sessions []uiSessionInfo `json:"sessions"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &state); err != nil || len(state.Sessions) != 1 {
 			t.Fatal("snapshot", err, w.Body.String())
 		}
-		return list[0]
+		at = state.At
+		return state.Sessions[0]
 	}
 	before := snapshot("access")
 	mark("reader", 1, 0)
@@ -130,13 +135,17 @@ func TestReaderWatermarksAreIndependentAndDurable(t *testing.T) {
 	if snapshot("rotated-reader").ReadThrough != "1.0" || snapshot("access").ReadThrough != "2.3" {
 		t.Fatal("markers lost after reload/rotation")
 	}
-	transcript := accessGet(f, fmt.Sprintf("/api/transcript?session=%d", f.created), "rotated-reader")
-	if !strings.Contains(transcript.Body.String(), `"read_through":"1.0"`) {
-		t.Fatal("transcript uses wrong reader")
+	snapshot("rotated-reader")
+	mark("rotated-reader", 2, 0)
+	w := f.request("/api/changes", fmt.Sprintf(`{"after":%q}`, at), "rotated-reader")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"read_through":"2.0"`) {
+		t.Fatal("changes use wrong reader", w.Code, w.Body.String())
 	}
-	w := f.request("/api/tail", `{"cursors":{},"sess_rev":999999}`, "rotated-reader")
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"read_through":"1.0"`) {
-		t.Fatal("tail uses wrong reader", w.Code, w.Body.String())
+	after, _ := f.d.uiHub.parseAfter(at)
+	for _, raw := range func() []json.RawMessage { ev, _, _ := f.d.uiHub.collect("test", after, roleRW); return ev }() {
+		if strings.Contains(string(raw), `"read_through":"2.0"`) {
+			t.Fatal("reader strip reached the full-access role", string(raw))
+		}
 	}
 }
 
@@ -145,9 +154,9 @@ func TestReaderDoesNotCreateInitialSession(t *testing.T) {
 	for _, method := range []string{"GET", "POST"} {
 		var w *httptest.ResponseRecorder
 		if method == "GET" {
-			w = accessGet(f, "/api/sessions", "other-reader")
+			w = accessGet(f, "/api/state", "other-reader")
 		} else {
-			w = f.request("/api/tail", `{"cursors":{},"sess_rev":999999}`, "other-reader")
+			w = f.request("/api/changes", `{"after":""}`, "other-reader")
 		}
 		if w.Code != 200 {
 			t.Fatal(w.Code, w.Body.String())

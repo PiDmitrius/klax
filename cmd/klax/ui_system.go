@@ -47,11 +47,7 @@ func (d *daemon) systemState() *systemState {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.system == nil {
-		started := time.Now()
-		if d.uiHub != nil {
-			started = time.Unix(0, d.uiHub.epoch)
-		}
-		d.system = newSystemState(started)
+		d.system = newSystemState(time.Now())
 	}
 	return d.system
 }

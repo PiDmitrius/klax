@@ -47,7 +47,7 @@ export function decodePos(p){ p = p || 0; return { turn: Math.floor(p / POS_MULT
 // `holdSplits` preserves group boundaries that used to be separated by the unread divider for one
 // live frame after the divider disappears. That lets the line fade out before the two bubble pieces
 // merge back into one.
-export function renderModel(turns, watermark, holdSplits, joinHeldSplits){
+export function renderModel(turns, watermark, holdSplits, joinHeldSplits, ctxWindowHint){
   const items = [];
   let queuePos = 0, divided = false;
   // The last context we actually know — the most recent turn's own measured value (the exact
@@ -60,9 +60,8 @@ export function renderModel(turns, watermark, holdSplits, joinHeldSplits){
     if(t.role !== "user"){
       // System notices belong exclusively to the notification stack, never the timeline.
       if(t.role === "notice") continue;
-      // `key` is the standalone's live eventSeq (render-key stability only); it carries no data-pos
-      // so it never drives read-advance, and it is not counted as unread.
-      items.push({ kind: "bubble", cls: blockCls(t), text: t.text || "", md: t.role !== "tool", time: t.time, key: t.eventSeq });
+      // A standalone carries no data-pos, so it never drives read-advance and is not counted as unread.
+      items.push({ kind: "bubble", key: t.key, cls: blockCls(t), text: t.text || "", md: t.role !== "tool", time: t.time });
       continue;
     }
     const blocks_ = t.blocks || [];
@@ -110,14 +109,16 @@ export function renderModel(turns, watermark, holdSplits, joinHeldSplits){
     // the gap, still the bottom line. A running turn with no tokens of its own yet falls back to
     // lastCtx — the previous turn's final value, already known and already shown on its line.
     // It is NOT a group — buildItem renders it after the dots indicator.
-    const finalCtx = contextText(t.ctx_used, t.ctx_window);
-    const ctxLine = (t.state === "done" || t.state === "err") ? finalCtx
-      : t.state === "run" ? (finalCtx || contextText(lastCtxUsed, lastCtxWindow))
+    // A running turn learns its window only when it completes, so it measures its own tokens
+    // against the last window a turn actually ran with.
+    const ctxLine = (t.state === "done" || t.state === "err") ? contextText(t.ctx_used, t.ctx_window)
+      : t.state === "run" ? contextText(t.ctx_used || lastCtxUsed, t.ctx_window || lastCtxWindow || ctxWindowHint)
       : "";
     const note = t.state === "enq" ? "в очереди · " + queuePos
       : t.state === "unknown" ? "статус неизвестен" : undefined;
     items.push({ kind: "turn", seq: t.seq, text: t.text || "", time: t.time, groups, state: t.state, note, ctxLine, ctxTime: lastGroupTime });
-    if(t.ctx_used){ lastCtxUsed = t.ctx_used; lastCtxWindow = t.ctx_window; } // carry the known context forward to a later running turn
+    if(t.ctx_used) lastCtxUsed = t.ctx_used; // carry the known context forward to a later running turn
+    if(t.ctx_window) lastCtxWindow = t.ctx_window;
   }
   return items;
 }
@@ -198,11 +199,9 @@ function reuseImages(root, bySrc){
   });
 }
 
-function renderKey(it, index){
+function renderKey(it){
   if(it.kind === "turn") return "turn:" + it.seq;
-  // Prefer the event seq over the list index: it keeps the key stable when items above
-  // (the unread divider) come and go, which node reuse and FLIP shifts both rely on.
-  if(it.kind === "bubble") return "bubble:" + (it.key !== undefined ? "e" + it.key : index) + ":" + it.cls;
+  if(it.kind === "bubble") return "bubble:" + it.key;
   return "";
 }
 
@@ -214,11 +213,11 @@ function renderSig(it){
         divider: g.divider,
         cls: g.cls, tool: g.tool, time: g.time, startPos: g.startPos, maxPos: g.maxPos,
         joinPrev: !!g.joinPrev, joinNext: !!g.joinNext,
-        blocks: (g.blocks || []).map(b => ({ id: b.id, role: b.role, text: b.text, kind: b.kind, time: b.time })),
+        blocks: (g.blocks || []).map(b => ({ role: b.role, text: b.text, kind: b.kind, time: b.time })),
       })),
     });
   }
-  if(it.kind === "bubble") return JSON.stringify({ cls: it.cls, text: it.text, md: it.md, time: it.time, key: it.key });
+  if(it.kind === "bubble") return JSON.stringify({ cls: it.cls, text: it.text, md: it.md, time: it.time });
   return "";
 }
 
@@ -238,8 +237,8 @@ function stamp(node, key, sig){
 
 // Each turn child carries a FLIP key (data-flip) AND a content signature (data-csig). The key is an
 // independently animatable unit — answer groups are keyed by the durable position of their first
-// block, not by content-derived block IDs, so tool-label/text changes patch the same DOM node instead
-// of creating an entering replacement. When reading merges bubbles a divider used to split, the
+// block, so tool-label/text changes patch the same DOM node instead of creating an entering
+// replacement. When reading merges bubbles a divider used to split, the
 // merged bubble inherits the leading part's position key and stays put. The content signature gates
 // formatting and DOM replacement; join classes update separately without rebuilding bubble contents.
 function childSig(kind, extra){ return JSON.stringify([kind, extra]); }
@@ -306,7 +305,7 @@ function buildTurn(it, onStop, old){
     }
     const fk = "g:" + g.startPos;
     const sig = childSig("g", { cls: g.cls, tool: g.tool, time: g.time, maxPos: g.maxPos,
-      blocks: (g.blocks || []).map(b => ({ id: b.id, role: b.role, text: b.text, kind: b.kind, time: b.time })) });
+      blocks: (g.blocks || []).map(b => ({ role: b.role, text: b.text, kind: b.kind, time: b.time })) });
     const node = putBubble(fk, sig, g.cls, g.time, g.maxPos, () => ({
       html: g.blocks.map(b => g.tool ? esc(b.text || "") : mdSafe(b.text || "")).join(g.tool ? "<br>" : ""),
       raw: g.blocks.map(b => b.text || "").join(g.tool ? "\n" : "\n\n"),
@@ -341,8 +340,8 @@ export function paint(col, items, onStop){
   const nodes = reusableNodes(col);
   const desired = []; // ordered final nodes, reconciled into `col` in place (no fragment detach)
   const fresh = [];   // freshly-built nodes that may hold NEW <img> elements to reconnect
-  items.forEach((it, index) => {
-    const key = renderKey(it, index);
+  items.forEach(it => {
+    const key = renderKey(it);
     const sig = renderSig(it);
     const old = key && nodes.get(key);
     if(old && old.dataset.renderSig === sig){
@@ -384,8 +383,8 @@ export function paint(col, items, onStop){
   reconcileChildren(col, desired);
 }
 
-export function renderSession(col, turns, unreadAfter, onStop, holdSplits, joinHeldSplits){
-  paint(col, renderModel(turns, unreadAfter, holdSplits, joinHeldSplits), onStop);
+export function renderSession(col, turns, unreadAfter, onStop, holdSplits, joinHeldSplits, ctxWindowHint){
+  paint(col, renderModel(turns, unreadAfter, holdSplits, joinHeldSplits, ctxWindowHint), onStop);
 }
 
 // --- smooth live updates (FLIP) ---

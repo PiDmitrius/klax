@@ -145,7 +145,7 @@ func connectTransport(name string, handshake func() error, onReady, onDone func(
 
 // announceStartup tells the messengers the daemon is up, without waiting: a send retries for up to
 // sendTimeout per user against an unreachable platform, and nothing on the startup path may block on
-// that. The UI reads the same fact from /api/tail.
+// that. The UI reads the same fact from /api/state.
 func (d *daemon) announceStartup(text string) { go d.notifyAllUsers(text) }
 
 // connect runs a transport's readiness check in the background and starts its poll loop when it
@@ -641,6 +641,7 @@ func runDaemon() {
 	}
 
 	d := &daemon{
+		system:     newSystemState(time.Now()),
 		models:     models,
 		cfg:        cfg,
 		state:      session.LoadState(),
@@ -679,7 +680,7 @@ func runDaemon() {
 		d.sources["ym"] = &legacySource{name: "ym", poll: d.pollYM}
 	}
 
-	// Web UI source (HTTP/SSE), gated by config. It joins the same canonical
+	// Web UI source (HTTP), gated by config. It joins the same canonical
 	// user identity, so its tabs share sessions with the messengers.
 	if cfg.UIListen != "" {
 		uiTokens, err := buildUITokens(cfg.Users)
@@ -700,7 +701,7 @@ func runDaemon() {
 
 	// The marker distinguishes a completed install from every other kind of process start.
 	// Keep that fact in the new process after removing the marker so every UI tab reads the same
-	// canonical startup outcome from /api/tail instead of inferring it from browser-local state.
+	// canonical startup outcome from /api/state instead of inferring it from browser-local state.
 	m := readMarker()
 	startupKind, text := startupNotice(m)
 	d.startupKind = startupKind
@@ -850,12 +851,12 @@ func (d *daemon) stopPoll(name string) {
 	log.Printf("poll stopped: %s", name)
 }
 
-// notifyAllUsers sends a message to all allowed users on enabled platforms.
-// These are self-initiated messages (no replyTo).
+// notifyAllUsers sends a message to all allowed users on enabled platforms and returns the seq of
+// its UI notice. These are self-initiated messages (no replyTo).
 //
 // Runs concurrently with the poll loops, and /transports mutates the disabled set under d.mu, so
 // that set is snapshotted under the lock rather than read live.
-func (d *daemon) notifyAllUsers(text string) map[string]uint64 {
+func (d *daemon) notifyAllUsers(text string) uint64 {
 	d.mu.Lock()
 	disabled := make(map[string]bool, len(d.disabled))
 	for k, v := range d.disabled {
@@ -943,7 +944,7 @@ func (d *daemon) startDrain(reason string) {
 		case <-done:
 			log.Println("all sessions drained")
 			if d.uiHub != nil {
-				d.uiHub.waitAcknowledged(uiNotice, 2*time.Second)
+				d.uiHub.waitPollsPast(uiNotice, 2*time.Second)
 			}
 			d.shutdown()
 			return

@@ -1,6 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/PiDmitrius/klax/internal/session"
@@ -69,127 +73,175 @@ func TestUnreadAfterCountsBlocksPastWatermark(t *testing.T) {
 	}
 }
 
-// TestTailFromSlicesPastCursor locks the live-tail slice: a grown
-// boundary turn, a state-changed boundary turn, or any turn past `head` yields the tail from the
-// boundary turn (standalones ride along); an unchanged / fully-past cursor yields nil so the
-// long-poll keeps holding; a stale/zero cursor resends the whole model.
-func TestTailFromSlicesPastCursor(t *testing.T) {
-	mkturn := func(seq int64, blocks int) uiTurn {
-		u := uiTurn{Seq: seq, Role: "user"}
-		for i := 0; i < blocks; i++ {
-			u.Blocks = append(u.Blocks, uiBlock{Role: "assistant", Text: "b"})
+// Turn groups get stable keys and strictly increasing ords: standalone rows join the preceding
+// user row (group 0 before the first), and a queue-only turn sorts right before the transcript
+// turn it is placed before, or last.
+func TestGroupRowsKeysAndOrd(t *testing.T) {
+	rows := []uiTurn{
+		{Role: "system", Text: "intro", event: 0},
+		{Role: "user", Seq: 1, event: 3},
+		{Role: "system", Text: "note", event: 4},
+		{Role: "user", Seq: 2, queueOnly: true},
+		{Role: "user", Seq: 3, event: 8},
+		{Role: "user", Seq: 4, queueOnly: true},
+	}
+	groups := groupRows(9, rows)
+	var keys []string
+	for i, g := range groups {
+		keys = append(keys, g.Key)
+		if i > 0 && !groups[i-1].Ord.less(g.Ord) {
+			t.Fatalf("ord not increasing at %d: %+v then %+v", i, groups[i-1].Ord, g.Ord)
 		}
-		return u
 	}
-	// turn 1 (2 blocks), a standalone tool row, turn 2 (1 block). mkturn leaves State "" (code "e"),
-	// so passing "e" keeps the state check neutral and exercises the block/new-turn logic.
-	page := []uiTurn{mkturn(1, 2), {Role: "tool", Text: "compact"}, mkturn(2, 1)}
-
-	if got := tailFrom(page, 1, 0, "e", 0, 1, 0); len(got) != 3 || got[0].Seq != 1 {
-		t.Fatalf("boundary turn grew: got %d rows (want 3 from turn 1)", len(got))
+	if want := []string{"t:9:0", "t:9:1", "t:9:2", "t:9:3", "t:9:4"}; !slices.Equal(keys, want) {
+		t.Fatalf("keys = %v, want %v", keys, want)
 	}
-	if got := tailFrom(page, 1, 1, "e", 0, 1, 0); len(got) != 3 || got[0].Seq != 1 {
-		t.Fatalf("later turn is new: got %d rows (want 3 from turn 1)", len(got))
+	if len(groups[0].Rows) != 1 || groups[0].Head != nil || len(groups[1].Rows) != 1 || groups[1].Rows[0].Text != "note" {
+		t.Fatalf("standalone rows misplaced: %+v", groups)
 	}
-	if got := tailFrom(page, 2, 0, "e", 0, 2, 0); got != nil {
-		t.Fatalf("nothing new past (2,0,e,0): got %d rows, want nil", len(got))
+	for i, want := range []string{"[-1,0]", "[3,1]", "[8,2]", "[8,3]", "[null,4]"} {
+		if got, _ := json.Marshal(groups[i].Ord); string(got) != want {
+			t.Fatalf("ord %d = %s, want %s", i, got, want)
+		}
 	}
-	// A cursor block PAST the boundary turn's current block count — the turn shrank, or a stale
-	// over-read — re-syncs the boundary turn so live can't keep stale extra blocks a reload wouldn't.
-	if got := tailFrom(page, 2, 5, "e", 0, 2, 0); len(got) != 1 || got[0].Seq != 2 {
-		t.Fatalf("shrink/over-read must re-sync the boundary turn: got %d rows, want 1 from turn 2", len(got))
-	}
-	if got := tailFrom(page, 0, 0, "", 0, 0, 0); len(got) != 3 {
-		t.Fatalf("zero cursor resends all: got %d rows, want 3", len(got))
-	}
-
-	// The boundary (latest) turn flips enq→run with NO new block (backend still "thinking"): the state
-	// code makes it fresh ONCE, then it holds (no spin) once the client has acked the run state.
-	running := []uiTurn{{Seq: 1, Role: "user", State: "run"}} // started, no answer block yet
-	if got := tailFrom(running, 1, -1, "e", 0, 1, 0); len(got) != 1 || got[0].Seq != 1 {
-		t.Fatalf("enq→run with no new block must re-deliver once: got %d rows, want 1", len(got))
-	}
-	if got := tailFrom(running, 1, -1, "r", 0, 1, 0); got != nil {
-		t.Fatalf("already-acked run state must hold (no spin): got %d rows, want nil", len(got))
-	}
-
-	// A standalone non-durable row appended AFTER the last durable turn has no durable position of its
-	// own — the trail count (cursor 4th field, 0→1) delivers it once from the boundary, then holds.
-	trailing := []uiTurn{mkturn(4, 1), {Role: "tool", Text: "compact"}}
-	if got := tailFrom(trailing, 4, 0, "e", 0, 4, 0); len(got) != 2 || got[0].Seq != 4 {
-		t.Fatalf("trailing standalone must deliver once from the boundary: got %d rows, want 2 from turn 4", len(got))
-	}
-	if got := tailFrom(trailing, 4, 0, "e", 1, 4, 0); got != nil {
-		t.Fatalf("already-acked trailing standalone must hold (no spin): got %d rows, want nil", len(got))
-	}
-
-	// QUEUE: ping #1 still RUNNING while ping #2 is enqueued behind it. The cursor anchors on the
-	// running turn 1 (block 0, run) but carries head=2, so the already-seen queued turn 2 is not
-	// re-flagged as "new" — this is the regression guard for the "first turn's answer never arrives"
-	// bug where the cursor had jumped to turn 2 and turn 1's completion became invisible.
-	q1run := []uiTurn{{Seq: 1, Role: "user", State: "run", Blocks: []uiBlock{{Role: "assistant", Text: "b"}}}, {Seq: 2, Role: "user", State: "enq"}}
-	if got := tailFrom(q1run, 1, 0, "r", 0, 2, 0); got != nil {
-		t.Fatalf("running turn behind a queued one, nothing new: got %d rows, want nil (no spin)", len(got))
-	}
-	// ping #1 COMPLETES (run→done): delivered from turn 1 even though a newer turn (2) sits ahead.
-	q1done := []uiTurn{{Seq: 1, Role: "user", State: "done", Blocks: []uiBlock{{Role: "assistant", Text: "b"}}}, {Seq: 2, Role: "user", State: "enq"}}
-	if got := tailFrom(q1done, 1, 0, "r", 0, 2, 0); len(got) != 2 || got[0].Seq != 1 {
-		t.Fatalf("a running turn's completion behind a queued turn must deliver: got %d rows, want 2 from turn 1", len(got))
-	}
-	// a genuinely NEW turn 3 (past head) still fires, delivering from the anchor.
-	q3 := append(append([]uiTurn{}, q1run...), uiTurn{Seq: 3, Role: "user", State: "enq"})
-	if got := tailFrom(q3, 1, 0, "r", 0, 2, 0); len(got) != 3 || got[0].Seq != 1 {
-		t.Fatalf("a turn past head must deliver from the anchor: got %d rows, want 3 from turn 1", len(got))
-	}
-	// a queued turn between the running anchor and head is CANCELLED: delivered once, then quiet.
-	q2cancel := []uiTurn{q1run[0], {Seq: 2, Role: "user", State: "err", Blocks: []uiBlock{{Kind: "cancelled"}}}, {Seq: 3, Role: "user", State: "enq"}}
-	if got := tailFrom(q2cancel, 1, 0, "r", 0, 3, 0); len(got) != 3 || got[0].Seq != 1 {
-		t.Fatalf("a cancelled turn behind the running one must deliver: got %d rows, want 3 from turn 1", len(got))
-	}
-	if cur := tailCursor(q2cancel); cur != "1.0.r.0.3.1" {
-		t.Fatalf("tailCursor after cancel = %q, want 1.0.r.0.3.1", cur)
-	}
-	if got := tailFrom(q2cancel, 1, 0, "r", 0, 3, 1); got != nil {
-		t.Fatalf("an already-delivered cancel must not re-deliver: got %d rows", len(got))
+	if o, ok := parseOrd("null,4"); !ok || o != groups[4].Ord {
+		t.Fatalf("parseOrd(null,4) = %+v, %v", o, ok)
 	}
 }
 
-// TestBlockCursorRoundTrips locks the tail cursor wire format
-// "<turn>.<block>.<state>.<trail>[.<head>.<settled>]": tailCursor stamps the anchor turn's seq/last-block/state
-// code, parseBlockCursor reverses it, and a legacy "<turn>.<block>" cursor parses to an empty state
-// so it re-syncs once rather than erroring.
-func TestBlockCursorRoundTrips(t *testing.T) {
-	cur := tailCursor([]uiTurn{{Seq: 7, Role: "user", State: "run"}}) // 0 blocks, no trailing rows
-	if cur != "7.-1.r.0" {
-		t.Fatalf("tailCursor(run, 0 blocks) = %q, want 7.-1.r.0", cur)
+// applyMerge applies a merge patch to a wire object, as the client does.
+func applyMerge(base []byte, patch json.RawMessage) []byte {
+	m := map[string]json.RawMessage{}
+	_ = json.Unmarshal(base, &m)
+	var p map[string]json.RawMessage
+	_ = json.Unmarshal(patch, &p)
+	for k, v := range p {
+		if string(v) == "null" {
+			delete(m, k)
+		} else {
+			m[k] = v
+		}
 	}
-	if turn, block, state, trail, head, _ := parseBlockCursor(cur); turn != 7 || block != -1 || state != "r" || trail != 0 || head != 7 {
-		t.Fatalf("parseBlockCursor(%q) = (%d,%d,%q,%d,%d), want (7,-1,r,0,7)", cur, turn, block, state, trail, head)
+	out, _ := json.Marshal(m)
+	return out
+}
+
+func applyArray[T any](xs []T, d *uiArrayDelta) []T {
+	if d == nil {
+		return xs
 	}
-	// two answer blocks (done) + one trailing standalone → block 1, trail 1 (all settled ⇒ 4-segment)
-	if cur := tailCursor([]uiTurn{{Seq: 3, Role: "user", State: "done", Blocks: []uiBlock{{}, {}}}, {Role: "tool", Text: "compact"}}); cur != "3.1.d.1" {
-		t.Fatalf("tailCursor(done, 2 blocks, 1 trailing) = %q, want 3.1.d.1", cur)
+	w := wireList(xs)
+	for i, p := range d.Set {
+		n, _ := strconv.Atoi(i)
+		w[n] = applyMerge(w[n], p)
 	}
-	// QUEUE: a RUNNING turn 1 (1 block) behind an ENQUEUED turn 2 → 5-segment cursor anchored on the
-	// running turn with head=2, so the cursor never advances past the still-running turn.
-	if cur := tailCursor([]uiTurn{{Seq: 1, Role: "user", State: "run", Blocks: []uiBlock{{}}}, {Seq: 2, Role: "user", State: "enq"}}); cur != "1.0.r.0.2.0" {
-		t.Fatalf("tailCursor(run turn 1 behind enq turn 2) = %q, want 1.0.r.0.2.0", cur)
+	if d.Append != nil {
+		w = w[:d.Start]
 	}
-	if _, _, _, _, _, settled := parseBlockCursor("1.0.r.0.3.1"); settled != 1 {
-		t.Fatalf("parseBlockCursor(6-seg) settled = %d, want 1", settled)
+	for _, e := range d.Append {
+		w = append(w, e)
 	}
-	if turn, block, state, trail, head, _ := parseBlockCursor("1.0.r.0.2"); turn != 1 || block != 0 || state != "r" || trail != 0 || head != 2 {
-		t.Fatalf("parseBlockCursor(5-seg) = (%d,%d,%q,%d,%d), want (1,0,r,0,2)", turn, block, state, trail, head)
+	if d.Length != nil {
+		w = w[:*d.Length]
 	}
-	// Legacy cursors (a tab open from before the state/trail/head fields) parse the missing fields as
-	// zero-values (head defaults to the anchor turn) so they re-sync once rather than erroring.
-	if turn, block, state, trail, head, _ := parseBlockCursor("5.0"); turn != 5 || block != 0 || state != "" || trail != 0 || head != 5 {
-		t.Fatalf(`parseBlockCursor("5.0") = (%d,%d,%q,%d,%d), want (5,0,"",0,5)`, turn, block, state, trail, head)
+	out := make([]T, len(w))
+	for i, e := range w {
+		_ = json.Unmarshal(e, &out[i])
 	}
-	if turn, block, state, trail, head, _ := parseBlockCursor("5.0.r"); turn != 5 || block != 0 || state != "r" || trail != 0 || head != 5 {
-		t.Fatalf(`parseBlockCursor("5.0.r") = (%d,%d,%q,%d,%d), want (5,0,"r",0,5)`, turn, block, state, trail, head)
+	return out
+}
+
+// applyDelta is the client's rule for one group event.
+func applyDelta(g *uiGroup, d *uiGroupDelta) {
+	g.Ord = d.Ord
+	if d.Create != nil {
+		g.Head, g.Blocks, g.Rows = d.Create.Head, d.Create.Blocks, d.Create.Rows
+		return
 	}
-	if turn, block, state, trail, head, _ := parseBlockCursor(""); turn != 0 || block != -1 || state != "" || trail != 0 || head != 0 {
-		t.Fatalf(`parseBlockCursor("") = (%d,%d,%q,%d,%d), want (0,-1,"",0,0)`, turn, block, state, trail, head)
+	if d.Head != nil {
+		hb, _ := json.Marshal(g.Head)
+		var h uiTurn
+		_ = json.Unmarshal(applyMerge(hb, d.Head), &h)
+		g.Head = &h
+	}
+	g.Blocks, g.Rows = applyArray(g.Blocks, d.Blocks), applyArray(g.Rows, d.Rows)
+}
+
+func wireEqual(a, b any) bool {
+	x, _ := json.Marshal(a)
+	y, _ := json.Marshal(b)
+	return string(x) == string(y)
+}
+
+// A changed group sends only the fields and blocks that changed: a header patch, element patches
+// by index, appended blocks and a shorter length; a new group is created in full, a vanished one is
+// removed after the group events, and replaying the deltas reproduces the new value.
+func TestDiffGroupsSendsOnlyChanges(t *testing.T) {
+	block := func(text string) uiBlock { return uiBlock{Role: "assistant", Text: text} }
+	head := func(state string) *uiTurn { return &uiTurn{Role: "user", Seq: 5, Text: "long prompt", State: state} }
+	old := []uiGroup{
+		{Key: "t:1:4", Ord: uiOrd{event: 1, seq: 4}, Head: &uiTurn{Role: "user", Seq: 4, State: "done"}},
+		{Key: "t:1:5", Ord: uiOrd{event: 2, seq: 5}, Head: head("run"), Blocks: []uiBlock{block("A"), block("B"), block("C")}},
+		{Key: "t:1:-9", Ord: uiOrd{event: 3, seq: -9}, Head: &uiTurn{Role: "user", Seq: -9}},
+	}
+	next := head("done")
+	next.CtxUsed = 900
+	cur := []uiGroup{
+		old[0],
+		{Key: "t:1:5", Ord: uiOrd{event: 2, seq: 5}, Head: next, Blocks: []uiBlock{block("A"), {Role: "assistant", Text: "B", Time: "t1"}, block("C"), block("D")}},
+		{Key: "t:1:6", Ord: uiOrd{event: 3, seq: 6}, Head: &uiTurn{Role: "user", Seq: 6, State: "done"}},
+	}
+	evs := diffGroups(1, old, cur)
+	if len(evs) != 3 || evs[0].ev.Group == nil || evs[1].ev.Group == nil || evs[2].ev.Removed == nil {
+		t.Fatalf("events = %+v, want two group deltas then one removal", evs)
+	}
+	d := evs[0].ev.Group
+	if string(d.Head) != `{"ctx_used":900,"state":"done"}` {
+		t.Fatalf("head patch = %s, want only the changed fields", d.Head)
+	}
+	if d.Blocks == nil || len(d.Blocks.Set) != 1 || string(d.Blocks.Set["1"]) != `{"time":"t1"}` || len(d.Blocks.Append) != 1 || d.Blocks.Start != 3 || d.Blocks.Length != nil {
+		t.Fatalf("blocks delta = %+v, want one field patch and one appended block", d.Blocks)
+	}
+	g := old[1]
+	applyDelta(&g, d)
+	if !wireEqual(g, cur[1]) {
+		t.Fatalf("replayed group = %+v, want %+v", g, cur[1])
+	}
+	if n := evs[1].ev.Group; n.Key != "t:1:6" || n.Create == nil || n.Create.Head == nil {
+		t.Fatalf("new group delta = %+v", n)
+	}
+	if rm := evs[2].ev.Removed; rm.Key != "t:1:-9" || rm.Ord != old[2].Ord {
+		t.Fatalf("removal = %+v", rm)
+	}
+	shrunk := []uiGroup{old[0], {Key: "t:1:5", Ord: old[1].Ord, Head: old[1].Head, Blocks: old[1].Blocks[:1]}, old[2]}
+	evs = diffGroups(1, old, shrunk)
+	if len(evs) != 1 || evs[0].ev.Group.Head != nil || evs[0].ev.Group.Blocks.Length == nil || *evs[0].ev.Group.Blocks.Length != 1 {
+		t.Fatalf("shrunk group delta = %+v", evs)
+	}
+	if evs := diffGroups(1, old, old); len(evs) != 0 {
+		t.Fatalf("unchanged groups produced %d events", len(evs))
+	}
+}
+
+// A tab patch carries only the changed fields (null for a dropped one); a new tab arrives whole
+// and membership changes send the order.
+func TestDiffTabsSendsOnlyChanges(t *testing.T) {
+	a := uiSessionInfo{Created: 1, Name: "one", Unread: 3, ReadThrough: "1.0"}
+	b := uiSessionInfo{Created: 2, Name: "two"}
+	pub, evs := diffTabs(roleRW, nil, []uiSessionInfo{a, b})
+	if len(evs) != 0 {
+		t.Fatalf("first publication sent %d events", len(evs))
+	}
+	a.Unread, a.ReadThrough = 0, "2.0"
+	c := uiSessionInfo{Created: 3, Name: "three"}
+	_, evs = diffTabs(roleRW, pub, []uiSessionInfo{a, c})
+	if len(evs) != 3 {
+		t.Fatalf("events = %+v, want two tab patches and the order", evs)
+	}
+	if got := string(evs[0].ev.Tab); got != `{"created":1,"read_through":"2.0","unread":null}` {
+		t.Fatalf("tab patch = %s", got)
+	}
+	if !strings.Contains(string(evs[1].ev.Tab), `"name":"three"`) || !slices.Equal(evs[2].ev.Tabs, []int64{1, 3}) || evs[2].role != roleRW {
+		t.Fatalf("new tab and order = %s %v", evs[1].ev.Tab, evs[2].ev.Tabs)
 	}
 }

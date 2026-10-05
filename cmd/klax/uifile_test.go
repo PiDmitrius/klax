@@ -101,7 +101,7 @@ func TestHandleFileUsesDisplayNameForDownload(t *testing.T) {
 		{http.MethodGet, "/api/file", http.StatusForbidden},
 		{http.MethodGet, "/api/file?ref=invalid", http.StatusForbidden},
 		{http.MethodPost, "/api/file?ref=" + token, http.StatusUnauthorized},
-		{http.MethodGet, "/api/sessions", http.StatusUnauthorized},
+		{http.MethodGet, "/api/state", http.StatusUnauthorized},
 	} {
 		w := httptest.NewRecorder()
 		routes.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))

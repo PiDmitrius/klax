@@ -9,6 +9,7 @@ import (
 	_ "image/png"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -17,9 +18,9 @@ import (
 	"github.com/PiDmitrius/klax/internal/runner"
 )
 
-func decodeEvent(t *testing.T, raw json.RawMessage) uiEvent {
+func decodeEvent(t *testing.T, raw json.RawMessage) uiEventJSON {
 	t.Helper()
-	var ev uiEvent
+	var ev uiEventJSON
 	if err := json.Unmarshal(raw, &ev); err != nil {
 		t.Fatalf("decode event: %v", err)
 	}
@@ -39,141 +40,111 @@ func TestQueuedCountExcludesFirstIdleQueuedMessage(t *testing.T) {
 	}
 }
 
-// Every retained event (a notice — the only kind kept now) gets a monotonic seq per user; collect
-// returns everything after a cursor, the head, and whether the cursor is coverable.
-func TestUIHubCollect(t *testing.T) {
+// Ring events get one monotonic seq; collect returns everything after a cursor for the
+// request's role, never another user's events.
+func TestUIRingCollect(t *testing.T) {
 	h := newUIHub()
 	for i := 0; i < 5; i++ {
-		h.broadcast("alice", uiEvent{Type: "notice", Text: "x"})
+		h.notice("alice", "x")
 	}
-	// From cursor 0: all 5, head 5, no reload.
-	ev, head, reload := h.collect("alice", h.epoch, 0)
-	if reload || head != 5 || len(ev) != 5 {
-		t.Fatalf("collect(0): n=%d head=%d reload=%v, want 5/5/false", len(ev), head, reload)
+	ev, at, resync := h.collect("alice", 0, roleRW)
+	if resync || at != 5 || len(ev) != 5 || decodeEvent(t, ev[0]).Seq != 1 {
+		t.Fatalf("collect(0): n=%d at=%d resync=%v", len(ev), at, resync)
 	}
-	if first := decodeEvent(t, ev[0]); first.Seq != 1 {
-		t.Fatalf("first seq=%d, want 1", first.Seq)
+	if ev, _, _ := h.collect("alice", 2, roleRO); len(ev) != 3 || decodeEvent(t, ev[0]).Seq != 3 {
+		t.Fatalf("collect(2) = %d events", len(ev))
 	}
-	// From cursor 2: exactly 3,4,5.
-	if ev, _, _ := h.collect("alice", h.epoch, 2); len(ev) != 3 || decodeEvent(t, ev[0]).Seq != 3 {
-		t.Fatalf("collect(2): n=%d first=%d, want 3 starting at seq 3", len(ev), decodeEvent(t, ev[0]).Seq)
+	if ev, _, resync := h.collect("alice", 5, roleRW); resync || len(ev) != 0 {
+		t.Fatalf("collect(5): n=%d resync=%v", len(ev), resync)
 	}
-	// Up to date: nothing, no reload.
-	if ev, _, reload := h.collect("alice", h.epoch, 5); reload || len(ev) != 0 {
-		t.Fatalf("collect(5): n=%d reload=%v, want 0/false", len(ev), reload)
-	}
-	// Stale epoch (daemon restart) -> reload.
-	if _, _, reload := h.collect("alice", h.epoch+1, 2); !reload {
-		t.Fatal("a stale-epoch cursor must report reload")
+	if ev, _, _ := h.collect("bob", 0, roleRW); len(ev) != 0 {
+		t.Fatalf("bob got %d of alice's events", len(ev))
 	}
 }
 
-// A notice cursor older than the retained ring (overflow) -> reload (transcript backstop).
-func TestUIHubCollectGapOnOverflow(t *testing.T) {
+// The ring evicts while it is over the soft byte bound and keeps the hard minimum of events.
+// Evicting one role's event raises only that role's floor, so the other role never resyncs for it.
+func TestUIRingEvictionFloorsPerRole(t *testing.T) {
 	h := newUIHub()
-	for i := 0; i < uiRingMaxItems+50; i++ {
-		h.broadcast("alice", uiEvent{Type: "notice", Text: "x"})
+	u := h.userSync("alice")
+	big := json.RawMessage(`"` + strings.Repeat("x", uiRingSoftBytes/uiRingMinEvents) + `"`)
+	h.mu.Lock()
+	for i := 0; i < 2*uiRingMinEvents; i++ {
+		h.appendLocked("alice", u, []uiPending{{role: roleRO, ev: uiEventJSON{Tab: big}}})
 	}
-	if _, _, reload := h.collect("alice", h.epoch, 1); !reload {
-		t.Fatal("a cursor predating the ring must report reload")
+	h.mu.Unlock()
+	if len(u.ring) < uiRingMinEvents || u.floor[roleRO] == 0 {
+		t.Fatalf("ring=%d floorRO=%d: want eviction down to at least the minimum", len(u.ring), u.floor[roleRO])
+	}
+	if u.floor[roleRW] != 0 {
+		t.Fatalf("read-only events raised the full-access floor to %d", u.floor[roleRW])
+	}
+	if _, _, resync := h.collect("alice", 0, roleRW); resync {
+		t.Fatal("full-access client resynced for evicted read-only events")
+	}
+	if _, _, resync := h.collect("alice", 0, roleRO); !resync {
+		t.Fatal("read-only client behind its floor must resync")
+	}
+	h.mu.Lock()
+	for i := 0; i < 2*uiRingMinEvents; i++ {
+		h.appendLocked("alice", u, []uiPending{{role: roleShared, ev: uiEventJSON{Tab: big}}})
+	}
+	h.mu.Unlock()
+	if u.floor[roleRW] == 0 {
+		t.Fatal("evicted shared events must raise every role's floor")
+	}
+	if len(u.ring) < uiRingMinEvents {
+		t.Fatalf("ring kept %d events, below the hard minimum", len(u.ring))
 	}
 }
 
-// (The user-echo-via-ring and delivery-emits-error tests were removed with the ring content
-// channel: a turn's user bubble and its aborted/error block now come from the durable log via
-// buildReadModel, delivered by the tail — covered by the tailFrom/unreadAfter tests.)
-
-// Events are retained per user; one user's events never leak into another's.
-func TestUIHubIsolatesUsers(t *testing.T) {
-	h := newUIHub()
-	h.broadcast("alice", uiEvent{Type: "notice", Text: "hi"})
-	if ev, _, _ := h.collect("alice", h.epoch, 0); len(ev) != 1 {
-		t.Fatalf("alice got %d events, want 1", len(ev))
-	}
-	if ev, _, _ := h.collect("bob", h.epoch, 0); len(ev) != 0 {
-		t.Fatalf("bob got %d events, want 0 (not alice's)", len(ev))
-	}
-}
-
-// A held poll grabs its user's wake channel before reading the ring; an emit for
-// that user closes the channel it holds (lost-wakeup-safe).
-func TestUIHubWakeOnEmit(t *testing.T) {
+// Appending an event wakes the user's held polls.
+func TestUIHubWakeOnNotice(t *testing.T) {
 	h := newUIHub()
 	ch := h.waitChan("alice")
+	h.notice("alice", "x")
 	select {
 	case <-ch:
-		t.Fatal("wake channel fired before any emit")
 	default:
-	}
-	h.broadcast("alice", uiEvent{Type: "progress", Text: "x"})
-	select {
-	case <-ch: // emit closed the channel we were holding
-	default:
-		t.Fatal("emit did not wake a held waiter")
+		t.Fatal("a notice did not wake a held poll")
 	}
 }
 
-// bumpSessions advances the per-user strip revision AND wakes held polls, so handleTail can return
-// a sessions-only change (rename/create/close/cross-tab read) immediately instead of holding to
-// the timeout.
-func TestBumpSessionsAdvancesRevAndWakes(t *testing.T) {
+// Before a restart the drain waits only for polls whose cursor is still before the notice.
+func TestWaitPollsPastReleasesWhenPollsMoveOn(t *testing.T) {
 	h := newUIHub()
-	if h.sessionsRev("alice") != 0 {
-		t.Fatalf("fresh rev = %d, want 0", h.sessionsRev("alice"))
-	}
-	ch := h.waitChan("alice")
-	h.bumpSessions("alice")
-	if got := h.sessionsRev("alice"); got != 1 {
-		t.Fatalf("rev after bump = %d, want 1", got)
-	}
-	select {
-	case <-ch: // the bump woke the held poll
-	default:
-		t.Fatal("bumpSessions did not wake a held poll")
-	}
-}
-
-// A daemon-wide notice must reach a user who polled at least once but is between polls now (no
-// inflight, and no ring entry since content isn't retained) — else the restart/update banner is
-// silently dropped for an open UI.
-func TestBroadcastAllReachesKnownUserBetweenPolls(t *testing.T) {
-	h := newUIHub()
-	h.enterPoll("alice") // marks the user known
-	h.leavePoll("alice") // now: not inflight, no ring entry
-	h.broadcastAll(uiEvent{Type: "notice", Text: "restart"})
-	if ev, _, _ := h.collect("alice", h.epoch, 0); len(ev) != 1 {
-		t.Fatalf("known user between polls missed the notice: got %d events, want 1", len(ev))
-	}
-}
-
-func TestNoticeBarrierWaitsForClientCursor(t *testing.T) {
-	h := newUIHub()
-	h.enterPoll("alice")
-	h.leavePoll("alice")
-	h.observeClient("alice", "tab-a", "")
-	h.observeClient("alice", "tab-b", "")
-	targets := h.broadcastAll(uiEvent{Type: "notice", Text: "restart"})
+	h.userSync("alice")
+	behind, _ := h.enterPoll("alice", 0)
+	ahead, _ := h.enterPoll("bob", 100)
+	seq := h.noticeAll("restart")
 	done := make(chan struct{})
-	go func() {
-		h.waitAcknowledged(targets, time.Second)
-		close(done)
-	}()
+	go func() { h.waitPollsPast(seq, time.Second); close(done) }()
 	select {
 	case <-done:
-		t.Fatal("barrier returned before the client acknowledged the notice")
+		t.Fatal("wait returned while a poll was still behind the notice")
 	case <-time.After(10 * time.Millisecond):
 	}
-	h.observeClient("alice", "tab-a", fmt.Sprintf("%d-%d", h.epoch, targets[uiClientKey("alice", "tab-a")]))
-	select {
-	case <-done:
-		t.Fatal("barrier returned after only one of two tabs acknowledged the notice")
-	case <-time.After(10 * time.Millisecond):
-	}
-	h.observeClient("alice", "tab-b", fmt.Sprintf("%d-%d", h.epoch, targets[uiClientKey("alice", "tab-b")]))
+	h.leavePoll(behind)
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("barrier did not release after the client acknowledged the notice")
+		t.Fatal("wait did not release once no poll was behind the notice")
+	}
+	h.leavePoll(ahead)
+}
+
+func TestUICursorRoundTrip(t *testing.T) {
+	h := newUIHub()
+	if !regexp.MustCompile(`^[A-Za-z0-9]{8}$`).MatchString(h.epoch) {
+		t.Fatalf("epoch %q is not 8 characters of [A-Za-z0-9]", h.epoch)
+	}
+	if seq, ok := h.parseAfter(h.cursor(42)); !ok || seq != 42 {
+		t.Fatalf("parseAfter(cursor(42)) = %d, %v", seq, ok)
+	}
+	for _, v := range []string{"", "42", newEpoch() + ".42", h.epoch + ".x"} {
+		if _, ok := h.parseAfter(v); ok {
+			t.Fatalf("parseAfter(%q) accepted a cursor from another process or a malformed one", v)
+		}
 	}
 }
 
@@ -181,16 +152,22 @@ func TestNoticeBarrierWaitsForClientCursor(t *testing.T) {
 // per-connection state); a freed slot allows a new poll.
 func TestUIHubInflightCap(t *testing.T) {
 	h := newUIHub()
+	var last *uiPoll
 	for i := 0; i < uiMaxInflightPerUser; i++ {
-		if !h.enterPoll("alice") {
+		p, ok := h.enterPoll("alice", 0)
+		if !ok {
 			t.Fatalf("enterPoll refused at %d, under the cap", i)
 		}
+		last = p
 	}
-	if h.enterPoll("alice") {
+	if _, ok := h.enterPoll("alice", 0); ok {
 		t.Fatal("enterPoll must refuse past the cap")
 	}
-	h.leavePoll("alice")
-	if !h.enterPoll("alice") {
+	if _, ok := h.enterPoll("bob", 0); !ok {
+		t.Fatal("one user's polls must not count against another's cap")
+	}
+	h.leavePoll(last)
+	if _, ok := h.enterPoll("alice", 0); !ok {
 		t.Fatal("a freed slot must allow a new poll")
 	}
 }
@@ -218,26 +195,26 @@ func TestBuildUITokens(t *testing.T) {
 func TestUIServerAuth(t *testing.T) {
 	s := &uiServer{tokens: map[string]uiAccess{"secret": {User: "alice"}}}
 
-	bearer := httptest.NewRequest("GET", "/api/sessions", nil)
+	bearer := httptest.NewRequest("GET", "/api/state", nil)
 	bearer.Header.Set("Authorization", "Bearer secret")
 	if u, ok := s.auth(bearer); !ok || u != "alice" {
 		t.Fatalf("bearer auth: got %q ok=%v", u, ok)
 	}
 
-	// A query-string token is NOT accepted: every UI request (incl. the tail long-poll)
+	// A query-string token is NOT accepted: every UI request (incl. the changes long-poll)
 	// sets the Authorization header, so there is no ?token= auth path.
-	query := httptest.NewRequest("GET", "/api/tail?token=secret", nil)
+	query := httptest.NewRequest("GET", "/api/state?token=secret", nil)
 	if _, ok := s.auth(query); ok {
 		t.Fatal("query token must not authenticate")
 	}
 
-	bad := httptest.NewRequest("GET", "/api/sessions", nil)
+	bad := httptest.NewRequest("GET", "/api/state", nil)
 	bad.Header.Set("Authorization", "Bearer nope")
 	if _, ok := s.auth(bad); ok {
 		t.Fatal("unknown token must not authenticate")
 	}
 
-	none := httptest.NewRequest("GET", "/api/sessions", nil)
+	none := httptest.NewRequest("GET", "/api/state", nil)
 	if _, ok := s.auth(none); ok {
 		t.Fatal("missing token must not authenticate")
 	}
@@ -296,7 +273,7 @@ func TestDeliveryForMirrorsMessengerToUI(t *testing.T) {
 	}
 }
 
-// newUIDelivery pokes the CANONICAL user's tail (user:alice -> "alice"), never the raw messenger id.
+// newUIDelivery pokes the CANONICAL user's held polls (user:alice -> "alice"), never the raw messenger id.
 func TestUIDeliveryUsesCanonicalSessionUser(t *testing.T) {
 	h := newUIHub()
 	d := &daemon{uiHub: h}
@@ -323,14 +300,14 @@ func TestUITransportUsesCanonicalSessionUser(t *testing.T) {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
-	ev, _, _ := h.collect("alice", h.epoch, 0)
+	ev, _, _ := h.collect("alice", 0, roleRW)
 	if len(ev) != 1 {
 		t.Fatalf("canonical user got %d events, want 1 notice", len(ev))
 	}
-	if e := decodeEvent(t, ev[0]); e.Type != "notice" || e.Text != "status" {
+	if e := decodeEvent(t, ev[0]); e.Notice != "status" {
 		t.Fatalf("event = %+v, want status notice", e)
 	}
-	if raw, _, _ := h.collect("42", h.epoch, 0); len(raw) != 0 {
+	if raw, _, _ := h.collect("42", 0, roleRW); len(raw) != 0 {
 		t.Fatal("raw messenger id received the canonical UI notice")
 	}
 }
@@ -353,27 +330,27 @@ func TestUIServerRoutes(t *testing.T) {
 	}
 
 	unauth := httptest.NewRecorder()
-	h.ServeHTTP(unauth, httptest.NewRequest("GET", "/api/sessions", nil))
+	h.ServeHTTP(unauth, httptest.NewRequest("GET", "/api/state", nil))
 	if unauth.Code != 401 {
-		t.Fatalf("unauthenticated /api/sessions: code=%d, want 401", unauth.Code)
+		t.Fatalf("unauthenticated /api/state: code=%d, want 401", unauth.Code)
 	}
 
 	ok := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/api/sessions", nil)
+	req := httptest.NewRequest("GET", "/api/state", nil)
 	req.Header.Set("Authorization", "Bearer sec")
 	h.ServeHTTP(ok, req)
 	if ok.Code != 200 || !strings.Contains(ok.Body.String(), `"created"`) {
-		t.Fatalf("authenticated /api/sessions: code=%d body=%s", ok.Code, ok.Body.String())
+		t.Fatalf("authenticated /api/state: code=%d body=%s", ok.Code, ok.Body.String())
 	}
 
-	// The tail long-poll is wired and authenticated: a malformed body reaches handleTail and is
-	// rejected 400 (not 404/401), proving the route past auth without holding the poll open.
-	tail := httptest.NewRecorder()
-	treq := httptest.NewRequest("POST", "/api/tail", strings.NewReader("not json"))
-	treq.Header.Set("Authorization", "Bearer sec")
-	h.ServeHTTP(tail, treq)
-	if tail.Code != 400 {
-		t.Fatalf("/api/tail with a bad body: code=%d, want 400 (route reached handleTail)", tail.Code)
+	// The changes long-poll is wired and authenticated: a malformed body reaches handleChanges and
+	// is rejected 400 (not 404/401), proving the route past auth without holding the poll open.
+	changes := httptest.NewRecorder()
+	creq0 := httptest.NewRequest("POST", "/api/changes", strings.NewReader("not json"))
+	creq0.Header.Set("Authorization", "Bearer sec")
+	h.ServeHTTP(changes, creq0)
+	if changes.Code != 400 {
+		t.Fatalf("/api/changes with a bad body: code=%d, want 400", changes.Code)
 	}
 
 	// The UI has no chat commands: the /api/command endpoint is gone (it falls

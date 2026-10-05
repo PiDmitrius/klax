@@ -1,9 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"fmt"
-	"strings"
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/history"
@@ -11,17 +8,12 @@ import (
 )
 
 // uiBlock is one answer block (assistant narration / tool call / system note) under a
-// user turn. ID is a STABLE content-derived dedup key (blockID): the same block hashes
-// identically whether it arrives in a reload's transcript or a live poll event, so the
-// client can drop the duplicate across the reload-read/poll race.
-// EventSeq is filled by the client on live apply (= the event's seq); absent on reload.
+// user turn; it is addressed by its index in the turn.
 type uiBlock struct {
-	ID    string             `json:"id"`
-	Role  string             `json:"role"` // assistant|tool|system|error
-	Text  string             `json:"text,omitempty"`
-	Tools []history.ToolCall `json:"tools,omitempty"`
-	Kind  string             `json:"kind,omitempty"`
-	Time  string             `json:"time,omitempty"` // RFC3339; a merged answer bubble shows its LAST block's time
+	Role string `json:"role"` // assistant|tool|system|error
+	Text string `json:"text,omitempty"`
+	Kind string `json:"kind,omitempty"`
+	Time string `json:"time,omitempty"` // RFC3339; a merged answer bubble shows its LAST block's time
 }
 
 // uiTurn is one row of the read model. A user row carries the durable turn seq + state
@@ -37,27 +29,16 @@ type uiTurn struct {
 	Blocks    []uiBlock `json:"blocks,omitempty"`
 	CtxUsed   int       `json:"ctx_used,omitempty"`
 	CtxWindow int       `json:"ctx_window,omitempty"`
-}
-
-// blockID hashes CANONICAL block content (role/text/tools) — callers must hash BEFORE any
-// per-response /api/file capability-ref rewriting (refs change every render), so a block
-// produced live and the same block re-read from the transcript share one id.
-func blockID(seq int64, role, text string, tools []history.ToolCall) string {
-	text = strings.TrimSpace(text) // history.Load trims assistant text; hash the same canonical form
-	h := sha256.New()
-	fmt.Fprintf(h, "%d\x00%s\x00%s", seq, role, text)
-	for _, t := range tools {
-		fmt.Fprintf(h, "\x00%s\x00%s", t.Name, t.Label)
-	}
-	return fmt.Sprintf("%d:%x", seq, h.Sum(nil)[:8])
+	event     int64     // transcript record of the row's lead; positions turn groups (ord)
+	queueOnly bool      // a durable turn the transcript has not recorded
 }
 
 // errBlock is the terminal block of an aborted/errored turn, so a reload shows why it
 // stopped (mirrors the messenger "❌ Прервано") instead of a silently-frozen turn. A cancelled
 // turn is the user's own choice, not a failure: the same block in a neutral kind.
-func errBlock(seq int64, reason string) uiBlock {
+func errBlock(reason string) uiBlock {
 	if reason == turnErrCancelled {
-		return uiBlock{ID: blockID(seq, "system", "Отменено", nil), Role: "system", Kind: "cancelled", Text: "Отменено"}
+		return uiBlock{Role: "system", Kind: "cancelled", Text: "Отменено"}
 	}
 	switch reason {
 	case "", turnErrAborted:
@@ -71,19 +52,16 @@ func errBlock(seq int64, reason string) uiBlock {
 	case turnErrBackendFailed:
 		reason = "Ошибка backend"
 	}
-	return uiBlock{ID: blockID(seq, "error", reason, nil), Role: "error", Text: reason}
+	return uiBlock{Role: "error", Text: reason}
 }
 
-func appendHookWarnings(blocks []uiBlock, seq int64, failures []sessfiles.HookFailure) []uiBlock {
+func appendHookWarnings(blocks []uiBlock, failures []sessfiles.HookFailure) []uiBlock {
 	for _, failure := range failures {
 		if failure.Hook != "audit.turn.finish" || failure.Status != "error" {
 			continue
 		}
 		text := turnWarnAuditFinishText
-		blocks = append(blocks, uiBlock{
-			ID: blockID(seq, "system", failure.Reason, nil), Role: "system",
-			Text: text, Kind: "error", Time: time.Unix(0, failure.TS).Format(time.RFC3339),
-		})
+		blocks = append(blocks, uiBlock{Role: "system", Text: text, Kind: "error", Time: time.Unix(0, failure.TS).Format(time.RFC3339)})
 	}
 	return blocks
 }
@@ -161,58 +139,11 @@ func groupTurns(items []history.Item) []groupedTurn {
 	return out
 }
 
-// transcriptPresence returns durable seqs whose user record is present in this
-// transcript projection. It uses durable coordinates, legacy markers, and the
-// same matcher as reconciliation for not-yet-bound records.
-func transcriptPresence(items []history.Item, queueTurns []sessfiles.Turn) map[int64]bool {
-	present := make(map[int64]bool)
-	byCoord := make(map[string]sessfiles.Turn)
-	byMarker := make(map[string]sessfiles.Turn)
-	transcripts := make(map[string][2]string)
-	var end int64
-	for _, t := range queueTurns {
-		if t.Bound {
-			byCoord[coordinateKey(t.Backend, t.Session, t.Event)] = t
-		}
-		if t.Marker != "" {
-			byMarker[t.Marker] = t
-		}
-	}
-	for _, it := range items {
-		if it.Role != "user" {
-			continue // only user records carry coordinates, markers and bindings
-		}
-		if it.Event >= end {
-			end = it.Event + 1
-		}
-		if it.Backend != "" && it.Session != "" {
-			transcripts[it.Backend+"\x00"+it.Session] = [2]string{it.Backend, it.Session}
-		}
-		if t, ok := byCoord[coordinateKey(it.Backend, it.Session, it.Event)]; ok && t.RecordDigest == it.RecordDigest {
-			present[t.Seq] = true
-		}
-		if it.Marker != "" {
-			if t, ok := byMarker[it.Marker]; ok {
-				present[t.Seq] = true
-			}
-		}
-	}
-	for _, bs := range transcripts {
-		for _, p := range proposeBindings(queueTurns, items, bs[0], bs[1], end) {
-			present[p.Seq] = true
-		}
-	}
-	return present
-}
-
-// buildReadModel turns one paginated page of grouped turns into read-model rows: it joins
-// each user turn to its durable coordinate binding (or legacy marker), rewrites
-// text to durable text + file thumbnails, and gives every answer block its stable id.
-// It also places turns the transcript hasn't recorded (queued, just-started, cancelled or
-// aborted before running) by turn_seq, so a reload shows them. `startOrdinal`
-// startOrdinal is retained in the internal signature for page callers; physical
-// transcript event numbers mint stable native/legacy ids.
-func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, queueTurns []sessfiles.Turn, globalPresence map[int64]bool, busy bool, startOrdinal int, latest bool, ctxWindow int, memo *rowMemo) []uiTurn {
+// buildReadModel turns a session's grouped transcript into read-model rows: it joins each user
+// turn to its durable coordinate binding (or legacy marker), rewrites text to durable text + file
+// thumbnails, and nests its answer blocks. It also places turns the transcript hasn't recorded
+// (queued, just-started, cancelled or aborted before running) by turn_seq, so a reload shows them.
+func (d *daemon) buildReadModel(sk string, created int64, grouped []groupedTurn, queueTurns []sessfiles.Turn, busy bool, memo *rowMemo) []uiTurn {
 	store := d.sessionStore(sk, created)
 	byMarker := make(map[string]sessfiles.Turn, len(queueTurns))
 	byCoord := make(map[string]sessfiles.Turn, len(queueTurns))
@@ -226,28 +157,24 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 	}
 	// The only non-durable association allowed here is the newest active run,
 	// using the exact same matcher as persistence while its bind fsync is pending.
-	pageItems := make([]history.Item, 0, len(page)) // presence and binding read only user leads
-	var pageEnd int64
-	for _, g := range page {
-		pageItems = append(pageItems, g.lead)
-		if g.lead.Event >= pageEnd {
-			pageEnd = g.lead.Event + 1
+	leads := make([]history.Item, 0, len(grouped)) // presence and binding read only user leads
+	var end int64
+	for _, g := range grouped {
+		leads = append(leads, g.lead)
+		if g.lead.Event >= end {
+			end = g.lead.Event + 1
 		}
-	}
-	pagePresence := transcriptPresence(pageItems, queueTurns)
-	if globalPresence == nil {
-		globalPresence = pagePresence
 	}
 	newestRun := newestRunSeq(queueTurns)
 	suppressNative := make(map[string]bool)
 	transcripts := make(map[string][2]string)
-	for _, it := range pageItems {
+	for _, it := range leads {
 		if it.Backend != "" && it.Session != "" {
 			transcripts[it.Backend+"\x00"+it.Session] = [2]string{it.Backend, it.Session}
 		}
 	}
 	for _, bs := range transcripts {
-		for _, p := range proposeBindings(queueTurns, pageItems, bs[0], bs[1], pageEnd) {
+		for _, p := range proposeBindings(queueTurns, leads, bs[0], bs[1], end) {
 			if busy && p.Seq == newestRun {
 				for _, t := range queueTurns {
 					if t.Seq == p.Seq {
@@ -255,21 +182,19 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 						byCoord[coordinateKey(p.Backend, p.Session, p.Event)] = t
 					}
 				}
-			} else if latest {
-				// Idle/recovered turns are never provisionally promoted to a durable
-				// positive seq. On the latest page, where its queue replacement is
-				// emitted, suppress the duplicate native row. Historical pages keep
-				// the transcript row because they do not append queue-only turns.
+			} else {
+				// Idle/recovered turns are never provisionally promoted to a durable positive
+				// seq: the queue row stands in for them, so the duplicate native row is dropped.
 				suppressNative[coordinateKey(p.Backend, p.Session, p.Event)] = true
 			}
 		}
 	}
-	seen := make(map[int64]bool, len(page))
+	seen := make(map[int64]bool, len(grouped))
 
-	turns := make([]uiTurn, 0, len(page))
-	for _, g := range page {
+	turns := make([]uiTurn, 0, len(grouped))
+	for _, g := range grouped {
 		if g.lead.Role != "user" {
-			turns = append(turns, uiTurn{Role: g.lead.Role, Text: g.lead.Text, Kind: g.lead.Kind, Time: g.lead.Time})
+			turns = append(turns, uiTurn{Role: g.lead.Role, Text: g.lead.Text, Kind: g.lead.Kind, Time: g.lead.Time, event: g.lead.Event})
 			continue
 		}
 		if suppressNative[coordinateKey(g.lead.Backend, g.lead.Session, g.lead.Event)] {
@@ -296,58 +221,46 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 			reason = matched.Reason
 			hooks = len(matched.HookFailures)
 		}
-		key := rowKey{event: g.lead.Event, seq: seq, blocks: len(g.blocks), state: state, reason: reason, hooks: hooks, ctxWindow: ctxWindow}
+		key := rowKey{event: g.lead.Event, seq: seq, blocks: len(g.blocks), state: state, reason: reason, hooks: hooks, turnWindow: matched.CtxWindow}
 		if n := len(g.blocks); n > 0 {
 			last := g.blocks[n-1]
 			key.lastCtx, key.lastCtxWindow, key.lastTime = last.CtxUsed, last.CtxWindow, last.Time
 		}
 		ut, keep := memo.get(key)
 		if !keep {
-			ut, keep = d.userRow(store, sk, created, g, matched, ok, seq, state, reason, ctxWindow)
+			ut, keep = d.userRow(store, sk, created, g, matched, ok, seq, state, reason)
 		}
 		if keep {
 			memo.put(key, ut)
+		} else {
+			memo.degrade()
 		}
+		ut.event = g.lead.Event
 		turns = append(turns, ut)
 	}
 
-	// A queue-only turn (never reached the transcript) belongs to the page of the next turn that
-	// did, right before it; with no such turn it trails the latest page.
-	anchor := make(map[int64]int64, len(queueTurns))
-	var next int64
-	for i := len(queueTurns) - 1; i >= 0; i-- {
-		t := queueTurns[i]
-		anchor[t.Seq] = next
-		if globalPresence[t.Seq] {
-			next = t.Seq
-		}
-	}
 	var missing []uiTurn
 	for _, t := range queueTurns {
 		if seen[t.Seq] {
 			continue
 		}
-		if globalPresence[t.Seq] {
-			if !latest || !pagePresence[t.Seq] {
-				continue // its real transcript row lives on another page
-			}
-		} else if a := anchor[t.Seq]; (a == 0 && !latest) || (a != 0 && !pagePresence[a]) {
-			continue
+		text, published := d.inboundText(store, t, sk, created)
+		if !published {
+			memo.degrade()
 		}
-		text, _ := d.inboundText(store, t, sk, created)
 		ut := uiTurn{
-			Seq: t.Seq, Role: "user", Text: text,
+			Seq: t.Seq, Role: "user", Text: text, queueOnly: true,
 			Time: time.Unix(0, t.TS).Format(time.RFC3339), State: resolvedTurnState(t, busy, newestRun, false),
 		}
 		switch t.Last {
 		case "enq", "run":
 			missing = append(missing, ut)
 		case "err": // a queued turn aborted before it ran — show it with why it stopped
-			ut.Blocks = append(ut.Blocks, errBlock(t.Seq, t.Reason))
+			ut.Blocks = append(ut.Blocks, errBlock(t.Reason))
 			missing = append(missing, ut)
 		case "done":
 			if !t.Bound {
-				ut.Blocks = appendHookWarnings(ut.Blocks, t.Seq, t.HookFailures)
+				ut.Blocks = appendHookWarnings(ut.Blocks, t.HookFailures)
 				missing = append(missing, ut)
 			}
 		}
@@ -355,10 +268,10 @@ func (d *daemon) buildReadModel(sk string, created int64, page []groupedTurn, qu
 	return mergeQueueOnlyTurns(turns, missing)
 }
 
-// userRow builds one user turn's row: durable text and time, answer blocks with stable ids, and
+// userRow builds one user turn's row: durable text and time, answer blocks, and
 // the klax-side error and hook-warning blocks. keep is false when an attachment or a local file
 // link could not be published yet, which a later build may still do.
-func (d *daemon) userRow(store *sessfiles.Store, sk string, created int64, g groupedTurn, matched sessfiles.Turn, ok bool, seq int64, state, reason string, ctxWindow int) (ut uiTurn, keep bool) {
+func (d *daemon) userRow(store *sessfiles.Store, sk string, created int64, g groupedTurn, matched sessfiles.Turn, ok bool, seq int64, state, reason string) (ut uiTurn, keep bool) {
 	keep = true
 	text, turnAt := g.lead.Text, g.lead.Time
 	if ok {
@@ -373,44 +286,41 @@ func (d *daemon) userRow(store *sessfiles.Store, sk string, created int64, g gro
 		}
 	}
 	ut = uiTurn{Seq: seq, Role: "user", Text: text, Time: turnAt, State: state}
-	// Split an assistant item's text and each tool into separate blocks, matching the
-	// live progress stream (one narration block, one block per tool) so a block's id is
-	// computed over the same canonical shape in both the transcript and the live event.
-	// The id hashes CANONICAL raw text; the displayed text gets the same outbound
-	// file-ref rewrite the live final applies, so reloaded agent files stay sealed refs.
+	// Split an assistant item's text and each tool into separate blocks: one narration block,
+	// one block per tool.
+	// The displayed text gets the same outbound file-ref rewrite the live final applies, so
+	// reloaded agent files stay sealed refs.
 	for _, b := range g.blocks {
 		if b.Role == "assistant" {
 			if b.Text != "" || len(b.Tools) == 0 {
 				text, published := d.rewriteOutboundForUI(sk, created, seq, b.Text)
 				keep = keep && published
-				ut.Blocks = append(ut.Blocks, uiBlock{
-					ID: blockID(seq, "assistant", b.Text, nil), Role: "assistant",
-					Text: text, Time: b.Time,
-				})
+				ut.Blocks = append(ut.Blocks, uiBlock{Role: "assistant", Text: text, Time: b.Time})
 			}
 			for _, tc := range b.Tools {
-				ut.Blocks = append(ut.Blocks, uiBlock{ID: blockID(seq, "tool", tc.Label, nil), Role: "tool", Text: tc.Label, Time: b.Time})
+				ut.Blocks = append(ut.Blocks, uiBlock{Role: "tool", Text: tc.Label, Time: b.Time})
 			}
 			// The per-turn context "cut line" comes from the last assistant block's usage —
 			// including a tool-only block (a codex turn whose final token_count lands on a
 			// trailing tool call), so this lives outside the text-block branch above. The
-			// block's own window wins; else fall back to the session window (Claude has none).
+			// block's own window wins; else the window the turn completed with (Claude's
+			// transcript has none). A turn without either shows used tokens only.
 			if b.CtxUsed > 0 {
 				ut.CtxUsed = b.CtxUsed
 				ut.CtxWindow = b.CtxWindow
-				if ut.CtxWindow == 0 {
-					ut.CtxWindow = ctxWindow
+				if ut.CtxWindow == 0 && ok {
+					ut.CtxWindow = matched.CtxWindow
 				}
 			}
 			continue
 		}
-		ut.Blocks = append(ut.Blocks, uiBlock{ID: blockID(seq, b.Role, b.Text, b.Tools), Role: b.Role, Text: b.Text, Tools: b.Tools, Kind: b.Kind, Time: b.Time})
+		ut.Blocks = append(ut.Blocks, uiBlock{Role: b.Role, Text: b.Text, Kind: b.Kind, Time: b.Time})
 	}
 	if state == "err" && !explainedByTranscript(reason, g.blocks) {
-		ut.Blocks = append(ut.Blocks, errBlock(seq, reason))
+		ut.Blocks = append(ut.Blocks, errBlock(reason))
 	}
 	if ok {
-		ut.Blocks = appendHookWarnings(ut.Blocks, seq, matched.HookFailures)
+		ut.Blocks = appendHookWarnings(ut.Blocks, matched.HookFailures)
 	}
 	// While the turn is still RUNNING, hold back only the most-recent assistant text block:
 	// the message currently being generated is represented by the working dots, not shown as
@@ -426,9 +336,11 @@ func (d *daemon) userRow(store *sessfiles.Store, sk string, created int64, g gro
 // transcript index generation. A row is a pure function of its rowKey — transcript blocks are
 // append-only apart from the last one's usage and time, and the durable text, time and published
 // file links of a seq never change — so a transcript append rebuilds only the turns it touched.
-// A row whose file link degraded is not kept. A nil memo builds every row.
+// A row whose file link degraded is not kept, and marks the build degraded. A nil memo builds
+// every row.
 type rowMemo struct {
 	prev, next map[rowKey]uiTurn
+	degraded   bool
 }
 
 type rowKey struct {
@@ -437,7 +349,7 @@ type rowKey struct {
 	lastCtx, lastCtxWindow int
 	lastTime               string
 	state, reason          string
-	hooks, ctxWindow       int
+	hooks, turnWindow      int
 }
 
 func (m *rowMemo) get(k rowKey) (uiTurn, bool) {
@@ -446,6 +358,12 @@ func (m *rowMemo) get(k rowKey) (uiTurn, bool) {
 	}
 	r, ok := m.prev[k]
 	return r, ok
+}
+
+func (m *rowMemo) degrade() {
+	if m != nil {
+		m.degraded = true
+	}
 }
 
 func (m *rowMemo) put(k rowKey, r uiTurn) {
@@ -508,93 +426,6 @@ func unreadAfter(turns []uiTurn, throughTurn int64, throughBlock int) int {
 			if t.Seq > throughTurn || (t.Seq == throughTurn && bi > throughBlock) {
 				n++
 			}
-		}
-	}
-	return n
-}
-
-// stateCode is the one-letter form of a turn's state carried in the tail cursor. It lets a pure
-// state transition (enq→run when the backend is still "thinking", so no new block yet) advance the
-// cursor and re-deliver the turn ONCE — edge-triggered, so the long-poll neither misses the change
-// (the bubble would stay "queued" until the first block or a reload) nor spins on it.
-func stateCode(state string) string {
-	switch state {
-	case "run":
-		return "r"
-	case "done":
-		return "d"
-	case "err":
-		return "x"
-	default:
-		return "e" // enq / unknown
-	}
-}
-
-// tailFrom returns the live "tail" of a session's read model past a per-session
-// (turn,block,state,trail,head,settled) cursor — the boundary turn (refreshed, so a grown OR state-changed
-// last turn re-syncs) plus every later turn AND trailing standalone row. It returns nil when nothing
-// is new (the boundary turn has not grown, its state is unchanged, no later turn exists past `head`,
-// AND no standalone was appended after the last durable turn), so a long-poll keeps holding rather
-// than spinning. The client replaces its own tail from `throughTurn` with these rows — ONE path,
-// shared with reload, so live delivery and reload converge (no event synthesis, no in-memory ring).
-// `throughState` is the boundary turn's state code the client last saw; `throughTrail` is the count
-// of standalone rows it last saw trailing after the last durable turn — this is how a non-durable
-// standalone appended AFTER the last turn (which has no durable position of its own) is delivered
-// live exactly once instead of only on reload. ("" / 0 on a legacy cursor ⇒ re-syncs once.)
-//
-// `head` is the newest durable turn the client has already seen. It is normally == throughTurn, but
-// when a turn is still RUNNING behind a newer QUEUED one, the boundary anchors on the running turn
-// (so its later blocks + completion are delivered) while `head` stays on the newest turn — so the
-// already-seen queued turn is NOT re-flagged as "new" on every poll (which would busy-loop the
-// long-poll). A whole new turn is one past `head`, not past the boundary. `settled` is how many turns
-// in (boundary, head] had already settled — a queued turn cancelled behind the running one changes it.
-func tailFrom(turns []uiTurn, throughTurn int64, throughBlock int, throughState string, throughTrail int, head int64, settled int) []uiTurn {
-	boundary := -1
-	fresh := false
-	trail := 0
-	if settledBetween(turns, throughTurn, head) != settled {
-		fresh = true
-	}
-	for i, t := range turns {
-		if t.Role != "user" || t.Seq <= 0 {
-			trail++ // a standalone / non-durable row; reset below when a later durable turn is seen
-			continue
-		}
-		trail = 0
-		if t.Seq == throughTurn {
-			boundary = i
-			if len(t.Blocks) > throughBlock+1 {
-				fresh = true // the boundary turn grew past the read block
-			}
-			if stateCode(t.State) != throughState {
-				fresh = true // the boundary turn changed state (e.g. enq→run, run→done) with no new block
-			}
-			if throughBlock >= 0 && throughBlock >= len(t.Blocks) {
-				fresh = true // the boundary turn shrank below the read block — re-sync so live == reload
-			}
-		} else if t.Seq > head {
-			fresh = true // a whole new turn (past everything the client has seen, not just the boundary)
-		}
-	}
-	if trail != throughTrail {
-		fresh = true // a standalone was appended/removed after the last durable turn
-	}
-	if !fresh {
-		return nil
-	}
-	from := boundary
-	if from < 0 {
-		from = 0 // cursor turn gone / never set → resend from the top; the client reconciles
-	}
-	return turns[from:]
-}
-
-// settledBetween counts durable turns in (anchor, head] that are no longer enq/run.
-func settledBetween(turns []uiTurn, anchor, head int64) int {
-	n := 0
-	for _, t := range turns {
-		if t.Role == "user" && t.Seq > anchor && t.Seq <= head && t.State != "enq" && t.State != "run" {
-			n++
 		}
 	}
 	return n
