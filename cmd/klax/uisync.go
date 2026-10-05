@@ -702,7 +702,7 @@ func writeChanges(w http.ResponseWriter, at string, events []json.RawMessage) {
 }
 
 // handleTranscript returns a window of a session's turn groups cut from the published state: the
-// newest `limit` groups, or those before the `before` ord for an older page.
+// newest `limit` groups, or those before the `to` ord for an older page.
 func (s *uiServer) handleTranscript(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")

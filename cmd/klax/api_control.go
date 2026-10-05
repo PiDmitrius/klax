@@ -189,8 +189,18 @@ func decodeAPIRequest(body io.Reader, value any, allowEmpty bool) error {
 		return fmt.Errorf("expected one JSON object")
 	}
 	for field, raw := range fields {
-		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-			return fmt.Errorf("field %q must not be null", field)
+		tokens := json.NewDecoder(bytes.NewReader(raw))
+		for {
+			token, err := tokens.Token()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return err
+			}
+			if token == nil {
+				return fmt.Errorf("field %q must not contain null", field)
+			}
 		}
 	}
 	data, err := json.Marshal(fields)

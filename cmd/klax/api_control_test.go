@@ -360,12 +360,14 @@ func TestAPIRejectsMalformedRequestsWithoutMutations(t *testing.T) {
 		{"/api/settings", `"model":"wrong"`},
 		{"/api/settings", `"tty":null`},
 		{"/api/settings", `"groups":null`},
+		{"/api/settings", `"groups":[null]`},
 		{"/api/send", `"text":"hello","session":"wrong"`},
 		{"/api/abort", `"extra":true`},
 		{"/api/cancel", `"turn_seq":1,"extra":true`},
 		{"/api/read", `"read_pos":"9.2","extra":true`},
 		{"/api/rename", `"name":"changed","extra":true`},
 		{"/api/reorder", `"tabs":[],"order":[]`},
+		{"/api/reorder", `"tabs":[null]`},
 		{"/api/close", `"extra":true`},
 		{"/api/changes", `"after":"","extra":true`},
 		{"/api/models/refresh", `"backend":"codex","extra":true`},
@@ -513,11 +515,19 @@ func TestAPISettingsOmittedAndEmptyFields(t *testing.T) {
 		cur.ModelRequested, cur.Think, cur.SystemPrompt = "retained-model", "high", "prompt"
 		cur.Groups = []string{"group"}
 	})
-	w := f.request("/api/settings", fmt.Sprintf(`{"klax_id":%q,"name":"renamed"}`, f.klaxID), "")
-	if w.Code != http.StatusOK {
+	w := f.request("/api/settings", fmt.Sprintf(`{"klax_id":%q,"groups":[null]}`, f.klaxID), "")
+	if w.Code != http.StatusBadRequest {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	cur := f.d.store.Get("user:test", f.klaxID)
+	if len(cur.Groups) != 1 || cur.Groups[0] != "group" {
+		t.Fatal("rejected groups changed", cur.Groups)
+	}
+	w = f.request("/api/settings", fmt.Sprintf(`{"klax_id":%q,"name":"renamed"}`, f.klaxID), "")
+	if w.Code != http.StatusOK {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	cur = f.d.store.Get("user:test", f.klaxID)
 	if cur.ModelRequested != "retained-model" || cur.Think != "high" || cur.SystemPrompt != "prompt" || len(cur.Groups) != 1 {
 		t.Fatal("omitted fields changed", cur)
 	}

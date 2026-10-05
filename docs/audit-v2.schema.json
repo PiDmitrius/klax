@@ -27,7 +27,7 @@
       "properties": {
         "turn_id": {
           "type": "string",
-          "pattern": "^[A-Za-z0-9]{1,64}\\.-?[0-9]+$",
+          "pattern": "^[A-Za-z0-9]+\\.-?[0-9]+$",
           "description": "<klax_id>.<turn_seq>: links turn.start to turn.finish. klax_id is unique within one klax state store; aggregators that combine independent stores key by their own (installation_id, turn_id)."
         },
         "turn_seq": {
@@ -100,7 +100,7 @@
       "required": ["session_key", "klax_id"],
       "properties": {
         "session_key": {"type": "string", "description": "Canonical klax routing key. It can represent a transport chat or a cross-transport mapped user."},
-        "klax_id": {"type": "string", "pattern": "^[A-Za-z0-9]{1,64}$", "description": "Opaque session identifier compared only for equality; its length is not part of the contract. Together with turn_seq it forms turn_id."},
+        "klax_id": {"type": "string", "pattern": "^[A-Za-z0-9]+$", "description": "Opaque session identifier compared only for equality; its length is not part of the contract. Together with turn_seq it forms turn_id."},
         "name": {"type": "string", "description": "User-visible session name at the turn.start boundary."}
       }
     },
