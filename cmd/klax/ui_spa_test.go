@@ -350,10 +350,6 @@ assert(renderModel([{ role: "notice", text: "restart" }], undefined).length === 
 	}
 }
 
-// The durable send-outbox is the client half of the "a submitted message is never lost" guarantee:
-// recoverOutbox must keep a still-unconfirmed message for a live session, re-home one whose target
-// session was closed (under a fresh nonce, dropping the undeliverable original), and discard an
-// unrecoverable attachment-only entry — all without losing any written text.
 func TestSendOutboxRecovery(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not found")
@@ -394,7 +390,7 @@ localStorage.setItem(K("orph"),  JSON.stringify({ klax_id: "s2", text: "orphan",
 localStorage.setItem(K("empty"), JSON.stringify({ klax_id: "s1", text: "",       nonce: "empty", sent: true }));
 // A different identity's entry must be invisible to this identity's recovery (privacy namespacing).
 localStorage.setItem("klax_outbox.OTHER.x", JSON.stringify({ klax_id: "s1", text: "not mine", nonce: "x", sent: true }));
-// Entries of the numeric-session outbox are dropped: their sessions no longer exist.
+// Numeric-session entries retain their original address and nonce.
 localStorage.setItem("klax_ob." + idTag("tok") + ".old", JSON.stringify({ created: 1, text: "old", nonce: "old", sent: true }));
 
 const { recoverOutbox } = await import("./compose.js");
@@ -408,7 +404,7 @@ assert(after.some(e => e.nonce === "a1" && e.text === "first"), "first original 
 assert(after.some(e => e.nonce === "a2" && e.text === "second"), "second original message/nonce must remain");
 assert(after.some(e => e.nonce === "orph" && e.klax_id === "s2"), "closed-session orphan must remain under its original nonce");
 assert(localStorage.getItem("klax_outbox.OTHER.x") !== null, "another identity's entry must be left untouched");
-assert(localStorage.getItem("klax_ob." + idTag("tok") + ".old") === null, "a numeric-session entry must be dropped");
+assert(localStorage.getItem("klax_ob." + idTag("tok") + ".old") !== null, "a numeric-session entry must remain intact");
 assert(n === 2, "only the two live-session messages are recoverable, got " + n);
 assert(notices === 2, "recovery and orphan notices expected");
 console.log("ok");

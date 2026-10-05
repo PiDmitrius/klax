@@ -577,6 +577,31 @@ test("recovery reclaims closed unsent drafts and preserves uncertain or legacy e
   assert.match(notices[1],/: 2$/);
 });
 
+test("numeric-session outbox keeps exact entries and notifies only their owner",()=>{
+  const h=composer();
+  const prefix="klax_ob."+h.ctx.idTag()+".";
+  for(const [nonce,sent] of [["typed",false],["submitted",true],["unknown",undefined]]){
+    h.store.set(prefix+nonce,JSON.stringify({created:42,text:"  original\n"+nonce,nonce,sent}));
+  }
+  h.ctx.getToken=()=>"another-token";
+  const otherPrefix="klax_ob."+h.ctx.idTag()+".";
+  h.store.set(otherPrefix+"other",JSON.stringify({created:7,text:"private draft",nonce:"other",sent:false}));
+  h.ctx.getToken=()=>"";
+  const before=[...h.store];
+
+  assert.equal(h.ctx.recoverOutbox({isLive:()=>true,notice:s=>h.notices.push(s)},h.ctx.outboxList()),0);
+  assert.deepEqual([...h.store],before);
+  assert.deepEqual(h.notices,["Сохранено сообщений без доступной сессии: 3"]);
+  assert.equal(h.ctx.outboxList().length,0);
+  assert.equal(h.apiCalls.length,0);
+
+  h.ctx.getToken=()=>"another-token";
+  h.notices.length=0;
+  assert.equal(h.ctx.recoverOutbox({isLive:()=>false,notice:s=>h.notices.push(s)}),0);
+  assert.deepEqual([...h.store],before);
+  assert.deepEqual(h.notices,["Сохранено сообщений без доступной сессии: 1"]);
+});
+
 test("closed unsent drafts cannot permanently exhaust outbox capacity",async()=>{
   const h=composer();
   for(let i=0;i<500;i++) assert.equal(h.ctx.outboxPut({klax_id:7,nonce:"closed-"+i,text:"draft",sent:false}),true);

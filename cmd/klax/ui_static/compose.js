@@ -82,7 +82,7 @@ function outboxDrop(nonce){
   catch(e){ return false; }
 }
 function discardUnsent(entry){ return entry.sent === false && outboxDrop(entry.nonce); }
-export function outboxList(){ const p = OB_PREFIX + idTag() + "."; const out = []; obScan(k => { if(k.indexOf(p) === 0){ try { const e = JSON.parse(localStorage.getItem(k)); if(e) out.push(e); } catch(_){} } }); return out; }
+export function outboxList(prefix = OB_PREFIX){ const p = prefix + idTag() + "."; const out = []; obScan(k => { if(k.indexOf(p) === 0){ try { const e = JSON.parse(localStorage.getItem(k)); if(e) out.push(e); } catch(_){} } }); return out; }
 
 function persistDraft(klaxId, text, transmitted = false){
   if(!klaxId) return false;
@@ -334,15 +334,11 @@ function showNextRecovered(klaxId, deps){
 // Submitted or legacy entries remain
 // recoverable in storage; re-homing them could duplicate already accepted work.
 export function recoverOutbox(deps, observedBeforeRequest = []){
-  const legacy = [];
-  obScan(k => { if(k.indexOf(LEGACY_OB_PREFIX) === 0) legacy.push(k); });
-  legacy.forEach(k => { try { localStorage.removeItem(k); } catch(e){} });
   const discardable = new Set(observedBeforeRequest.map(e => e.nonce));
   const list = outboxList().sort((a, b) => (a.at || 0) - (b.at || 0));
-  if(!list.length) return 0;
   const isLive = deps && deps.isLive;
   const groups = new Map(); // target klaxId -> separate original drafts, in submission order
-  let orphaned = 0;
+  let orphaned = outboxList(LEGACY_OB_PREFIX).filter(e => e.text).length;
   for(const e of list){
     if(!e || !e.text){ outboxDrop(e && e.nonce); continue; } // nothing recoverable (no text)
     if(isLive && !isLive(e.klax_id)){
