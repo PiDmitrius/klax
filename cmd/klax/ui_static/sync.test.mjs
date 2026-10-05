@@ -37,37 +37,37 @@ function harness(){
   return { run: code => vm.runInContext(code, context), requests, respond };
 }
 
-const group = (seq, ids, state = "done") => ({ key: "t:" + seq, ord: seq + "@" + seq, head: { turn_seq: seq, role: "user", state }, blocks: ids.map(id => ({ id })) });
+const group = (seq, ids, state = "done") => ({ key: "t:" + seq, ord: seq + "." + seq, head: { turn_seq: seq, role: "user", state }, blocks: ids.map(id => ({ id })) });
 
 test("events during a window load are buffered; those the window already holds are skipped", async () => {
   const h = harness();
   const load = h.run("loadTranscript('1')");
   h.run(`applyEvents([
-    { seq: 11, klax_id: "1", group: { key: "t:5", ord: "5@5", blocks: { start: 1, append: [{ id: "b" }] } } },
-    { seq: 13, klax_id: "1", group: { key: "t:6", ord: "6@6", create: { head: { turn_seq: 6, role: "user", state: "enq" }, blocks: [] } } },
+    { seq: 11, klax_id: "1", group: { key: "t:5", ord: "5.5", blocks: { start: 1, append: [{ id: "b" }] } } },
+    { seq: 13, klax_id: "1", group: { key: "t:6", ord: "6.6", create: { head: { turn_seq: 6, role: "user", state: "enq" }, blocks: [] } } },
   ], "1.13")`);
   assert.deepEqual(h.run("seqs()"), []);
-  h.respond(0, { at: "1.12", from: "5@5", to: null, more: false, groups: [group(5, ["a", "b"])] });
+  h.respond(0, { at: "1.12", from: "5.5", to: null, more: false, groups: [group(5, ["a", "b"])] });
   await load;
   assert.deepEqual(Array.from(h.run("seqs()")), [5, 6]);
   assert.deepEqual(Array.from(h.run("blocks(5)")), ["a", "b"]);
-  h.run(`applyEvents([{ seq: 14, klax_id: "1", group: { key: "t:5", ord: "5@5", blocks: { start: 2, append: [{ id: "c" }] } } }], "1.14")`);
+  h.run(`applyEvents([{ seq: 14, klax_id: "1", group: { key: "t:5", ord: "5.5", blocks: { start: 2, append: [{ id: "c" }] } } }], "1.14")`);
   assert.deepEqual(Array.from(h.run("blocks(5)")), ["a", "b", "c"]);
 });
 
 test("a page load keeps applying events to the held tail and buffers only its own range", async () => {
   const h = harness();
   const load = h.run("loadTranscript('1')");
-  h.respond(0, { at: "1.10", from: "5@5", to: null, more: true, groups: [group(5, ["a"], "run")] });
+  h.respond(0, { at: "1.10", from: "5.5", to: null, more: true, groups: [group(5, ["a"], "run")] });
   await load;
   const page = h.run("loadOlder('1')");
-  assert.match(h.requests[1].url, /to=5%405/);
+  assert.match(h.requests[1].url, /to=5\.5/);
   h.run(`applyEvents([
-    { seq: 11, klax_id: "1", group: { key: "t:5", ord: "5@5", blocks: { start: 1, append: [{ id: "b" }] } } },
-    { seq: 12, klax_id: "1", removed: { key: "t:3", ord: "3@3" } },
+    { seq: 11, klax_id: "1", group: { key: "t:5", ord: "5.5", blocks: { start: 1, append: [{ id: "b" }] } } },
+    { seq: 12, klax_id: "1", removed: { key: "t:3", ord: "3.3" } },
   ], "1.12")`);
   assert.deepEqual(Array.from(h.run("blocks(5)")), ["a", "b"]);
-  h.respond(1, { at: "1.11", from: "2@2", to: "5@5", more: false, groups: [group(2, []), group(3, [])] });
+  h.respond(1, { at: "1.11", from: "2.2", to: "5.5", more: false, groups: [group(2, []), group(3, [])] });
   await page;
   assert.deepEqual(Array.from(h.run("seqs()")), [2, 5]);
 });
@@ -75,11 +75,11 @@ test("a page load keeps applying events to the held tail and buffers only its ow
 test("a delta for a group the session should hold but lacks reloads its window", async () => {
   const h = harness();
   const load = h.run("loadTranscript('1')");
-  h.respond(0, { at: "1.10", from: "5@5", to: null, more: false, groups: [group(5, ["a"])] });
+  h.respond(0, { at: "1.10", from: "5.5", to: null, more: false, groups: [group(5, ["a"])] });
   await load;
   h.run(`applyEvents([
-    { seq: 11, klax_id: "2", group: { key: "t:7", ord: "7@7", blocks: { start: 1, append: [{ id: "x" }] } } },
-    { seq: 12, klax_id: "1", group: { key: "t:7", ord: "7@7", blocks: { start: 1, append: [{ id: "x" }] } } },
+    { seq: 11, klax_id: "2", group: { key: "t:7", ord: "7.7", blocks: { start: 1, append: [{ id: "x" }] } } },
+    { seq: 12, klax_id: "1", group: { key: "t:7", ord: "7.7", blocks: { start: 1, append: [{ id: "x" }] } } },
   ], "1.12")`);
   assert.equal(h.requests.length, 2);
   assert.match(h.requests[1].url, /klax_id=1&/);
@@ -89,15 +89,15 @@ test("a delta for a group the session should hold but lacks reloads its window",
 test("a page that finishes after a newer window cannot roll it back", async () => {
   const h = harness();
   const load = h.run("loadTranscript('1')");
-  h.respond(0, { at: "1.10", from: "5@5", to: null, more: true, groups: [group(5, ["a"], "run")] });
+  h.respond(0, { at: "1.10", from: "5.5", to: null, more: true, groups: [group(5, ["a"], "run")] });
   await load;
   const page = h.run("loadOlder('1')");
   h.run("reloadWindow('1')");
-  h.run(`applyEvents([{ seq: 11, klax_id: "1", group: { key: "t:5", ord: "5@5", blocks: { start: 1, append: [{ id: "b" }] } } }], "1.11")`);
-  h.respond(2, { at: "1.12", from: "5@5", to: null, more: true, groups: [group(5, ["a", "b", "c"])] });
+  h.run(`applyEvents([{ seq: 11, klax_id: "1", group: { key: "t:5", ord: "5.5", blocks: { start: 1, append: [{ id: "b" }] } } }], "1.11")`);
+  h.respond(2, { at: "1.12", from: "5.5", to: null, more: true, groups: [group(5, ["a", "b", "c"])] });
   await new Promise(resolve => setImmediate(resolve));
-  h.run(`applyEvents([{ seq: 12, klax_id: "1", group: { key: "t:5", ord: "5@5", blocks: { start: 2, append: [{ id: "c" }] } } }], "1.12")`);
-  h.respond(1, { at: "1.10", from: "2@2", to: "5@5", more: false, groups: [group(2, [])] });
+  h.run(`applyEvents([{ seq: 12, klax_id: "1", group: { key: "t:5", ord: "5.5", blocks: { start: 2, append: [{ id: "c" }] } } }], "1.12")`);
+  h.respond(1, { at: "1.10", from: "2.2", to: "5.5", more: false, groups: [group(2, [])] });
   await page;
   assert.deepEqual(Array.from(h.run("blocks(5)")), ["a", "b", "c"]);
 });
@@ -119,17 +119,17 @@ test("a failed snapshot during resync keeps the sessions to restore", async () =
 test("a newer window that needs older history pages it in while a superseded page is still in flight", async () => {
   const h = harness();
   const load = h.run("loadTranscript('1')");
-  h.respond(0, { at: "1.10", from: "5@5", to: null, more: false, groups: [group(5, ["a"])] });
+  h.respond(0, { at: "1.10", from: "5.5", to: null, more: false, groups: [group(5, ["a"])] });
   await load;
   h.run("moreFor[1] = true; ensureLineLoaded = ensureLineLoadedActual");
   const page = h.run("loadOlder('1')");
   h.run("reloadWindow('1')");
-  h.respond(2, { at: "1.11", from: "5@5", to: null, more: true, groups: [group(5, ["a"])] });
+  h.respond(2, { at: "1.11", from: "5.5", to: null, more: true, groups: [group(5, ["a"])] });
   for(let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
   assert.equal(h.requests.length, 4);
-  assert.match(h.requests[3].url, /to=5%405/);
-  h.respond(1, { at: "1.10", from: "2@2", to: "5@5", more: false, groups: [] });
-  h.respond(3, { at: "1.11", from: null, to: "5@5", more: false, groups: [] });
+  assert.match(h.requests[3].url, /to=5\.5/);
+  h.respond(1, { at: "1.10", from: "2.2", to: "5.5", more: false, groups: [] });
+  h.respond(3, { at: "1.11", from: null, to: "5.5", more: false, groups: [] });
   await page;
 });
 
@@ -166,7 +166,7 @@ test("tab patches and orders rebuild the strip from the snapshot", async () => {
 test("a resync refreshes a held session in place", async () => {
   const h = harness();
   const load = h.run("loadTranscript('1')");
-  h.respond(0, { at: "1.10", from: "5@5", to: null, more: false, groups: [group(5, ["a"])] });
+  h.respond(0, { at: "1.10", from: "5.5", to: null, more: false, groups: [group(5, ["a"])] });
   await load;
   h.run("loaded[1] = true");
   const sync = h.run("resync()");
@@ -174,7 +174,7 @@ test("a resync refreshes a held session in place", async () => {
   await sync;
   assert.equal(h.run("loaded[1] && model.has('1')"), true);
   assert.match(h.requests[2].url, /transcript\?klax_id=1&limit=/);
-  h.respond(2, { at: "2.2", from: "5@5", to: null, more: false, groups: [group(5, ["a", "b"])] });
+  h.respond(2, { at: "2.2", from: "5.5", to: null, more: false, groups: [group(5, ["a", "b"])] });
   for(let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
   assert.equal(h.run("loaded[1]"), true);
   assert.deepEqual(Array.from(h.run("blocks(5)")), ["a", "b"]);
@@ -188,15 +188,15 @@ test("a refresh keeps the old view when paging back fails, then swaps and render
   await load;
   h.run("renders = 0; loaded[1] = true");
   const failed = h.run("refreshWindow('1')");
-  h.respond(1, { at: "1.11", from: "5@5", more: true, groups: [group(5, ["a"])] });
+  h.respond(1, { at: "1.11", from: "5.5", more: true, groups: [group(5, ["a"])] });
   for(let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
-  assert.match(h.requests[2].url, /to=5%405/);
+  assert.match(h.requests[2].url, /to=5\.5/);
   h.respond(2, {}, false);
   await failed;
   assert.deepEqual(Array.from(h.run("seqs()")), [2, 5]);
   assert.equal(h.run("renders"), 0);
   const retry = h.run("refreshWindow('1', 1)");
-  h.respond(3, { at: "1.12", from: "5@5", more: true, groups: [group(5, ["a", "b"])] });
+  h.respond(3, { at: "1.12", from: "5.5", more: true, groups: [group(5, ["a", "b"])] });
   for(let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
   h.respond(4, { at: "1.12", from: null, more: false, groups: [group(2, [])] });
   await retry;

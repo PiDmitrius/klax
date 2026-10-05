@@ -43,7 +43,7 @@ func roleOf(readOnly bool) int8 {
 
 // uiOrd orders a turn group in the feed: the transcript record of its leader, then its turn_seq. A
 // queue-only turn takes the record of the transcript turn it is placed before; `last` sorts after
-// every record. On the wire it is "<turn_seq>@<event>", or "<turn_seq>" for `last`.
+// every record. On the wire it is "<turn_seq>.<event>", or "<turn_seq>" for `last`.
 type uiOrd struct {
 	event int64
 	last  bool
@@ -54,7 +54,7 @@ func (o uiOrd) String() string {
 	if o.last {
 		return strconv.FormatInt(o.seq, 10)
 	}
-	return strconv.FormatInt(o.seq, 10) + "@" + strconv.FormatInt(o.event, 10)
+	return strconv.FormatInt(o.seq, 10) + "." + strconv.FormatInt(o.event, 10)
 }
 
 func (o uiOrd) MarshalJSON() ([]byte, error) { return json.Marshal(o.String()) }
@@ -69,10 +69,10 @@ func (o uiOrd) less(p uiOrd) bool {
 	return o.seq < p.seq
 }
 
-// parseBound reads the "<turn_seq>@<event>" position the client sends as `to`; a range bound is
+// parseBound reads the "<turn_seq>.<event>" position the client sends as `to`; a range bound is
 // always a transcript position.
 func parseBound(v string) (uiOrd, bool) {
-	s, e, ok := strings.Cut(v, "@")
+	s, e, ok := strings.Cut(v, ".")
 	if !ok {
 		return uiOrd{}, false
 	}

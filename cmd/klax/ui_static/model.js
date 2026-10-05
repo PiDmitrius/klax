@@ -3,11 +3,11 @@
 // ordered by `ord`, and the start of the range it holds. Windows and pages replace a range; group
 // events patch one group. turns() is the flat row list render works on. Pure data; no DOM, no fetch.
 
-// ord is a group's place in the feed: "<turn_seq>@<event>" (the transcript record of the turn, or of
+// ord is a group's place in the feed: "<turn_seq>.<event>" (the transcript record of the turn, or of
 // the transcript turn a queued one stands before), or "<turn_seq>" for a turn with no record after it,
 // which sorts after every record. null is the history start, below every group.
 function ordParts(o){
-  const i = o.indexOf("@");
+  const i = o.indexOf(".");
   return i < 0 ? { last: true, event: 0, seq: +o } : { last: false, event: +o.slice(i + 1), seq: +o.slice(0, i) };
 }
 export function ordEvent(o){ const p = ordParts(o); return p.last ? null : p.event; }

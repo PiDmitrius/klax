@@ -98,13 +98,13 @@ func TestGroupRowsKeysAndOrd(t *testing.T) {
 	if len(groups[0].Rows) != 1 || groups[0].Head != nil || len(groups[1].Rows) != 1 || groups[1].Rows[0].Text != "note" {
 		t.Fatalf("standalone rows misplaced: %+v", groups)
 	}
-	for i, want := range []string{`"0@-1"`, `"1@3"`, `"2@8"`, `"3@8"`, `"4"`} {
+	for i, want := range []string{`"0.-1"`, `"1.3"`, `"2.8"`, `"3.8"`, `"4"`} {
 		if got, _ := json.Marshal(groups[i].Ord); string(got) != want {
 			t.Fatalf("ord %d = %s, want %s", i, got, want)
 		}
 	}
-	if o, ok := parseBound("3@8"); !ok || o != groups[3].Ord {
-		t.Fatalf("parseBound(3@8) = %+v, %v", o, ok)
+	if o, ok := parseBound("3.8"); !ok || o != groups[3].Ord {
+		t.Fatalf("parseBound(3.8) = %+v, %v", o, ok)
 	}
 	if _, ok := parseBound("4"); ok {
 		t.Fatal("a bound without a transcript record must be rejected")

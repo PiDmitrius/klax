@@ -36,8 +36,8 @@ function harness(){
     reportRead = () => {};
     rerenderStructural = () => calls.push("render");
     commitLive = () => calls.push("animate");
-    globalThis.startTurn = () => model.loadWindow(1, { from: "0@-1", groups: [{ key: "t:1:1", ord: "1@0", head: { turn_seq: 1, role: "user", state: "run" } }] });
-    globalThis.addBlock = text => { const n = model.turns(1)[0].blocks.length; model.applyGroup(1, { key: "t:1:1", ord: "1@0", blocks: { start: n, append: [{ text }] } }); };
+    globalThis.startTurn = () => model.loadWindow(1, { from: "0.-1", groups: [{ key: "t:1:1", ord: "1.0", head: { turn_seq: 1, role: "user", state: "run" } }] });
+    globalThis.addBlock = text => { const n = model.turns(1)[0].blocks.length; model.applyGroup(1, { key: "t:1:1", ord: "1.0", blocks: { start: n, append: [{ text }] } }); };
   `, context);
   function tick(ms){
     const end = now + ms;

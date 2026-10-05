@@ -22,7 +22,7 @@ func (o *uiOrd) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &v); err != nil {
 		return fmt.Errorf("bad ord %s", b)
 	}
-	if !strings.Contains(v, "@") {
+	if !strings.Contains(v, ".") {
 		seq, err := strconv.ParseInt(v, 10, 64)
 		*o = uiOrd{seq: seq, last: true}
 		return err
