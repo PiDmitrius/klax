@@ -29,16 +29,21 @@ function row(label, value, opts){
 }
 
 function elapsed(sec){
-  sec = Math.max(0, Number(sec) || 0);
-  const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
-  return (d ? d + " д " : "") + (h ? h + " ч " : "") + m + " мин";
+  if(sec === null || sec === undefined) return "—";
+  const tenths = Math.round(Math.max(0, Number(sec) || 0) * 10);
+  const d = Math.floor(tenths / 864000), h = Math.floor(tenths % 864000 / 36000), m = Math.floor(tenths % 36000 / 600), s = tenths % 600 / 10;
+  return (d ? d + " д " : "") + (h ? h + " ч " : "") + (m ? m + " мин " : "") + s + " с";
+}
+
+function ram(bytes){
+  return bytes === null || bytes === undefined ? "—" : (bytes / 1048576).toFixed(1) + " МиБ";
 }
 
 function render(data){
   lastData = data;
   const body = $("sysbody"), u = data.update || {};
   body.textContent = "";
-  body.append(row("Версия", "v" + data.version, { copy: true }), row("Запущен", new Date(data.started_at).toLocaleString()), row("Работает", elapsed(data.uptime_sec)), row("Процесс", String(data.pid), { copy: true }), row("Платформа", data.platform));
+  body.append(row("Версия", "v" + data.version, { copy: true }), row("Запущен", new Date(data.started_at).toLocaleString()), row("Работает", elapsed(data.uptime_sec)), row("RAM", ram(data.rss_bytes)), row("CPU Time", elapsed(data.cpu_time_sec)), row("Платформа", data.platform));
   body.appendChild(Object.assign(document.createElement("div"), { className: "syssep" }));
   if(u.source_dir) body.append(row("Исходник", u.source_dir, { copy: true }));
   const check = document.createElement("button"); check.id = "syscheck"; check.className = "syscheck";

@@ -255,6 +255,19 @@ running one), plus the state of its UI tab. `at` is the cursor of the UI live
 channel and `home` the server's home directory the UI abbreviates paths with; a
 client that only lists sessions ignores both. With management access, an empty account gets an initial session.
 
+### System status
+
+`GET /api/system` returns the running daemon's version, start time, uptime,
+platform, resource usage and cached update status. Resource fields describe the
+klax process; backend child processes are excluded:
+
+| Field | Meaning |
+| --- | --- |
+| `rss_bytes` | Current resident memory (RSS), in bytes. |
+| `cpu_time_sec` | Cumulative user and system CPU time, in seconds, including fractions. |
+
+An unavailable resource metric is `null`.
+
 ### Access roles and read markers
 
 Each configured user may have two independent credentials:

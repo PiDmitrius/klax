@@ -47,6 +47,21 @@ func TestSystemAPIAuthAndView(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("authenticated status = %d", rec.Code)
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fields["pid"]; ok {
+		t.Fatal("system view exposes pid")
+	}
+	var rss uint64
+	var cpu float64
+	if err := json.Unmarshal(fields["rss_bytes"], &rss); err != nil || rss == 0 {
+		t.Fatalf("rss_bytes = %s, error = %v", fields["rss_bytes"], err)
+	}
+	if err := json.Unmarshal(fields["cpu_time_sec"], &cpu); err != nil || string(fields["cpu_time_sec"]) == "null" || cpu < 0 {
+		t.Fatalf("cpu_time_sec = %s, error = %v", fields["cpu_time_sec"], err)
+	}
 	var got systemView
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatal(err)
