@@ -10,8 +10,8 @@ import (
 func TestProposeBindingsOrderedAndBounded(t *testing.T) {
 	d := promptcanon.Digest("same")
 	turns := []sessfiles.Turn{
-		{Seq: 1, Backend: "claude", Session: "S", PromptDigest: d, FromEvent: 2},
-		{Seq: 2, Backend: "claude", Session: "S", PromptDigest: d, FromEvent: 6},
+		{Seq: 1, Backend: "claude", BackendID: "S", PromptDigest: d, FromEvent: 2},
+		{Seq: 2, Backend: "claude", BackendID: "S", PromptDigest: d, FromEvent: 6},
 	}
 	items := []history.Item{
 		{Role: "user", Event: 3, PromptDigest: promptcanon.Digest("manual"), RecordDigest: "m"},
@@ -26,7 +26,7 @@ func TestProposeBindingsOrderedAndBounded(t *testing.T) {
 
 func TestProposeBindingsDoesNotCrossNextRun(t *testing.T) {
 	d := promptcanon.Digest("same")
-	turns := []sessfiles.Turn{{Seq: 1, Backend: "codex", Session: "S", PromptDigest: d, FromEvent: 1}, {Seq: 2, Backend: "codex", Session: "S", PromptDigest: d, FromEvent: 3}}
+	turns := []sessfiles.Turn{{Seq: 1, Backend: "codex", BackendID: "S", PromptDigest: d, FromEvent: 1}, {Seq: 2, Backend: "codex", BackendID: "S", PromptDigest: d, FromEvent: 3}}
 	items := []history.Item{{Role: "user", Event: 4, PromptDigest: d, RecordDigest: "late"}}
 	got := proposeBindings(turns, items, "codex", "S", 5)
 	if len(got) != 1 || got[0].Seq != 2 {
@@ -37,14 +37,14 @@ func TestProposeBindingsDoesNotCrossNextRun(t *testing.T) {
 func TestUnboundBackendSessionsSkipsWhatCannotBind(t *testing.T) {
 	d := promptcanon.Digest("same")
 	turns := []sessfiles.Turn{
-		{Seq: 1, Backend: "codex", Session: "S", PromptDigest: d, Bound: true},
-		{Seq: 2, Backend: "codex", Session: "S", PromptDigest: d},
-		{Seq: 3, Backend: "codex", Session: "S", PromptDigest: d},
-		{Seq: 4, Backend: "claude", Session: "T"},    // marker-era turn, no digest
+		{Seq: 1, Backend: "codex", BackendID: "S", PromptDigest: d, Bound: true},
+		{Seq: 2, Backend: "codex", BackendID: "S", PromptDigest: d},
+		{Seq: 3, Backend: "codex", BackendID: "S", PromptDigest: d},
+		{Seq: 4, Backend: "claude", BackendID: "T"},  // marker-era turn, no digest
 		{Seq: 5, Backend: "claude", PromptDigest: d}, // never reached a backend session
-		{Seq: 6, Backend: "claude", Session: "U", PromptDigest: d},
-		{Seq: 7, Backend: "codex", Session: "V", PromptDigest: d}, // interval closed by seq 8
-		{Seq: 8, Backend: "codex", Session: "V", PromptDigest: d, Bound: true},
+		{Seq: 6, Backend: "claude", BackendID: "U", PromptDigest: d},
+		{Seq: 7, Backend: "codex", BackendID: "V", PromptDigest: d}, // interval closed by seq 8
+		{Seq: 8, Backend: "codex", BackendID: "V", PromptDigest: d, Bound: true},
 	}
 	got := unboundBackendSessions(turns)
 	want := [][2]string{{"codex", "S"}, {"claude", "U"}}

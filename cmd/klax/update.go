@@ -258,7 +258,14 @@ type releaseInfo struct {
 	URL         string `json:"html_url"`
 }
 
-// fetchReleases returns releases sorted descending (newest first).
+// oldestDataRelease is the oldest release that reads the current data format: an older one would
+// silently drop the session ids and fields of sessions.json on its first save. Older releases are
+// neither listed nor installed; going back below it means restoring a copy of the data dir.
+const oldestDataRelease = "v0.9.0"
+
+func readsCurrentData(tag string) bool { return !versionLess(tag, oldestDataRelease) }
+
+// fetchReleases lists the releases that can run on the current data, newest first.
 func fetchReleases() ([]releaseInfo, error) {
 	var all []releaseInfo
 	for page := 1; page <= 10; page++ {
@@ -269,7 +276,11 @@ func fetchReleases() ([]releaseInfo, error) {
 		if len(releases) == 0 {
 			break
 		}
-		all = append(all, releases...)
+		for _, r := range releases {
+			if readsCurrentData(r.Tag) {
+				all = append(all, r)
+			}
+		}
 	}
 	return all, nil
 }
@@ -352,6 +363,10 @@ func runFallback() {
 
 	if !strings.HasPrefix(tag, "v") {
 		tag = "v" + tag
+	}
+	if !readsCurrentData(tag) {
+		fmt.Fprintf(os.Stderr, "%s cannot read the current data; going back below %s needs a copy of the data dir taken with that release\n", tag, oldestDataRelease)
+		os.Exit(1)
 	}
 	fmt.Printf("installing %s...\n", tag)
 

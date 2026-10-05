@@ -13,7 +13,7 @@ import (
 // get distinct indices (no collision), and the bytes land.
 func TestWriteTurnNamesAndBytes(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
-	s := Open("user:alice", 1719500000)
+	s := Open("user:alice", "s1719500000")
 	names, err := s.WriteTurn(42, []Blob{{"image.png", []byte("a")}, {"image.png", []byte("b")}})
 	if err != nil {
 		t.Fatal(err)
@@ -31,7 +31,7 @@ func TestWriteTurnNamesAndBytes(t *testing.T) {
 // same stored name, no error, original bytes intact.
 func TestWriteFileIdempotentReplay(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
-	s := Open("user:alice", 7)
+	s := Open("user:alice", "s7")
 	n1, err := s.WriteFile(3, 1, "doc.pdf", bytes.NewReader([]byte("orig")))
 	if err != nil {
 		t.Fatal(err)
@@ -50,7 +50,7 @@ func TestWriteFileIdempotentReplay(t *testing.T) {
 // run-view realpath stays in the run dir, not the internal store).
 func TestMaterializeCleanNamesAndCollision(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
-	s := Open("user:alice", 42)
+	s := Open("user:alice", "s42")
 	names, _ := s.WriteTurn(5, []Blob{{"shot.png", []byte("1")}, {"shot.png", []byte("2")}})
 	run := filepath.Join(t.TempDir(), "klax-attach-x")
 	paths, err := s.Materialize(names, run)
@@ -86,7 +86,7 @@ func TestKeyDirSafeAndInjective(t *testing.T) {
 
 func TestRemove(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
-	s := Open("user:alice", 7)
+	s := Open("user:alice", "s7")
 	if _, err := s.WriteFile(1, 1, "a.txt", bytes.NewReader([]byte("x"))); err != nil {
 		t.Fatal(err)
 	}

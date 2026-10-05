@@ -20,8 +20,8 @@ type uiBlock struct {
 // (the per-turn indicator: enq|run|done|err) and its answer blocks; a standalone
 // non-turn row has role != "user" and no seq/state.
 type uiTurn struct {
-	Seq       int64     `json:"seq,omitempty"` // durable turn_seq (user turns); negative synthetic for legacy markerless; 0 for standalone rows
-	Role      string    `json:"role"`          // user|system|assistant|tool|notice
+	Seq       int64     `json:"turn_seq,omitempty"` // durable turn_seq (user turns); negative synthetic for legacy markerless; 0 for standalone rows
+	Role      string    `json:"role"`               // user|system|assistant|tool|notice
 	Text      string    `json:"text,omitempty"`
 	Time      string    `json:"time,omitempty"`
 	State     string    `json:"state,omitempty"` // user turns: enq|run|done|err
@@ -143,8 +143,8 @@ func groupTurns(items []history.Item) []groupedTurn {
 // turn to its durable coordinate binding (or legacy marker), rewrites text to durable text + file
 // thumbnails, and nests its answer blocks. It also places turns the transcript hasn't recorded
 // (queued, just-started, cancelled or aborted before running) by turn_seq, so a reload shows them.
-func (d *daemon) buildReadModel(sk string, created int64, grouped []groupedTurn, queueTurns []sessfiles.Turn, busy bool, memo *rowMemo) []uiTurn {
-	store := d.sessionStore(sk, created)
+func (d *daemon) buildReadModel(sk string, klaxID string, grouped []groupedTurn, queueTurns []sessfiles.Turn, busy bool, memo *rowMemo) []uiTurn {
+	store := d.sessionStore(sk, klaxID)
 	byMarker := make(map[string]sessfiles.Turn, len(queueTurns))
 	byCoord := make(map[string]sessfiles.Turn, len(queueTurns))
 	for _, t := range queueTurns {
@@ -152,7 +152,7 @@ func (d *daemon) buildReadModel(sk string, created int64, grouped []groupedTurn,
 			byMarker[t.Marker] = t
 		}
 		if t.Bound {
-			byCoord[coordinateKey(t.Backend, t.Session, t.Event)] = t
+			byCoord[coordinateKey(t.Backend, t.BackendID, t.Event)] = t
 		}
 	}
 	// The only non-durable association allowed here is the newest active run,
@@ -228,7 +228,7 @@ func (d *daemon) buildReadModel(sk string, created int64, grouped []groupedTurn,
 		}
 		ut, keep := memo.get(key)
 		if !keep {
-			ut, keep = d.userRow(store, sk, created, g, matched, ok, seq, state, reason)
+			ut, keep = d.userRow(store, sk, klaxID, g, matched, ok, seq, state, reason)
 		}
 		if keep {
 			memo.put(key, ut)
@@ -244,7 +244,7 @@ func (d *daemon) buildReadModel(sk string, created int64, grouped []groupedTurn,
 		if seen[t.Seq] {
 			continue
 		}
-		text, published := d.inboundText(store, t, sk, created)
+		text, published := d.inboundText(store, t, sk, klaxID)
 		if !published {
 			memo.degrade()
 		}
@@ -271,7 +271,7 @@ func (d *daemon) buildReadModel(sk string, created int64, grouped []groupedTurn,
 // userRow builds one user turn's row: durable text and time, answer blocks, and
 // the klax-side error and hook-warning blocks. keep is false when an attachment or a local file
 // link could not be published yet, which a later build may still do.
-func (d *daemon) userRow(store *sessfiles.Store, sk string, created int64, g groupedTurn, matched sessfiles.Turn, ok bool, seq int64, state, reason string) (ut uiTurn, keep bool) {
+func (d *daemon) userRow(store *sessfiles.Store, sk string, klaxID string, g groupedTurn, matched sessfiles.Turn, ok bool, seq int64, state, reason string) (ut uiTurn, keep bool) {
 	keep = true
 	text, turnAt := g.lead.Text, g.lead.Time
 	if ok {
@@ -279,7 +279,7 @@ func (d *daemon) userRow(store *sessfiles.Store, sk string, created int64, g gro
 		// records this turn it is already shown from queue.jsonl; switching later to the transcript's
 		// slightly different timestamp changed the bubble signature and rebuilt an unchanged image.
 		turnAt = time.Unix(0, matched.TS).Format(time.RFC3339)
-		e, published := d.inboundText(store, matched, sk, created)
+		e, published := d.inboundText(store, matched, sk, klaxID)
 		keep = keep && published
 		if e != "" {
 			text = e
@@ -293,7 +293,7 @@ func (d *daemon) userRow(store *sessfiles.Store, sk string, created int64, g gro
 	for _, b := range g.blocks {
 		if b.Role == "assistant" {
 			if b.Text != "" || len(b.Tools) == 0 {
-				text, published := d.rewriteOutboundForUI(sk, created, seq, b.Text)
+				text, published := d.rewriteOutboundForUI(sk, klaxID, seq, b.Text)
 				keep = keep && published
 				ut.Blocks = append(ut.Blocks, uiBlock{Role: "assistant", Text: text, Time: b.Time})
 			}

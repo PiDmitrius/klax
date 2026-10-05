@@ -9,10 +9,9 @@ import (
 	"github.com/PiDmitrius/klax/internal/config"
 )
 
-func TestTurnIDStableVector(t *testing.T) {
-	const want = "66f1ecf04afa693c8fd5c6a9b71cb4ef0e769c40"
-	if got := TurnID("user:ivan", 8, 42); got != want {
-		t.Fatalf("TurnID changed: got %q, want %q", got, want)
+func TestTurnIDJoinsKlaxIDAndTurnSeq(t *testing.T) {
+	if got := TurnID("lOGezVsS", 42); got != "lOGezVsS.42" {
+		t.Fatalf("TurnID = %q, want lOGezVsS.42", got)
 	}
 }
 
@@ -21,7 +20,7 @@ func TestInvokeWritesOneJSONDocumentToStdin(t *testing.T) {
 	cfg := &config.AuditHookConfig{Command: []string{"/bin/sh", "-c", `cp /dev/stdin "$1"`, "audit", path}}
 	want := Event{
 		Schema: Schema, Event: "turn.start",
-		Turn: Turn{ID: "66f1ecf04afa693c8fd5c6a9b71cb4ef0e769c40", Seq: 42},
+		Turn: Turn{ID: "lOGezVsS.42", Seq: 42},
 	}
 	if err := Invoke(t.Context(), cfg, want); err != nil {
 		t.Fatal(err)

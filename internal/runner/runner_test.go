@@ -373,12 +373,12 @@ func TestRunSessionEnvironmentReachesChildScript(t *testing.T) {
 		t.Fatal(err)
 	}
 	type outcome struct {
-		id     int64
+		id     string
 		result RunResult
 	}
 	results := make(chan outcome, 2)
-	for _, id := range []int64{41, 42} {
-		go func(id int64) {
+	for _, id := range []string{"aB3dE9xZ", "Kx3pQ9aB"} {
+		go func(id string) {
 			b := &scriptBackend{shellCmd: "printf '%s\\n' \"$KLAX_SESSION_ID\"; " + script, parseAsIntermediate: true}
 			var r Runner
 			results <- outcome{id, r.Run(context.Background(), b, RunOptions{KlaxSessionID: id}, nil)}
@@ -386,10 +386,10 @@ func TestRunSessionEnvironmentReachesChildScript(t *testing.T) {
 	}
 	for range 2 {
 		got := <-results
-		want := strconv.FormatInt(got.id, 10)
+		want := got.id
 		values := strings.Fields(got.result.Text)
 		if got.result.Error != nil || len(values) != 2 || values[0] != want || values[1] != want {
-			t.Errorf("session %d: %+v", got.id, got.result)
+			t.Errorf("session %s: %+v", got.id, got.result)
 		}
 	}
 	if got := os.Getenv("KLAX_SESSION_ID"); got != "inherited-value" {

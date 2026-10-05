@@ -151,9 +151,9 @@ twice per executed turn:
   before final delivery.
 
 The stable protocol is defined by
-[`docs/audit-v1.md`](docs/audit-v1.md) and its machine-readable companion
-[`docs/audit-v1.schema.json`](docs/audit-v1.schema.json).
-The same deterministic 160-bit `turn.turn_id` correlates both calls.
+[`docs/audit-v2.md`](docs/audit-v2.md) and its machine-readable companion
+[`docs/audit-v2.schema.json`](docs/audit-v2.schema.json).
+The same `turn.turn_id` (`<klax_id>.<turn_seq>`) correlates both calls.
 Klax does not impose a timeout and does not cancel a running hook: a hook that
 needs either behavior must implement it itself or configure a wrapper in
 `command`. A stuck hook therefore blocks that turn by design.
@@ -193,7 +193,8 @@ same user scope, sessions, execution queue, settings and results as the UI.
 ### Create a session
 
 `POST /api/new` accepts the initial session settings: `name`, `cwd`, `backend`,
-`model`, `think`, `sandbox`, `tty`, `prompt` and `groups`. Settings are validated
+`model_requested`, `think`, `sandbox`, `tty`, `system_prompt` (appended to the
+backend's own system prompt) and `groups`. Settings are validated
 before the session and its defaults are saved and published. A failed request
 creates no session. An empty body creates a session with the scope defaults.
 
@@ -204,13 +205,14 @@ creates no session. An empty body creates a session with the scope defaults.
 }
 ```
 
-The response is `200` with `{"created":42}`. `created` is the persistent klax
-session identifier used by all subsequent requests. Backend session identifiers
-are managed internally.
+The response is `200` with `{"klax_id":"lOGezVsS"}`. `klax_id` is the persistent
+session identifier: an opaque string of `[A-Za-z0-9]` compared only for
+equality; its length is not part of the contract. Every request and response
+names it `klax_id`. Backend session identifiers are managed internally.
 
 Each backend process receives `KLAX_SESSION_ID` in its environment, containing
 this persistent identifier. Launch wrappers and scripts invoked by the backend
-can use it as the `session` field in `/api/send`; the backend must preserve the
+can use it as the `klax_id` field in `/api/send`; the backend must preserve the
 variable when launching tools. The API URL and the owning user's management
 token are still required. Group-chat sessions are not addressable through this
 HTTP API. A running turn sending a new message to its own session
@@ -226,16 +228,18 @@ block on the current turn's completion.
   "at": "dizTFvMd.11",
   "startup": "started",
   "version": "<version>",
+  "home": "/home/<user>",
   "sessions": [
-    {"created": 42, "name": "developer-01", "backend": "claude", "cwd": "/work", "busy": true, "queued": 1}
+    {"klax_id": "lOGezVsS", "name": "developer-01", "backend": "claude", "cwd": "/work", "busy": true, "queued": 1}
   ]
 }
 ```
 
-Each session carries `created`, `name`, `backend`, `model`, `cwd`, `busy` and
-`queued` (messages waiting behind the running one), plus the state of its UI tab.
-`at` is the cursor of the UI live channel; a client that only lists sessions
-ignores it. With management access, an empty account gets an initial session.
+Each session carries `klax_id`, `name`, `backend`, `model_requested`,
+`model_used`, `cwd` (absolute), `busy` and `queued` (messages waiting behind the
+running one), plus the state of its UI tab. `at` is the cursor of the UI live
+channel and `home` the server's home directory the UI abbreviates paths with; a
+client that only lists sessions ignores both. With management access, an empty account gets an initial session.
 
 ### Access roles and read markers
 
@@ -257,26 +261,21 @@ Creation, messages, attachments, abort, queue cancellation, deletion, settings c
 and service updates are rejected by the server with `403 read-only`.
 Read access does not create an initial session in an empty account.
 
-`GET /api/auth` returns `user` and `read_only`. Session and settings views also
-include `read_only`. The viewing UI hides the new-session button, keeps its
+`GET /api/auth` returns `user` and `read_only`. The viewing UI hides the new-session button, keeps its
 composer gray and disabled, and disables mutation controls. Messenger permissions
 and backend filesystem permissions are independent of the UI access role.
 
-Management and viewing access have separate persistent read-through watermarks
-for every session. Browsers sharing a role synchronize their markers; reading
-through one role does not mark the other role's messages as read. Markers survive
-a restart and token rotation. The watermark uses the same `(turn, block)` axis
-and unread-count calculation for both roles.
+Management and viewing access have separate persistent read positions for every
+session, `read_pos` `"<turn_seq>.<block_seq>"`. Browsers sharing a role
+synchronize their positions; reading through one role does not mark the other
+role's messages as read. Positions survive a restart and token rotation. Both
+roles use the same axis and unread-count calculation.
 
 For automatic login, open `https://<host>/<mount>/#login=<viewing-token>` with a
 URL-encoded token. The browser consumes and removes the fragment before making
 API requests, and uses the supplied token in preference to any saved credential.
 Anyone holding the link can read that user's sessions. An invalid saved token
 returns the UI to the login form; clearing application data is unnecessary.
-
-`control_token` on `/api/new` is unsupported and returns
-`400 unsupported-control-token`. There is no per-session control-token check;
-`X-Klax-Control-Token` grants no permissions.
 
 ### Send a message
 
@@ -285,7 +284,7 @@ returns the UI to the login form; clearing application data is unnecessary.
 
 ```json
 {
-  "session": 42,
+  "klax_id": "lOGezVsS",
   "text": "Perform the task",
   "nonce": "client-message-1",
   "return_on": "finish"
@@ -298,7 +297,7 @@ returns the UI to the login form; clearing application data is unnecessary.
 | `start` | Preparation, durable run registration and the optional start hook complete; `200` with `turn.start`. |
 | `finish` | Backend execution, result formation and the optional finish hook complete; `200` with `turn.finish`. |
 
-Both event responses use [klax.audit/v1](docs/audit-v1.md). The API and configured
+Both event responses use [klax.audit/v2](docs/audit-v2.md). The API and configured
 hook receive the same event snapshot. Waiting also works with no hooks.
 `start` permits execution; it does not guarantee a successful backend launch.
 A completed backend error or cancellation returns a finish event with
@@ -332,8 +331,7 @@ while draining are durable for replay; their waiting response is
 `result-unavailable` because execution belongs to the next process.
 
 Errors use their HTTP status, since headers are held until the response is
-ready. Execution/preparation failures returned by the waiting API have this
-shape:
+ready. Every `/api/*` error has this shape:
 
 ```json
 {
@@ -348,16 +346,23 @@ shape:
 | --- | --- | --- |
 | `read-only` | 403 | The authenticated token permits viewing only. |
 | `session-not-found`, `session-deleted` | 404 | Session unavailable in the authenticated scope. |
-| `invalid-nonce`, `invalid-return-on`, `unsupported-control-token`, `empty-message` | 400 | Invalid input; nothing enqueued or created. |
+| `file-not-found` | 404 | The referenced file is gone. |
+| `unauthorized` | 401 | Missing or unknown token. |
+| `forbidden` | 403 | File reference not valid for this session. |
+| `bad-request`, `invalid-nonce`, `invalid-return-on`, `empty-message`, `close-failed` | 400 | Invalid input; nothing enqueued or created. |
+| `invalid-settings` | 400, 404, 409 | Settings rejected: invalid value, unknown option, or a change the session no longer allows. |
+| `method-not-allowed` | 405 | Wrong HTTP method. |
+| `too-many-polls` | 429 | Too many concurrent live-channel polls. |
+| `history-unavailable`, `models-unavailable`, `restarting` | 503 | Temporarily unavailable. |
 | `result-unavailable` | 409 | Boundary cannot be recovered in this process. |
 | `aborted` | 409 | Waiting message removed from the queue. |
 | `cancelled` | 409 | This message was cancelled from the queue in the web UI. |
 | `enqueue-failed` | 500 | Durable acceptance failed. |
 | `attachments-missing`, `run-start-failed`, `audit-start-failed` | 500 | Preparation, registration or start gate failed. |
-| `result-save-failed` | 500 | Result persistence failed. |
+| `result-save-failed`, `settings-save-failed` | 500 | Result or settings persistence failed. |
+| `models-refresh-failed` | 409, 502 | The model catalog refresh is already running or failed. |
 
-Existing authentication, parsing and settings errors retain their ordinary
-HTTP error responses. All paths that stop a turn before the requested boundary
+All paths that stop a turn before the requested boundary
 release its waiters with an error. Start-gate failure does not await or produce
 a finish event. No new hook timeout is imposed: a blocked configured hook
 continues to block its corresponding boundary.

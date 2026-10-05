@@ -57,7 +57,7 @@ func TestMessengerDeliveryProgressDroppedWhenQuiet(t *testing.T) {
 func TestMessengerDeliveryDeliversAnswer(t *testing.T) {
 	tp := &fakeTransport{}
 	d := newTestDeliveryDaemon(tp)
-	msg := queuedMsg{chatID: "tg:1", msgID: "100", sessKey: "user:x", sessCreated: 1}
+	msg := queuedMsg{chatID: "tg:1", msgID: "100", sessKey: "user:x", klaxID: "s1"}
 
 	del := d.newMessengerDelivery(context.Background(), msg, true)
 	del.Final(runner.RunResult{Text: "hello world"})
@@ -79,7 +79,7 @@ func TestMessengerDeliveryReusedQueuedProgressKeepsReplyToOnEdit(t *testing.T) {
 	tp := &fakeTransport{}
 	d := newTestDeliveryDaemon(tp)
 	seq := d.bumpChatActivity("tg:1")
-	msg := queuedMsg{chatID: "tg:1", msgID: "100", progressID: "queued-1", progressSeq: seq, sessKey: "user:x", sessCreated: 1}
+	msg := queuedMsg{chatID: "tg:1", msgID: "100", progressID: "queued-1", progressSeq: seq, sessKey: "user:x", klaxID: "s1"}
 
 	del := d.newMessengerDelivery(context.Background(), msg, true)
 	del.Final(runner.RunResult{Text: "pong"})
@@ -106,7 +106,7 @@ func TestMessengerDeliveryRedirectMarkerKeepsReplyTo(t *testing.T) {
 	d := newTestDeliveryDaemon(tp)
 	seq := d.bumpChatActivity("tg:1")
 	d.bumpChatActivity("tg:1") // more activity since queueing -> reuse condition fails
-	msg := queuedMsg{chatID: "tg:1", msgID: "100", progressID: "queued-1", progressSeq: seq, sessKey: "user:x", sessCreated: 1}
+	msg := queuedMsg{chatID: "tg:1", msgID: "100", progressID: "queued-1", progressSeq: seq, sessKey: "user:x", klaxID: "s1"}
 
 	d.newMessengerDelivery(context.Background(), msg, true)
 
@@ -130,7 +130,7 @@ func TestMessengerDeliveryRedirectMarkerKeepsReplyTo(t *testing.T) {
 func TestMessengerDeliveryFinalSurvivesCancelledRunCtx(t *testing.T) {
 	tp := &fakeTransport{}
 	d := newTestDeliveryDaemon(tp)
-	msg := queuedMsg{chatID: "tg:1", msgID: "100", sessKey: "user:x", sessCreated: 1}
+	msg := queuedMsg{chatID: "tg:1", msgID: "100", sessKey: "user:x", klaxID: "s1"}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	del := d.newMessengerDelivery(ctx, msg, true)

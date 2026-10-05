@@ -1,7 +1,7 @@
-# klax audit protocol v1
+# klax audit protocol v2
 
 This document is the normative contract for local klax audit hooks. The JSON
-Schema in `audit-v1.schema.json` is its machine-readable companion. Where the
+Schema in `audit-v2.schema.json` is its machine-readable companion. Where the
 two disagree, the discrepancy is a bug.
 
 ## Purpose
@@ -11,7 +11,7 @@ hook is an execution gate: klax may invoke the backend only after that hook
 exits successfully. The finish hook reports an already completed computation;
 its failure is made visible but cannot undo the turn.
 
-The v1 protocol defines two events:
+The v2 protocol defines two events:
 
 - `turn.start`: klax has durably accepted and prepared the turn and is about to
   invoke the backend.
@@ -62,27 +62,27 @@ Hooks are completely disabled unless their commands are explicitly configured.
 Configuring only one boundary enables only that hook.
 
 The user-visible error or warning caused by a failed hook is an internal
-durable klax system event. It is not another `klax.audit/v1` event and is not
+durable klax system event. It is not another `klax.audit/v2` event and is not
 part of the audited turn snapshot.
 
 ## Envelope and compatibility
 
 ```json
 {
-  "schema": "klax.audit/v1",
+  "schema": "klax.audit/v2",
   "event": "turn.start",
   "turn": {}
 }
 ```
 
-- `schema` is exactly `klax.audit/v1`.
+- `schema` is exactly `klax.audit/v2`.
 - `event` is a namespaced event name matching
   `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`.
 - `turn` is required for every `turn.*` event.
 - Consumers reject unknown schema versions.
-- Stream consumers ignore unknown v1 event names and unknown object
+- Stream consumers ignore unknown v2 event names and unknown object
   properties. A command bound to one exact event may reject a different event.
-- Adding another event family or additive optional fields does not require v2.
+- Adding another event family or additive optional fields does not require v3.
   Changing the meaning or required shape of an existing event does.
 
 ## Boundary ordering
@@ -114,28 +114,20 @@ queue or session-metadata write succeeded.
 
 A process crash or failed start hook may leave a `turn.start` attempt without a
 `turn.finish`. A backend turn that passed its durable run fence is never
-re-run. Klax v1 does not durably retry audit hooks: an auditor detects a
+re-run. Klax v2 does not durably retry audit hooks: an auditor detects a
 missing or failed completion record as an accepted `turn.start` without an
 acknowledged `turn.finish`.
 
 ## Turn identity
 
-`turn_id` is deterministic and requires no additional stored identifier:
-
-```text
-identity_bytes = Go encoding/json of:
-  ["klax.turn/v1", session_key, session_created, turn_seq]
-
-turn_id = lowercase hex(SHA-256(identity_bytes)[0:20])
-```
-
-The text form is exactly 40 lowercase hexadecimal characters (160 bits).
-Uniqueness is scoped to one uninterrupted klax state store. An aggregator that
-combines independent installations keys records by its own
+`turn_id` is `<klax_id>.<turn_seq>`: `routing.klax_id` and `turn_seq` joined by
+a dot, for example `lOGezVsS.42`. It is the key that links `turn.start` to
+`turn.finish`. `klax_id` is unique within one klax state store, so an
+aggregator that combines independent installations keys records by its own
 `(installation_id, turn_id)`.
 
-`turn_seq` is the durable monotonically increasing turn sequence within this
-session incarnation's queue.
+`turn_seq` is the durable monotonically increasing turn sequence within the
+session's queue.
 
 ## Snapshot monotonicity
 
@@ -147,11 +139,11 @@ the repeated fields.
 `turn.finish` may only add:
 
 - `finish_at`;
-- `execution.backend_session_id`, if it was unknown at start;
+- `execution.backend_id`, if it was unknown at start;
 - `result`;
 - `trace`.
 
-`execution.backend_session_id` is add-only. If it was present at start, it
+`execution.backend_id` is add-only. If it was present at start, it
 cannot change. If the backend reports a conflicting session ID, klax keeps the
 start value, logs the invariant violation, and omits trace whose coordinates
 cannot be trusted.
@@ -162,7 +154,7 @@ The common shape is:
 
 ```json
 {
-  "turn_id": "7cf1b93af31ea98138ea42ec8c6893b3ad6ca537",
+  "turn_id": "lOGezVsS.42",
   "turn_seq": 42,
   "accepted_at": "2026-07-26T12:00:00.123456789Z",
   "start_at": "2026-07-26T12:00:01.234567890Z",
@@ -210,9 +202,8 @@ acceptance:
 }
 ```
 
-- `transport` is the public audit transport name, currently `tg`, `max`, `vk`,
-  `ym`, or `ui`. Internal routing may use a different prefix: MAX session keys,
-  for example, retain their existing `mx:` prefix.
+- `transport` is the klax transport prefix, currently `tg`, `mx`, `vk`, `ym`,
+  or `ui`.
 - `chat.id` is the transport-native chat ID without the klax prefix.
 - `chat.type`, `chat.title`, and `chat.thread_id` are included when supplied by
   the transport.
@@ -229,16 +220,16 @@ required inside the nested objects; unavailable optional values are omitted.
 ```json
 {
   "session_key": "ym:0/0/example-chat#example-thread",
-  "session_created": 8,
-  "session_name": "work"
+  "klax_id": "lOGezVsS",
+  "name": "work"
 }
 ```
 
 - `session_key` is the canonical klax routing key and may represent a
   transport chat or a cross-transport mapped user.
-- `session_created` is an opaque monotonic identifier of this durable session
-  incarnation; consumers must not interpret it as a timestamp.
-- `session_name` is the user-visible name at the start boundary, when set.
+- `klax_id` is the session's opaque identifier: a string of `[A-Za-z0-9]`
+  compared only for equality; its length is not part of the contract.
+- `name` is the user-visible session name at the start boundary, when set.
 
 ## Request and attachments
 
@@ -281,21 +272,22 @@ copy any bytes they need before the hook returns.
 ```json
 {
   "backend": "claude",
-  "backend_session_id": "89c19fb7-690b-4bf1-85ef-4d68cdfd49df",
+  "backend_id": "89c19fb7-690b-4bf1-85ef-4d68cdfd49df",
   "cwd": "/work/project",
   "model_requested": "sonnet",
-  "effort": "high",
+  "think": "high",
   "sandbox": "workspace-write",
   "tty": false,
-  "append_system_prompt": "Answer in Russian."
+  "system_prompt": "Answer in Russian."
 }
 ```
 
 - `backend` is the selected backend implementation.
-- `backend_session_id` is the backend's session identity when known.
+- `backend_id` is the backend's session identity when known.
 - `cwd` is the backend working directory.
-- `model_requested`, `effort`, `sandbox`, and `append_system_prompt` are
-  explicit launch overrides and are omitted when unset.
+- `model_requested`, `think`, `sandbox`, and `system_prompt` are explicit
+  launch overrides and are omitted when unset. `system_prompt` is appended to
+  the backend's own system prompt.
 - `tty` says whether klax used its TTY integration.
 
 The backend-reported effective model belongs in `result.model_used`.
@@ -358,10 +350,10 @@ be present for an error or aborted turn.
 - `code` is a stable machine-readable classification.
 - `message` is diagnostic and must not be used for grouping.
 
-Known v1 codes are `aborted`, `run-start-failed`, and `backend-failed`.
+Known v2 codes are `aborted`, `run-start-failed`, and `backend-failed`.
 `audit-start-failed` is a durable queue reason, not a `turn.finish` result code,
 because a denied start produces no finish event. Consumers display unknown
-future v1 codes as generic errors.
+future v2 codes as generic errors.
 
 `tokens` describes this backend turn. Unknown counters are omitted rather than
 encoded as negative values.
@@ -514,10 +506,10 @@ into blocks. Trace enrichment failure does not change the backend result status.
 
 ```json
 {
-  "schema": "klax.audit/v1",
+  "schema": "klax.audit/v2",
   "event": "turn.start",
   "turn": {
-    "turn_id": "7cf1b93af31ea98138ea42ec8c6893b3ad6ca537",
+    "turn_id": "lOGezVsS.42",
     "turn_seq": 42,
     "accepted_at": "2026-07-26T12:00:00.123456789Z",
     "start_at": "2026-07-26T12:00:01.234567890Z",
@@ -541,8 +533,8 @@ into blocks. Trace enrichment failure does not change the backend result status.
     },
     "routing": {
       "session_key": "ym:0/0/example-chat#example-thread",
-      "session_created": 8,
-      "session_name": "work"
+      "klax_id": "lOGezVsS",
+      "name": "work"
     },
     "request": {
       "original_text": "@bot inspect the report",
@@ -558,10 +550,10 @@ into blocks. Trace enrichment failure does not change the backend result status.
     },
     "execution": {
       "backend": "claude",
-      "backend_session_id": "89c19fb7-690b-4bf1-85ef-4d68cdfd49df",
+      "backend_id": "89c19fb7-690b-4bf1-85ef-4d68cdfd49df",
       "cwd": "/work/project",
       "model_requested": "sonnet",
-      "effort": "high",
+      "think": "high",
       "tty": false
     }
   }
@@ -572,10 +564,10 @@ into blocks. Trace enrichment failure does not change the backend result status.
 
 ```json
 {
-  "schema": "klax.audit/v1",
+  "schema": "klax.audit/v2",
   "event": "turn.finish",
   "turn": {
-    "turn_id": "7cf1b93af31ea98138ea42ec8c6893b3ad6ca537",
+    "turn_id": "lOGezVsS.42",
     "turn_seq": 42,
     "accepted_at": "2026-07-26T12:00:00.123456789Z",
     "start_at": "2026-07-26T12:00:01.234567890Z",
@@ -600,8 +592,8 @@ into blocks. Trace enrichment failure does not change the backend result status.
     },
     "routing": {
       "session_key": "ym:0/0/example-chat#example-thread",
-      "session_created": 8,
-      "session_name": "work"
+      "klax_id": "lOGezVsS",
+      "name": "work"
     },
     "request": {
       "original_text": "@bot inspect the report",
@@ -617,10 +609,10 @@ into blocks. Trace enrichment failure does not change the backend result status.
     },
     "execution": {
       "backend": "claude",
-      "backend_session_id": "89c19fb7-690b-4bf1-85ef-4d68cdfd49df",
+      "backend_id": "89c19fb7-690b-4bf1-85ef-4d68cdfd49df",
       "cwd": "/work/project",
       "model_requested": "sonnet",
-      "effort": "high",
+      "think": "high",
       "tty": false
     },
     "result": {

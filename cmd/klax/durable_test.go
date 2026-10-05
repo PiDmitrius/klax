@@ -10,8 +10,8 @@ import (
 	"github.com/PiDmitrius/klax/internal/sessfiles"
 )
 
-func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []attachment, targetCreated int64, nonce string) bool {
-	return d.enqueueToSessionOrigin(chatID, msgID, text, text, attachments, targetCreated, nonce, inbound.Origin{}, nil)
+func (d *daemon) enqueueToSession(chatID, msgID, text string, attachments []attachment, targetKlaxID, nonce string) bool {
+	return d.enqueueToSessionOrigin(chatID, msgID, text, text, attachments, targetKlaxID, nonce, inbound.Origin{}, nil)
 }
 
 func TestBuildTurnPromptContainsNoCorrelationMarker(t *testing.T) {
@@ -19,8 +19,8 @@ func TestBuildTurnPromptContainsNoCorrelationMarker(t *testing.T) {
 	d := newTestDeliveryDaemon(&fakeTransport{})
 	d.store = newStoreWithChat("user:alice", "one")
 	d.runners = make(map[runnerKey]*sessionRunner)
-	created := d.store.SessionsFor("user:alice")[0].Created
-	sr := d.getRunner("user:alice", created)
+	klaxID := d.store.SessionsFor("user:alice")[0].KlaxID
+	sr := d.getRunner("user:alice", klaxID)
 	prompt, tmp, err := d.buildTurnPrompt(sr, queuedMsg{text: "literal text"})
 	_ = tmp
 	if err != nil {
@@ -39,13 +39,13 @@ func TestRemoveSessionStoreLatchesRunnerStore(t *testing.T) {
 	d := newTestDeliveryDaemon(&fakeTransport{})
 	d.store = newStoreWithChat("tg:1", "one")
 	d.runners = make(map[runnerKey]*sessionRunner)
-	created := d.store.SessionsFor("tg:1")[0].Created
-	sr := d.getRunner("tg:1", created)
+	klaxID := d.store.SessionsFor("tg:1")[0].KlaxID
+	sr := d.getRunner("tg:1", klaxID)
 	seq, _, _, _, err := sr.store.Enqueue("tg:1", "", "n", "hi", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	d.removeSessionStore("tg:1", created) // simulates close/nuke teardown (runner present)
+	d.removeSessionStore("tg:1", klaxID) // simulates close/nuke teardown (runner present)
 	// The in-flight run's late terminal mark goes through the SAME sr.store instance.
 	if err := sr.store.MarkDone(seq, 0); !errors.Is(err, sessfiles.ErrRemoved) {
 		t.Fatalf("MarkDone after removeSessionStore = %v, want ErrRemoved", err)
@@ -64,12 +64,12 @@ func TestEnqueueToSessionPersistsDurably(t *testing.T) {
 	d.store = newStoreWithChat("tg:1", "one")
 	d.runners = make(map[runnerKey]*sessionRunner)
 
-	created := d.store.SessionsFor("tg:1")[0].Created
-	sr := d.getRunner("tg:1", created)
+	klaxID := d.store.SessionsFor("tg:1")[0].KlaxID
+	sr := d.getRunner("tg:1", klaxID)
 	sr.processing = true // busy → enqueue only queues; no real backend runs
 
 	att := []attachment{{filename: "shot.png", data: []byte("PNG")}}
-	if ok := d.enqueueToSession("tg:1", "100", "look", att, created, ""); !ok {
+	if ok := d.enqueueToSession("tg:1", "100", "look", att, klaxID, ""); !ok {
 		t.Fatal("enqueueToSession returned false")
 	}
 
@@ -90,7 +90,7 @@ func TestEnqueueToSessionPersistsDurably(t *testing.T) {
 
 	// Durable: a fresh store (restart) sees the enq with text + file + marker, and
 	// the file bytes are on disk.
-	fresh := sessfiles.Open("tg:1", created)
+	fresh := sessfiles.Open("tg:1", klaxID)
 	log, err := fresh.InboundLog()
 	if err != nil {
 		t.Fatal(err)
@@ -118,8 +118,8 @@ func TestReplayDurableQueuesLeavesRecoveredRunUnchanged(t *testing.T) {
 	d.store = newStoreWithChat("tg:1", "one")
 	d.runners = make(map[runnerKey]*sessionRunner)
 
-	created := d.store.SessionsFor("tg:1")[0].Created
-	sr := d.getRunner("tg:1", created)
+	klaxID := d.store.SessionsFor("tg:1")[0].KlaxID
+	sr := d.getRunner("tg:1", klaxID)
 	seq, _, _, _, err := sr.store.Enqueue("tg:1", "", "n", "already ran", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -130,7 +130,7 @@ func TestReplayDurableQueuesLeavesRecoveredRunUnchanged(t *testing.T) {
 
 	d.replayDurableQueues()
 
-	log, err := sessfiles.Open("tg:1", created).InboundLog()
+	log, err := sessfiles.Open("tg:1", klaxID).InboundLog()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,14 +147,14 @@ func TestEnqueueToSessionDuplicateNonceDoesNotRequeue(t *testing.T) {
 	d.runners = make(map[runnerKey]*sessionRunner)
 	d.uiHub = newUIHub()
 
-	created := d.store.SessionsFor("user:alice")[0].Created
-	sr := d.getRunner("user:alice", created)
+	klaxID := d.store.SessionsFor("user:alice")[0].KlaxID
+	sr := d.getRunner("user:alice", klaxID)
 	sr.processing = true
 
-	if ok := d.enqueueToSession("user:alice", "100", "one", nil, created, "nonce-1"); !ok {
+	if ok := d.enqueueToSession("user:alice", "100", "one", nil, klaxID, "nonce-1"); !ok {
 		t.Fatal("first enqueueToSession returned false")
 	}
-	if ok := d.enqueueToSession("user:alice", "101", "retry", nil, created, "nonce-1"); !ok {
+	if ok := d.enqueueToSession("user:alice", "101", "retry", nil, klaxID, "nonce-1"); !ok {
 		t.Fatal("duplicate enqueueToSession returned false")
 	}
 

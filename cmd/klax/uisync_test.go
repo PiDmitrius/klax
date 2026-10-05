@@ -8,28 +8,36 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/PiDmitrius/klax/internal/ids"
 	"github.com/PiDmitrius/klax/internal/session"
 )
 
 func (o *uiOrd) UnmarshalJSON(b []byte) error {
-	var v [2]*int64
-	if err := json.Unmarshal(b, &v); err != nil || v[1] == nil {
+	var v string
+	if err := json.Unmarshal(b, &v); err != nil {
 		return fmt.Errorf("bad ord %s", b)
 	}
-	*o = uiOrd{seq: *v[1], last: v[0] == nil}
-	if v[0] != nil {
-		o.event = *v[0]
+	if !strings.Contains(v, "@") {
+		seq, err := strconv.ParseInt(v, 10, 64)
+		*o = uiOrd{seq: seq, last: true}
+		return err
 	}
+	p, ok := parseBound(v)
+	if !ok {
+		return fmt.Errorf("bad ord %s", b)
+	}
+	*o = p
 	return nil
 }
 
 type syncWindow struct {
 	At     string    `json:"at"`
-	From   uiOrd     `json:"from"`
+	From   *uiOrd    `json:"from"`
 	More   bool      `json:"more"`
 	Groups []uiGroup `json:"groups"`
 }
@@ -41,34 +49,34 @@ type syncChanges struct {
 }
 
 type syncFixture struct {
-	t       *testing.T
-	d       *daemon
-	s       *uiServer
-	created int64
-	dir     string
-	event   int
+	t      *testing.T
+	d      *daemon
+	s      *uiServer
+	klaxID string
+	dir    string
+	event  int
 }
 
 func newSyncFixture(t *testing.T) *syncFixture {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	d, created := newReadModelDaemon(t)
+	d, klaxID := newReadModelDaemon(t)
 	const cwd = "/tmp/proj"
 	dir := filepath.Join(home, ".claude", "projects", strings.NewReplacer("/", "-", ".", "-", "_", "-").Replace(cwd))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	f := &syncFixture{t: t, d: d, s: &uiServer{d: d, tokens: map[string]uiAccess{"tok": {User: "alice"}}}, created: created, dir: dir}
-	f.attach(created, "s1")
+	f := &syncFixture{t: t, d: d, s: &uiServer{d: d, tokens: map[string]uiAccess{"tok": {User: "alice"}}}, klaxID: klaxID, dir: dir}
+	f.attach(klaxID, "s1")
 	prev := uiPollHold
 	uiPollHold = 50 * time.Millisecond
 	t.Cleanup(func() { uiPollHold = prev })
 	return f
 }
 
-func (f *syncFixture) attach(created int64, id string) {
-	f.d.store.UpdateSession("user:alice", created, func(s *session.Session) { s.ID, s.CWD, s.Backend = id, "/tmp/proj", "claude" })
+func (f *syncFixture) attach(klaxID string, id string) {
+	f.d.store.UpdateSession("user:alice", klaxID, func(s *session.Session) { s.BackendID, s.CWD, s.Backend = id, "/tmp/proj", "claude" })
 	f.write(id)
 }
 
@@ -119,9 +127,9 @@ func (f *syncFixture) state() (string, []uiSessionInfo) {
 	return st.At, st.Sessions
 }
 
-func (f *syncFixture) window(created int64, query string) syncWindow {
+func (f *syncFixture) window(klaxID string, query string) syncWindow {
 	var w syncWindow
-	if err := json.Unmarshal(f.do("GET", fmt.Sprintf("/api/transcript?session=%d%s", created, query), "").Body.Bytes(), &w); err != nil {
+	if err := json.Unmarshal(f.do("GET", fmt.Sprintf("/api/transcript?klax_id=%s%s", klaxID, query), "").Body.Bytes(), &w); err != nil {
 		f.t.Fatal(err)
 	}
 	return w
@@ -146,10 +154,10 @@ func (r replica) load(w syncWindow) {
 	}
 }
 
-func (r replica) apply(t *testing.T, created int64, evs []uiEventJSON) {
+func (r replica) apply(t *testing.T, klaxID string, evs []uiEventJSON) {
 	t.Helper()
 	for _, ev := range evs {
-		if ev.Session != created {
+		if ev.KlaxID != klaxID {
 			continue
 		}
 		switch {
@@ -211,7 +219,7 @@ func TestSyncReplayEqualsReload(t *testing.T) {
 	f := newSyncFixture(t)
 	f.write("s1", "u:first", "one")
 	f.state()
-	w := f.window(f.created, "&limit=50")
+	w := f.window(f.klaxID, "&limit=50")
 	r := replica{}
 	r.load(w)
 	at := w.At
@@ -221,9 +229,9 @@ func TestSyncReplayEqualsReload(t *testing.T) {
 		if c.Resync {
 			t.Fatalf("%s: unexpected resync", name)
 		}
-		r.apply(t, f.created, c.Events)
+		r.apply(t, f.klaxID, c.Events)
 		at = c.At
-		sameGroups(t, r.list(), f.window(f.created, "&limit=50").Groups)
+		sameGroups(t, r.list(), f.window(f.klaxID, "&limit=50").Groups)
 	}
 	f.write("s1", "u:second")
 	step("new turn")
@@ -231,7 +239,7 @@ func TestSyncReplayEqualsReload(t *testing.T) {
 		f.write("s1", fmt.Sprint("block ", i))
 		step(fmt.Sprint("block ", i))
 	}
-	sr := f.d.getRunner("user:alice", f.created)
+	sr := f.d.getRunner("user:alice", f.klaxID)
 	seq, _, _, _, err := sr.store.Enqueue("ui:alice", "", "nq", "queued", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -256,9 +264,9 @@ func TestSyncIdlePollReturnsSameAt(t *testing.T) {
 func TestSyncRenameSendsOnlyTheName(t *testing.T) {
 	f := newSyncFixture(t)
 	at, _ := f.state()
-	f.d.renameSession("user:alice", f.created, "renamed")
+	f.d.renameSession("user:alice", f.klaxID, "renamed")
 	c := f.changes(at)
-	if want := fmt.Sprintf(`{"created":%d,"name":"renamed"}`, f.created); len(c.Events) != 1 || string(c.Events[0].Tab) != want {
+	if want := fmt.Sprintf(`{"klax_id":%q,"name":"renamed"}`, f.klaxID); len(c.Events) != 1 || string(c.Events[0].Tab) != want {
 		t.Fatalf("rename events = %+v, want %s", c.Events, want)
 	}
 }
@@ -267,28 +275,30 @@ func TestSyncRenameSendsOnlyTheName(t *testing.T) {
 func TestSyncTabsReplayEqualsState(t *testing.T) {
 	f := newSyncFixture(t)
 	at, list := f.state()
-	tabs := map[int64][]byte{}
-	var order []int64
+	tabs := map[string][]byte{}
+	var order []string
 	for _, s := range list {
-		tabs[s.Created], _ = json.Marshal(s)
-		order = append(order, s.Created)
+		tabs[s.KlaxID], _ = json.Marshal(s)
+		order = append(order, s.KlaxID)
 	}
 	added := f.d.store.New("user:alice", "two", "/tmp/proj", session.ScopeDefaults{})
-	f.d.renameSession("user:alice", f.created, "renamed")
-	f.d.store.UpdateSession("user:alice", f.created, func(s *session.Session) { s.Groups = []string{"g"} })
+	f.d.renameSession("user:alice", f.klaxID, "renamed")
+	f.d.store.UpdateSession("user:alice", f.klaxID, func(s *session.Session) { s.Groups = []string{"g"} })
 	f.d.uiPoke("alice")
 	c := f.changes(at)
-	f.d.store.UpdateSession("user:alice", f.created, func(s *session.Session) { s.Groups = nil })
-	if err := f.d.closeSession("user:alice", added.Created); err != nil {
+	f.d.store.UpdateSession("user:alice", f.klaxID, func(s *session.Session) { s.Groups = nil })
+	if err := f.d.closeSession("user:alice", added.KlaxID); err != nil {
 		t.Fatal(err)
 	}
 	c2 := f.changes(c.At)
 	for _, ev := range append(c.Events, c2.Events...) {
 		switch {
 		case ev.Tab != nil:
-			var id struct{ Created int64 }
+			var id struct {
+				KlaxID string `json:"klax_id"`
+			}
 			_ = json.Unmarshal(ev.Tab, &id)
-			tabs[id.Created] = applyMerge(tabs[id.Created], ev.Tab)
+			tabs[id.KlaxID] = applyMerge(tabs[id.KlaxID], ev.Tab)
 		case ev.Tabs != nil:
 			order = ev.Tabs
 		}
@@ -312,23 +322,23 @@ func TestSyncSessionLifecycleEvents(t *testing.T) {
 	at, _ := f.state()
 	f.write("s2", "u:old", "a", "u:older", "b")
 	added := f.d.store.New("user:alice", "two", "/tmp/proj", session.ScopeDefaults{})
-	f.attach(added.Created, "s2")
+	f.attach(added.KlaxID, "s2")
 	c := f.changes(at)
 	for _, ev := range c.Events {
 		if ev.Group != nil || ev.Removed != nil {
 			t.Fatalf("new session streamed its history: %+v", ev)
 		}
 	}
-	w := f.window(added.Created, "&limit=50")
+	w := f.window(added.KlaxID, "&limit=50")
 	r := replica{}
 	r.load(w)
 	f.write("s3", "u:other")
-	f.attach(added.Created, "s3")
+	f.attach(added.KlaxID, "s3")
 	c = f.changes(w.At)
-	r.apply(t, added.Created, c.Events)
-	sameGroups(t, r.list(), f.window(added.Created, "&limit=50").Groups)
+	r.apply(t, added.KlaxID, c.Events)
+	sameGroups(t, r.list(), f.window(added.KlaxID, "&limit=50").Groups)
 	at = c.At
-	if err := f.d.closeSession("user:alice", added.Created); err != nil {
+	if err := f.d.closeSession("user:alice", added.KlaxID); err != nil {
 		t.Fatal(err)
 	}
 	c = f.changes(at)
@@ -348,10 +358,10 @@ func TestSyncSessionWindowLeavesTurnsAlone(t *testing.T) {
 	f := newSyncFixture(t)
 	f.write("s1", "u:hello", "hi")
 	at, _ := f.state()
-	f.d.store.UpdateSession("user:alice", f.created, func(s *session.Session) { s.ContextWindow = 1_000_000 })
+	f.d.store.UpdateSession("user:alice", f.klaxID, func(s *session.Session) { s.ContextWindow = 1_000_000 })
 	f.d.uiPoke("alice")
 	c := f.changes(at)
-	if want := fmt.Sprintf(`{"created":%d,"ctx_window":1000000}`, f.created); len(c.Events) != 1 || string(c.Events[0].Tab) != want {
+	if want := fmt.Sprintf(`{"ctx_window":1000000,"klax_id":%q}`, f.klaxID); len(c.Events) != 1 || string(c.Events[0].Tab) != want {
 		t.Fatalf("window change events = %+v, want only %s", c.Events, want)
 	}
 }
@@ -361,17 +371,15 @@ func TestSyncWindowPaging(t *testing.T) {
 	for i := range 7 {
 		f.write("s1", fmt.Sprint("u:q", i), fmt.Sprint("a", i))
 	}
-	all := f.window(f.created, "&limit=100")
-	if len(all.Groups) != 7 || all.More || all.From != (uiOrd{event: -1}) {
+	all := f.window(f.klaxID, "&limit=100")
+	if len(all.Groups) != 7 || all.More || all.From != nil {
 		t.Fatalf("full window = %d groups, more=%v, from=%+v; want 7, false, the history start", len(all.Groups), all.More, all.From)
 	}
 	var got []uiGroup
-	w := f.window(f.created, "&limit=3")
+	w := f.window(f.klaxID, "&limit=3")
 	got = append(got, w.Groups...)
 	for w.More {
-		before := w.From
-		ord := fmt.Sprintf("%d,%d", before.event, before.seq)
-		w = f.window(f.created, "&limit=3&before="+ord)
+		w = f.window(f.klaxID, "&limit=3&to="+w.From.String())
 		got = append(slices.Clone(w.Groups), got...)
 	}
 	sameGroups(t, got, all.Groups)
@@ -379,7 +387,7 @@ func TestSyncWindowPaging(t *testing.T) {
 
 func TestSyncResyncAcrossProcesses(t *testing.T) {
 	f := newSyncFixture(t)
-	for _, after := range []string{"", newEpoch() + ".1"} {
+	for _, after := range []string{"", ids.New() + ".1"} {
 		if c := f.changes(after); !c.Resync {
 			t.Fatalf("after %q: %+v, want resync", after, c)
 		}
@@ -409,15 +417,15 @@ func TestSyncNoticeReleasesHeldPoll(t *testing.T) {
 func TestSyncWindowStartsAtTranscriptPosition(t *testing.T) {
 	f := newSyncFixture(t)
 	f.write("s1", "u:first", "one")
-	sr := f.d.getRunner("user:alice", f.created)
+	sr := f.d.getRunner("user:alice", f.klaxID)
 	for i := range 4 {
 		if _, _, _, _, err := sr.store.Enqueue("ui:alice", "", fmt.Sprint("n", i), fmt.Sprint("queued ", i), nil); err != nil {
 			t.Fatal(err)
 		}
 	}
 	f.state()
-	w := f.window(f.created, "&limit=2")
-	if w.From.last || len(w.Groups) < 3 {
+	w := f.window(f.klaxID, "&limit=2")
+	if (w.From != nil && w.From.last) || len(w.Groups) < 3 {
 		t.Fatalf("window from=%+v with %d groups, want it to start at the transcript turn", w.From, len(w.Groups))
 	}
 }
@@ -427,7 +435,7 @@ func TestSyncWindowStartsAtTranscriptPosition(t *testing.T) {
 func TestSyncReadOnlyStripPublishedOnDemand(t *testing.T) {
 	f := newSyncFixture(t)
 	at, _ := f.state()
-	f.d.renameSession("user:alice", f.created, "renamed")
+	f.d.renameSession("user:alice", f.klaxID, "renamed")
 	f.changes(at)
 	u := f.d.uiHub.userSync("alice")
 	if u.tabs[roleRO] != nil {

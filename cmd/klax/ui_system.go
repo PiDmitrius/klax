@@ -251,11 +251,11 @@ func (d *daemon) systemUpdateRunning() bool {
 
 func (s *uiServer) handleSystem(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(r); !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		apiFail(w, http.StatusUnauthorized, "unauthorized", "Требуется авторизация")
 		return
 	}
 	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -264,11 +264,11 @@ func (s *uiServer) handleSystem(w http.ResponseWriter, r *http.Request) {
 
 func (s *uiServer) handleSystemCheck(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(r); !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		apiFail(w, http.StatusUnauthorized, "unauthorized", "Требуется авторизация")
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")
 		return
 	}
 	started := s.d.startUpdateCheck()
@@ -278,11 +278,11 @@ func (s *uiServer) handleSystemCheck(w http.ResponseWriter, r *http.Request) {
 
 func (s *uiServer) handleSystemUpdate(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(r); !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		apiFail(w, http.StatusUnauthorized, "unauthorized", "Требуется авторизация")
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")
 		return
 	}
 	var body struct {
@@ -290,7 +290,7 @@ func (s *uiServer) handleSystemUpdate(w http.ResponseWriter, r *http.Request) {
 		Source string `json:"source"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Tag == "" {
-		http.Error(w, "Tag is required", http.StatusBadRequest)
+		apiFail(w, http.StatusBadRequest, "bad-request", "Нужно указать тег")
 		return
 	}
 	if body.Source == "" {

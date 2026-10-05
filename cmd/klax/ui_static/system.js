@@ -1,4 +1,4 @@
-import { api, copyText, flashCopied } from "./base.js";
+import { api, apiError, copyText, flashCopied } from "./base.js";
 import { isReadOnly } from "./auth.js";
 import { uiConfirm } from "./modal.js";
 
@@ -74,7 +74,7 @@ function render(data){
 async function refresh(){
   try {
     const r = await api("/api/system");
-    if(!r.ok) throw new Error(await r.text());
+    if(!r.ok) throw new Error(await apiError(r, ""));
     render(await r.json());
   } catch(e){ $("sysbody").textContent = "Не удалось получить состояние klax"; }
 }
@@ -99,7 +99,7 @@ async function checkUpdates(){
   const b = $("syscheck"); if(b){ b.disabled = true; b.textContent = "Проверяется…"; }
   try {
     const r = await api("/api/system/check", { method: "POST" });
-    if(!r.ok) throw new Error(await r.text());
+    if(!r.ok) throw new Error(await apiError(r, ""));
     refresh();
   } catch(e){ notify(errorNotice("Ошибка проверки обновлений", e), { error: true }); refresh(); }
 }
@@ -118,7 +118,7 @@ async function beginInstall(chosen){
   try {
     const r = await api("/api/system/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tag: chosen.tag, source: chosen.source }) });
     const data = await r.json();
-    if(!r.ok) throw new Error(data.message || "Ошибка установки");
+    if(!r.ok) throw new Error((data.error && data.error.message) || "Ошибка установки");
     notify(data.message, data.started ? "info" : "warning");
     if(lastData && lastData.update){ lastData.update.running = !!data.running; render(lastData); }
     refresh();

@@ -202,7 +202,7 @@ test("storage refusal leaves the draft editable and sends no request",async()=>{
 test("multiple recovered drafts surface separately after each confirmation",async()=>{
   const h=composer();
   for(const [nonce,text] of [["old-a","first"],["old-b","second"]]){
-    h.ctx.outboxPut({created:42,nonce,text,sent:true});
+    h.ctx.outboxPut({klax_id:42,nonce,text,sent:true});
   }
   h.ctx.recoverOutbox({isLive:()=>true}); h.ctx.loadDraft(42);
   for(const [index,text,nonce] of [[0,"first","old-a"],[1,"second","old-b"]]){
@@ -217,9 +217,9 @@ test("multiple recovered drafts surface separately after each confirmation",asyn
 
 test("an uncommitted overwrite cannot count as a durable save",()=>{
   const h=composer();
-  h.ctx.outboxPut({created:42,nonce:"same",text:"old"});
+  h.ctx.outboxPut({klax_id:42,nonce:"same",text:"old"});
   h.localStorage.setItem=()=>{};
-  assert.equal(h.ctx.outboxPut({created:42,nonce:"same",text:"new"}),false);
+  assert.equal(h.ctx.outboxPut({klax_id:42,nonce:"same",text:"new"}),false);
 });
 
 
@@ -559,18 +559,18 @@ for(const text of ["", "unchanged text"]){
 test("closing a session discards only its never-transmitted drafts",()=>{
   const h=composer(); typeDraft(h,"discard on close");
   h.switchTo(7); typeDraft(h,"keep live session");
-  h.ctx.outboxPut({created:42,nonce:"pending",text:"uncertain",sent:true});
-  h.ctx.outboxPut({created:42,nonce:"legacy",text:"unknown submission"});
+  h.ctx.outboxPut({klax_id:42,nonce:"pending",text:"uncertain",sent:true});
+  h.ctx.outboxPut({klax_id:42,nonce:"legacy",text:"unknown submission"});
   h.ctx.dropDraft(42, true);
   assert.deepEqual(entries(h).map(e=>e.text).sort(),["keep live session","uncertain","unknown submission"]);
 });
 
 test("recovery reclaims closed unsent drafts and preserves uncertain or legacy entries",()=>{
   const h=composer();
-  h.ctx.outboxPut({created:7,nonce:"typed",text:"unsent",sent:false});
-  h.ctx.outboxPut({created:7,nonce:"sent",text:"uncertain",sent:true});
-  h.ctx.outboxPut({created:7,nonce:"legacy",text:"legacy"});
-  h.ctx.outboxPut({created:42,nonce:"live",text:"keep",sent:false});
+  h.ctx.outboxPut({klax_id:7,nonce:"typed",text:"unsent",sent:false});
+  h.ctx.outboxPut({klax_id:7,nonce:"sent",text:"uncertain",sent:true});
+  h.ctx.outboxPut({klax_id:7,nonce:"legacy",text:"legacy"});
+  h.ctx.outboxPut({klax_id:42,nonce:"live",text:"keep",sent:false});
   const notices=[];
   assert.equal(h.ctx.recoverOutbox({isLive:c=>c===42,notice:s=>notices.push(s)},h.ctx.outboxList()),1);
   assert.deepEqual(entries(h).map(e=>e.nonce).sort(),["legacy","live","sent"]);
@@ -579,7 +579,7 @@ test("recovery reclaims closed unsent drafts and preserves uncertain or legacy e
 
 test("closed unsent drafts cannot permanently exhaust outbox capacity",async()=>{
   const h=composer();
-  for(let i=0;i<500;i++) assert.equal(h.ctx.outboxPut({created:7,nonce:"closed-"+i,text:"draft",sent:false}),true);
+  for(let i=0;i<500;i++) assert.equal(h.ctx.outboxPut({klax_id:7,nonce:"closed-"+i,text:"draft",sent:false}),true);
   assert.equal(h.ctx.recoverOutbox({isLive:c=>c===42,notice:s=>h.notices.push(s)},h.ctx.outboxList()),0);
   assert.equal(h.store.size,0);
   assert.equal(h.notices.length,0);
@@ -590,7 +590,7 @@ test("closed unsent drafts cannot permanently exhaust outbox capacity",async()=>
 });
 
 
-test("a delayed session snapshot cannot erase another tab's newly created draft",()=>{
+test("a delayed session snapshot cannot erase another tab's newly klaxId draft",()=>{
   const first=composer(), second=composer(first.store);
 
   const beforeRequest=first.ctx.outboxList();
@@ -667,7 +667,7 @@ test("background cancellation timer and completion preserve mobile editing in an
   assert.equal(h.ctx.document.activeElement,h.elements.input);
   assert.equal(h.elements.input.readOnly,false);
   assert.equal(h.elements.sendbtn.title,"Отправить");
-  assert.equal(h.ctx.outboxList().find(e=>e.created===7).text,"new draft");
+  assert.equal(h.ctx.outboxList().find(e=>e.klax_id===7).text,"new draft");
   h.pending[0].resolve({status:204}); await first;
   assert.equal(h.ctx.document.activeElement,h.elements.input);
   assert.equal(h.elements.input.value,"new draft");

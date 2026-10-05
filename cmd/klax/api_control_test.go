@@ -21,10 +21,10 @@ import (
 )
 
 type apiFixture struct {
-	d       *daemon
-	s       *uiServer
-	dir     string
-	created int64
+	d      *daemon
+	s      *uiServer
+	dir    string
+	klaxID string
 }
 
 func newAPIFixture(t *testing.T, start, finish, backend string) *apiFixture {
@@ -70,7 +70,7 @@ func newAPIFixture(t *testing.T, start, finish, backend string) *apiFixture {
 		t.Fatal(err)
 	}
 	sess := d.store.New("user:test", "test", dir, session.ScopeDefaults{Backend: "codex"})
-	f := &apiFixture{d: d, s: &uiServer{d: d, tokens: map[string]uiAccess{"access": {User: "test"}, "other": {User: "other"}}}, dir: dir, created: sess.Created}
+	f := &apiFixture{d: d, s: &uiServer{d: d, tokens: map[string]uiAccess{"access": {User: "test"}, "other": {User: "other"}}}, dir: dir, klaxID: sess.KlaxID}
 	t.Cleanup(func() {
 		for _, phase := range []string{"start", "finish", "backend"} {
 			if err := os.WriteFile(filepath.Join(dir, phase+".release"), nil, 0600); err != nil {
@@ -121,7 +121,7 @@ func (f *apiFixture) request(path, body, token string) *httptest.ResponseRecorde
 	return w
 }
 func (f *apiFixture) send(boundary, nonce string) *httptest.ResponseRecorder {
-	return f.request("/api/send", fmt.Sprintf(`{"session":%d,"text":"hello","return_on":%q,"nonce":%q}`, f.created, boundary, nonce), "")
+	return f.request("/api/send", fmt.Sprintf(`{"klax_id":%q,"text":"hello","return_on":%q,"nonce":%q}`, f.klaxID, boundary, nonce), "")
 }
 func (f *apiFixture) entered(t *testing.T, phase string) {
 	t.Helper()
@@ -231,8 +231,8 @@ func TestAPIWaitBoundariesAndSharedHookSnapshot(t *testing.T) {
 	f.release(t, "finish")
 	end := eventResponse(t, response(t, finish), "finish", "success")
 	env, err := os.ReadFile(filepath.Join(f.dir, "session-env"))
-	if err != nil || string(env) != fmt.Sprint(f.created) {
-		t.Fatalf("backend session environment = %q, want %d, error = %v", env, f.created, err)
+	if err != nil || string(env) != fmt.Sprint(f.klaxID) {
+		t.Fatalf("backend session environment = %q, want %s, error = %v", env, f.klaxID, err)
 	}
 	raw, err = os.ReadFile(filepath.Join(f.dir, "finish.json"))
 	if err != nil {
@@ -260,13 +260,13 @@ func TestAPIWaitBoundariesAndSharedHookSnapshot(t *testing.T) {
 func TestAPIImmediateFinishWithoutHooks(t *testing.T) {
 	f := newAPIFixture(t, "", "", "")
 	for i := 0; i < 8; i++ {
-		w := f.request("/api/send", fmt.Sprintf(`{"session":%d,"text":"hello","return_on":"finish"}`, f.created), "")
+		w := f.request("/api/send", fmt.Sprintf(`{"klax_id":%q,"text":"hello","return_on":"finish"}`, f.klaxID), "")
 		ev := eventResponse(t, w, "finish", "success")
 		if ev.Turn.Result.Output.Text != "done" {
 			t.Fatal("missing backend output")
 		}
 	}
-	turns, err := f.d.getRunner("user:test", f.created).store.InboundLog()
+	turns, err := f.d.getRunner("user:test", f.klaxID).store.InboundLog()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +291,7 @@ func TestAPIErrorsAndAbort(t *testing.T) {
 			ch := asyncResponse(func() *httptest.ResponseRecorder { return f.send("finish", "n") })
 			if tc.backend == "block" {
 				f.entered(t, "backend")
-				f.d.abortSession("user:test", f.created, false)
+				f.d.abortSession("user:test", f.klaxID, false)
 			}
 			w := response(t, ch)
 			if tc.code != "" {
@@ -316,7 +316,7 @@ func TestAPIQueuedAbortAndDeleteWakeWaiters(t *testing.T) {
 			f.send("queued", "second")
 			wait := asyncResponse(func() *httptest.ResponseRecorder { return f.send("finish", "second") })
 			blocked(t, wait)
-			f.d.abortSession("user:test", f.created, closing)
+			f.d.abortSession("user:test", f.klaxID, closing)
 			code := "aborted"
 			if closing {
 				code = "session-deleted"
@@ -332,7 +332,7 @@ func TestAPIQueuedAbortAndDeleteWakeWaiters(t *testing.T) {
 
 func TestAPINonceUnavailableAndValidation(t *testing.T) {
 	f := newAPIFixture(t, "", "", "")
-	sr := f.d.getRunner("user:test", f.created)
+	sr := f.d.getRunner("user:test", f.klaxID)
 	if _, _, _, _, err := sr.store.Enqueue("ui:test", "", "historical", "hello", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -341,7 +341,7 @@ func TestAPINonceUnavailableAndValidation(t *testing.T) {
 	}
 	errorResponse(t, f.send("finish", "historical"), "result-unavailable")
 	for _, fields := range []string{`"nonce":""`, `"nonce":null`, `"nonce":1`, `"return_on":""`, `"return_on":true`, `"return_on":"later"`} {
-		w := f.request("/api/send", fmt.Sprintf(`{"session":%d,"text":"hello",%s}`, f.created, fields), "")
+		w := f.request("/api/send", fmt.Sprintf(`{"klax_id":%q,"text":"hello",%s}`, f.klaxID, fields), "")
 		if w.Code != 400 {
 			t.Fatalf("%s: %d", fields, w.Code)
 		}
@@ -358,7 +358,7 @@ func TestAPIDisconnectDoesNotCancelAndNoIntermediateResponse(t *testing.T) {
 	defer server.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, "POST", server.URL+"/api/send", strings.NewReader(fmt.Sprintf(`{"session":%d,"text":"hello","return_on":"finish","nonce":"lost"}`, f.created)))
+	req, _ := http.NewRequestWithContext(ctx, "POST", server.URL+"/api/send", strings.NewReader(fmt.Sprintf(`{"klax_id":%q,"text":"hello","return_on":"finish","nonce":"lost"}`, f.klaxID)))
 	req.Header.Set("Authorization", "Bearer access")
 	done := make(chan error, 1)
 	go func() {
@@ -392,7 +392,7 @@ func TestAPIMultipartWait(t *testing.T) {
 	f := newAPIFixture(t, "", "", "")
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
-	_ = mw.WriteField("session", fmt.Sprint(f.created))
+	_ = mw.WriteField("klax_id", f.klaxID)
 	_ = mw.WriteField("text", "read file")
 	_ = mw.WriteField("return_on", "finish")
 	part, _ := mw.CreateFormFile("files", "note.txt")
@@ -411,7 +411,7 @@ func TestAPIMultipartWait(t *testing.T) {
 
 func TestAPINewRejectsInvalidWithoutPartialSession(t *testing.T) {
 	f := newAPIFixture(t, "", "", "")
-	for _, body := range []string{`{"control_token":""}`, `{"control_token":null}`, `{"control_token":false}`, `{"backend":"unknown"}`, `{"cwd":"/nonexistent/klax-api-test"}`} {
+	for _, body := range []string{`{"backend":"unknown"}`, `{"cwd":"/nonexistent/klax-api-test"}`} {
 		w := f.request("/api/new", body, "")
 		if w.Code != 400 {
 			t.Fatalf("%s: %d", body, w.Code)
@@ -454,7 +454,7 @@ func TestAPIPreparationFailuresWakeBothBoundaries(t *testing.T) {
 	for _, missingFiles := range []bool{false, true} {
 		t.Run(fmt.Sprint(missingFiles), func(t *testing.T) {
 			f := newAPIFixture(t, "", "", "")
-			sr := f.d.getRunner("user:test", f.created)
+			sr := f.d.getRunner("user:test", f.klaxID)
 			sr.mu.Lock()
 			sr.processing = true
 			sr.mu.Unlock()
@@ -463,7 +463,7 @@ func TestAPIPreparationFailuresWakeBothBoundaries(t *testing.T) {
 			if missingFiles {
 				files = []attachment{{filename: "missing.txt", data: []byte("data")}}
 			}
-			if !f.d.handleInbound(Inbound{ChatID: "ui:test", Text: "hello", TargetCreated: f.created, Nonce: "n", Attachments: files, RawMessage: true, admission: admission}) {
+			if !f.d.handleInbound(Inbound{ChatID: "ui:test", Text: "hello", TargetKlaxID: f.klaxID, Nonce: "n", Attachments: files, RawMessage: true, admission: admission}) {
 				t.Fatal("enqueue rejected")
 			}
 			sr.mu.Lock()
@@ -527,7 +527,7 @@ func (w *delayedAPIWriter) Write(p []byte) (int, error) {
 func TestAPISlowFailedWriterDoesNotBlockQueue(t *testing.T) {
 	f := newAPIFixture(t, "", "", "")
 	w := &delayedAPIWriter{header: make(http.Header), writing: make(chan struct{}), release: make(chan struct{})}
-	req := httptest.NewRequest("POST", "/api/send", strings.NewReader(fmt.Sprintf(`{"session":%d,"text":"hello","return_on":"finish","nonce":"slow"}`, f.created)))
+	req := httptest.NewRequest("POST", "/api/send", strings.NewReader(fmt.Sprintf(`{"klax_id":%q,"text":"hello","return_on":"finish","nonce":"slow"}`, f.klaxID)))
 	req.Header.Set("Authorization", "Bearer access")
 	done := make(chan struct{})
 	go func() { defer close(done); f.s.handleSend(w, req) }()
@@ -552,7 +552,7 @@ func TestAPIDeletionReleasesActiveGateWaiter(t *testing.T) {
 	f.d.store.New("user:test", "other", f.dir, session.ScopeDefaults{Backend: "codex"})
 	wait := asyncResponse(func() *httptest.ResponseRecorder { return f.send("finish", "deleted") })
 	f.entered(t, "start")
-	w := f.request("/api/close", fmt.Sprintf(`{"session":%d}`, f.created), "")
+	w := f.request("/api/close", fmt.Sprintf(`{"klax_id":%q}`, f.klaxID), "")
 	if w.Code != 204 {
 		t.Fatal(w.Code, w.Body.String())
 	}
@@ -578,7 +578,7 @@ func TestAPIFinalSaveFailure(t *testing.T) {
 
 func TestAPIResultRetentionPreservesPendingWaiters(t *testing.T) {
 	f := newAPIFixture(t, "", "", "")
-	sr := f.d.getRunner("user:test", f.created)
+	sr := f.d.getRunner("user:test", f.klaxID)
 	sr.mu.Lock()
 	sr.results = make(map[int64]*turnWait)
 	pending := newTurnWait()
@@ -610,11 +610,11 @@ func TestMessengerSessionControl(t *testing.T) {
 			if w := f.request("/api/new", `{"name":"managed"}`, ""); w.Code != 200 {
 				t.Fatal(w.Code, w.Body.String())
 			}
-			id := f.d.store.Active("user:test").Created
+			id := f.d.store.Active("user:test").KlaxID
 			f.d.handleCommand(chatID, "", "/name renamed")
 			f.d.handleCommand(chatID, "", "/prompt instructions")
 			got := f.d.store.Get("user:test", id)
-			if got.Name != "renamed" || got.AppendSystemPrompt != "instructions" {
+			if got.Name != "renamed" || got.SystemPrompt != "instructions" {
 				t.Fatal("messenger settings blocked")
 			}
 			if !f.d.handleInbound(Inbound{ChatID: chatID, MsgID: "1", Text: "hello", Attachments: []attachment{{filename: "note.txt", data: []byte("note")}}}) {
@@ -657,9 +657,9 @@ func TestMessengerNukeWakesAPI(t *testing.T) {
 	if w := f.request("/api/new", `{"name":"managed"}`, ""); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	id := f.d.store.Active("user:test").Created
+	id := f.d.store.Active("user:test").KlaxID
 	wait := asyncResponse(func() *httptest.ResponseRecorder {
-		return f.request("/api/send", fmt.Sprintf(`{"session":%d,"text":"hello","return_on":"finish"}`, id), "")
+		return f.request("/api/send", fmt.Sprintf(`{"klax_id":%q,"text":"hello","return_on":"finish"}`, id), "")
 	})
 	f.entered(t, "start")
 	f.d.handleCommand("tg:1", "", "/nuke fresh")

@@ -4,125 +4,139 @@ package session
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
+
+	"github.com/PiDmitrius/klax/internal/ids"
 )
 
 type ScopeDefaults struct {
-	Backend   string `json:"backend,omitempty"`
-	Model     string `json:"model,omitempty"`
-	Think     string `json:"think,omitempty"`
-	Sandbox   string `json:"sandbox,omitempty"`    // "on" | "off"
-	ClaudeTTY bool   `json:"claude_tty,omitempty"` // drive Claude through klax tty
-	CWD       string `json:"cwd,omitempty"`        // working directory for the next new session
+	Backend        string `json:"backend,omitempty"`
+	ModelRequested string `json:"model_requested,omitempty"`
+	Think          string `json:"think,omitempty"`
+	Sandbox        string `json:"sandbox,omitempty"` // "on" | "off"
+	TTY            bool   `json:"tty,omitempty"`     // drive Claude through klax tty
+	CWD            string `json:"cwd,omitempty"`     // working directory for the next new session
 	// YM threads inherit group mode once, then evolve independently. Keep that
 	// per-thread state with the thread's sessions instead of materializing every
 	// discovered thread in config.json's explicit group_chats registry.
 	GroupMode           *bool  `json:"group_mode,omitempty"`
 	GroupVerbose        *bool  `json:"group_verbose,omitempty"`
 	GroupAttachmentMode string `json:"group_attachment_mode,omitempty"` // "off" | "on" (default) | "any"
-	// Deprecated development-build shape. Read only for a compatible migration:
-	// true meant today's "any"; false meant the old/default "on" behaviour.
-	LegacyGroupAttachments *bool `json:"group_attachments,omitempty"`
 }
 
 type Session struct {
-	ID            string `json:"id"`                       // session UUID (claude or codex thread_id)
-	Name          string `json:"name"`                     // user-friendly name
-	CWD           string `json:"cwd"`                      // working directory
-	Created       int64  `json:"created"`                  // monotonic per-chat session key (never reused; not a timestamp for new sessions)
-	LastUsed      int64  `json:"last_used"`                // unix timestamp
-	Active        bool   `json:"active"`                   // currently selected
-	Backend       string `json:"backend,omitempty"`        // "claude" (default) or "codex"
-	Model         string `json:"model,omitempty"`          // last used model (from result)
-	ModelOverride string `json:"model_override,omitempty"` // user-selected model
-	ThinkOverride string `json:"think_override,omitempty"` // thinking level
-	Sandbox       string `json:"sandbox,omitempty"`        // "on" | "off"
-	ClaudeTTY     bool   `json:"claude_tty,omitempty"`     // drive Claude through klax tty
-	ContextWindow int    `json:"ctx_window,omitempty"`
-	ContextUsed   int    `json:"ctx_used,omitempty"`
-	Messages      int    `json:"messages"` // user message count
+	KlaxID         string `json:"klax_id"`              // opaque session id (internal/ids), unique across the store
+	BackendID      string `json:"backend_id,omitempty"` // backend session identity (claude session / codex thread)
+	Name           string `json:"name"`
+	CWD            string `json:"cwd"`
+	LastUsed       int64  `json:"last_used"` // unix timestamp
+	Active         bool   `json:"active"`    // the chat's selected session
+	Backend        string `json:"backend,omitempty"`
+	ModelUsed      string `json:"model_used,omitempty"`      // model the backend last reported
+	ModelRequested string `json:"model_requested,omitempty"` // model the user selected
+	Think          string `json:"think,omitempty"`
+	Sandbox        string `json:"sandbox,omitempty"` // "on" | "off"
+	TTY            bool   `json:"tty,omitempty"`     // drive Claude through klax tty
+	ContextWindow  int    `json:"ctx_window,omitempty"`
+	ContextUsed    int    `json:"ctx_used,omitempty"`
+	Messages       int    `json:"messages"` // user message count
 	// Groups label a session for the UI's filtered views (one browser tab per group). A pure view
 	// filter: never a second source of order or session state, and never a place for computed
 	// "is:*" views, which are derived from live facts instead of stored here. A session may belong
 	// to several groups.
 	Groups []string `json:"groups,omitempty"`
-	// UI read-through watermark — the durable per-session unread cursor: the highest
-	// (turn_seq, block index) the user has read. Absent on legacy stores ⇒ 0 ("nothing read
-	// yet"). Consumed by the UI so the unread divider/badge/title survive a page reload
-	// and a daemon restart instead of re-baselining to "all read".
-	ReadThroughTurn        int64  `json:"read_through_turn,omitempty"`
-	ReadThroughBlock       int    `json:"read_through_block,omitempty"`
-	ReaderReadThroughTurn  int64  `json:"reader_read_through_turn,omitempty"`
-	ReaderReadThroughBlock int    `json:"reader_read_through_block,omitempty"`
-	AppendSystemPrompt     string `json:"append_system_prompt,omitempty"`
-	// Deprecated: rate limits moved to global config per backend.
-	// Keep fields for JSON backward compat (old sessions.json).
-	RateLimitStatus  string `json:"rl_status,omitempty"`
-	RateLimitResets  int64  `json:"rl_resets,omitempty"`
-	RateLimitType    string `json:"rl_type,omitempty"`
-	RateLimitOverage bool   `json:"rl_overage,omitempty"`
+	// Durable read positions "<turn_seq>.<block_seq>" per access role: the highest block the user
+	// has read, so unread state survives reloads and restarts. Empty means nothing read yet.
+	ReadPos      string `json:"read_pos,omitempty"`
+	ReadPosRO    string `json:"read_pos_ro,omitempty"`
+	SystemPrompt string `json:"system_prompt,omitempty"` // appended to the backend's system prompt
 }
 
-// ReadThrough selects the durable watermark for the access role, independent of token rotation.
-func (s *Session) ReadThrough(readOnly bool) (int64, int) {
-	if readOnly {
-		return s.ReaderReadThroughTurn, s.ReaderReadThroughBlock
+// FormatReadPos renders a read position.
+func FormatReadPos(turn int64, block int) string {
+	if turn == 0 && block == 0 {
+		return ""
 	}
-	return s.ReadThroughTurn, s.ReadThroughBlock
+	return strconv.FormatInt(turn, 10) + "." + strconv.Itoa(block)
 }
 
-func (s *Session) AdvanceReadThrough(readOnly bool, turn int64, block int) bool {
-	t, b := &s.ReadThroughTurn, &s.ReadThroughBlock
-	if readOnly {
-		t, b = &s.ReaderReadThroughTurn, &s.ReaderReadThroughBlock
+// ParseReadPos reads "<turn_seq>.<block_seq>"; the empty string is the start (0, 0).
+func ParseReadPos(v string) (turn int64, block int, err error) {
+	if v == "" {
+		return 0, 0, nil
 	}
-	if turn < *t || (turn == *t && block <= *b) {
+	t, b, ok := strings.Cut(v, ".")
+	if !ok {
+		return 0, 0, fmt.Errorf("read_pos %q: want <turn_seq>.<block_seq>", v)
+	}
+	if turn, err = strconv.ParseInt(t, 10, 64); err == nil {
+		block, err = strconv.Atoi(b)
+	}
+	if err != nil || block < 0 {
+		return 0, 0, fmt.Errorf("read_pos %q: want <turn_seq>.<block_seq>", v)
+	}
+	return turn, block, nil
+}
+
+// ReadPosition selects the durable read position for the access role, independent of token rotation.
+func (s *Session) ReadPosition(readOnly bool) (int64, int) {
+	v := s.ReadPos
+	if readOnly {
+		v = s.ReadPosRO
+	}
+	turn, block, _ := ParseReadPos(v)
+	return turn, block
+}
+
+// AdvanceReadPos raises the role's read position; it never moves back.
+func (s *Session) AdvanceReadPos(readOnly bool, turn int64, block int) bool {
+	t, b := s.ReadPosition(readOnly)
+	if turn < t || (turn == t && block <= b) {
 		return false
 	}
-	*t, *b = turn, block
+	if readOnly {
+		s.ReadPosRO = FormatReadPos(turn, block)
+	} else {
+		s.ReadPos = FormatReadPos(turn, block)
+	}
 	return true
 }
 
 type ChatSessions struct {
-	// HighWater is the legacy per-chat high-water written by development builds before session keys
-	// became store-global. normalize folds it into Store.HighWater and clears it; keep the field only
-	// so those stores migrate without reusing a deleted session's key.
-	HighWater int64      `json:"high_water,omitempty"`
-	Sessions  []*Session `json:"sessions"`
+	Sessions []*Session `json:"sessions"`
 }
 
 type Store struct {
-	mu sync.Mutex
-	// HighWater is the store-global monotonic session-key counter. Every new klax session, regardless
-	// of chat, gets the next value, so MergeKeys can never combine colliding identities.
-	HighWater int64                     `json:"high_water,omitempty"`
-	Chats     map[string]*ChatSessions  `json:"chats"`
-	Scope     map[string]*ScopeDefaults `json:"scope_defaults,omitempty"`
-	path      string
+	mu    sync.Mutex
+	Chats map[string]*ChatSessions  `json:"chats"`
+	Scope map[string]*ScopeDefaults `json:"scope_defaults,omitempty"`
+	path  string
 }
 
-// nextCreated advances the store-global high-water. Caller holds s.mu.
-func (s *Store) nextCreated() int64 {
-	s.HighWater++
-	return s.HighWater
+// newKlaxID returns an id no session in the store holds. Caller holds s.mu.
+func (s *Store) newKlaxID() string {
+	for {
+		id := ids.New()
+		if !s.hasKlaxIDLocked(id) {
+			return id
+		}
+	}
 }
 
-func (s *Session) UnmarshalJSON(data []byte) error {
-	type alias Session
-	var payload struct {
-		alias
-		LegacyEffortOverride string `json:"effort_override,omitempty"`
+func (s *Store) hasKlaxIDLocked(id string) bool {
+	for _, cs := range s.Chats {
+		for _, sess := range cs.Sessions {
+			if sess != nil && sess.KlaxID == id {
+				return true
+			}
+		}
 	}
-	if err := json.Unmarshal(data, &payload); err != nil {
-		return err
-	}
-	*s = Session(payload.alias)
-	if s.ThinkOverride == "" {
-		s.ThinkOverride = payload.LegacyEffortOverride
-	}
-	return nil
+	return false
 }
 
 func cloneSession(sess *Session) *Session {
@@ -149,10 +163,6 @@ func cloneDefaults(def *ScopeDefaults) *ScopeDefaults {
 		verbose := *def.GroupVerbose
 		cp.GroupVerbose = &verbose
 	}
-	if def.LegacyGroupAttachments != nil {
-		attachments := *def.LegacyGroupAttachments
-		cp.LegacyGroupAttachments = &attachments
-	}
 	return &cp
 }
 
@@ -175,6 +185,10 @@ func StoreDir() string {
 	return filepath.Join(home, ".local", "share", "klax")
 }
 
+// ErrLegacyStore means sessions.json is still in the pre-klax_id format: the store migration
+// (sessfiles.MigrateStore) must run before the store is loaded.
+var ErrLegacyStore = errors.New("sessions.json is in the legacy format; run the store migration first")
+
 func LoadStore() (*Store, error) {
 	path := filepath.Join(StoreDir(), "sessions.json")
 	s := &Store{path: path, Chats: make(map[string]*ChatSessions), Scope: make(map[string]*ScopeDefaults)}
@@ -185,27 +199,50 @@ func LoadStore() (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	// Try new format first.
-	if err := json.Unmarshal(data, s); err == nil && (s.HighWater > 0 || len(s.Chats) > 0 || len(s.Scope) > 0) {
-		s.normalize()
-		return s, nil
+	if IsLegacy(data) {
+		return nil, ErrLegacyStore
 	}
-
-	// Fall back to legacy flat format.
-	s.Chats = make(map[string]*ChatSessions)
-	s.Scope = make(map[string]*ScopeDefaults)
-	var legacy struct {
-		Sessions []*Session `json:"sessions"`
-	}
-	if err := json.Unmarshal(data, &legacy); err != nil {
+	if err := json.Unmarshal(data, s); err != nil {
 		return nil, err
-	}
-	if len(legacy.Sessions) > 0 {
-		s.Chats["_migrated"] = &ChatSessions{Sessions: legacy.Sessions}
 	}
 	s.normalize()
 	return s, nil
+}
+
+// IsLegacy reports whether a sessions.json payload predates klax_id: a flat or high-water store,
+// a session without klax_id, or a template with the old field names.
+func IsLegacy(data []byte) bool {
+	var top map[string]json.RawMessage
+	if json.Unmarshal(data, &top) != nil {
+		return false
+	}
+	if _, ok := top["high_water"]; ok {
+		return true
+	}
+	if _, ok := top["sessions"]; ok {
+		return true
+	}
+	var chats map[string]struct {
+		Sessions []map[string]json.RawMessage `json:"sessions"`
+	}
+	json.Unmarshal(top["chats"], &chats)
+	for _, cs := range chats {
+		for _, sess := range cs.Sessions {
+			if _, ok := sess["klax_id"]; !ok {
+				return true
+			}
+		}
+	}
+	var scope map[string]map[string]json.RawMessage
+	json.Unmarshal(top["scope_defaults"], &scope)
+	for _, def := range scope {
+		for _, k := range []string{"model", "claude_tty", "group_attachments"} {
+			if _, ok := def[k]; ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // MigrateTo moves legacy sessions to the given chatID.
@@ -265,13 +302,11 @@ func (s *Store) saveLocked() error {
 	}
 	path := s.path
 	payload := struct {
-		HighWater int64                     `json:"high_water,omitempty"`
-		Chats     map[string]*ChatSessions  `json:"chats"`
-		Scope     map[string]*ScopeDefaults `json:"scope_defaults,omitempty"`
+		Chats map[string]*ChatSessions  `json:"chats"`
+		Scope map[string]*ScopeDefaults `json:"scope_defaults,omitempty"`
 	}{
-		HighWater: s.HighWater,
-		Chats:     make(map[string]*ChatSessions, len(s.Chats)),
-		Scope:     make(map[string]*ScopeDefaults, len(s.Scope)),
+		Chats: make(map[string]*ChatSessions, len(s.Chats)),
+		Scope: make(map[string]*ScopeDefaults, len(s.Scope)),
 	}
 	for key, chat := range s.Chats {
 		payload.Chats[key] = &ChatSessions{Sessions: cloneSessions(chat.Sessions)}
@@ -335,20 +370,10 @@ func (s *Store) normalize() {
 		if chat.Sessions == nil {
 			chat.Sessions = []*Session{}
 		}
-		// Migrate the short-lived per-chat counter format into the one canonical global source.
-		if chat.HighWater > s.HighWater {
-			s.HighWater = chat.HighWater
-		}
-		chat.HighWater = 0
 		def := s.scope(key)
 		for _, sess := range chat.Sessions {
 			if sess == nil {
 				continue
-			}
-			// Lift the global counter to every existing key. Legacy timestamp keys therefore remain valid,
-			// while every new key is unique across all chats and safe under MergeKeys.
-			if sess.Created > s.HighWater {
-				s.HighWater = sess.Created
 			}
 			if sess.Backend == "" && sess.Messages > 0 {
 				sess.Backend = "claude"
@@ -360,15 +385,15 @@ func (s *Store) normalize() {
 	}
 }
 
-// EachSession calls fn for every (chatID, Created) in the store under the lock — used at startup to
+// EachSession calls fn for every (chatID, klaxID) in the store under the lock — used at startup to
 // rebuild derived indexes (e.g. the file-token index) from each session's on-disk state.
-func (s *Store) EachSession(fn func(chatID string, created int64)) {
+func (s *Store) EachSession(fn func(chatID, klaxID string)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for chatID, cs := range s.Chats {
 		for _, sess := range cs.Sessions {
 			if sess != nil {
-				fn(chatID, sess.Created)
+				fn(chatID, sess.KlaxID)
 			}
 		}
 	}
@@ -430,22 +455,22 @@ func (s *Store) UpdateActive(chatID string, fn func(*Session)) *Session {
 	return nil
 }
 
-// ErrSessionNotFound is returned by UpdateSessionChecked when created has no match —
+// ErrSessionNotFound is returned by UpdateSessionChecked when klaxID has no match —
 // e.g. the session was deleted (/nuke, /new) between an earlier lookup and this call.
 var ErrSessionNotFound = errors.New("session not found")
 
-// UpdateSessionChecked applies fn to the session identified by created only if check
+// UpdateSessionChecked applies fn to the session identified by klaxID only if check
 // passes, both evaluated under the SAME lock — closing the gap between a precondition
 // verified earlier (e.g. Messages==0) and the mutation, during which a message could
 // have started and finished running. check may inspect but must not mutate sess; it
 // runs even when fn would be a no-op, so a failing check always short-circuits fn.
 // Returns the resulting session (unmodified if check failed) and check's error, or
-// ErrSessionNotFound if created has no match.
-func (s *Store) UpdateSessionChecked(chatID string, created int64, check func(*Session) error, fn func(*Session)) (*Session, error) {
+// ErrSessionNotFound if klaxID has no match.
+func (s *Store) UpdateSessionChecked(chatID, klaxID string, check func(*Session) error, fn func(*Session)) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, sess := range s.chat(chatID).Sessions {
-		if sess.Created == created {
+		if sess.KlaxID == klaxID {
 			if check != nil {
 				if err := check(sess); err != nil {
 					return cloneSession(sess), err
@@ -458,16 +483,16 @@ func (s *Store) UpdateSessionChecked(chatID string, created int64, check func(*S
 	return nil, ErrSessionNotFound
 }
 
-// SetCWDIfMessages0 re-checks Messages==0 for the session identified by created and,
+// SetCWDIfMessages0 re-checks Messages==0 for the session identified by klaxID and,
 // if still true, sets both its CWD and the chat's ScopeDefaults.CWD under one lock —
 // closing the same TOCTOU gap as UpdateSessionChecked, specifically for /cwd (which
 // writes both fields together, unlike a plain UI settings patch). Returns the updated
 // session and true, or the current session and false if Messages>0 by now.
-func (s *Store) SetCWDIfMessages0(chatID string, created int64, cwd string) (*Session, bool) {
+func (s *Store) SetCWDIfMessages0(chatID, klaxID string, cwd string) (*Session, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, sess := range s.chat(chatID).Sessions {
-		if sess.Created == created {
+		if sess.KlaxID == klaxID {
 			if sess.Messages > 0 {
 				return cloneSession(sess), false
 			}
@@ -479,11 +504,11 @@ func (s *Store) SetCWDIfMessages0(chatID string, created int64, cwd string) (*Se
 	return nil, false
 }
 
-func (s *Store) UpdateSession(chatID string, created int64, fn func(*Session)) *Session {
+func (s *Store) UpdateSession(chatID, klaxID string, fn func(*Session)) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, sess := range s.chat(chatID).Sessions {
-		if sess.Created == created {
+		if sess.KlaxID == klaxID {
 			fn(sess)
 			return cloneSession(sess)
 		}
@@ -491,13 +516,13 @@ func (s *Store) UpdateSession(chatID string, created int64, fn func(*Session)) *
 	return nil
 }
 
-// Get returns a clone of the session identified by Created within chatID.
+// Get returns a clone of the session identified by klaxID within chatID.
 // Returns nil if no matching session exists.
-func (s *Store) Get(chatID string, created int64) *Session {
+func (s *Store) Get(chatID, klaxID string) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, sess := range s.chat(chatID).Sessions {
-		if sess.Created == created {
+		if sess.KlaxID == klaxID {
 			return cloneSession(sess)
 		}
 	}
@@ -523,17 +548,16 @@ func (s *Store) Ensure(chatID, name, cwd string, defaults ScopeDefaults) *Sessio
 	for _, sess := range cs.Sessions {
 		sess.Active = false
 	}
-	created := s.nextCreated()
 	sess := &Session{
-		Name:          name,
-		CWD:           cwd,
-		Created:       created,
-		Active:        true,
-		Backend:       def.Backend,
-		ModelOverride: def.Model,
-		ThinkOverride: def.Think,
-		Sandbox:       def.Sandbox,
-		ClaudeTTY:     def.ClaudeTTY,
+		KlaxID:         s.newKlaxID(),
+		Name:           name,
+		CWD:            cwd,
+		Active:         true,
+		Backend:        def.Backend,
+		ModelRequested: def.ModelRequested,
+		Think:          def.Think,
+		Sandbox:        def.Sandbox,
+		TTY:            def.TTY,
 	}
 	cs.Sessions = append(cs.Sessions, sess)
 	return cloneSession(sess)
@@ -553,24 +577,23 @@ func (s *Store) New(chatID, name, cwd string, defaults ScopeDefaults) *Session {
 	for _, sess := range cs.Sessions {
 		sess.Active = false
 	}
-	created := s.nextCreated()
 	sess := &Session{
-		Name:          name,
-		CWD:           cwd,
-		Created:       created,
-		Active:        true,
-		Backend:       def.Backend,
-		ModelOverride: def.Model,
-		ThinkOverride: def.Think,
-		Sandbox:       def.Sandbox,
-		ClaudeTTY:     def.ClaudeTTY,
+		KlaxID:         s.newKlaxID(),
+		Name:           name,
+		CWD:            cwd,
+		Active:         true,
+		Backend:        def.Backend,
+		ModelRequested: def.ModelRequested,
+		Think:          def.Think,
+		Sandbox:        def.Sandbox,
+		TTY:            def.TTY,
 	}
 	cs.Sessions = append(cs.Sessions, sess)
 	return cloneSession(sess)
 }
 
 // Add inserts an ALREADY-FORMED session into a chat ATOMICALLY: under a single lock it deactivates
-// the current active session, assigns a unique Created, marks the new one active, and appends it. No
+// the current active session, assigns a unique KlaxID, marks the new one active, and appends it. No
 // intermediate or partially-configured state is ever visible to a concurrent SessionsFor — the whole
 // session is published in one operation. The store takes ownership of `sess`; a clone is returned.
 func (s *Store) Add(chatID string, sess *Session) *Session {
@@ -591,7 +614,7 @@ func (s *Store) addWithDefaultsLocked(chatID string, sess *Session, defaults *Sc
 	for _, existing := range cs.Sessions {
 		existing.Active = false
 	}
-	sess.Created = s.nextCreated()
+	sess.KlaxID = s.newKlaxID()
 	sess.Active = true
 	cs.Sessions = append(cs.Sessions, sess)
 	if defaults != nil {
@@ -600,11 +623,11 @@ func (s *Store) addWithDefaultsLocked(chatID string, sess *Session, defaults *Sc
 	return cloneSession(sess)
 }
 
-func (s *Store) DeleteCreated(chatID string, created int64) bool {
+func (s *Store) DeleteByID(chatID, klaxID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for idx, sess := range s.chat(chatID).Sessions {
-		if sess.Created == created {
+		if sess.KlaxID == klaxID {
 			return s.deleteLocked(chatID, idx)
 		}
 	}
@@ -626,7 +649,7 @@ func (s *Store) deleteLocked(chatID string, idx int) bool {
 	return true
 }
 
-// Reorder rearranges a chat's sessions to match the given order of Created ids (the tab strip's
+// Reorder rearranges a chat's sessions to match the given order of klax ids (the tab strip's
 // drag-and-drop). The order may be a SUBSET — a filtered group view drags only the tabs it shows — so
 // the permutation is SLOT-PRESERVING: the positions the listed sessions occupied are refilled in the
 // requested order, and every session not listed keeps its exact index.
@@ -638,19 +661,19 @@ func (s *Store) deleteLocked(chatID string, idx int) bool {
 //
 // Unknown ids are ignored, so a stale client order can never drop or resurrect a tab. Returns true
 // if the order actually changed.
-func (s *Store) Reorder(chatID string, order []int64) bool {
+func (s *Store) Reorder(chatID string, order []string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cs := s.chat(chatID)
 	if len(cs.Sessions) < 2 {
 		return false
 	}
-	byID := make(map[int64]*Session, len(cs.Sessions))
+	byID := make(map[string]*Session, len(cs.Sessions))
 	for _, sess := range cs.Sessions {
-		byID[sess.Created] = sess
+		byID[sess.KlaxID] = sess
 	}
 	seq := make([]*Session, 0, len(order)) // listed sessions that really exist, request order, deduped
-	listed := make(map[int64]bool, len(order))
+	listed := make(map[string]bool, len(order))
 	for _, id := range order {
 		sess := byID[id]
 		if sess == nil || listed[id] {
@@ -663,7 +686,7 @@ func (s *Store) Reorder(chatID string, order []int64) bool {
 	copy(sorted, cs.Sessions)
 	k := 0
 	for i, sess := range cs.Sessions {
-		if listed[sess.Created] {
+		if listed[sess.KlaxID] {
 			sorted[i] = seq[k]
 			k++
 		}
@@ -709,10 +732,8 @@ func (s *Store) AddPersisted(chatID string, sess *Session, defaults *ScopeDefaul
 	}
 	oldDefaults, hadDefaults := s.Scope[chatID]
 	priorDefaults := cloneDefaults(oldDefaults)
-	highWater := s.HighWater
-	created := s.addWithDefaultsLocked(chatID, sess, defaults)
+	added := s.addWithDefaultsLocked(chatID, sess, defaults)
 	if err := s.saveLocked(); err != nil {
-		s.HighWater = highWater
 		if hadChat {
 			s.Chats[chatID] = prior
 		} else {
@@ -725,5 +746,5 @@ func (s *Store) AddPersisted(chatID string, sess *Session, defaults *ScopeDefaul
 		}
 		return nil, err
 	}
-	return created, nil
+	return added, nil
 }

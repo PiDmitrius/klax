@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"reflect"
 	"slices"
 	"strconv"
@@ -40,21 +41,23 @@ func roleOf(readOnly bool) int8 {
 	return roleRW
 }
 
-// uiOrd positions a turn group: the transcript record of its leader, then its seq. A queue-only
-// turn takes the record of the transcript turn it is placed before; `last` (null on the wire)
-// sorts after every record.
+// uiOrd orders a turn group in the feed: the transcript record of its leader, then its turn_seq. A
+// queue-only turn takes the record of the transcript turn it is placed before; `last` sorts after
+// every record. On the wire it is "<turn_seq>@<event>", or "<turn_seq>" for `last`.
 type uiOrd struct {
 	event int64
 	last  bool
 	seq   int64
 }
 
-func (o uiOrd) MarshalJSON() ([]byte, error) {
+func (o uiOrd) String() string {
 	if o.last {
-		return fmt.Appendf(nil, "[null,%d]", o.seq), nil
+		return strconv.FormatInt(o.seq, 10)
 	}
-	return fmt.Appendf(nil, "[%d,%d]", o.event, o.seq), nil
+	return strconv.FormatInt(o.seq, 10) + "@" + strconv.FormatInt(o.event, 10)
 }
+
+func (o uiOrd) MarshalJSON() ([]byte, error) { return json.Marshal(o.String()) }
 
 func (o uiOrd) less(p uiOrd) bool {
 	if o.last != p.last {
@@ -66,18 +69,16 @@ func (o uiOrd) less(p uiOrd) bool {
 	return o.seq < p.seq
 }
 
-// parseOrd reads the "<event|null>,<seq>" form the client sends as `before`.
-func parseOrd(v string) (uiOrd, bool) {
-	e, s, ok := strings.Cut(v, ",")
+// parseBound reads the "<turn_seq>@<event>" position the client sends as `to`; a range bound is
+// always a transcript position.
+func parseBound(v string) (uiOrd, bool) {
+	s, e, ok := strings.Cut(v, "@")
 	if !ok {
 		return uiOrd{}, false
 	}
 	seq, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
 		return uiOrd{}, false
-	}
-	if e == "null" {
-		return uiOrd{last: true, seq: seq}, true
 	}
 	ev, err := strconv.ParseInt(e, 10, 64)
 	if err != nil {
@@ -96,13 +97,13 @@ type uiGroup struct {
 	Rows   []uiTurn  `json:"rows,omitempty"`
 }
 
-func groupRows(created int64, rows []uiTurn) []uiGroup {
+func groupRows(klaxID string, rows []uiTurn) []uiGroup {
 	out := make([]uiGroup, 0, len(rows))
 	used := make(map[string]bool, len(rows))
 	for i, r := range rows {
 		if r.Role != "user" {
 			if len(out) == 0 {
-				out = append(out, uiGroup{Key: fmt.Sprintf("t:%d:0", created), Ord: uiOrd{event: -1}})
+				out = append(out, uiGroup{Key: "t:0", Ord: uiOrd{event: -1}})
 			}
 			out[len(out)-1].Rows = append(out[len(out)-1].Rows, r)
 			continue
@@ -117,9 +118,9 @@ func groupRows(created int64, rows []uiTurn) []uiGroup {
 				}
 			}
 		}
-		key := fmt.Sprintf("t:%d:%d", created, r.Seq)
+		key := fmt.Sprintf("t:%d", r.Seq)
 		if used[key] {
-			key = fmt.Sprintf("t:%d:e%d", created, r.event)
+			key = fmt.Sprintf("t:e%d", r.event)
 		}
 		used[key] = true
 		head := new(uiTurn)
@@ -232,11 +233,11 @@ type uiRemoved struct {
 // uiEventJSON is the wire form of one ring event; exactly one payload field is set.
 type uiEventJSON struct {
 	Seq     uint64          `json:"seq"`
-	Session int64           `json:"session,omitempty"`
+	KlaxID  string          `json:"klax_id,omitempty"`
 	Group   *uiGroupDelta   `json:"group,omitempty"`
 	Removed *uiRemoved      `json:"removed,omitempty"`
-	Tab     json.RawMessage `json:"tab,omitempty"`  // patch of one tab, always with its created
-	Tabs    []int64         `json:"tabs,omitempty"` // the tab order, when membership or order changed
+	Tab     json.RawMessage `json:"tab,omitempty"`  // patch of one tab, always with its klax_id
+	Tabs    []string        `json:"tabs,omitempty"` // the tab order, when membership or order changed
 	Notice  string          `json:"notice,omitempty"`
 }
 
@@ -247,7 +248,7 @@ type uiPending struct {
 
 // diffGroups returns the deltas that turn old into cur: changed and new groups (group events
 // first), then vanished ones.
-func diffGroups(created int64, old, cur []uiGroup) []uiPending {
+func diffGroups(klaxID string, old, cur []uiGroup) []uiPending {
 	byKey := make(map[string]*uiGroup, len(old))
 	for i := range old {
 		byKey[old[i].Key] = &old[i]
@@ -271,11 +272,11 @@ func diffGroups(created int64, old, cur []uiGroup) []uiPending {
 				continue
 			}
 		}
-		out = append(out, uiPending{role: roleShared, ev: uiEventJSON{Session: created, Group: d}})
+		out = append(out, uiPending{role: roleShared, ev: uiEventJSON{KlaxID: klaxID, Group: d}})
 	}
 	for _, o := range old {
 		if !live[o.Key] {
-			out = append(out, uiPending{role: roleShared, ev: uiEventJSON{Session: created, Removed: &uiRemoved{Key: o.Key, Ord: o.Ord}}})
+			out = append(out, uiPending{role: roleShared, ev: uiEventJSON{KlaxID: klaxID, Removed: &uiRemoved{Key: o.Key, Ord: o.Ord}}})
 		}
 	}
 	return out
@@ -283,8 +284,8 @@ func diffGroups(created int64, old, cur []uiGroup) []uiPending {
 
 // uiTabs is one role's published tab strip: the order and each tab's wire form.
 type uiTabs struct {
-	order []int64
-	entry map[int64][]byte
+	order []string
+	entry map[string][]byte
 }
 
 func (t *uiTabs) wire() json.RawMessage {
@@ -302,10 +303,10 @@ func (t *uiTabs) wire() json.RawMessage {
 
 // diffTabs publishes a role's strip and returns its tab patches, then its order if that changed.
 func diffTabs(role int8, old *uiTabs, list []uiSessionInfo) (*uiTabs, []uiPending) {
-	cur := &uiTabs{order: make([]int64, len(list)), entry: make(map[int64][]byte, len(list))}
+	cur := &uiTabs{order: make([]string, len(list)), entry: make(map[string][]byte, len(list))}
 	for i, t := range list {
-		cur.order[i] = t.Created
-		cur.entry[t.Created], _ = json.Marshal(t)
+		cur.order[i] = t.KlaxID
+		cur.entry[t.KlaxID], _ = json.Marshal(t)
 	}
 	if old == nil {
 		return cur, nil
@@ -319,7 +320,7 @@ func diffTabs(role int8, old *uiTabs, list []uiSessionInfo) (*uiTabs, []uiPendin
 		if p := mergePatch(before, cur.entry[c]); p != nil {
 			var m map[string]json.RawMessage
 			_ = json.Unmarshal(p, &m)
-			m["created"], _ = json.Marshal(c)
+			m["klax_id"], _ = json.Marshal(c)
 			tab, _ := json.Marshal(m)
 			out = append(out, uiPending{role: role, ev: uiEventJSON{Tab: tab}})
 		}
@@ -345,7 +346,7 @@ type uiPubSession struct {
 // detector (detMu); ring, ringBytes and floor belong to uiHub.mu.
 type uiUserSync struct {
 	detMu sync.Mutex
-	pub   map[int64]*uiPubSession
+	pub   map[string]*uiPubSession
 	tabs  [2]*uiTabs
 	roles [2]bool // roles that requested state; a role's strip is published from its first request
 
@@ -366,7 +367,7 @@ func (h *uiHub) userSync(user string) *uiUserSync {
 	defer h.mu.Unlock()
 	u := h.users[user]
 	if u == nil {
-		u = &uiUserSync{pub: make(map[int64]*uiPubSession)}
+		u = &uiUserSync{pub: make(map[string]*uiPubSession)}
 		h.users[user] = u
 	}
 	return u
@@ -537,29 +538,29 @@ func (d *daemon) uiDetectLocked(user, sk string, u *uiUserSync) uint64 {
 	h := d.uiHub
 	var evs []uiPending
 	sessions := d.store.SessionsFor(sk)
-	live := make(map[int64]bool, len(sessions))
-	rowsOf := make(map[int64][]uiTurn, len(sessions))
+	live := make(map[string]bool, len(sessions))
+	rowsOf := make(map[string][]uiTurn, len(sessions))
 	for _, sess := range sessions {
-		live[sess.Created] = true
+		live[sess.KlaxID] = true
 		rows, build, ok := d.readModelBuild(sk, sess)
-		rowsOf[sess.Created] = rows
+		rowsOf[sess.KlaxID] = rows
 		if !ok {
 			continue
 		}
-		p := u.pub[sess.Created]
+		p := u.pub[sess.KlaxID]
 		if p != nil && p.build == build {
 			continue
 		}
-		groups := groupRows(sess.Created, rows)
+		groups := groupRows(sess.KlaxID, rows)
 		if p != nil {
-			evs = append(evs, diffGroups(sess.Created, p.groups, groups)...)
+			evs = append(evs, diffGroups(sess.KlaxID, p.groups, groups)...)
 		}
-		u.pub[sess.Created] = &uiPubSession{build: build, groups: groups}
+		u.pub[sess.KlaxID] = &uiPubSession{build: build, groups: groups}
 	}
-	for created := range u.pub {
-		if !live[created] {
-			delete(u.pub, created)
-			d.dropReadModel(sk, created)
+	for klaxID := range u.pub {
+		if !live[klaxID] {
+			delete(u.pub, klaxID)
+			d.dropReadModel(sk, klaxID)
 		}
 	}
 	for _, role := range []int8{roleRW, roleRO} {
@@ -583,7 +584,7 @@ func (d *daemon) uiDetectLocked(user, sk string, u *uiUserSync) uint64 {
 func (s *uiServer) handleState(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		apiFail(w, http.StatusUnauthorized, "unauthorized", "Требуется авторизация")
 		return
 	}
 	readOnly := s.readOnly(r)
@@ -595,12 +596,14 @@ func (s *uiServer) handleState(w http.ResponseWriter, r *http.Request) {
 		At       string          `json:"at"`
 		Startup  string          `json:"startup"`
 		Version  string          `json:"version"`
+		Home     string          `json:"home"` // the UI abbreviates paths under it to ~
 		Sessions json.RawMessage `json:"sessions"`
 	}
 	s.d.uiSync(user, sk, roleOf(readOnly), func(u *uiUserSync, at uint64) {
 		resp.At, resp.Sessions = s.d.uiHub.cursor(at), u.tabs[roleOf(readOnly)].wire()
 	})
 	resp.Startup, resp.Version = s.d.startupKind, version
+	resp.Home, _ = os.UserHomeDir()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 }
@@ -610,18 +613,18 @@ func (s *uiServer) handleState(w http.ResponseWriter, r *http.Request) {
 func (s *uiServer) handleChanges(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		apiFail(w, http.StatusUnauthorized, "unauthorized", "Требуется авторизация")
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")
 		return
 	}
 	var req struct {
 		After string `json:"after"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Bad request", http.StatusBadRequest)
+		apiFail(w, http.StatusBadRequest, "bad-request", "Некорректный запрос")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -633,7 +636,7 @@ func (s *uiServer) handleChanges(w http.ResponseWriter, r *http.Request) {
 	}
 	poll, ok := h.enterPoll(user, after)
 	if !ok {
-		http.Error(w, "Too many concurrent polls", http.StatusTooManyRequests)
+		apiFail(w, http.StatusTooManyRequests, "too-many-polls", "Слишком много одновременных запросов")
 		return
 	}
 	defer h.leavePoll(poll)
@@ -699,45 +702,45 @@ func writeChanges(w http.ResponseWriter, at string, events []json.RawMessage) {
 func (s *uiServer) handleTranscript(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		apiFail(w, http.StatusUnauthorized, "unauthorized", "Требуется авторизация")
 		return
 	}
-	created, _ := strconv.ParseInt(r.URL.Query().Get("session"), 10, 64)
+	klaxID := r.URL.Query().Get("klax_id")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
-	var before *uiOrd
-	if v := r.URL.Query().Get("before"); v != "" {
-		o, ok := parseOrd(v)
+	var to *uiOrd
+	if v := r.URL.Query().Get("to"); v != "" {
+		o, ok := parseBound(v)
 		if !ok {
-			http.Error(w, "Bad before", http.StatusBadRequest)
+			apiFail(w, http.StatusBadRequest, "bad-request", "Некорректная граница to")
 			return
 		}
-		before = &o
+		to = &o
 	}
 	sk := s.d.sessionKey(s.chatID(user))
-	if s.d.store.Get(sk, created) == nil {
-		http.Error(w, "Session not found", http.StatusNotFound)
+	if s.d.store.Get(sk, klaxID) == nil {
+		writeAPIError(w, apiFailure("session-not-found"))
 		return
 	}
 	var resp struct {
 		At     string    `json:"at"`
-		From   uiOrd     `json:"from"`
+		From   *uiOrd    `json:"from,omitempty"` // absent when the window starts at the history start
 		More   bool      `json:"more"`
 		Groups []uiGroup `json:"groups"`
 	}
 	found := false
 	s.d.uiSync(user, sk, roleOf(s.readOnly(r)), func(u *uiUserSync, at uint64) {
-		p := u.pub[created]
+		p := u.pub[klaxID]
 		if p == nil {
 			return
 		}
 		found = true
 		end := len(p.groups)
-		if before != nil {
+		if to != nil {
 			end = 0
-			for end < len(p.groups) && p.groups[end].Ord.less(*before) {
+			for end < len(p.groups) && p.groups[end].Ord.less(*to) {
 				end++
 			}
 		}
@@ -747,13 +750,13 @@ func (s *uiServer) handleTranscript(w http.ResponseWriter, r *http.Request) {
 		}
 		resp.At, resp.More = s.d.uiHub.cursor(at), start > 0
 		resp.Groups = slices.Clone(p.groups[start:end])
-		resp.From = uiOrd{event: -1} // the history start: everything below is covered
 		if start > 0 {
-			resp.From = p.groups[start].Ord
+			from := p.groups[start].Ord
+			resp.From = &from
 		}
 	})
 	if !found {
-		http.Error(w, "История недоступна", http.StatusServiceUnavailable)
+		apiFail(w, http.StatusServiceUnavailable, "history-unavailable", "История недоступна")
 		return
 	}
 	if resp.Groups == nil {

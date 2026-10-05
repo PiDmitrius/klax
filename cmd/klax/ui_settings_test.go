@@ -44,16 +44,16 @@ func TestApplyUISessionSettingsCoreRejectsCWDOnceMessagesStarted(t *testing.T) {
 	chatID := "tg:test"
 	sk := d.sessionKey(chatID)
 	sess := d.store.Ensure(sk, "default", t.TempDir(), d.fallbackScopeDefaults())
-	d.store.UpdateSession(sk, sess.Created, func(s *session.Session) { s.Messages = 1 })
+	d.store.UpdateSession(sk, sess.KlaxID, func(s *session.Session) { s.Messages = 1 })
 
 	newCWD := t.TempDir()
-	err := d.applyUISessionSettingsCore(sk, sess.Created, uiSettingsPatch{CWD: &newCWD})
+	err := d.applyUISessionSettingsCore(sk, sess.KlaxID, uiSettingsPatch{CWD: &newCWD})
 
 	uerr, ok := err.(*uiErr)
 	if !ok || uerr.status != 409 {
 		t.Fatalf("err = %v, want a 409 *uiErr conflict", err)
 	}
-	if got := d.store.Get(sk, sess.Created).CWD; got == newCWD {
+	if got := d.store.Get(sk, sess.KlaxID).CWD; got == newCWD {
 		t.Fatal("cwd must not have been applied once Messages > 0")
 	}
 }
@@ -73,7 +73,7 @@ func TestApplyUISessionSettingsCoreReturns404ForAlreadyDeletedSession(t *testing
 	}
 
 	newCWD := t.TempDir()
-	err := d.applyUISessionSettingsCore(sk, sess.Created, uiSettingsPatch{CWD: &newCWD})
+	err := d.applyUISessionSettingsCore(sk, sess.KlaxID, uiSettingsPatch{CWD: &newCWD})
 
 	uerr, ok := err.(*uiErr)
 	if !ok || uerr.status != 404 {
@@ -148,12 +148,12 @@ func TestValidateSettingsPatchTreatsGroupsAsFreeWhileBusy(t *testing.T) {
 	on := true
 	runAffecting := map[string]uiSettingsPatch{
 		"backend": {Backend: str("codex")},
-		"model":   {Model: str("")},
+		"model":   {ModelRequested: str("")},
 		"think":   {Think: str("")},
 		"sandbox": {Sandbox: str("on")},
 		"tty":     {TTY: &on},
 		"cwd":     {CWD: str(t.TempDir())},
-		"prompt":  {Prompt: str("x")},
+		"prompt":  {SystemPrompt: str("x")},
 	}
 	for name, patch := range runAffecting {
 		if _, err := (&daemon{}).validateSettingsPatch(cur, "claude", true, patch); err == nil {
@@ -188,11 +188,11 @@ func TestApplySettingsPatchClearsGroupsOnExplicitEmptySet(t *testing.T) {
 	}
 }
 
-// A name that would make `#<group>` ambiguous against a session id or a computed view is a client
+// A name that would make `#<group>` ambiguous against a session address or a computed view is a client
 // error, not a silently ignored value.
 func TestValidateSettingsPatchRejectsAmbiguousGroupName(t *testing.T) {
 	cur := &session.Session{CWD: t.TempDir()}
-	for _, bad := range []string{"123", "is:unread", "a/b", "a#b", "*"} {
+	for _, bad := range []string{"is:unread", "a/b", "a#b", "*"} {
 		groups := []string{bad}
 		_, err := (&daemon{}).validateSettingsPatch(cur, "claude", false, uiSettingsPatch{Groups: &groups})
 		uerr, ok := err.(*uiErr)

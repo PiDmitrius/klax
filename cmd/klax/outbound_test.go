@@ -30,14 +30,14 @@ func TestRewriteOutboundForUI(t *testing.T) {
 	d.store.New("tg:1", "one", cwd, session.ScopeDefaults{})
 	d.runners = make(map[runnerKey]*sessionRunner)
 	d.uiHub = newUIHub() // UI on: the file-link rewrite is enabled
-	created := d.store.SessionsFor("tg:1")[0].Created
+	klaxID := d.store.SessionsFor("tg:1")[0].KlaxID
 
 	md := "img ![c](chart.png) esc [r](../../../etc/passwd) web [w](https://x.com/a)"
-	out, published := d.rewriteOutboundForUI("tg:1", created, 1, md)
+	out, published := d.rewriteOutboundForUI("tg:1", klaxID, 1, md)
 	if published {
 		t.Fatal("a degraded link was reported as published")
 	}
-	if _, published := d.rewriteOutboundForUI("tg:1", created, 1, "img ![c](chart.png) web [w](https://x.com/a)"); !published {
+	if _, published := d.rewriteOutboundForUI("tg:1", klaxID, 1, "img ![c](chart.png) web [w](https://x.com/a)"); !published {
 		t.Fatal("published links reported as degraded")
 	}
 
@@ -54,7 +54,7 @@ func TestRewriteOutboundForUI(t *testing.T) {
 		t.Fatalf("remote link must be untouched: %q", out)
 	}
 	// The snapshot landed in the durable store as an out-* entry.
-	filesDir := filepath.Dir(sessfiles.Open("tg:1", created).Path("x"))
+	filesDir := filepath.Dir(sessfiles.Open("tg:1", klaxID).Path("x"))
 	ents, _ := os.ReadDir(filesDir)
 	found := false
 	for _, e := range ents {
@@ -68,7 +68,7 @@ func TestRewriteOutboundForUI(t *testing.T) {
 
 	// With the UI off the markdown is returned unchanged.
 	d.uiHub = nil
-	if got, _ := d.rewriteOutboundForUI("tg:1", created, 1, md); got != md {
+	if got, _ := d.rewriteOutboundForUI("tg:1", klaxID, 1, md); got != md {
 		t.Fatalf("UI-off must pass through unchanged: %q", got)
 	}
 }
@@ -87,10 +87,10 @@ func TestRewriteOutboundSurvivesADeletedOriginal(t *testing.T) {
 	d.store.New("tg:1", "one", cwd, session.ScopeDefaults{})
 	d.runners = make(map[runnerKey]*sessionRunner)
 	d.uiHub = newUIHub()
-	created := d.store.SessionsFor("tg:1")[0].Created
+	klaxID := d.store.SessionsFor("tg:1")[0].KlaxID
 
 	md := "see [report](report.csv)"
-	first, _ := d.rewriteOutboundForUI("tg:1", created, 1, md)
+	first, _ := d.rewriteOutboundForUI("tg:1", klaxID, 1, md)
 	if !strings.Contains(first, "[report](/api/file?ref=") {
 		t.Fatalf("first render must publish the file: %q", first)
 	}
@@ -99,7 +99,7 @@ func TestRewriteOutboundSurvivesADeletedOriginal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	second, _ := d.rewriteOutboundForUI("tg:1", created, 1, md)
+	second, _ := d.rewriteOutboundForUI("tg:1", klaxID, 1, md)
 	if second != first {
 		t.Fatalf("a rebuild after the original vanished changed the link:\n first=%q\nsecond=%q", first, second)
 	}
@@ -122,20 +122,20 @@ func TestRewriteOutboundCapturesEachTurnsVersion(t *testing.T) {
 	d.store.New("tg:1", "one", cwd, session.ScopeDefaults{})
 	d.runners = make(map[runnerKey]*sessionRunner)
 	d.uiHub = newUIHub()
-	created := d.store.SessionsFor("tg:1")[0].Created
+	klaxID := d.store.SessionsFor("tg:1")[0].KlaxID
 
 	md := "готово [summary](summary.md)"
-	turn1, _ := d.rewriteOutboundForUI("tg:1", created, 1, md)
+	turn1, _ := d.rewriteOutboundForUI("tg:1", klaxID, 1, md)
 
 	if err := os.WriteFile(src, []byte("# v2 corrected\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	turn2, _ := d.rewriteOutboundForUI("tg:1", created, 2, md)
+	turn2, _ := d.rewriteOutboundForUI("tg:1", klaxID, 2, md)
 
 	if turn2 == turn1 {
 		t.Fatalf("the corrected file was served as the old snapshot — the fix is invisible: %q", turn2)
 	}
-	if again, _ := d.rewriteOutboundForUI("tg:1", created, 1, md); again != turn1 {
+	if again, _ := d.rewriteOutboundForUI("tg:1", klaxID, 1, md); again != turn1 {
 		t.Fatalf("re-rendering turn 1 changed its link:\n was=%q\nnow=%q", turn1, again)
 	}
 	body1, body2 := servedBody(t, d, turn1), servedBody(t, d, turn2)
@@ -164,7 +164,7 @@ func servedBody(t *testing.T, d *daemon, rewritten string) string {
 	if !ok {
 		t.Fatalf("token %q not in the index", tok)
 	}
-	data, err := os.ReadFile(sessfiles.Open(ref.sk, ref.created).Path(ref.stored))
+	data, err := os.ReadFile(sessfiles.Open(ref.sk, ref.klaxID).Path(ref.stored))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,18 +180,18 @@ func TestRewriteOutboundResolvesAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	newDaemon := func() (*daemon, int64) {
+	newDaemon := func(klaxID string) *daemon {
 		d := newTestDeliveryDaemon(&fakeTransport{})
 		d.store = &session.Store{Chats: map[string]*session.ChatSessions{}, Scope: map[string]*session.ScopeDefaults{}}
-		d.store.New("tg:1", "one", cwd, session.ScopeDefaults{})
+		d.store.Add("tg:1", &session.Session{Name: "one", CWD: cwd})
+		d.store.UpdateActive("tg:1", func(s *session.Session) { s.KlaxID = klaxID })
 		d.runners = make(map[runnerKey]*sessionRunner)
 		d.uiHub = newUIHub()
-		return d, d.store.SessionsFor("tg:1")[0].Created
+		return d
 	}
 
 	md := "see [report](report.csv)"
-	d1, created1 := newDaemon()
-	first, _ := d1.rewriteOutboundForUI("tg:1", created1, 1, md)
+	first, _ := newDaemon("lOGezVsS").rewriteOutboundForUI("tg:1", "lOGezVsS", 1, md)
 	if !strings.Contains(first, "/api/file?ref=") {
 		t.Fatalf("first render must publish the file: %q", first)
 	}
@@ -199,11 +199,7 @@ func TestRewriteOutboundResolvesAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d2, created2 := newDaemon()
-	if created2 != created1 {
-		t.Fatalf("test setup did not reproduce the same durable store (%d vs %d)", created1, created2)
-	}
-	second, _ := d2.rewriteOutboundForUI("tg:1", created2, 1, md)
+	second, _ := newDaemon("lOGezVsS").rewriteOutboundForUI("tg:1", "lOGezVsS", 1, md)
 	if second != first {
 		t.Fatalf("after restart the link changed:\n first=%q\nsecond=%q", first, second)
 	}

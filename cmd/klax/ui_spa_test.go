@@ -289,9 +289,9 @@ import { renderModel, pos } from "./render.js";
 function assert(cond, msg){
   if(!cond) throw new Error(msg);
 }
-const base = { seq: 2, role: "user", text: "u", time: "2026-01-01T00:00:00Z", blocks: [] };
+const base = { turn_seq: 2, role: "user", text: "u", time: "2026-01-01T00:00:00Z", blocks: [] };
 // A running turn carries the PREVIOUS turn's own measured context (one source, not a snapshot).
-const prev = (used, window) => ({ seq: 1, role: "user", text: "p", time: "2026-01-01T00:00:00Z", blocks: [], state: "done", ctx_used: used, ctx_window: window });
+const prev = (used, window) => ({ turn_seq: 1, role: "user", text: "p", time: "2026-01-01T00:00:00Z", blocks: [], state: "done", ctx_used: used, ctx_window: window });
 function runCtx(turn, prevUsed, prevWindow){
   const items = renderModel([prev(prevUsed, prevWindow), turn]);
   return items[items.length - 1].ctxLine;
@@ -385,27 +385,30 @@ function assert(c, m){ if(!c) throw new Error(m); }
 // The outbox namespaces keys by a djb2 tag of the auth token — replicate it to seed entries.
 localStorage.setItem("klax_ui_token", "tok");
 function idTag(t){ let h1 = 5381, h2 = 52711; for(let i = 0; i < t.length; i++){ const c = t.charCodeAt(i); h1 = ((h1 << 5) + h1 + c) >>> 0; h2 = ((h2 << 5) + h2 + (c ^ 0x9e)) >>> 0; } return h1.toString(36) + h2.toString(36); }
-const K = n => "klax_ob." + idTag("tok") + "." + n;
+const K = n => "klax_outbox." + idTag("tok") + "." + n;
 // Session 1 is live; session 2 is closed. TWO unconfirmed messages for session 1 must remain
 // separate with their original nonces; the orphan stays untouched (never re-homed/duplicated).
-localStorage.setItem(K("a1"),    JSON.stringify({ created: 1, text: "first",  nonce: "a1",    sent: true }));
-localStorage.setItem(K("a2"),    JSON.stringify({ created: 1, text: "second", nonce: "a2",    sent: true }));
-localStorage.setItem(K("orph"),  JSON.stringify({ created: 2, text: "orphan", nonce: "orph",  sent: true }));
-localStorage.setItem(K("empty"), JSON.stringify({ created: 1, text: "",       nonce: "empty", sent: true }));
+localStorage.setItem(K("a1"),    JSON.stringify({ klax_id: "s1", text: "first",  nonce: "a1",    sent: true }));
+localStorage.setItem(K("a2"),    JSON.stringify({ klax_id: "s1", text: "second", nonce: "a2",    sent: true }));
+localStorage.setItem(K("orph"),  JSON.stringify({ klax_id: "s2", text: "orphan", nonce: "orph",  sent: true }));
+localStorage.setItem(K("empty"), JSON.stringify({ klax_id: "s1", text: "",       nonce: "empty", sent: true }));
 // A different identity's entry must be invisible to this identity's recovery (privacy namespacing).
-localStorage.setItem("klax_ob.OTHER.x", JSON.stringify({ created: 1, text: "not mine", nonce: "x", sent: true }));
+localStorage.setItem("klax_outbox.OTHER.x", JSON.stringify({ klax_id: "s1", text: "not mine", nonce: "x", sent: true }));
+// Entries of the numeric-session outbox are dropped: their sessions no longer exist.
+localStorage.setItem("klax_ob." + idTag("tok") + ".old", JSON.stringify({ created: 1, text: "old", nonce: "old", sent: true }));
 
 const { recoverOutbox } = await import("./compose.js");
 let notices = 0;
-const n = recoverOutbox({ isLive: c => c === 1, notice: () => notices++ });
+const n = recoverOutbox({ isLive: c => c === "s1", notice: () => notices++ });
 
-const mine = () => { const p = "klax_ob." + idTag("tok") + "."; const out = []; for(let i = 0; i < localStorage.length; i++){ const k = localStorage.key(i); if(k && k.indexOf(p) === 0) out.push(JSON.parse(localStorage.getItem(k))); } return out; };
+const mine = () => { const p = "klax_outbox." + idTag("tok") + "."; const out = []; for(let i = 0; i < localStorage.length; i++){ const k = localStorage.key(i); if(k && k.indexOf(p) === 0) out.push(JSON.parse(localStorage.getItem(k))); } return out; };
 const after = mine();
 assert(!after.some(e => e.nonce === "empty"), "empty entry must be dropped");
 assert(after.some(e => e.nonce === "a1" && e.text === "first"), "first original message/nonce must remain");
 assert(after.some(e => e.nonce === "a2" && e.text === "second"), "second original message/nonce must remain");
-assert(after.some(e => e.nonce === "orph" && e.created === 2), "closed-session orphan must remain under its original nonce");
-assert(localStorage.getItem("klax_ob.OTHER.x") !== null, "another identity's entry must be left untouched");
+assert(after.some(e => e.nonce === "orph" && e.klax_id === "s2"), "closed-session orphan must remain under its original nonce");
+assert(localStorage.getItem("klax_outbox.OTHER.x") !== null, "another identity's entry must be left untouched");
+assert(localStorage.getItem("klax_ob." + idTag("tok") + ".old") === null, "a numeric-session entry must be dropped");
 assert(n === 2, "only the two live-session messages are recoverable, got " + n);
 assert(notices === 2, "recovery and orphan notices expected");
 console.log("ok");

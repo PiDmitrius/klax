@@ -29,19 +29,17 @@ export function sameScope(a, b){ return a.kind === b.kind && a.name === b.name; 
 // fragment and `#is:unread` must stay readable.
 function encodeScope(name){ return encodeURIComponent(name).replace(/%3A/gi, ":"); }
 
-// parseHash reads the address bar. It never touches state, so callers can compare before/after.
+// parseHash reads the address bar: `#<group>`, `#<group>/<klax_id>`, `#/<klax_id>` (all sessions),
+// `#is:<view>[/<klax_id>]`. A bare `#<x>` is always a group. It never touches state, so callers can
+// compare before/after.
 export function parseHash(){
   const raw = (location.hash || "").replace(/^#/, "");
-  if(!raw) return { scope: ROOT, created: 0 };
   const parts = raw.split("/");
-  let first = "";
+  let first = "", second = "";
   try { first = decodeURIComponent(parts[0] || ""); } catch(e){ first = parts[0] || ""; }
-  if(/^\d+$/.test(first)) return { scope: ROOT, created: parseInt(first, 10) || 0 };
-  if(!first) return { scope: ROOT, created: 0 };
-  let second = "";
   try { second = parts.length > 1 ? decodeURIComponent(parts[1]) : ""; } catch(e){ second = parts[1] || ""; }
-  const created = /^\d+$/.test(second) ? parseInt(second, 10) : 0;
-  return { scope: { kind: first.startsWith("is:") ? "builtin" : "group", name: first }, created };
+  if(!first) return { scope: ROOT, klax_id: second };
+  return { scope: { kind: first.startsWith("is:") ? "builtin" : "group", name: first }, klax_id: second };
 }
 
 export function setScope(s){ scope = s && s.kind ? s : ROOT; }
@@ -60,21 +58,21 @@ export function filterScope(list){ return (list || []).filter(inScope); }
 // side do not fight over one key.
 export function storageKey(){ return scope.kind === "root" ? "klax_active" : "klax_active:" + scope.kind + ":" + scope.name; }
 
-// hashFor builds this scope's address for `created`. Root keeps the historical bare `#<created>`.
-export function hashFor(created){
-  const tab = created ? String(created) : "";
+// hashFor builds this scope's address for `klaxId`; all sessions is the empty scope: `#/<klax_id>`.
+export function hashFor(klaxId){
+  const tab = klaxId ? "/" + klaxId : "";
   if(scope.kind === "root") return tab;
-  return encodeScope(scope.name) + (tab ? "/" + tab : "");
+  return encodeScope(scope.name) + tab;
 }
 
 // writeHash keeps the address bar in step with the viewed tab WITHOUT pushing history: switching
 // tabs is not navigation, and a push would make Back walk every tab you ever looked at. Scope
 // changes are real navigation and go through ordinary links, which do push.
-export function writeHash(created){
-  const want = "#" + hashFor(created);
+export function writeHash(klaxId){
+  const want = "#" + hashFor(klaxId);
   if(location.hash === want || (!location.hash && want === "#")) return;
   try { history.replaceState(null, "", location.pathname + location.search + want); }
-  catch(e){ location.hash = hashFor(created); }
+  catch(e){ location.hash = hashFor(klaxId); }
 }
 
 // titlePrefix is the scope segment of the window title: "(3*) work — klax". The counter comes first
@@ -140,7 +138,7 @@ export function renderChip(list, unreadOf){
   let outside = 0, total = 0;
   const perGroup = new Map();
   for(const s of list || []){
-    const n = of(s.created);
+    const n = of(s.klax_id);
     total += n;
     if(!isRoot() && !inScope(s)) outside += n;
     for(const g of s.groups || []) perGroup.set(g, (perGroup.get(g) || 0) + n);

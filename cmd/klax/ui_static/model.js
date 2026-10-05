@@ -3,14 +3,22 @@
 // ordered by `ord`, and the start of the range it holds. Windows and pages replace a range; group
 // events patch one group. turns() is the flat row list render works on. Pure data; no DOM, no fetch.
 
-// ordLess orders two group positions [event|null, seq]; a null event sorts after every event.
-export function ordLess(a, b){
-  if((a[0] === null) !== (b[0] === null)) return b[0] === null;
-  if(a[0] !== null && a[0] !== b[0]) return a[0] < b[0];
-  return a[1] < b[1];
+// ord is a group's place in the feed: "<turn_seq>@<event>" (the transcript record of the turn, or of
+// the transcript turn a queued one stands before), or "<turn_seq>" for a turn with no record after it,
+// which sorts after every record. null is the history start, below every group.
+function ordParts(o){
+  const i = o.indexOf("@");
+  return i < 0 ? { last: true, event: 0, seq: +o } : { last: false, event: +o.slice(i + 1), seq: +o.slice(0, i) };
 }
-
-export function ordParam(o){ return (o[0] === null ? "null" : o[0]) + "," + o[1]; }
+export function ordEvent(o){ const p = ordParts(o); return p.last ? null : p.event; }
+export function ordLess(a, b){
+  if(b === null) return false;
+  if(a === null) return true;
+  const x = ordParts(a), y = ordParts(b);
+  if(x.last !== y.last) return y.last;
+  if(!x.last && x.event !== y.event) return x.event < y.event;
+  return x.seq < y.seq;
+}
 
 // applyMerge applies a JSON Merge Patch to an object: a key set to null is dropped.
 export function applyMerge(obj, patch){
@@ -33,14 +41,14 @@ function applyArray(arr, d){
 }
 
 export class TurnModel {
-  constructor(){ this.byCreated = {}; }
+  constructor(){ this.bySession = {}; }
 
-  has(created){ return this.byCreated[created] !== undefined; }
-  drop(created){ delete this.byCreated[created]; }
-  rangeStart(created){ const s = this.byCreated[created]; return s ? s.from : null; }
+  has(klaxId){ return this.bySession[klaxId] !== undefined; }
+  drop(klaxId){ delete this.bySession[klaxId]; }
+  rangeStart(klaxId){ const s = this.bySession[klaxId]; return s ? s.from : null; }
 
-  turns(created){
-    const s = this.byCreated[created];
+  turns(klaxId){
+    const s = this.bySession[klaxId];
     if(!s) return [];
     if(!s.rows){
       s.rows = [];
@@ -53,28 +61,29 @@ export class TurnModel {
   }
 
   // loadWindow replaces a session with the newest window.
-  loadWindow(created, w){
-    this.byCreated[created] = { groups: (w.groups || []).map(normGroup), from: w.from, rows: null };
+  loadWindow(klaxId, w){
+    this.bySession[klaxId] = { groups: (w.groups || []).map(normGroup), from: w.from ?? null, rows: null };
   }
 
   // loadPage merges an older page: it replaces every held group inside [from, to) and every held
   // copy of a key the page carries (a group that moved into the page's range).
-  loadPage(created, w){
-    const s = this.byCreated[created];
+  loadPage(klaxId, w){
+    const s = this.bySession[klaxId];
     if(!s) return;
-    const inside = o => !ordLess(o, w.from) && (!w.to || ordLess(o, w.to));
+    const from = w.from ?? null;
+    const inside = o => !ordLess(o, from) && (!w.to || ordLess(o, w.to));
     const keys = new Set((w.groups || []).map(g => g.key));
     s.groups = s.groups.filter(g => !inside(g.ord) && !keys.has(g.key)).concat((w.groups || []).map(normGroup));
     s.groups.sort((a, b) => ordLess(a.ord, b.ord) ? -1 : 1);
-    if(ordLess(w.from, s.from)) s.from = w.from;
+    if(ordLess(from, s.from)) s.from = from;
     s.rows = null;
   }
 
   // applyGroup applies one group event — a full create, or patches of the head, blocks and rows;
   // returns false when the session lost track of that group (a patch for a group it should hold but
   // does not) and needs a fresh window.
-  applyGroup(created, d){
-    const s = this.byCreated[created];
+  applyGroup(klaxId, d){
+    const s = this.bySession[klaxId];
     if(!s) return true;
     const i = s.groups.findIndex(g => g.key === d.key);
     if(i < 0){
@@ -99,8 +108,8 @@ export class TurnModel {
     return true;
   }
 
-  applyRemoved(created, key){
-    const s = this.byCreated[created];
+  applyRemoved(klaxId, key){
+    const s = this.bySession[klaxId];
     if(!s) return;
     const i = s.groups.findIndex(g => g.key === key);
     if(i >= 0){ s.groups.splice(i, 1); s.rows = null; }
@@ -108,8 +117,8 @@ export class TurnModel {
 
   // evictTop drops whole groups covered by the oldest n rows (windowing — early history unloaded to
   // keep a long session responsive) and raises the range start. Returns the rows actually removed.
-  evictTop(created, n){
-    const s = this.byCreated[created];
+  evictTop(klaxId, n){
+    const s = this.bySession[klaxId];
     if(!s || n <= 0) return 0;
     let groups = 0, rows = 0;
     while(groups < s.groups.length - 1){
@@ -119,7 +128,7 @@ export class TurnModel {
     }
     // The range starts at a transcript position: not at a queued turn, which sorts last or shares
     // the event of the transcript turn after it.
-    const queued = i => s.groups[i].ord[0] === null || s.groups[i].ord[0] === s.groups[i + 1]?.ord[0];
+    const queued = i => ordEvent(s.groups[i].ord) === null || (i + 1 < s.groups.length && ordEvent(s.groups[i].ord) === ordEvent(s.groups[i + 1].ord));
     while(groups > 0 && queued(groups)) groups--;
     if(!groups) return 0;
     s.groups = s.groups.slice(groups);

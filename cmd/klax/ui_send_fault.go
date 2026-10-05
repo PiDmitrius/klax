@@ -26,7 +26,7 @@ func (s *uiSendTest) intercept(w http.ResponseWriter, r *http.Request, user stri
 	s.mu.Unlock()
 	switch step {
 	case 1:
-		http.Error(w, "Тест отправки: быстрый отказ (1/3). Сообщение не принято.", http.StatusServiceUnavailable)
+		apiFail(w, http.StatusServiceUnavailable, "send-fault", "Тест отправки: быстрый отказ (1/3). Сообщение не принято.")
 		return true
 	case 2:
 		<-r.Context().Done()

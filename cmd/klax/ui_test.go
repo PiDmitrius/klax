@@ -9,12 +9,12 @@ import (
 	_ "image/png"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/config"
+	"github.com/PiDmitrius/klax/internal/ids"
 	"github.com/PiDmitrius/klax/internal/runner"
 )
 
@@ -30,12 +30,12 @@ func decodeEvent(t *testing.T, raw json.RawMessage) uiEventJSON {
 func TestQueuedCountExcludesFirstIdleQueuedMessage(t *testing.T) {
 	d := &daemon{runners: map[runnerKey]*sessionRunner{}}
 	sr := &sessionRunner{runner: runner.New(), queue: []queuedMsg{{turnSeq: 1}}}
-	d.runners[runnerKey{sk: "user:x", created: 1}] = sr
-	if got := d.queuedCount("user:x", 1); got != 0 {
+	d.runners[runnerKey{sk: "user:x", klaxID: "s1"}] = sr
+	if got := d.queuedCount("user:x", "s1"); got != 0 {
 		t.Fatalf("idle first queued count = %d, want 0", got)
 	}
 	sr.processing = true
-	if got := d.queuedCount("user:x", 1); got != 1 {
+	if got := d.queuedCount("user:x", "s1"); got != 1 {
 		t.Fatalf("processing queued count = %d, want 1", got)
 	}
 }
@@ -135,13 +135,13 @@ func TestWaitPollsPastReleasesWhenPollsMoveOn(t *testing.T) {
 
 func TestUICursorRoundTrip(t *testing.T) {
 	h := newUIHub()
-	if !regexp.MustCompile(`^[A-Za-z0-9]{8}$`).MatchString(h.epoch) {
-		t.Fatalf("epoch %q is not 8 characters of [A-Za-z0-9]", h.epoch)
+	if len(h.epoch) != ids.Length {
+		t.Fatalf("epoch %q is not an id", h.epoch)
 	}
 	if seq, ok := h.parseAfter(h.cursor(42)); !ok || seq != 42 {
 		t.Fatalf("parseAfter(cursor(42)) = %d, %v", seq, ok)
 	}
-	for _, v := range []string{"", "42", newEpoch() + ".42", h.epoch + ".x"} {
+	for _, v := range []string{"", "42", ids.New() + ".42", h.epoch + ".x"} {
 		if _, ok := h.parseAfter(v); ok {
 			t.Fatalf("parseAfter(%q) accepted a cursor from another process or a malformed one", v)
 		}
@@ -234,7 +234,7 @@ func TestSessionKeyUISharesIdentity(t *testing.T) {
 
 func TestDeliveryForRoutesUIChat(t *testing.T) {
 	d := &daemon{uiHub: newUIHub()}
-	del := d.deliveryFor(context.Background(), queuedMsg{chatID: "ui:alice", sessCreated: 5}, true)
+	del := d.deliveryFor(context.Background(), queuedMsg{chatID: "ui:alice", klaxID: "s5"}, true)
 	if _, ok := del.(*uiDelivery); !ok {
 		t.Fatalf("ui chat must get *uiDelivery, got %T", del)
 	}
@@ -249,7 +249,7 @@ func TestDeliveryForMirrorsMessengerToUI(t *testing.T) {
 	d.uiHub = newUIHub()
 
 	canon := d.uiHub.waitChan("alice")
-	del := d.deliveryFor(context.Background(), queuedMsg{chatID: "tg:1", sessKey: "user:alice", sessCreated: 7}, true)
+	del := d.deliveryFor(context.Background(), queuedMsg{chatID: "tg:1", sessKey: "user:alice", klaxID: "s7"}, true)
 	if _, ok := del.(teeDelivery); !ok {
 		t.Fatalf("canonical messenger session must mirror to UI (teeDelivery), got %T", del)
 	}
@@ -261,7 +261,7 @@ func TestDeliveryForMirrorsMessengerToUI(t *testing.T) {
 	}
 
 	raw := d.uiHub.waitChan("2")
-	del2 := d.deliveryFor(context.Background(), queuedMsg{chatID: "tg:2", sessKey: "tg:2", sessCreated: 9}, true)
+	del2 := d.deliveryFor(context.Background(), queuedMsg{chatID: "tg:2", sessKey: "tg:2", klaxID: "s9"}, true)
 	if _, ok := del2.(teeDelivery); ok {
 		t.Fatal("a raw (unmapped) messenger session must NOT mirror to UI")
 	}
@@ -279,7 +279,7 @@ func TestUIDeliveryUsesCanonicalSessionUser(t *testing.T) {
 	d := &daemon{uiHub: h}
 	canon := h.waitChan("alice")
 	raw := h.waitChan("42")
-	d.newUIDelivery(context.Background(), queuedMsg{chatID: "tg:42", sessKey: "user:alice", sessCreated: 7})
+	d.newUIDelivery(context.Background(), queuedMsg{chatID: "tg:42", sessKey: "user:alice", klaxID: "s7"})
 
 	select {
 	case <-canon: // poked the canonical user
@@ -339,7 +339,7 @@ func TestUIServerRoutes(t *testing.T) {
 	req := httptest.NewRequest("GET", "/api/state", nil)
 	req.Header.Set("Authorization", "Bearer sec")
 	h.ServeHTTP(ok, req)
-	if ok.Code != 200 || !strings.Contains(ok.Body.String(), `"created"`) {
+	if ok.Code != 200 || !strings.Contains(ok.Body.String(), `"klax_id"`) {
 		t.Fatalf("authenticated /api/state: code=%d body=%s", ok.Code, ok.Body.String())
 	}
 
@@ -373,8 +373,8 @@ func TestUISendRequiresSession(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer sec")
 	req.Header.Set("Content-Type", "application/json")
 	h.ServeHTTP(rec, req)
-	if rec.Code != 400 {
-		t.Fatalf("/api/send without a session: code=%d, want 400 (must not hit the active session)", rec.Code)
+	if rec.Code != 404 {
+		t.Fatalf("/api/send without a session: code=%d, want 404 (must not hit the active session)", rec.Code)
 	}
 }
 
@@ -382,7 +382,7 @@ func TestUIAbortValidatesSession(t *testing.T) {
 	d := &daemon{store: newStoreWithChat("user:alice", "one"), runners: make(map[runnerKey]*sessionRunner)}
 	h := (&uiServer{d: d, tokens: map[string]uiAccess{"sec": {User: "alice"}}}).routes()
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/abort", strings.NewReader(`{"session":99999}`))
+	req := httptest.NewRequest("POST", "/api/abort", strings.NewReader(`{"klax_id":"unknown"}`))
 	req.Header.Set("Authorization", "Bearer sec")
 	h.ServeHTTP(rec, req)
 	if rec.Code != 404 {
@@ -392,12 +392,12 @@ func TestUIAbortValidatesSession(t *testing.T) {
 
 func TestUICancelRejectsNotQueued(t *testing.T) {
 	d := &daemon{store: newStoreWithChat("user:alice", "one"), runners: make(map[runnerKey]*sessionRunner)}
-	created := d.store.SessionsFor("user:alice")[0].Created
+	klaxID := d.store.SessionsFor("user:alice")[0].KlaxID
 	h := (&uiServer{d: d, tokens: map[string]uiAccess{"sec": {User: "alice"}}}).routes()
 	for body, want := range map[string]int{
-		`{"session":99999,"seq":1}`:                    404,
-		fmt.Sprintf(`{"session":%d,"seq":1}`, created): 409,
-		fmt.Sprintf(`{"session":%d}`, created):         400,
+		`{"klax_id":"unknown","turn_seq":1}`:               404,
+		fmt.Sprintf(`{"klax_id":%q,"turn_seq":1}`, klaxID): 409,
+		fmt.Sprintf(`{"klax_id":%q}`, klaxID):              400,
 	} {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest("POST", "/api/cancel", strings.NewReader(body))
@@ -526,6 +526,36 @@ func TestIsLoopbackAddr(t *testing.T) {
 	for addr, want := range cases {
 		if got := isLoopbackAddr(addr); got != want {
 			t.Errorf("isLoopbackAddr(%q) = %v, want %v", addr, got, want)
+		}
+	}
+}
+
+// Every /api/* error is one JSON shape, whatever rejects the request.
+func TestUIErrorsAreJSON(t *testing.T) {
+	d := &daemon{cfg: &config.Config{}, store: newStoreWithChat("user:alice", "one"), uiHub: newUIHub(), runners: make(map[runnerKey]*sessionRunner)}
+	h := (&uiServer{d: d, tokens: map[string]uiAccess{"sec": {User: "alice"}}}).routes()
+	for _, c := range []struct {
+		method, path, token, body, code string
+	}{
+		{"GET", "/api/state", "", "", "unauthorized"},
+		{"GET", "/api/transcript?klax_id=unknown", "sec", "", "session-not-found"},
+		{"GET", "/api/settings?klax_id=unknown", "sec", "", "session-not-found"},
+		{"POST", "/api/send", "sec", `{"text":"hi"}`, "session-not-found"},
+		{"POST", "/api/read", "sec", `{"klax_id":"unknown","read_pos":"1."}`, "bad-request"},
+		{"GET", "/api/rename", "sec", "", "method-not-allowed"},
+		{"GET", "/api/file?ref=nope", "sec", "", "forbidden"},
+	} {
+		r := httptest.NewRequest(c.method, c.path, strings.NewReader(c.body))
+		if c.token != "" {
+			r.Header.Set("Authorization", "Bearer "+c.token)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		var body struct {
+			Error struct{ Code, Message string } `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || body.Error.Code != c.code || body.Error.Message == "" {
+			t.Fatalf("%s %s: %d %s, want JSON error %s", c.method, c.path, w.Code, w.Body.String(), c.code)
 		}
 	}
 }

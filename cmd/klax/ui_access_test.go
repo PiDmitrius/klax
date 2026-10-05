@@ -36,7 +36,7 @@ func accessGet(f *apiFixture, path, token string) *httptest.ResponseRecorder {
 
 func TestReadTokenPermissionsAndIdentity(t *testing.T) {
 	f := readerFixture(t)
-	body := fmt.Sprintf(`{"session":%d,"name":"changed","text":"hello","order":[%d]}`, f.created, f.created)
+	body := fmt.Sprintf(`{"klax_id":%q,"name":"changed","text":"hello","tabs":[%q]}`, f.klaxID, f.klaxID)
 	for _, path := range []string{"/api/new", "/api/send", "/api/abort", "/api/cancel", "/api/rename", "/api/reorder", "/api/close", "/api/settings", "/api/models/refresh", "/api/system/check", "/api/system/update"} {
 		w := f.request(path, body, "reader")
 		if w.Code != http.StatusForbidden {
@@ -55,22 +55,25 @@ func TestReadTokenPermissionsAndIdentity(t *testing.T) {
 	if w := f.request("/api/send", body, "invalid"); w.Code != 401 {
 		t.Fatal("invalid token accepted")
 	}
-	for _, path := range []string{"/api/auth", "/api/state", fmt.Sprintf("/api/settings?session=%d", f.created), fmt.Sprintf("/api/transcript?session=%d", f.created)} {
+	for _, path := range []string{"/api/auth", "/api/state", fmt.Sprintf("/api/settings?klax_id=%s", f.klaxID), fmt.Sprintf("/api/transcript?klax_id=%s", f.klaxID)} {
 		w := accessGet(f, path, "reader")
 		if w.Code != 200 {
 			t.Fatalf("read %s: %d %s", path, w.Code, w.Body.String())
 		}
-		if !strings.Contains(path, "transcript") && !strings.Contains(w.Body.String(), `"read_only":true`) {
+		if path == "/api/auth" && !strings.Contains(w.Body.String(), `"read_only":true`) {
 			t.Fatalf("missing role %s", path)
+		}
+		if path != "/api/auth" && strings.Contains(w.Body.String(), `"read_only"`) {
+			t.Fatalf("role repeated outside /api/auth: %s", path)
 		}
 		if strings.Contains(w.Body.String(), `"reader"`) || strings.Contains(w.Body.String(), `"access"`) {
 			t.Fatal("credential exposed")
 		}
 	}
-	if w := accessGet(f, fmt.Sprintf("/api/transcript?session=%d", f.created), "other-reader"); w.Code != 404 {
+	if w := accessGet(f, fmt.Sprintf("/api/transcript?klax_id=%s", f.klaxID), "other-reader"); w.Code != 404 {
 		t.Fatal("cross-user read accepted", w.Code)
 	}
-	if w := f.request("/api/read", fmt.Sprintf(`{"session":%d,"turn":1,"block":0}`, f.created), "other-reader"); w.Code != 404 {
+	if w := f.request("/api/read", fmt.Sprintf(`{"klax_id":%q,"read_pos":"1.0"}`, f.klaxID), "other-reader"); w.Code != 404 {
 		t.Fatal("cross-user mark accepted", w.Code)
 	}
 	eventResponse(t, f.send("finish", "test-turn"), "finish", "success")
@@ -91,7 +94,7 @@ func TestReaderWatermarksAreIndependentAndDurable(t *testing.T) {
 	eventResponse(t, f.send("finish", "test-turn"), "finish", "success")
 	mark := func(token string, turn int64, block int) {
 		t.Helper()
-		w := f.request("/api/read", fmt.Sprintf(`{"session":%d,"turn":%d,"block":%d}`, f.created, turn, block), token)
+		w := f.request("/api/read", fmt.Sprintf(`{"klax_id":%q,"read_pos":"%d.%d"}`, f.klaxID, turn, block), token)
 		if w.Code != 204 {
 			t.Fatal(w.Code, w.Body.String())
 		}
@@ -113,15 +116,15 @@ func TestReaderWatermarksAreIndependentAndDurable(t *testing.T) {
 	before := snapshot("access")
 	mark("reader", 1, 0)
 	owner, reader := snapshot("access"), snapshot("reader")
-	if owner.ReadThrough != "0.0" || owner.Unread != before.Unread || reader.ReadThrough != "1.0" || reader.Unread >= owner.Unread {
+	if owner.ReadPos != "" || owner.Unread != before.Unread || reader.ReadPos != "1.0" || reader.Unread >= owner.Unread {
 		t.Fatalf("mixed markers: owner=%+v reader=%+v", owner, reader)
 	}
 	mark("access", 2, 3)
 	mark("reader", 0, 0)
-	if snapshot("reader").ReadThrough != "1.0" || snapshot("access").ReadThrough != "2.3" {
+	if snapshot("reader").ReadPos != "1.0" || snapshot("access").ReadPos != "2.3" {
 		t.Fatal("watermark crossed roles or regressed")
 	}
-	f.d.store.UpdateSession("user:test", f.created, func(cur *session.Session) { cur.Name = "renamed" })
+	f.d.store.UpdateSession("user:test", f.klaxID, func(cur *session.Session) { cur.Name = "renamed" })
 	if err := f.d.store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -132,18 +135,18 @@ func TestReaderWatermarksAreIndependentAndDurable(t *testing.T) {
 	f.d.store = reloaded
 	delete(f.s.tokens, "reader")
 	f.s.tokens["rotated-reader"] = uiAccess{User: "test", ReadOnly: true}
-	if snapshot("rotated-reader").ReadThrough != "1.0" || snapshot("access").ReadThrough != "2.3" {
+	if snapshot("rotated-reader").ReadPos != "1.0" || snapshot("access").ReadPos != "2.3" {
 		t.Fatal("markers lost after reload/rotation")
 	}
 	snapshot("rotated-reader")
 	mark("rotated-reader", 2, 0)
 	w := f.request("/api/changes", fmt.Sprintf(`{"after":%q}`, at), "rotated-reader")
-	if w.Code != 200 || !strings.Contains(w.Body.String(), `"read_through":"2.0"`) {
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"read_pos":"2.0"`) {
 		t.Fatal("changes use wrong reader", w.Code, w.Body.String())
 	}
 	after, _ := f.d.uiHub.parseAfter(at)
 	for _, raw := range func() []json.RawMessage { ev, _, _ := f.d.uiHub.collect("test", after, roleRW); return ev }() {
-		if strings.Contains(string(raw), `"read_through":"2.0"`) {
+		if strings.Contains(string(raw), `"read_pos":"2.0"`) {
 			t.Fatal("reader strip reached the full-access role", string(raw))
 		}
 	}
@@ -162,7 +165,7 @@ func TestReaderDoesNotCreateInitialSession(t *testing.T) {
 			t.Fatal(w.Code, w.Body.String())
 		}
 		if len(f.d.store.SessionsFor("user:other")) != 0 {
-			t.Fatal("reading created session")
+			t.Fatal("reading klaxID session")
 		}
 	}
 }
@@ -185,7 +188,7 @@ func TestAccessTokenCollisions(t *testing.T) {
 
 func TestNewSessionSettingsWithManagementAccess(t *testing.T) {
 	f := readerFixture(t)
-	body := fmt.Sprintf(`{"name":"configured","cwd":%q,"backend":"codex","model":"gpt-5.6-sol","think":"high","sandbox":"on","prompt":"instructions","groups":["work"]}`, f.dir)
+	body := fmt.Sprintf(`{"name":"configured","cwd":%q,"backend":"codex","model_requested":"gpt-5.6-sol","think":"high","sandbox":"on","system_prompt":"instructions","groups":["work"]}`, f.dir)
 	w := f.request("/api/new", body, "")
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
@@ -195,10 +198,10 @@ func TestNewSessionSettingsWithManagementAccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := reloaded.Active("user:test")
-	if got.Name != "configured" || got.CWD != f.dir || got.Backend != "codex" || got.ModelOverride != "gpt-5.6-sol" || got.ThinkOverride != "high" || got.Sandbox != "on" || got.AppendSystemPrompt != "instructions" || len(got.Groups) != 1 || got.Groups[0] != "work" {
+	if got.Name != "configured" || got.CWD != f.dir || got.Backend != "codex" || got.ModelRequested != "gpt-5.6-sol" || got.Think != "high" || got.Sandbox != "on" || got.SystemPrompt != "instructions" || len(got.Groups) != 1 || got.Groups[0] != "work" {
 		t.Fatal("settings lost during creation")
 	}
-	req := httptest.NewRequest("POST", "/api/send", strings.NewReader(fmt.Sprintf(`{"session":%d,"text":"hello"}`, got.Created)))
+	req := httptest.NewRequest("POST", "/api/send", strings.NewReader(fmt.Sprintf(`{"klax_id":%q,"text":"hello"}`, got.KlaxID)))
 	req.Header.Set("Authorization", "Bearer reader")
 	req.Header.Set("X-Klax-Control-Token", "anything")
 	rec := httptest.NewRecorder()

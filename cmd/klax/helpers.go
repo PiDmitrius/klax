@@ -266,8 +266,8 @@ func resolveModelCommand(entries []modelEntry, token string) (string, bool) {
 func (d *daemon) effortsForModel(backend, model string) []modelEntry {
 	for _, m := range d.models.Models(backend) {
 		if (model != "" && m.Value == model) || (model == "" && m.Default) {
-			entries := make([]modelEntry, 0, len(m.Efforts))
-			for _, effort := range m.Efforts {
+			entries := make([]modelEntry, 0, len(m.ThinkLevels))
+			for _, effort := range m.ThinkLevels {
 				entries = append(entries, modelEntry{effort, effort, effort})
 			}
 			return entries
@@ -296,7 +296,7 @@ func (d *daemon) modelText(sk string, sess *session.Session) string {
 	models := d.modelsForBackend(backend)
 
 	var sb strings.Builder
-	current := sess.ModelOverride
+	current := sess.ModelRequested
 	if current == "" {
 		fmt.Fprintf(&sb, "<b>/m_default По умолчанию ✅</b>\n")
 	} else {
@@ -319,10 +319,10 @@ func (d *daemon) modelText(sk string, sess *session.Session) string {
 func (d *daemon) thinkText(sk string, sess *session.Session) string {
 	def := d.scopeDefaults(sk)
 	backend := resolveSessionBackend(sess, def, d.cfg.GetDefaultBackend())
-	efforts := d.effortsForModel(backend, sess.ModelOverride)
+	efforts := d.effortsForModel(backend, sess.ModelRequested)
 
 	var sb strings.Builder
-	current := sess.ThinkOverride
+	current := sess.Think
 	if current == "" {
 		fmt.Fprintf(&sb, "<b>/t_default По умолчанию ✅</b>\n")
 	} else {
@@ -353,7 +353,7 @@ func effectiveSandboxMode(def *session.ScopeDefaults, sess *session.Session) str
 }
 
 func claudeTTYLabel(sess *session.Session) string {
-	if sess != nil && sess.ClaudeTTY {
+	if sess != nil && sess.TTY {
 		return "on"
 	}
 	return "off"
@@ -377,7 +377,7 @@ func (d *daemon) ttyText(sk string, sess *session.Session) string {
 		return "TTY (только claude)"
 	}
 	var sb strings.Builder
-	if sess != nil && sess.ClaudeTTY {
+	if sess != nil && sess.TTY {
 		sb.WriteString("<b>/tty_on ✅</b>\n")
 		sb.WriteString("/tty_off\n")
 	} else {
@@ -535,7 +535,7 @@ func (d *daemon) statusText(chatID string) string {
 		return "❌ Нет активной сессии"
 	}
 
-	sr := d.lookupRunner(chatID, sess.Created)
+	sr := d.lookupRunner(chatID, sess.KlaxID)
 	var statusLine string
 	if sr == nil {
 		statusLine = "💤 Свободен"
@@ -563,14 +563,14 @@ func (d *daemon) statusText(chatID string) string {
 	}
 
 	backend := resolveSessionBackend(sess, d.scopeDefaults(chatID), d.cfg.GetDefaultBackend())
-	model := sess.Model
+	model := sess.ModelUsed
 	if model == "" {
-		model = sess.ModelOverride
+		model = sess.ModelRequested
 	}
 	if model == "" {
 		model = "по умолчанию"
 	}
-	think := sess.ThinkOverride
+	think := sess.Think
 	if think == "" {
 		think = "по умолчанию"
 	}

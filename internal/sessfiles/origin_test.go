@@ -8,7 +8,7 @@ import (
 
 func TestEnqueueOriginSurvivesReplay(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
-	s := Open("user:test", 1)
+	s := Open("user:test", "s1")
 	origin := inbound.Origin{
 		Transport: "ym",
 		Chat:      inbound.Chat{ID: "0/0/group", Type: "group", ThreadID: "7"},

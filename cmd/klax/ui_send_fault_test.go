@@ -13,14 +13,14 @@ import (
 func TestUISendTestCycle(t *testing.T) {
 	f := newAPIFixture(t, "", "", "")
 	f.s.sendTest.enabled = true
-	sr := f.d.getRunner("user:test", f.created)
+	sr := f.d.getRunner("user:test", f.klaxID)
 	for cycle := 0; cycle < 2; cycle++ {
 		nonce := fmt.Sprintf("test-cycle-%d", cycle)
 		if w := f.send("queued", nonce); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "1/3") {
 			t.Fatalf("fast rejection: %d %s", w.Code, w.Body.String())
 		}
 		ctx, cancel := context.WithCancel(context.Background())
-		r := httptest.NewRequest(http.MethodPost, "/api/send", strings.NewReader(fmt.Sprintf(`{"session":%d,"text":"hello","nonce":%q}`, f.created, nonce))).WithContext(ctx)
+		r := httptest.NewRequest(http.MethodPost, "/api/send", strings.NewReader(fmt.Sprintf(`{"klax_id":%q,"text":"hello","nonce":%q}`, f.klaxID, nonce))).WithContext(ctx)
 		r.Header.Set("Authorization", "Bearer access")
 		w := httptest.NewRecorder()
 		done := make(chan struct{})

@@ -59,6 +59,22 @@ export function api(path, opts){
   });
 }
 
+// home is the server's home directory (from /api/state): paths are absolute on the wire and shown
+// abbreviated to ~ here.
+let home = "";
+export function setHome(h){ home = h || ""; }
+export function tildePath(p){
+  if(!home || !p) return p || "";
+  if(p === home) return "~";
+  return p.startsWith(home + "/") ? "~" + p.slice(home.length) : p;
+}
+
+// apiError is the message of an /api/* error response ({"error":{"code","message"}}), or fallback.
+export async function apiError(r, fallback){
+  try { const e = await r.json(); if(e && e.error && e.error.message) return e.error.message; } catch(_){}
+  return fallback;
+}
+
 // --- click-to-copy: ONE implementation shared by every copyable surface (timeline code,
 // message body, the session UUID) so the copy behaviour AND its flash look identical everywhere.
 

@@ -6,9 +6,9 @@ import (
 	"unicode"
 )
 
-// Group names live in a URL fragment (`#work`, `#work/<created>`) that must stay unambiguous against
-// two neighbours in the same namespace: a bare session id (`#1783809783`) and a computed view
-// (`#is:unread`). Hence "not all digits" and "no colon" — they are the parse rule, not cosmetics.
+// Group names live in a URL fragment (`#work`, `#work/<klax_id>`) next to the all-sessions address
+// (`#/<klax_id>`) and computed views (`#is:unread`). Hence no "/" and no ":" — they are the parse
+// rule, not cosmetics.
 const (
 	MaxGroupLen   = 32
 	MaxGroupCount = 16
@@ -26,8 +26,6 @@ func ValidateGroup(group string) error {
 		return errors.New("В имени группы нельзя использовать / # :")
 	case group == "*":
 		return errors.New("«*» зарезервирована под все сессии")
-	case isAllDigits(group):
-		return errors.New("Имя группы не может состоять только из цифр")
 	}
 	for _, r := range group {
 		if unicode.IsControl(r) {
@@ -35,15 +33,6 @@ func ValidateGroup(group string) error {
 		}
 	}
 	return nil
-}
-
-func isAllDigits(s string) bool {
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return s != ""
 }
 
 // NormalizeGroups trims, drops empties, rejects invalid names and removes duplicates while KEEPING

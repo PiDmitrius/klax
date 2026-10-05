@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -383,7 +382,7 @@ func oneLinePreview(s string) string {
 // RunOptions configures a CLI invocation.
 type RunOptions struct {
 	Prompt                    string
-	KlaxSessionID             int64
+	KlaxSessionID             string
 	SessionID                 string // empty = new session
 	CWD                       string // working directory
 	Sandbox                   string // "on" = CLI defaults, "off" = unrestricted
@@ -733,8 +732,8 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 	if err != nil {
 		return RunResult{Error: err}
 	}
-	if opts.KlaxSessionID > 0 {
-		cmd.Env = append(cmd.Environ(), "KLAX_SESSION_ID="+strconv.FormatInt(opts.KlaxSessionID, 10))
+	if opts.KlaxSessionID != "" {
+		cmd.Env = append(cmd.Environ(), "KLAX_SESSION_ID="+opts.KlaxSessionID)
 	}
 	// A run reads only the rollout bytes it appended; a different thread is a new file.
 	var codexStartOffset int64

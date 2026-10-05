@@ -25,7 +25,7 @@ import (
 // t.Setenv can register the restore-on-cleanup.
 func newTestDaemon(t *testing.T) *daemon {
 	t.Setenv("KLAX_CONFIG_DIR", t.TempDir())
-	data, err := json.Marshal(map[string][]modelcatalog.Model{"codex": {{Value: "gpt-5.6-sol", Label: "gpt-5.6-sol", Default: true, Efforts: []string{"low", "medium", "high", "xhigh", "max", "ultra"}}}})
+	data, err := json.Marshal(map[string][]modelcatalog.Model{"codex": {{Value: "gpt-5.6-sol", Label: "gpt-5.6-sol", Default: true, ThinkLevels: []string{"low", "medium", "high", "xhigh", "max", "ultra"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,10 +51,10 @@ func TestModelTextHighlightsSelectedModelWithoutDefaultSuffix(t *testing.T) {
 	chatID := "tg:test"
 	d.store.UpdateScopeDefaults(chatID, func(def *session.ScopeDefaults) {
 		def.Backend = "codex"
-		def.Model = "gpt-5.6-sol"
+		def.ModelRequested = "gpt-5.6-sol"
 	})
 
-	text := d.modelText(chatID, &session.Session{ModelOverride: "gpt-5.6-sol"})
+	text := d.modelText(chatID, &session.Session{ModelRequested: "gpt-5.6-sol"})
 
 	if !strings.Contains(text, fmt.Sprintf("<b>/m_%s gpt-5.6-sol ✅</b>", d.modelsForBackend("codex")[0].alias)) {
 		t.Fatalf("selected model is not highlighted: %q", text)
@@ -75,7 +75,7 @@ func TestThinkTextHighlightsSelectedEffortWithoutDefaultSuffix(t *testing.T) {
 		def.Think = "high"
 	})
 
-	text := d.thinkText(chatID, &session.Session{ThinkOverride: "high"})
+	text := d.thinkText(chatID, &session.Session{Think: "high"})
 
 	if !strings.Contains(text, "<b>/t_high high ✅</b>") {
 		t.Fatalf("selected effort is not highlighted: %q", text)
@@ -93,7 +93,7 @@ func TestModelTextMarksDefaultWhenModelIsEmpty(t *testing.T) {
 	chatID := "tg:test"
 	d.store.UpdateScopeDefaults(chatID, func(def *session.ScopeDefaults) {
 		def.Backend = "codex"
-		def.Model = ""
+		def.ModelRequested = ""
 	})
 
 	text := d.modelText(chatID, &session.Session{})
@@ -167,15 +167,15 @@ func TestSettingsTextContainsBackendModelAndThinkSections(t *testing.T) {
 	chatID := "tg:test"
 	d.store.UpdateScopeDefaults(chatID, func(def *session.ScopeDefaults) {
 		def.Backend = "codex"
-		def.Model = "gpt-5.6-sol"
+		def.ModelRequested = "gpt-5.6-sol"
 		def.Think = "high"
 	})
 
 	text := d.settingsText(chatID, chatID, &session.Session{
-		Backend:       "codex",
-		ModelOverride: "gpt-5.6-sol",
-		ThinkOverride: "high",
-		Sandbox:       "on",
+		Backend:        "codex",
+		ModelRequested: "gpt-5.6-sol",
+		Think:          "high",
+		Sandbox:        "on",
 	})
 
 	for _, want := range []string{
@@ -214,15 +214,15 @@ func TestSettingsTextShowsGroupModeSectionInGroupChat(t *testing.T) {
 	d.groupChats[chatID] = "/tmp/groups/tg_-1001"
 	d.store.UpdateScopeDefaults(chatID, func(def *session.ScopeDefaults) {
 		def.Backend = "codex"
-		def.Model = "gpt-5.6-sol"
+		def.ModelRequested = "gpt-5.6-sol"
 		def.Think = "high"
 	})
 
 	text := d.settingsText(chatID, chatID, &session.Session{
-		Backend:       "codex",
-		ModelOverride: "gpt-5.6-sol",
-		ThinkOverride: "high",
-		Sandbox:       "off",
+		Backend:        "codex",
+		ModelRequested: "gpt-5.6-sol",
+		Think:          "high",
+		Sandbox:        "off",
 	})
 
 	for _, want := range []string{
@@ -269,23 +269,23 @@ func TestSessionCreatedTextIncludesSettingsHint(t *testing.T) {
 		"tg:test",
 		&session.ScopeDefaults{Backend: "codex"},
 		&session.Session{
-			Name:          "session",
-			CWD:           home + "/work",
-			Backend:       "codex",
-			ModelOverride: "gpt-5.6-sol",
-			ThinkOverride: "high",
-			Sandbox:       "off",
+			Name:           "session",
+			CWD:            home + "/work",
+			Backend:        "codex",
+			ModelRequested: "gpt-5.6-sol",
+			Think:          "high",
+			Sandbox:        "off",
 		},
 	)
 
 	if !strings.Contains(text, "Настроить: /settings") {
-		t.Fatalf("created text should include settings hint: %q", text)
+		t.Fatalf("klaxID text should include settings hint: %q", text)
 	}
 	if strings.Contains(text, "📂 <code>") {
-		t.Fatalf("created text should not include cwd: %q", text)
+		t.Fatalf("klaxID text should not include cwd: %q", text)
 	}
 	if !strings.Contains(text, "🔒 Sandbox: <code>off</code>") {
-		t.Fatalf("created text should include sandbox mode: %q", text)
+		t.Fatalf("klaxID text should include sandbox mode: %q", text)
 	}
 }
 
@@ -351,7 +351,7 @@ func TestSessionCWDFlattensYmGroupChatID(t *testing.T) {
 		t.Fatalf("sessionCWD = %q, want %q (a single flat directory, not nested by the embedded /)", cwd, want)
 	}
 	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
-		t.Fatalf("expected sessionCWD to have created %q: %v", cwd, err)
+		t.Fatalf("expected sessionCWD to have klaxID %q: %v", cwd, err)
 	}
 }
 
@@ -366,10 +366,10 @@ func TestYMThreadChatIDInheritsParentGroupModeOnce(t *testing.T) {
 	// /sandbox, /tty on the group before the thread was ever touched.
 	d.store.UpdateScopeDefaults(parent, func(def *session.ScopeDefaults) {
 		def.Backend = "codex"
-		def.Model = "gpt-5.6-sol"
+		def.ModelRequested = "gpt-5.6-sol"
 		def.Think = "xhigh"
 		def.Sandbox = "off"
-		def.ClaudeTTY = true
+		def.TTY = true
 		def.GroupAttachmentMode = "any"
 	})
 
@@ -402,8 +402,8 @@ func TestYMThreadChatIDInheritsParentGroupModeOnce(t *testing.T) {
 	if threadDef.GroupAttachmentMode != "any" {
 		t.Fatalf("thread must inherit the parent's attachment trigger setting, got %+v", threadDef)
 	}
-	if threadDef.Backend != "codex" || threadDef.Model != "gpt-5.6-sol" || threadDef.Think != "xhigh" ||
-		threadDef.Sandbox != "off" || !threadDef.ClaudeTTY {
+	if threadDef.Backend != "codex" || threadDef.ModelRequested != "gpt-5.6-sol" || threadDef.Think != "xhigh" ||
+		threadDef.Sandbox != "off" || !threadDef.TTY {
 		t.Fatalf("thread should inherit the parent's scope defaults, got %+v", threadDef)
 	}
 
@@ -655,18 +655,6 @@ func TestAttachmentsTextHasNoRedundantDescriptions(t *testing.T) {
 	}
 }
 
-func TestLegacyGroupAttachmentsTrueMigratesToAny(t *testing.T) {
-	d := newTestDaemon(t)
-	chatID := "ym:0/0/group"
-	legacy := true
-	d.store.UpdateScopeDefaults(chatID, func(def *session.ScopeDefaults) {
-		def.LegacyGroupAttachments = &legacy
-	})
-	if got := d.groupAttachmentMode(chatID); got != "any" {
-		t.Fatalf("legacy true mode = %q, want any", got)
-	}
-}
-
 func TestModelCommandCharactersAndMenuOrder(t *testing.T) {
 	for _, tc := range []struct{ value, want string }{
 		{"claude-opus-5-5[1m]", "claude_opus_5_5_1m_"},
@@ -678,7 +666,7 @@ func TestModelCommandCharactersAndMenuOrder(t *testing.T) {
 	}
 	d := newTestDaemon(t)
 	for _, model := range []string{"", "gpt-5.6-sol"} {
-		text := stripHTML(d.modelText("user:test", &session.Session{Backend: "codex", ModelOverride: model}))
+		text := stripHTML(d.modelText("user:test", &session.Session{Backend: "codex", ModelRequested: model}))
 		lines := strings.Split(strings.TrimSpace(text), "\n")
 		if len(lines) != 3 || !strings.HasPrefix(lines[0], "/m_default ") || lines[1] != "/m_update Обновить список" || !strings.HasPrefix(lines[2], "/m_gpt_5_6_sol ") {
 			t.Fatal(text)
@@ -692,7 +680,7 @@ func TestSettingsShowOverridesMissingFromCatalog(t *testing.T) {
 		if empty {
 			d.models = nil
 		}
-		sess := &session.Session{Backend: "codex", ModelOverride: "custom<model>", ThinkOverride: "custom<effort>"}
+		sess := &session.Session{Backend: "codex", ModelRequested: "custom<model>", Think: "custom<effort>"}
 		text := d.settingsText("ui:test", "user:test", sess)
 		for _, want := range []string{"<b>custom&lt;model&gt; ✅</b>", "<b>custom&lt;effort&gt; ✅</b>"} {
 			if !strings.Contains(text, want) {

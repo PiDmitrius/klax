@@ -23,14 +23,14 @@ const maxOutboundFiles = 16
 // rewriteOutboundForUI rewrites an agent answer's local file links to /api/file?ref= capability
 // URLs. A link that cannot be confined or snapshotted degrades to its plain label; published
 // reports whether none did, so a caller may keep the result. UI-only.
-func (d *daemon) rewriteOutboundForUI(sk string, created, turnSeq int64, md string) (out string, published bool) {
+func (d *daemon) rewriteOutboundForUI(sk, klaxID string, turnSeq int64, md string) (out string, published bool) {
 	if d.uiHub == nil || md == "" || !strings.Contains(md, "](") {
 		return md, true
 	}
 	// Store first, then liveness: closeSession deletes the session before dropping the runner, so a
 	// missing session here means a concurrent close won.
-	store := d.sessionStore(sk, created)
-	sess := d.store.Get(sk, created)
+	store := d.sessionStore(sk, klaxID)
+	sess := d.store.Get(sk, klaxID)
 	if sess == nil {
 		return md, false
 	}
@@ -53,7 +53,7 @@ func (d *daemon) rewriteOutboundForUI(sk string, created, turnSeq int64, md stri
 		key, keyOK := outboundKey(turnSeq, href, sess.CWD)
 		if keyOK {
 			if stored, ok := store.SourceStored(key); ok {
-				if out, ok := d.storedHref(store, sk, created, stored, bang, label); ok {
+				if out, ok := d.storedHref(store, sk, klaxID, stored, bang, label); ok {
 					n++
 					return out
 				}
@@ -70,7 +70,7 @@ func (d *daemon) rewriteOutboundForUI(sk string, created, turnSeq int64, md stri
 			return degrade(label)
 		}
 		// Token, turn mapping and content identity are one durable write, not three.
-		token, err := d.commitLink(store, sk, created, sessfiles.LinkRecord{
+		token, err := d.commitLink(store, sk, klaxID, sessfiles.LinkRecord{
 			Blob: stored, Name: sessfiles.DisplayName(stored),
 			ContentType: mime.TypeByExtension(filepath.Ext(stored)),
 			Source:      key, SeenPath: real, SeenInfo: fi,
@@ -85,8 +85,8 @@ func (d *daemon) rewriteOutboundForUI(sk string, created, turnSeq int64, md stri
 }
 
 // storedHref renders an already-published blob as its markdown link.
-func (d *daemon) storedHref(store *sessfiles.Store, sk string, created int64, stored, bang, label string) (string, bool) {
-	token, err := d.fileToken(store, sk, created, stored, sessfiles.DisplayName(stored), mime.TypeByExtension(filepath.Ext(stored)))
+func (d *daemon) storedHref(store *sessfiles.Store, sk string, klaxID string, stored, bang, label string) (string, bool) {
+	token, err := d.fileToken(store, sk, klaxID, stored, sessfiles.DisplayName(stored), mime.TypeByExtension(filepath.Ext(stored)))
 	if err != nil {
 		return "", false
 	}

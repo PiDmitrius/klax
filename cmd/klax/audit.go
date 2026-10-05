@@ -67,9 +67,6 @@ func auditOrigin(origin inbound.Origin, chatID, msgID string) inbound.Origin {
 	if origin.Message.ID == "" {
 		origin.Message.ID = msgID
 	}
-	if origin.Transport == "mx" {
-		origin.Transport = "max"
-	}
 	return origin
 }
 
@@ -108,21 +105,21 @@ func newAuditTurn(msg queuedMsg, store *sessfiles.Store, sess *session.Session, 
 		return turnaudit.Turn{}, fmt.Errorf("snapshot audit attachments: %w", err)
 	}
 	return turnaudit.Turn{
-		ID:         turnaudit.TurnID(msg.sessKey, msg.sessCreated, msg.turnSeq),
+		ID:         turnaudit.TurnID(msg.klaxID, msg.turnSeq),
 		Seq:        msg.turnSeq,
 		AcceptedAt: turnaudit.Time(accepted),
 		StartAt:    turnaudit.Time(started),
 		Origin:     auditOrigin(msg.origin, msg.chatID, msg.msgID),
 		Routing: turnaudit.Routing{
-			SessionKey: msg.sessKey, SessionCreated: msg.sessCreated, SessionName: sess.Name,
+			SessionKey: msg.sessKey, KlaxID: msg.klaxID, Name: sess.Name,
 		},
 		Request: turnaudit.Request{
 			OriginalText: msg.originalText, EffectivePrompt: prompt, Attachments: attachments,
 		},
 		Execution: turnaudit.Execution{
-			Backend: backend, BackendSessionID: sess.ID, CWD: sess.CWD,
-			ModelRequested: sess.ModelOverride, Effort: sess.ThinkOverride, Sandbox: sess.Sandbox,
-			TTY: sess.ClaudeTTY, AppendSystemPrompt: sess.AppendSystemPrompt,
+			Backend: backend, BackendID: sess.BackendID, CWD: sess.CWD,
+			ModelRequested: sess.ModelRequested, Think: sess.Think, Sandbox: sess.Sandbox,
+			TTY: sess.TTY, SystemPrompt: sess.SystemPrompt,
 		},
 	}, nil
 }
@@ -143,7 +140,7 @@ func auditTrace(store *sessfiles.Store, seq int64, backend, sessionID string, se
 			break
 		}
 	}
-	if bound == nil || !bound.Bound || bound.Backend != backend || bound.Session != sessionID {
+	if bound == nil || !bound.Bound || bound.Backend != backend || bound.BackendID != sessionID {
 		return nil, errors.New("turn has no matching durable backend user-event binding")
 	}
 	snap, err := session.Turn(bound.Event)

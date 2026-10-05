@@ -6,7 +6,7 @@
 // so a draft typed in one tab never shows up in another. One request may be in flight per session;
 // the composer is read-only during it, and only HTTP 204 clears the submitted draft.
 
-import { api, getToken, hasCoarsePointer, bindButtonActivation } from "./base.js";
+import { api, apiError, getToken, hasCoarsePointer, bindButtonActivation } from "./base.js";
 
 // Phones have no practical Shift+Enter gesture, so their primary coarse pointer changes plain Enter
 // into a newline and leaves sending to the visible button. Ctrl/Cmd+Enter remains an explicit send
@@ -43,19 +43,20 @@ const SENDTAB = randTab();
 let nonceCtr = 0;
 function newNonce(){ return SENDTAB + "-" + (++nonceCtr); }
 const pendingSends = new Map();
-let getActive = () => 0, accessReadOnly = false;
+let getActive = () => "", accessReadOnly = false;
 let files = [];                 // staged { file, name, url? } for the next send (url = lazy thumb blob)
 let attachmentsChanged = false;
 let retryNonce = "";            // outbox nonce this live composer currently corresponds to ("" = none)
-const drafts = {};              // created -> { text, files, nonce } — stashed composer state per tab
-const recoveryQueues = {};      // created -> remaining recovered drafts, each retaining its ORIGINAL nonce
+const drafts = {};              // klaxId -> { text, files, nonce } — stashed composer state per tab
+const recoveryQueues = {};      // klaxId -> remaining recovered drafts, each retaining its ORIGINAL nonce
 
 // One durable outbox holds typed and submitted text, scoped by identity. Text is immutable per
 // nonce: edits write a new entry before removing the previous one, so browser tabs cannot overwrite
 // each other's edits. Sending marks the same entry sent; retries keep its nonce. Only acceptance or
 // an explicit edit/discard removes it. Storage failure preserves the prior entry and blocks sending.
 // Attachments remain in memory; localStorage stores no blobs.
-const OB_PREFIX = "klax_ob.";
+const OB_PREFIX = "klax_outbox.";
+const LEGACY_OB_PREFIX = "klax_ob."; // entries addressing numeric sessions, which no longer exist
 const OB_CAP = 500; // hard bound on retained unconfirmed entries per identity (never evicted — refused beyond)
 // idTag: a cheap, stable per-identity tag (djb2 of the auth token) so outbox keys are scoped to the
 // authenticated user and cannot leak across a token change on a shared browser.
@@ -83,8 +84,8 @@ function outboxDrop(nonce){
 function discardUnsent(entry){ return entry.sent === false && outboxDrop(entry.nonce); }
 export function outboxList(){ const p = OB_PREFIX + idTag() + "."; const out = []; obScan(k => { if(k.indexOf(p) === 0){ try { const e = JSON.parse(localStorage.getItem(k)); if(e) out.push(e); } catch(_){} } }); return out; }
 
-function persistDraft(created, text, transmitted = false){
-  if(!created) return false;
+function persistDraft(klaxId, text, transmitted = false){
+  if(!klaxId) return false;
   const previous = retryNonce;
   const cur = previous ? outboxGet(previous) : null;
   if(!text){
@@ -97,7 +98,7 @@ function persistDraft(created, text, transmitted = false){
   if(!transmitted && !attachmentsChanged && cur && cur.text === text) return true;
   const reuse = transmitted && !attachmentsChanged && previous && (!cur || cur.text === text);
   const nonce = reuse ? previous : newNonce();
-  if(!outboxPut({ created, text, nonce, sent: transmitted, at: (cur && cur.at) || Date.now() })){
+  if(!outboxPut({ klax_id: klaxId, text, nonce, sent: transmitted, at: (cur && cur.at) || Date.now() })){
     if(!cur && !transmitted) retryNonce = "";
     return false;
   }
@@ -150,11 +151,11 @@ export function initCompose(deps){
     ta.addEventListener("input", () => {
       autoGrow(ta);
       if(pendingSends.has(getActive()) || deps.readOnly()) return;
-      const created = deps.getActive();
-      const saved = persistDraft(created, ta.value);
+      const klaxId = deps.getActive();
+      const saved = persistDraft(klaxId, ta.value);
       if(!saved && !storageFailed && deps.notice) deps.notice("Не удалось сохранить черновик в браузере. Не закрывайте страницу; скопируйте текст.");
       storageFailed = !saved;
-      if(saved && !ta.value && !files.length) showNextRecovered(created, deps);
+      if(saved && !ta.value && !files.length) showNextRecovered(klaxId, deps);
     });
     ta.addEventListener("keydown", e => { if(composerEnterSends(e, hasCoarsePointer())){ e.preventDefault(); send(deps); } });
     ta.addEventListener("paste", e => {
@@ -199,14 +200,14 @@ function releaseThumb(f){ if(f.url){ URL.revokeObjectURL(f.url); delete f.url; }
 // saveDraft/loadDraft move the live composer state to/from the per-session stash on tab
 // switches; dropDraft forgets a closed session's draft. loadDraft releases the thumbs of
 // whatever was live: if that state was stashed, its thumbs are re-minted on restore.
-export function saveDraft(created){
-  if(!created) return;
+export function saveDraft(klaxId){
+  if(!klaxId) return;
   const ta = document.getElementById("input");
-  drafts[created] = { text: ta ? ta.value : "", files, nonce: retryNonce, attachmentsChanged };
+  drafts[klaxId] = { text: ta ? ta.value : "", files, nonce: retryNonce, attachmentsChanged };
 }
-export function loadDraft(created){
-  const d = created ? drafts[created] : null;
-  if(created) delete drafts[created];
+export function loadDraft(klaxId){
+  const d = klaxId ? drafts[klaxId] : null;
+  if(klaxId) delete drafts[klaxId];
   files.forEach(releaseThumb);
   const ta = document.getElementById("input");
   if(ta){ ta.value = d ? d.text : ""; autoGrow(ta); }
@@ -215,11 +216,11 @@ export function loadDraft(created){
   attachmentsChanged = !!(d && d.attachmentsChanged);
   renderChips();
 }
-export function dropDraft(created, confirmedDeletion = false){
-  const d = drafts[created];
-  if(d){ delete drafts[created]; d.files.forEach(releaseThumb); }
-  delete recoveryQueues[created];
-  if(confirmedDeletion){ for(const entry of outboxList()){ if(entry.created === created) discardUnsent(entry); } }
+export function dropDraft(klaxId, confirmedDeletion = false){
+  const d = drafts[klaxId];
+  if(d){ delete drafts[klaxId]; d.files.forEach(releaseThumb); }
+  delete recoveryQueues[klaxId];
+  if(confirmedDeletion){ for(const entry of outboxList()){ if(entry.klax_id === klaxId) discardUnsent(entry); } }
 }
 
 function renderChips(){
@@ -249,20 +250,20 @@ async function send(deps){
   const text = ta ? ta.value : "";
   const staged = files.slice();
   if(!text.trim() && !staged.length) return;
-  const created = deps.getActive();
-  if(!created) return;
+  const klaxId = deps.getActive();
+  if(!klaxId) return;
 
-  if(!persistDraft(created, text, true)){
+  if(!persistDraft(klaxId, text, true)){
     if(deps.notice) deps.notice("Не удалось сохранить сообщение локально — отправка отменена. Черновик остаётся во вводе.");
     return;
   }
   const nonce = retryNonce;
   const controller = new AbortController();
   const sending = { controller, cancelReady: false };
-  pendingSends.set(created, sending);
+  pendingSends.set(klaxId, sending);
   updateComposerAccess(accessReadOnly);
   const cancelTimer = setTimeout(() => {
-    if(pendingSends.get(created) !== sending) return;
+    if(pendingSends.get(klaxId) !== sending) return;
     sending.cancelReady = true;
     updateComposerAccess(accessReadOnly);
   }, 3000);
@@ -272,15 +273,15 @@ async function send(deps){
     let r;
     if(staged.length){
       const fd = new FormData();
-      fd.append("session", String(created)); fd.append("text", text); fd.append("nonce", nonce);
+      fd.append("klax_id", klaxId); fd.append("text", text); fd.append("nonce", nonce);
       staged.forEach(f => fd.append("files", f.file, f.name));
       r = await api("/api/send", { method: "POST", body: fd, signal: controller.signal });
     } else {
-      r = await api("/api/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: created, text, nonce }), signal: controller.signal });
+      r = await api("/api/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ klax_id: klaxId, text, nonce }), signal: controller.signal });
     }
     if(controller.signal.aborted) return;
     accepted = r.status === 204;
-    if(!accepted && deps.notice) deps.notice((await r.text()).trim() || "Отправка не подтверждена — сообщение сохранено во вводе");
+    if(!accepted && deps.notice) deps.notice(await apiError(r, "Отправка не подтверждена — сообщение сохранено во вводе"));
   } catch(e){
     if(deps.notice) deps.notice(controller.signal.reason === "cancelled"
       ? "Ожидание отменено. Черновик сохранён; сообщение могло быть принято сервером."
@@ -288,42 +289,42 @@ async function send(deps){
   } finally {
     clearTimeout(timer);
     clearTimeout(cancelTimer);
-    pendingSends.delete(created);
+    pendingSends.delete(klaxId);
     updateComposerAccess(accessReadOnly);
   }
   if(!accepted) return;
   outboxDrop(nonce);
-  if(deps.getActive() === created){
+  if(deps.getActive() === klaxId){
     if(ta){ ta.value = ""; autoGrow(ta); }
     files.forEach(releaseThumb); files = []; retryNonce = ""; renderChips();
     if(deps.onAfterSend) deps.onAfterSend();
   } else {
-    const d = drafts[created];
-    if(d){ d.files.forEach(releaseThumb); delete drafts[created]; }
+    const d = drafts[klaxId];
+    if(d){ d.files.forEach(releaseThumb); delete drafts[klaxId]; }
   }
-  showNextRecovered(created, deps);
+  showNextRecovered(klaxId, deps);
 }
 
 // Each confirmed recovery reveals the next original message with its own retry nonce.
-function showNextRecovered(created, deps){
-  const q = recoveryQueues[created];
+function showNextRecovered(klaxId, deps){
+  const q = recoveryQueues[klaxId];
   if(!q || !q.length) return;
   const next = q[0];
-  if(deps.getActive() === created){
+  if(deps.getActive() === klaxId){
     const ta = document.getElementById("input");
     if(!ta || ta.value || files.length) return;
     q.shift(); ta.value = next.text; retryNonce = next.nonce; autoGrow(ta); renderChips();
   } else {
-    const d = drafts[created];
+    const d = drafts[klaxId];
     if(d && (d.text || d.files.length)) return;
-    q.shift(); drafts[created] = next;
+    q.shift(); drafts[klaxId] = next;
   }
-  if(!q.length) delete recoveryQueues[created];
+  if(!q.length) delete recoveryQueues[klaxId];
 }
 
 // recoverOutbox restores typed and submitted text before the first session is selected;
 // loadDraft then moves it into the live composer. Returns the recovered count. deps:
-// { isLive(created), notice(text) }.
+// { isLive(klaxId), notice(text) }.
 //
 // Every live-session entry keeps its ORIGINAL nonce and remains a separate message. The first is
 // shown in the composer; the rest surface after acceptance or explicit discard of the current text.
@@ -333,20 +334,23 @@ function showNextRecovered(created, deps){
 // Submitted or legacy entries remain
 // recoverable in storage; re-homing them could duplicate already accepted work.
 export function recoverOutbox(deps, observedBeforeRequest = []){
+  const legacy = [];
+  obScan(k => { if(k.indexOf(LEGACY_OB_PREFIX) === 0) legacy.push(k); });
+  legacy.forEach(k => { try { localStorage.removeItem(k); } catch(e){} });
   const discardable = new Set(observedBeforeRequest.map(e => e.nonce));
   const list = outboxList().sort((a, b) => (a.at || 0) - (b.at || 0));
   if(!list.length) return 0;
   const isLive = deps && deps.isLive;
-  const groups = new Map(); // target created -> separate original drafts, in submission order
+  const groups = new Map(); // target klaxId -> separate original drafts, in submission order
   let orphaned = 0;
   for(const e of list){
     if(!e || !e.text){ outboxDrop(e && e.nonce); continue; } // nothing recoverable (no text)
-    if(isLive && !isLive(e.created)){
+    if(isLive && !isLive(e.klax_id)){
       if(!discardable.has(e.nonce) || !discardUnsent(e)) orphaned++;
       continue;
     }
-    if(!groups.has(e.created)) groups.set(e.created, []);
-    groups.get(e.created).push({ text: e.text, files: [], nonce: e.nonce });
+    if(!groups.has(e.klax_id)) groups.set(e.klax_id, []);
+    groups.get(e.klax_id).push({ text: e.text, files: [], nonce: e.nonce });
   }
   let recovered = 0;
   for(const [target, entries] of groups){

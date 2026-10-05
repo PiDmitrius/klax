@@ -324,10 +324,10 @@ func TestNotifyQueuePositionsUpdatesPositionAndReplyTo(t *testing.T) {
 }
 
 func TestCancelQueuedDropsOnlyThatMessage(t *testing.T) {
-	d, created := newReadModelDaemon(t)
+	d, klaxID := newReadModelDaemon(t)
 	tp := &fakeTransport{}
 	d.transports["tg"] = tp
-	sr := d.getRunner("user:alice", created)
+	sr := d.getRunner("user:alice", klaxID)
 	var queue []queuedMsg
 	for i, text := range []string{"first", "second", "third"} {
 		seq, _, _, _, err := sr.store.Enqueue("tg:1", "", "n"+text, text, nil)
@@ -338,11 +338,11 @@ func TestCancelQueuedDropsOnlyThatMessage(t *testing.T) {
 	}
 	sr.queue = append([]queuedMsg(nil), queue...)
 
-	journal := filepath.Join(sessfiles.WorkDir("user:alice", created), "queue.jsonl")
+	journal := filepath.Join(sessfiles.WorkDir("user:alice", klaxID), "queue.jsonl")
 	if err := os.Chmod(journal, 0o400); err != nil {
 		t.Fatal(err)
 	}
-	if found, err := d.cancelQueued("user:alice", created, queue[1].turnSeq); !found || err == nil {
+	if found, err := d.cancelQueued("user:alice", klaxID, queue[1].turnSeq); !found || err == nil {
 		t.Fatalf("cancel with an unwritable journal = (%v, %v), want a durable-write error", found, err)
 	}
 	if len(sr.queue) != 3 {
@@ -352,7 +352,7 @@ func TestCancelQueuedDropsOnlyThatMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if found, err := d.cancelQueued("user:alice", created, queue[1].turnSeq); !found || err != nil {
+	if found, err := d.cancelQueued("user:alice", klaxID, queue[1].turnSeq); !found || err != nil {
 		t.Fatalf("queued message not cancelled: (%v, %v)", found, err)
 	}
 	if len(sr.queue) != 2 || sr.queue[0].turnSeq != queue[0].turnSeq || sr.queue[1].turnSeq != queue[2].turnSeq {
@@ -379,7 +379,7 @@ func TestCancelQueuedDropsOnlyThatMessage(t *testing.T) {
 	if last := tp.editLog[len(tp.editLog)-1]; last.message != "q3" || last.text != "⏳ В очереди: 2" {
 		t.Fatalf("queue position edit = %+v", last)
 	}
-	if found, _ := d.cancelQueued("user:alice", created, queue[1].turnSeq); found {
+	if found, _ := d.cancelQueued("user:alice", klaxID, queue[1].turnSeq); found {
 		t.Fatal("already cancelled message cancelled again")
 	}
 }

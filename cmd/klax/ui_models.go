@@ -10,18 +10,18 @@ import (
 
 func (s *uiServer) handleModelsRefresh(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")
 		return
 	}
 	var body struct {
 		Backend string `json:"backend"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil || (body.Backend != "claude" && body.Backend != "codex") {
-		http.Error(w, "Неизвестный движок", http.StatusBadRequest)
+		apiFail(w, http.StatusBadRequest, "bad-request", "Неизвестный движок")
 		return
 	}
 	if s.d.models == nil {
-		http.Error(w, "Каталог моделей недоступен", http.StatusServiceUnavailable)
+		apiFail(w, http.StatusServiceUnavailable, "models-unavailable", "Каталог моделей недоступен")
 		return
 	}
 	models, err := s.d.models.Refresh(r.Context(), body.Backend)
@@ -30,7 +30,7 @@ func (s *uiServer) handleModelsRefresh(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, modelcatalog.ErrUpdating) {
 			code = http.StatusConflict
 		}
-		http.Error(w, "Не удалось обновить список моделей: "+err.Error(), code)
+		apiFail(w, code, "models-refresh-failed", "Не удалось обновить список моделей: "+err.Error())
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

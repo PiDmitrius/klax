@@ -66,11 +66,11 @@ export function renderModel(turns, watermark, holdSplits, joinHeldSplits, ctxWin
     }
     const blocks_ = t.blocks || [];
     const groups = [];
-    const held = holdSplits && holdSplits.get && holdSplits.get(t.seq);
+    const held = holdSplits && holdSplits.get && holdSplits.get(t.turn_seq);
     let i = 0;
     let lastGroupTime = t.time;
     while(i < blocks_.length){
-      if(unread(pos(t.seq, i)) && answerBlock(blocks_[i]) && !divided && has){
+      if(unread(pos(t.turn_seq, i)) && answerBlock(blocks_[i]) && !divided && has){
         groups.push({ divider: true });
         divided = true;
         continue;
@@ -78,16 +78,16 @@ export function renderModel(turns, watermark, holdSplits, joinHeldSplits, ctxWin
       const cls = blockCls(blocks_[i]), blocks = [];
       const groupStart = i;
       while(i < blocks_.length && blockCls(blocks_[i]) === cls){
-        if(held && i > groupStart && held.has(pos(t.seq, i))) break;
-        if(unread(pos(t.seq, i)) && answerBlock(blocks_[i]) && !divided && has && blocks.length > 0) break;
+        if(held && i > groupStart && held.has(pos(t.turn_seq, i))) break;
+        if(unread(pos(t.turn_seq, i)) && answerBlock(blocks_[i]) && !divided && has && blocks.length > 0) break;
         blocks.push(blocks_[i]); i++;
       }
       const last = blocks.length ? blocks[blocks.length - 1] : {};
-      const startPos = pos(t.seq, i - blocks.length);
+      const startPos = pos(t.turn_seq, i - blocks.length);
       const group = {
         cls, blocks, tool: cls === "tool", time: last.time,
         startPos,
-        maxPos: answerBlock(last) ? pos(t.seq, i - 1) : 0, // the last block's position — drives read-advance (data-pos)
+        maxPos: answerBlock(last) ? pos(t.turn_seq, i - 1) : 0, // the last block's position — drives read-advance (data-pos)
       };
       groups.push(group);
       if(group.time) lastGroupTime = group.time;
@@ -116,7 +116,7 @@ export function renderModel(turns, watermark, holdSplits, joinHeldSplits, ctxWin
       : "";
     const note = t.state === "enq" ? "в очереди · " + queuePos
       : t.state === "unknown" ? "статус неизвестен" : undefined;
-    items.push({ kind: "turn", seq: t.seq, text: t.text || "", time: t.time, groups, state: t.state, note, ctxLine, ctxTime: lastGroupTime });
+    items.push({ kind: "turn", seq: t.turn_seq, text: t.text || "", time: t.time, groups, state: t.state, note, ctxLine, ctxTime: lastGroupTime });
     if(t.ctx_used) lastCtxUsed = t.ctx_used; // carry the known context forward to a later running turn
     if(t.ctx_window) lastCtxWindow = t.ctx_window;
   }

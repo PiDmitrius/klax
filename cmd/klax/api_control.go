@@ -49,6 +49,10 @@ func apiFailure(code string) *apiError {
 	return &apiError{Code: code, Message: message, status: status}
 }
 
+func apiFail(w http.ResponseWriter, status int, code, message string) {
+	writeAPIError(w, &apiError{Code: code, Message: message, status: status})
+}
+
 func writeAPIError(w http.ResponseWriter, err *apiError) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -69,8 +73,8 @@ func optionalNonemptyString(raw json.RawMessage, field, fallback string) (string
 	return value, nil
 }
 
-func (s *uiServer) requireSession(w http.ResponseWriter, sk string, created int64) bool {
-	if s.d.store.Get(sk, created) == nil {
+func (s *uiServer) requireSession(w http.ResponseWriter, sk string, klaxID string) bool {
+	if s.d.store.Get(sk, klaxID) == nil {
 		writeAPIError(w, apiFailure("session-not-found"))
 		return false
 	}
