@@ -7,7 +7,7 @@ import { TurnModel, ordLess, applyMerge } from "./model.js";
 import { renderSession, answerBlock, beginShift, playShift, fadeOutDivider, DIVIDER_FADE_MS, pos, parsePos, decodePos } from "./render.js";
 import { esc } from "./markdown.js";
 import { changesLoop, cursorEpoch, cursorSeq } from "./events.js";
-import { api, hasCoarsePointer, copyText, flashCopied, bindButtonActivation, setHome } from "./base.js";
+import { api, apiError, hasCoarsePointer, copyText, flashCopied, bindButtonActivation, setHome } from "./base.js";
 import { initAuth, isReadOnly } from "./auth.js";
 import { selectionInLog } from "./scroll.js";
 import { initCompose, updateComposerAccess, saveDraft, loadDraft, dropDraft, recoverOutbox, outboxList } from "./compose.js";
@@ -141,7 +141,8 @@ function flushRead(klaxId){
   if(!klaxId || readThrough[klaxId] === undefined) return;
   if(readReportTimer[klaxId]){ clearTimeout(readReportTimer[klaxId]); delete readReportTimer[klaxId]; }
   const { turn, block } = decodePos(readThrough[klaxId]);
-  api("/api/read", { method: "POST", keepalive: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ klax_id: klaxId, read_pos: turn + "." + block }) }).catch(()=>{});
+  api("/api/read", { method: "POST", keepalive: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ klax_id: klaxId, read_pos: turn + "." + block }) })
+    .then(r => { if(!r.ok) return apiError(r, "Не удалось сохранить отметку прочитанного").then(showNotice); }).catch(()=>{});
 }
 function jumpToUnread(klaxId){ if(klaxId){ unreadJump[klaxId] = true; startReadGrace(klaxId); } }
 function focusComposer(){

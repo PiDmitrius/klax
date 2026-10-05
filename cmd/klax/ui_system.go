@@ -271,6 +271,11 @@ func (s *uiServer) handleSystemCheck(w http.ResponseWriter, r *http.Request) {
 		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")
 		return
 	}
+	var body struct{}
+	if err := decodeAPIRequest(r.Body, &body, true); err != nil {
+		apiFail(w, http.StatusBadRequest, "bad-request", "Некорректный запрос")
+		return
+	}
 	started := s.d.startUpdateCheck()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"checking": true, "started": started})
@@ -289,7 +294,7 @@ func (s *uiServer) handleSystemUpdate(w http.ResponseWriter, r *http.Request) {
 		Tag    string `json:"tag"`
 		Source string `json:"source"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Tag == "" {
+	if err := decodeAPIRequest(r.Body, &body, false); err != nil || body.Tag == "" {
 		apiFail(w, http.StatusBadRequest, "bad-request", "Нужно указать тег")
 		return
 	}

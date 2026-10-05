@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -45,6 +46,14 @@ func apiFailure(code string) *apiError {
 		message = "Не удалось сохранить сообщение"
 	case "cancel-failed":
 		message = "Не удалось отменить сообщение"
+	case "read-save-failed":
+		message = "Не удалось сохранить отметку прочитанного"
+	case "settings-save-failed":
+		message = "Не удалось сохранить настройки"
+	case "reorder-save-failed":
+		message = "Не удалось сохранить порядок вкладок"
+	case "close-save-failed":
+		message = "Не удалось сохранить закрытие сессии"
 	}
 	return &apiError{Code: code, Message: message, status: status}
 }
@@ -165,17 +174,32 @@ func awaitTurn(w http.ResponseWriter, r *http.Request, t *turnWait, boundary str
 
 func decodeAPIRequest(body io.Reader, value any, allowEmpty bool) error {
 	decoder := json.NewDecoder(body)
-	if err := decoder.Decode(value); err != nil {
+	var fields map[string]json.RawMessage
+	if err := decoder.Decode(&fields); err != nil {
 		if allowEmpty && err == io.EOF {
 			return nil
 		}
 		return err
 	}
+	if fields == nil {
+		return fmt.Errorf("expected one JSON object")
+	}
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return fmt.Errorf("expected one JSON object")
 	}
-	return nil
+	for field, raw := range fields {
+		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return fmt.Errorf("field %q must not be null", field)
+		}
+	}
+	data, err := json.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	strict := json.NewDecoder(bytes.NewReader(data))
+	strict.DisallowUnknownFields()
+	return strict.Decode(value)
 }
 
 const retainedTurnResults = 64

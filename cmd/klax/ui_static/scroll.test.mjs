@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { TurnModel } from "./model.js";
-import { pos, answerBlock } from "./render.js";
+import { pos, decodePos, answerBlock } from "./render.js";
+import { apiError } from "./base.js";
 
 function harness(){
   let now = 0, nextTimer = 0;
@@ -14,7 +15,7 @@ function harness(){
   log.addEventListener = (name, fn) => { logEvents[name] = fn; };
   const arm = (fn, delay) => { const id = ++nextTimer; timers.set(id, { fn, at: now + delay }); return id; };
   const context = vm.createContext({
-    TurnModel, calls, pos, answerBlock, fadeOutDivider: () => false,
+    TurnModel, calls, pos, decodePos, answerBlock, apiError, fadeOutDivider: () => false,
     document: { visibilityState: "visible", getElementById: id => id === "log" ? log : col,
       addEventListener: (name, fn) => { documentEvents[name] = fn; } },
     setTimeout: arm, requestAnimationFrame: fn => arm(fn, 16),
@@ -57,6 +58,22 @@ test("near-bottom reading is not bottom-following; fractional bottom and short l
   assert.equal(h.run("atBottom()"), true);
   h.col.offsetHeight = 400; h.log.scrollTop = 0;
   assert.equal(h.run("atBottom()"), true);
+});
+
+test("a failed read-marker save displays the server error, while success is quiet", async () => {
+  const h = harness();
+  h.run(`
+    readThrough[1] = pos(2, 3);
+    showNotice = text => calls.push(text);
+    api = async () => ({ ok: false, json: async () => ({ error: { code: "read-save-failed", message: "Не удалось сохранить отметку прочитанного" } }) });
+    flushRead(1);
+  `);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(h.calls, ["Не удалось сохранить отметку прочитанного"]);
+  h.calls.length = 0;
+  h.run("api = async () => ({ ok: true }); flushRead(1)");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(h.calls, []);
 });
 
 test("bottom jump animates to settled geometry and has no persistent scroll lock", () => {

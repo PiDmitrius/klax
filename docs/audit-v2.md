@@ -276,7 +276,7 @@ copy any bytes they need before the hook returns.
   "cwd": "/work/project",
   "model_requested": "sonnet",
   "think": "high",
-  "sandbox": "workspace-write",
+  "sandbox": "on",
   "tty": false,
   "system_prompt": "Answer in Russian."
 }
@@ -289,6 +289,7 @@ copy any bytes they need before the hook returns.
   launch overrides and are omitted when unset. `system_prompt` is appended to
   the backend's own system prompt.
 - `tty` says whether klax used its TTY integration.
+- `sandbox` is the klax session override, `on` or `off`, rather than a backend-native policy name.
 
 The backend-reported effective model belongs in `result.model_used`.
 

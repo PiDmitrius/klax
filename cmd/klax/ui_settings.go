@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 
@@ -70,6 +71,7 @@ type uiSettingsPatch struct {
 type uiErr struct {
 	status int
 	msg    string
+	code   string
 }
 
 func (e *uiErr) Error() string { return e.msg }
@@ -81,11 +83,16 @@ func settingsFail(w http.ResponseWriter, err error) {
 	case errors.Is(err, session.ErrSessionNotFound):
 		writeAPIError(w, apiFailure("session-not-found"))
 	case ok && ue.status < http.StatusInternalServerError:
-		apiFail(w, ue.status, "invalid-settings", ue.msg)
+		code := ue.code
+		if code == "" {
+			code = "invalid-settings"
+		}
+		apiFail(w, ue.status, code, ue.msg)
 	case ok:
 		apiFail(w, ue.status, "settings-save-failed", ue.msg)
 	default:
-		apiFail(w, http.StatusInternalServerError, "settings-save-failed", err.Error())
+		log.Printf("save UI settings: %v", err)
+		writeAPIError(w, apiFailure("settings-save-failed"))
 	}
 }
 
@@ -185,13 +192,10 @@ func (d *daemon) applyUISessionSettings(sk string, klaxID string, p uiSettingsPa
 	if err := d.applyUISessionSettingsCore(sk, klaxID, p); err != nil {
 		return err
 	}
-	d.saveStore()
 	d.broadcastSessions(sk)
 	return nil
 }
 
-// applyUISessionSettingsCore runs the validation + in-memory mutation but does NOT persist — the
-// caller owns the save + broadcast.
 func (d *daemon) applyUISessionSettingsCore(sk string, klaxID string, p uiSettingsPatch) error {
 	if d.store.Get(sk, klaxID) == nil {
 		return session.ErrSessionNotFound
@@ -203,20 +207,20 @@ func (d *daemon) applyUISessionSettingsCore(sk string, klaxID string, p uiSettin
 		var err error
 		cwd, err = resolveWorkingDir(*p.CWD)
 		if err != nil {
-			return &uiErr{http.StatusBadRequest, err.Error()}
+			return &uiErr{status: http.StatusBadRequest, msg: err.Error()}
 		}
 	}
 	// Resolve filesystem paths outside the lock; validate settings against the state being changed.
 	var r resolvedPatch
-	_, err := d.store.UpdateSessionChecked(sk, klaxID,
+	_, err := d.store.UpdateSessionPersisted(sk, klaxID,
 		func(cur *session.Session) error {
 			if p.CWD != nil && cur.Messages > 0 {
-				return &uiErr{http.StatusConflict, "Рабочую директорию нельзя изменить после первого сообщения."}
+				return &uiErr{status: http.StatusConflict, code: "cwd-locked", msg: "Рабочую директорию нельзя изменить после первого сообщения."}
 			}
 			check := p
 			check.CWD = nil
 			if busy && p.CWD != nil {
-				return &uiErr{http.StatusConflict, "Сессия занята — параметры запуска нельзя менять до завершения."}
+				return &uiErr{status: http.StatusConflict, code: "session-busy", msg: "Сессия занята — параметры запуска нельзя менять до завершения."}
 			}
 			backend := resolveSessionBackend(cur, def, d.cfg.GetDefaultBackend())
 			var err error
@@ -252,26 +256,26 @@ func (d *daemon) validateSettingsPatch(cur *session.Session, backend string, bus
 	if p.Name != nil {
 		r.name = strings.TrimSpace(*p.Name)
 		if r.name == "" {
-			return r, &uiErr{http.StatusBadRequest, "Имя не может быть пустым"}
+			return r, &uiErr{status: http.StatusBadRequest, msg: "Имя не может быть пустым"}
 		}
 	}
 	touchesRun := p.Backend != nil || p.ModelRequested != nil || p.Think != nil || p.Sandbox != nil || p.TTY != nil || p.CWD != nil || p.SystemPrompt != nil
 	if touchesRun && busy {
-		return r, &uiErr{http.StatusConflict, "Сессия занята — параметры запуска нельзя менять до завершения."}
+		return r, &uiErr{status: http.StatusConflict, code: "session-busy", msg: "Сессия занята — параметры запуска нельзя менять до завершения."}
 	}
 	if p.Backend != nil && *p.Backend != backend {
 		if *p.Backend != "claude" && *p.Backend != "codex" {
-			return r, &uiErr{http.StatusBadRequest, "Движок: claude или codex"}
+			return r, &uiErr{status: http.StatusBadRequest, msg: "Движок: claude или codex"}
 		}
 		if cur.Messages > 0 {
-			return r, &uiErr{http.StatusConflict, "Движок нельзя изменить после первого сообщения."}
+			return r, &uiErr{status: http.StatusConflict, code: "backend-locked", msg: "Движок нельзя изменить после первого сообщения."}
 		}
 		r.backend = *p.Backend
 		r.backendChanged = true
 	}
 	// model/think are validated against the EFFECTIVE (possibly new) backend.
 	if p.ModelRequested != nil && *p.ModelRequested != "" && (r.backendChanged || *p.ModelRequested != cur.ModelRequested) && !validOption(d.modelsForBackend(r.backend), *p.ModelRequested) {
-		return r, &uiErr{http.StatusBadRequest, "Неизвестная модель"}
+		return r, &uiErr{status: http.StatusBadRequest, msg: "Неизвестная модель"}
 	}
 	model := cur.ModelRequested
 	if r.backendChanged {
@@ -282,25 +286,25 @@ func (d *daemon) validateSettingsPatch(cur *session.Session, backend string, bus
 	}
 	efforts := d.effortsForModel(r.backend, model)
 	if p.Think != nil && *p.Think != "" && (r.backendChanged || model != cur.ModelRequested || *p.Think != cur.Think) && !validOption(efforts, *p.Think) {
-		return r, &uiErr{http.StatusBadRequest, "Неизвестный уровень мышления"}
+		return r, &uiErr{status: http.StatusBadRequest, msg: "Неизвестный уровень мышления"}
 	}
 	if p.Think == nil && p.ModelRequested != nil && model != cur.ModelRequested && !validOption(efforts, cur.Think) {
 		empty := ""
 		r.p.Think = &empty
 	}
 	if p.Sandbox != nil && *p.Sandbox != "on" && *p.Sandbox != "off" {
-		return r, &uiErr{http.StatusBadRequest, "sandbox: on или off"}
+		return r, &uiErr{status: http.StatusBadRequest, msg: "sandbox: on или off"}
 	}
 	if p.TTY != nil && *p.TTY && r.backend != "claude" {
-		return r, &uiErr{http.StatusBadRequest, "TTY доступен только для claude"}
+		return r, &uiErr{status: http.StatusBadRequest, msg: "TTY доступен только для claude"}
 	}
 	if p.CWD != nil {
 		if cur.Messages > 0 {
-			return r, &uiErr{http.StatusConflict, "Рабочую директорию нельзя изменить после первого сообщения."}
+			return r, &uiErr{status: http.StatusConflict, code: "cwd-locked", msg: "Рабочую директорию нельзя изменить после первого сообщения."}
 		}
 		cwd, err := resolveWorkingDir(*p.CWD)
 		if err != nil {
-			return r, &uiErr{http.StatusBadRequest, err.Error()}
+			return r, &uiErr{status: http.StatusBadRequest, msg: err.Error()}
 		}
 		r.cwd = cwd
 	}
@@ -311,7 +315,7 @@ func (d *daemon) validateSettingsPatch(cur *session.Session, backend string, bus
 		// A group is a view label, not a run parameter: free to change at any time, busy or not.
 		groups, err := session.NormalizeGroups(*p.Groups)
 		if err != nil {
-			return r, &uiErr{http.StatusBadRequest, err.Error()}
+			return r, &uiErr{status: http.StatusBadRequest, msg: err.Error()}
 		}
 		r.groups = groups
 	}
@@ -390,7 +394,7 @@ func (s *uiServer) handleSettings(w http.ResponseWriter, r *http.Request) {
 			KlaxID string `json:"klax_id"`
 			uiSettingsPatch
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := decodeAPIRequest(r.Body, &body, false); err != nil {
 			apiFail(w, http.StatusBadRequest, "bad-request", "Некорректный запрос")
 			return
 		}

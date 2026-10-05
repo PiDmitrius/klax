@@ -16,7 +16,7 @@ func (s *uiServer) handleModelsRefresh(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Backend string `json:"backend"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil || (body.Backend != "claude" && body.Backend != "codex") {
+	if err := decodeAPIRequest(http.MaxBytesReader(w, r.Body, 4096), &body, false); err != nil || (body.Backend != "claude" && body.Backend != "codex") {
 		apiFail(w, http.StatusBadRequest, "bad-request", "Неизвестный движок")
 		return
 	}

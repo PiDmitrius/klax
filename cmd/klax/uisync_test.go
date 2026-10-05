@@ -62,6 +62,12 @@ func newSyncFixture(t *testing.T) *syncFixture {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	d, klaxID := newReadModelDaemon(t)
+	store, err := session.LoadStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Chats, store.Scope = d.store.Chats, d.store.Scope
+	d.store = store
 	const cwd = "/tmp/proj"
 	dir := filepath.Join(home, ".claude", "projects", strings.NewReplacer("/", "-", ".", "-", "_", "-").Replace(cwd))
 	if err := os.MkdirAll(dir, 0o755); err != nil {

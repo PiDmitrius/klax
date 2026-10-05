@@ -352,6 +352,216 @@ func TestAPINonceUnavailableAndValidation(t *testing.T) {
 	}
 }
 
+func TestAPIRejectsMalformedRequestsWithoutMutations(t *testing.T) {
+	f := newAPIFixture(t, "", "", "")
+	before, _ := json.Marshal(f.d.store.SessionsFor("user:test"))
+	for _, c := range []struct{ path, fields string }{
+		{"/api/new", `"model":"wrong"`},
+		{"/api/settings", `"model":"wrong"`},
+		{"/api/settings", `"tty":null`},
+		{"/api/settings", `"groups":null`},
+		{"/api/send", `"text":"hello","session":"wrong"`},
+		{"/api/abort", `"extra":true`},
+		{"/api/cancel", `"turn_seq":1,"extra":true`},
+		{"/api/read", `"read_pos":"9.2","extra":true`},
+		{"/api/rename", `"name":"changed","extra":true`},
+		{"/api/reorder", `"tabs":[],"order":[]`},
+		{"/api/close", `"extra":true`},
+		{"/api/changes", `"after":"","extra":true`},
+		{"/api/models/refresh", `"backend":"codex","extra":true`},
+		{"/api/system/update", `"tag":"v0.9.3","extra":true`},
+		{"/api/system/check", `"extra":true`},
+	} {
+		t.Run(c.path+"/"+c.fields, func(t *testing.T) {
+			body := fmt.Sprintf(`{"klax_id":%q,%s}`, f.klaxID, c.fields)
+			switch c.path {
+			case "/api/new", "/api/reorder", "/api/changes", "/api/models/refresh", "/api/system/update", "/api/system/check":
+				body = "{" + c.fields + "}"
+			}
+			w := f.request(c.path, body, "")
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("%s: %d %s", body, w.Code, w.Body.String())
+			}
+			errorResponse(t, w, "bad-request")
+		})
+	}
+	for _, body := range []string{"null", "[]", `{"name":"changed"} {}`, `{"name":"changed"} garbage`} {
+		w := f.request("/api/new", body, "")
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s: %d %s", body, w.Code, w.Body.String())
+		}
+	}
+	after, _ := json.Marshal(f.d.store.SessionsFor("user:test"))
+	if !bytes.Equal(before, after) {
+		t.Fatalf("rejected requests changed sessions: %s -> %s", before, after)
+	}
+	if _, err := os.Stat(filepath.Join(f.dir, "backend.entered")); !os.IsNotExist(err) {
+		t.Fatal("rejected request started a backend", err)
+	}
+}
+
+func TestAPISessionMutationsRollbackFailedSaveAndRetry(t *testing.T) {
+	for _, c := range []struct{ path, code, token string }{
+		{"/api/settings", "settings-save-failed", ""},
+		{"/api/rename", "settings-save-failed", ""},
+		{"/api/read", "read-save-failed", ""},
+		{"/api/read", "read-save-failed", "reader"},
+		{"/api/reorder", "reorder-save-failed", ""},
+		{"/api/close", "close-save-failed", ""},
+	} {
+		t.Run(c.path+"/"+c.token, func(t *testing.T) {
+			f := newAPIFixture(t, "", "", "")
+			f.s.tokens["reader"] = uiAccess{User: "test", ReadOnly: true}
+			second := f.d.store.New("user:test", "second", f.dir, session.ScopeDefaults{Backend: "codex"})
+			if err := f.d.store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			before, _ := json.Marshal(f.d.store.SessionsFor("user:test"))
+			keep := f.d.sessionStore("user:test", f.klaxID).Path("keep.txt")
+			if err := os.MkdirAll(filepath.Dir(keep), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(keep, []byte("keep"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(session.StoreDir(), "sessions.json")
+			if err := os.Rename(path, path+".before"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0700); err != nil {
+				t.Fatal(err)
+			}
+			body := fmt.Sprintf(`{"klax_id":%q}`, f.klaxID)
+			switch c.path {
+			case "/api/settings", "/api/rename":
+				body = fmt.Sprintf(`{"klax_id":%q,"name":"changed"}`, f.klaxID)
+			case "/api/read":
+				body = fmt.Sprintf(`{"klax_id":%q,"read_pos":"9.2"}`, f.klaxID)
+			case "/api/reorder":
+				body = fmt.Sprintf(`{"tabs":[%q,%q]}`, second.KlaxID, f.klaxID)
+			}
+			w := f.request(c.path, body, c.token)
+			if w.Code != http.StatusInternalServerError {
+				t.Fatalf("failed save: %d %s", w.Code, w.Body.String())
+			}
+			errorResponse(t, w, c.code)
+			after, _ := json.Marshal(f.d.store.SessionsFor("user:test"))
+			if !bytes.Equal(before, after) {
+				t.Fatalf("failed save changed sessions: %s -> %s", before, after)
+			}
+			if data, err := os.ReadFile(keep); err != nil || string(data) != "keep" {
+				t.Fatal("failed mutation removed session files", err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(path+".before", path); err != nil {
+				t.Fatal(err)
+			}
+			w = f.request(c.path, body, c.token)
+			if w.Code != http.StatusOK && w.Code != http.StatusNoContent {
+				t.Fatalf("retry: %d %s", w.Code, w.Body.String())
+			}
+			reloaded, err := session.LoadStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			live, _ := json.Marshal(f.d.store.SessionsFor("user:test"))
+			disk, _ := json.Marshal(reloaded.SessionsFor("user:test"))
+			if !bytes.Equal(live, disk) || bytes.Equal(live, before) {
+				t.Fatalf("retry was not durable: live=%s disk=%s prior=%s", live, disk, before)
+			}
+		})
+	}
+}
+
+func TestAPIMultipartRejectsUnknownAndDuplicateFields(t *testing.T) {
+	f := newAPIFixture(t, "", "", "")
+	for _, field := range []string{"session", "klax_id", "upload"} {
+		var body bytes.Buffer
+		mw := multipart.NewWriter(&body)
+		_ = mw.WriteField("klax_id", f.klaxID)
+		_ = mw.WriteField("text", "hello")
+		if field == "upload" {
+			part, err := mw.CreateFormFile(field, "note.txt")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.WriteString(part, "contents")
+		} else {
+			_ = mw.WriteField(field, "wrong")
+		}
+		_ = mw.Close()
+		r := httptest.NewRequest("POST", "/api/send", &body)
+		r.Header.Set("Authorization", "Bearer access")
+		r.Header.Set("Content-Type", mw.FormDataContentType())
+		w := httptest.NewRecorder()
+		f.s.routes().ServeHTTP(w, r)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s: %d %s", field, w.Code, w.Body.String())
+		}
+		errorResponse(t, w, "bad-request")
+	}
+	if _, err := os.Stat(filepath.Join(f.dir, "backend.entered")); !os.IsNotExist(err) {
+		t.Fatal("invalid form started a backend", err)
+	}
+}
+
+func TestAPISettingsOmittedAndEmptyFields(t *testing.T) {
+	f := newAPIFixture(t, "", "", "")
+	f.d.store.UpdateSession("user:test", f.klaxID, func(cur *session.Session) {
+		cur.ModelRequested, cur.Think, cur.SystemPrompt = "retained-model", "high", "prompt"
+		cur.Groups = []string{"group"}
+	})
+	w := f.request("/api/settings", fmt.Sprintf(`{"klax_id":%q,"name":"renamed"}`, f.klaxID), "")
+	if w.Code != http.StatusOK {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	cur := f.d.store.Get("user:test", f.klaxID)
+	if cur.ModelRequested != "retained-model" || cur.Think != "high" || cur.SystemPrompt != "prompt" || len(cur.Groups) != 1 {
+		t.Fatal("omitted fields changed", cur)
+	}
+	w = f.request("/api/settings", fmt.Sprintf(`{"klax_id":%q,"model_requested":"","think":"","system_prompt":"","groups":[]}`, f.klaxID), "")
+	if w.Code != http.StatusOK {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	reloaded, err := session.LoadStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur = reloaded.Get("user:test", f.klaxID)
+	if cur.Name != "renamed" || cur.ModelRequested != "" || cur.Think != "" || cur.SystemPrompt != "" || len(cur.Groups) != 0 {
+		t.Fatal("empty overrides not persisted", cur)
+	}
+}
+
+func TestAPISettingsConflictsHaveDistinctCodes(t *testing.T) {
+	f := newAPIFixture(t, "", "", "")
+	f.d.store.UpdateSession("user:test", f.klaxID, func(cur *session.Session) { cur.Messages = 1 })
+	for _, c := range []struct{ fields, code string }{
+		{`"backend":"claude"`, "backend-locked"},
+		{fmt.Sprintf(`"cwd":%q`, f.dir), "cwd-locked"},
+	} {
+		w := f.request("/api/settings", fmt.Sprintf(`{"klax_id":%q,%s}`, f.klaxID, c.fields), "")
+		if w.Code != http.StatusConflict {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		errorResponse(t, w, c.code)
+	}
+	sr := f.d.getRunner("user:test", f.klaxID)
+	sr.mu.Lock()
+	sr.processing = true
+	sr.mu.Unlock()
+	w := f.request("/api/settings", fmt.Sprintf(`{"klax_id":%q,"think":""}`, f.klaxID), "")
+	sr.mu.Lock()
+	sr.processing = false
+	sr.mu.Unlock()
+	if w.Code != http.StatusConflict {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	errorResponse(t, w, "session-busy")
+}
+
 func TestAPIDisconnectDoesNotCancelAndNoIntermediateResponse(t *testing.T) {
 	f := newAPIFixture(t, "block", "", "")
 	server := httptest.NewServer(f.s.routes())

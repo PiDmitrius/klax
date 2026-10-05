@@ -68,7 +68,7 @@ func TestFinishedAuditClassifiesAbort(t *testing.T) {
 	}
 }
 
-func TestAuditJSONUsesDocumentedV1Names(t *testing.T) {
+func TestAuditJSONUsesDocumentedV2Names(t *testing.T) {
 	now := time.Now()
 	turn, err := newAuditTurn(
 		queuedMsg{turnSeq: 1, sessKey: "user:test", klaxID: "s1"},

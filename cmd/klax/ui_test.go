@@ -543,6 +543,9 @@ func TestUIErrorsAreJSON(t *testing.T) {
 		{"POST", "/api/send", "sec", `{"text":"hi"}`, "session-not-found"},
 		{"POST", "/api/read", "sec", `{"klax_id":"unknown","read_pos":"1."}`, "bad-request"},
 		{"GET", "/api/rename", "sec", "", "method-not-allowed"},
+		{"POST", "/api/state", "sec", "", "method-not-allowed"},
+		{"POST", "/api/transcript", "sec", "", "method-not-allowed"},
+		{"POST", "/api/file?ref=nope", "sec", "", "method-not-allowed"},
 		{"GET", "/api/file?ref=nope", "sec", "", "forbidden"},
 		{"GET", "/api/missing", "sec", "", "not-found"},
 	} {

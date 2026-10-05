@@ -186,9 +186,23 @@ not as proof that it is still running.
 
 ## Session control API
 
+Compatibility is best effort within 0.9; long-term API compatibility is not guaranteed.
+
 The UI HTTP server also serves programmatic clients. A browser is not required.
 Requests use the existing `Authorization: Bearer <api-token>` header and the
 same user scope, sessions, execution queue, settings and results as the UI.
+
+JSON requests contain exactly one object. Unknown fields, `null` values and
+trailing data are rejected with `400 bad-request`. An empty body is allowed
+for `/api/new` and `/api/system/check`. Multipart `/api/send` uses the same
+scalar fields, each at most once, and the `files` attachment field.
+
+`POST /api/settings` changes only supplied fields. Empty `model_requested`
+and `think` select backend defaults, empty `system_prompt` clears the appended
+prompt, and `groups: []` clears group membership. Successful settings, read-marker,
+rename, reorder and close responses follow persistence; a failed save leaves
+the prior session state intact. Closing persists session removal before
+stopping its work and deleting its files.
 
 ### Create a session
 
@@ -350,17 +364,22 @@ ready. Every `/api/*` error has this shape:
 | `bad-range` | 416 | The requested byte range of a file is unavailable. |
 | `unauthorized` | 401 | Missing or unknown token. |
 | `forbidden` | 403 | File reference not valid for this session. |
-| `bad-request`, `invalid-nonce`, `invalid-return-on`, `empty-message`, `close-failed` | 400 | Invalid input; nothing enqueued or created. |
-| `invalid-settings` | 400, 409 | Settings rejected: invalid value, unknown option, or a change the session no longer allows. |
+| `bad-request`, `invalid-nonce`, `invalid-return-on`, `empty-message` | 400 | Invalid input; nothing enqueued or created. |
+| `invalid-settings` | 400 | Settings rejected: invalid value or unknown option. |
+| `session-busy` | 409 | Run settings cannot change while work is running or queued. |
+| `backend-locked`, `cwd-locked` | 409 | Backend or working directory cannot change after the first message. |
+| `last-session` | 409 | The last remaining session cannot be closed. |
 | `method-not-allowed` | 405 | Wrong HTTP method. |
 | `too-many-polls` | 429 | Too many concurrent live-channel polls. |
 | `history-unavailable`, `models-unavailable`, `restarting` | 503 | Temporarily unavailable. |
 | `result-unavailable` | 409 | Boundary cannot be recovered in this process. |
 | `aborted` | 409 | Waiting message removed from the queue. |
 | `cancelled` | 409 | This message was cancelled from the queue in the web UI. |
+| `not-queued` | 409 | The turn has already started or settled; queue cancellation cannot apply. |
 | `enqueue-failed` | 500 | Durable acceptance failed. |
 | `attachments-missing`, `run-start-failed`, `audit-start-failed` | 500 | Preparation, registration or start gate failed. |
 | `result-save-failed`, `settings-save-failed` | 500 | Result or settings persistence failed. |
+| `read-save-failed`, `reorder-save-failed`, `close-save-failed`, `cancel-failed` | 500 | Read-marker, tab-order, closure or queue-cancellation persistence failed. |
 | `models-refresh-failed` | 409, 502 | The model catalog refresh is already running or failed. |
 
 All paths that stop a turn before the requested boundary

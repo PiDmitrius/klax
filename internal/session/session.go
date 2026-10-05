@@ -1,4 +1,5 @@
-// Package session manages AI coding sessions.
+// Package session manages coding sessions. Persisted mutations hold the store lock through
+// saving and restore the prior value on failure; unchanged mutations do not write.
 package session
 
 import (
@@ -7,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -469,6 +471,10 @@ var ErrSessionNotFound = errors.New("session not found")
 func (s *Store) UpdateSessionChecked(chatID, klaxID string, check func(*Session) error, fn func(*Session)) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.updateSessionCheckedLocked(chatID, klaxID, check, fn)
+}
+
+func (s *Store) updateSessionCheckedLocked(chatID, klaxID string, check func(*Session) error, fn func(*Session)) (*Session, error) {
 	for _, sess := range s.chat(chatID).Sessions {
 		if sess.KlaxID == klaxID {
 			if check != nil {
@@ -481,6 +487,41 @@ func (s *Store) UpdateSessionChecked(chatID, klaxID string, check func(*Session)
 		}
 	}
 	return nil, ErrSessionNotFound
+}
+
+func (s *Store) UpdateSessionPersisted(chatID, klaxID string, check func(*Session) error, fn func(*Session)) (*Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var updated *Session
+	err := s.persistChatLocked(chatID, func() error {
+		var err error
+		updated, err = s.updateSessionCheckedLocked(chatID, klaxID, check, fn)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+func (s *Store) persistChatLocked(chatID string, edit func() error) error {
+	old, existed := s.Chats[chatID]
+	var prior *ChatSessions
+	if existed {
+		prior = &ChatSessions{Sessions: cloneSessions(old.Sessions)}
+	}
+	err := edit()
+	if err == nil && !reflect.DeepEqual(prior, s.Chats[chatID]) {
+		err = s.saveLocked()
+	}
+	if err != nil {
+		if existed {
+			s.Chats[chatID] = prior
+		} else {
+			delete(s.Chats, chatID)
+		}
+	}
+	return err
 }
 
 // SetCWDIfMessages0 re-checks Messages==0 for the session identified by klaxID and,
@@ -664,6 +705,45 @@ func (s *Store) deleteLocked(chatID string, idx int) bool {
 func (s *Store) Reorder(chatID string, order []string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.reorderLocked(chatID, order)
+}
+
+func (s *Store) ReorderPersisted(chatID string, order []string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var changed bool
+	err := s.persistChatLocked(chatID, func() error {
+		changed = s.reorderLocked(chatID, order)
+		return nil
+	})
+	return changed && err == nil, err
+}
+
+var ErrLastSession = errors.New("cannot close the last session")
+
+func (s *Store) ClosePersisted(chatID, klaxID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.persistChatLocked(chatID, func() error {
+		cs := s.chat(chatID)
+		for idx, sess := range cs.Sessions {
+			if sess.KlaxID != klaxID {
+				continue
+			}
+			if len(cs.Sessions) <= 1 {
+				return ErrLastSession
+			}
+			s.deleteLocked(chatID, idx)
+			if sess.Active {
+				cs.Sessions[0].Active = true
+			}
+			return nil
+		}
+		return ErrSessionNotFound
+	})
+}
+
+func (s *Store) reorderLocked(chatID string, order []string) bool {
 	cs := s.chat(chatID)
 	if len(cs.Sessions) < 2 {
 		return false
@@ -719,7 +799,6 @@ func (s *Store) Switch(chatID string, idx int) *Session {
 	return cloneSession(cs.Sessions[idx])
 }
 
-// AddPersisted publishes the configured session and defaults only after saving; failure restores the store under the same lock.
 func (s *Store) AddPersisted(chatID string, sess *Session, defaults *ScopeDefaults) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -221,64 +221,44 @@ func (d *daemon) createUISessionAtomic(sk, chatID string, patch uiSettingsPatch)
 	}
 	klaxID, err := d.store.AddPersisted(sk, sess, &newDefaults)
 	if err != nil {
-		return nil, &uiErr{http.StatusInternalServerError, "Не удалось сохранить сессию"}
+		return nil, &uiErr{status: http.StatusInternalServerError, msg: "Не удалось сохранить сессию"}
 	}
 	d.broadcastSessions(sk)
 	return klaxID, nil
 }
 
 // renameSession renames one session (by klax_id) and pushes the updated tab strip.
-func (d *daemon) renameSession(sk string, klaxID string, name string) bool {
+func (d *daemon) renameSession(sk string, klaxID string, name string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return false
+		return &uiErr{status: http.StatusBadRequest, msg: "Нужно указать имя"}
 	}
-	if d.store.UpdateSession(sk, klaxID, func(cur *session.Session) { cur.Name = name }) == nil {
-		return false
+	if _, err := d.store.UpdateSessionPersisted(sk, klaxID, nil, func(cur *session.Session) { cur.Name = name }); err != nil {
+		return err
 	}
-	d.saveStore()
 	d.broadcastSessions(sk)
-	return true
+	return nil
 }
 
 // reorderSessions applies the tab strip's drag-and-drop order (by klax_id) and
 // pushes the updated strip. A no-op order change persists nothing.
-func (d *daemon) reorderSessions(sk string, order []string) bool {
-	if !d.store.Reorder(sk, order) {
-		return false
+func (d *daemon) reorderSessions(sk string, order []string) (bool, error) {
+	changed, err := d.store.ReorderPersisted(sk, order)
+	if err != nil || !changed {
+		return false, err
 	}
-	d.saveStore()
 	d.broadcastSessions(sk)
-	return true
+	return true, nil
 }
 
-// closeSession aborts any in-flight run on a session and removes it (the
-// transcript JSONL stays on disk). Refuses the last remaining session; promotes
-// a new active one if the closed tab was active. Mirrors the /nuke teardown
-// order (abort → delete → dropRunner).
+// closeSession persists removal before aborting work and deleting session files.
 func (d *daemon) closeSession(sk string, klaxID string) error {
-	sessions := d.store.SessionsFor(sk)
-	if len(sessions) <= 1 {
-		return errors.New("Нельзя закрыть последнюю сессию")
-	}
-	idx, wasActive := -1, false
-	for i, s := range sessions {
-		if s.KlaxID == klaxID {
-			idx, wasActive = i, s.Active
-			break
-		}
-	}
-	if idx == -1 {
-		return session.ErrSessionNotFound
+	if err := d.store.ClosePersisted(sk, klaxID); err != nil {
+		return err
 	}
 	d.abortSession(sk, klaxID, true)
-	d.store.DeleteByID(sk, klaxID)
 	d.removeSessionStore(sk, klaxID) // latch + delete the runner-owned store before dropping it
 	d.dropRunner(sk, klaxID)
-	if wasActive {
-		d.store.Switch(sk, 0) // promote the first remaining session
-	}
-	d.saveStore()
 	d.broadcastSessions(sk)
 	return nil
 }
@@ -630,28 +610,37 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		targetKlaxID        string
 		attachments         []attachment
 	)
+	var body struct {
+		KlaxID   string          `json:"klax_id"`
+		Text     string          `json:"text"`
+		Nonce    json.RawMessage `json:"nonce"`
+		ReturnOn json.RawMessage `json:"return_on"`
+	}
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			apiFail(w, http.StatusBadRequest, "bad-request", "Некорректная multipart-форма")
 			return
 		}
 		defer r.MultipartForm.RemoveAll()
-		text = r.FormValue("text")
-		if values, ok := r.MultipartForm.Value["nonce"]; ok {
+		fields := make(map[string]string, len(r.MultipartForm.Value))
+		for field, values := range r.MultipartForm.Value {
 			if len(values) != 1 {
-				apiFail(w, http.StatusBadRequest, "invalid-nonce", "Поле nonce должно быть непустой строкой")
+				apiFail(w, http.StatusBadRequest, "bad-request", "Поле формы указано несколько раз")
 				return
 			}
-			nonceRaw, _ = json.Marshal(values[0])
+			fields[field] = values[0]
 		}
-		if values, ok := r.MultipartForm.Value["return_on"]; ok {
-			if len(values) != 1 {
-				apiFail(w, http.StatusBadRequest, "invalid-return-on", "Неизвестное значение return_on")
+		data, _ := json.Marshal(fields)
+		if err := decodeAPIRequest(bytes.NewReader(data), &body, false); err != nil {
+			apiFail(w, http.StatusBadRequest, "bad-request", "Некорректная multipart-форма")
+			return
+		}
+		for field := range r.MultipartForm.File {
+			if field != "files" {
+				apiFail(w, http.StatusBadRequest, "bad-request", "Неизвестное поле вложения")
 				return
 			}
-			returnRaw, _ = json.Marshal(values[0])
 		}
-		targetKlaxID = r.FormValue("klax_id")
 		for _, fh := range r.MultipartForm.File["files"] {
 			f, err := fh.Open()
 			if err != nil {
@@ -667,20 +656,14 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 			attachments = append(attachments, attachment{filename: fh.Filename, data: data})
 		}
 	} else {
-		var body struct {
-			KlaxID   string          `json:"klax_id"`
-			Text     string          `json:"text"`
-			Nonce    json.RawMessage `json:"nonce"`
-			ReturnOn json.RawMessage `json:"return_on"`
-		}
 		if err := decodeAPIRequest(r.Body, &body, false); err != nil {
 			apiFail(w, http.StatusBadRequest, "bad-request", "Некорректный запрос")
 			return
 		}
-		text = body.Text
-		nonceRaw, returnRaw = body.Nonce, body.ReturnOn
-		targetKlaxID = body.KlaxID
 	}
+	text = body.Text
+	nonceRaw, returnRaw = body.Nonce, body.ReturnOn
+	targetKlaxID = body.KlaxID
 	// The UI always targets a specific tab; never silently fall back to the
 	// active session the way the messenger paths do.
 	if targetKlaxID == "" {
@@ -769,7 +752,7 @@ func (s *uiServer) handleAbort(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		KlaxID string `json:"klax_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeAPIRequest(r.Body, &body, false); err != nil {
 		apiFail(w, http.StatusBadRequest, "bad-request", "Некорректный запрос")
 		return
 	}
@@ -801,7 +784,7 @@ func (s *uiServer) handleCancel(w http.ResponseWriter, r *http.Request) {
 		KlaxID  string `json:"klax_id"`
 		TurnSeq int64  `json:"turn_seq"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.TurnSeq <= 0 {
+	if err := decodeAPIRequest(r.Body, &body, false); err != nil || body.TurnSeq <= 0 {
 		apiFail(w, http.StatusBadRequest, "bad-request", "Нужен положительный turn_seq")
 		return
 	}
@@ -842,7 +825,7 @@ func (s *uiServer) handleRead(w http.ResponseWriter, r *http.Request) {
 		KlaxID  string `json:"klax_id"`
 		ReadPos string `json:"read_pos"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeAPIRequest(r.Body, &body, false); err != nil {
 		apiFail(w, http.StatusBadRequest, "bad-request", "Некорректный запрос")
 		return
 	}
@@ -861,11 +844,19 @@ func (s *uiServer) handleRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	raised := false
-	s.d.store.UpdateSession(sk, body.KlaxID, func(cur *session.Session) {
+	_, err = s.d.store.UpdateSessionPersisted(sk, body.KlaxID, nil, func(cur *session.Session) {
 		raised = cur.AdvanceReadPos(s.readOnly(r), turn, block)
 	})
+	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			writeAPIError(w, apiFailure("session-not-found"))
+		} else {
+			log.Printf("save read position: %v", err)
+			writeAPIError(w, apiFailure("read-save-failed"))
+		}
+		return
+	}
 	if raised {
-		s.d.saveStore()
 		s.d.broadcastSessions(sk) // push the new read_pos/unread to this user's other tabs/devices
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -917,7 +908,7 @@ func (s *uiServer) handleRename(w http.ResponseWriter, r *http.Request) {
 		KlaxID string `json:"klax_id"`
 		Name   string `json:"name"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeAPIRequest(r.Body, &body, false); err != nil {
 		apiFail(w, http.StatusBadRequest, "bad-request", "Некорректный запрос")
 		return
 	}
@@ -929,8 +920,8 @@ func (s *uiServer) handleRename(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSession(w, sk, body.KlaxID) {
 		return
 	}
-	if !s.d.renameSession(sk, body.KlaxID, body.Name) {
-		writeAPIError(w, apiFailure("session-not-found"))
+	if err := s.d.renameSession(sk, body.KlaxID, body.Name); err != nil {
+		settingsFail(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -949,12 +940,16 @@ func (s *uiServer) handleReorder(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Tabs []string `json:"tabs"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeAPIRequest(r.Body, &body, false); err != nil {
 		apiFail(w, http.StatusBadRequest, "bad-request", "Некорректный запрос")
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
-	s.d.reorderSessions(sk, body.Tabs)
+	if _, err := s.d.reorderSessions(sk, body.Tabs); err != nil {
+		log.Printf("save tab order: %v", err)
+		writeAPIError(w, apiFailure("reorder-save-failed"))
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -971,7 +966,7 @@ func (s *uiServer) handleClose(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		KlaxID string `json:"klax_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeAPIRequest(r.Body, &body, false); err != nil {
 		apiFail(w, http.StatusBadRequest, "bad-request", "Некорректный запрос")
 		return
 	}
@@ -986,8 +981,12 @@ func (s *uiServer) handleClose(w http.ResponseWriter, r *http.Request) {
 	if err := s.d.closeSession(sk, body.KlaxID); errors.Is(err, session.ErrSessionNotFound) {
 		writeAPIError(w, apiFailure("session-not-found"))
 		return
+	} else if errors.Is(err, session.ErrLastSession) {
+		apiFail(w, http.StatusConflict, "last-session", "Нельзя закрыть последнюю сессию")
+		return
 	} else if err != nil {
-		apiFail(w, http.StatusBadRequest, "close-failed", err.Error())
+		log.Printf("save session closure: %v", err)
+		writeAPIError(w, apiFailure("close-save-failed"))
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

@@ -181,6 +181,10 @@ var inlineImageTypes = map[string]bool{
 // links.json for the stored file, and the file lies inside the session's files/ dir. One token grants
 // access to exactly one file — there is no session-wide key.
 func (s *uiServer) handleFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")
+		return
+	}
 	token := r.URL.Query().Get("ref")
 	if token == "" {
 		apiFail(w, http.StatusForbidden, "forbidden", "Доступ запрещён")

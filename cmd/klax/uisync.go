@@ -582,6 +582,10 @@ func (d *daemon) uiDetectLocked(user, sk string, u *uiUserSync) uint64 {
 // --- handlers ---
 
 func (s *uiServer) handleState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")
+		return
+	}
 	user, ok := s.auth(r)
 	if !ok {
 		apiFail(w, http.StatusUnauthorized, "unauthorized", "Требуется авторизация")
@@ -623,7 +627,7 @@ func (s *uiServer) handleChanges(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		After string `json:"after"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeAPIRequest(r.Body, &req, false); err != nil {
 		apiFail(w, http.StatusBadRequest, "bad-request", "Некорректный запрос")
 		return
 	}
@@ -700,6 +704,10 @@ func writeChanges(w http.ResponseWriter, at string, events []json.RawMessage) {
 // handleTranscript returns a window of a session's turn groups cut from the published state: the
 // newest `limit` groups, or those before the `before` ord for an older page.
 func (s *uiServer) handleTranscript(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")
+		return
+	}
 	user, ok := s.auth(r)
 	if !ok {
 		apiFail(w, http.StatusUnauthorized, "unauthorized", "Требуется авторизация")

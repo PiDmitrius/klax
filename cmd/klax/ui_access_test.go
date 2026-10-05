@@ -44,9 +44,16 @@ func TestReadTokenPermissionsAndIdentity(t *testing.T) {
 		}
 		errorResponse(t, w, "read-only")
 	}
-	for _, path := range []string{"/api/send", "/api/abort", "/api/rename", "/api/close", "/api/settings"} {
-		if w := f.request(path, body, "other"); w.Code != 404 {
-			t.Fatalf("cross-user %s: %d", path, w.Code)
+	for _, c := range []struct{ path, fields string }{
+		{"/api/send", `,"text":"hello"`},
+		{"/api/abort", ""},
+		{"/api/rename", `,"name":"changed"`},
+		{"/api/close", ""},
+		{"/api/settings", `,"name":"changed"`},
+	} {
+		body := fmt.Sprintf(`{"klax_id":%q%s}`, f.klaxID, c.fields)
+		if w := f.request(c.path, body, "other"); w.Code != 404 {
+			t.Fatalf("cross-user %s: %d", c.path, w.Code)
 		}
 	}
 	if got := f.d.store.SessionsFor("user:test"); len(got) != 1 || got[0].Name != "test" {
