@@ -963,15 +963,15 @@ function setEmptyScope(on){
       : 'В группе «' + esc(name) + '» нет сессий.');
 }
 
-// bootState loads the snapshot: the strip and the cursor live events continue from. A changed
-// server epoch shows the restart banner.
+// bootState loads the session snapshot and samples system status.
 async function bootState(){
   const data = await fetchJSON("/api/state");
   const epoch = cursorEpoch(data.at);
-  if(serverEpoch !== null && epoch !== serverEpoch) showNotice(systemRestartNotice(data.startup, data.version));
+  const system = data.system;
+  if(serverEpoch !== null && epoch !== serverEpoch && system.uptime_sec < 300) showNotice(systemRestartNotice(system.startup, system.version));
   serverEpoch = epoch;
   try { sessionStorage.setItem(SERVER_EPOCH_KEY, epoch); } catch(_){}
-  setHome(data.home);
+  setHome(system.home);
   after = data.at;
   tabs = new Map((data.sessions || []).map(t => [t.klax_id, t]));
   tabOrder = (data.sessions || []).map(t => t.klax_id);

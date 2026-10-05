@@ -235,14 +235,22 @@ block on the current turn's completion.
 
 ### List sessions
 
-`GET /api/state` returns the user's sessions in tab order:
+`GET /api/state` returns the user's sessions in tab order and a system snapshot:
 
 ```json
 {
   "at": "dizTFvMd.11",
-  "startup": "started",
-  "version": "<version>",
-  "home": "/home/<user>",
+  "system": {
+    "version": "<version>",
+    "startup": "started",
+    "started_at": "2026-01-01T00:00:00Z",
+    "uptime_sec": 60,
+    "home": "/home/<user>",
+    "rss_bytes": 20971520,
+    "cpu_time_sec": 0.42,
+    "platform": "linux/amd64",
+    "update": {"mode": "release", "running": false, "ok": false, "checked": false, "checking": false}
+  },
   "sessions": [
     {"klax_id": "lOGezVsS", "name": "developer-01", "backend": "claude", "cwd": "/work", "busy": true, "queued": 1}
   ]
@@ -251,22 +259,37 @@ block on the current turn's completion.
 
 Each session carries `klax_id`, `name`, `backend`, `model_requested`,
 `model_used`, `cwd` (absolute), `busy` and `queued` (messages waiting behind the
-running one), plus the state of its UI tab. `at` is the cursor of the UI live
-channel and `home` the server's home directory the UI abbreviates paths with; a
-client that only lists sessions ignores both. With management access, an empty account gets an initial session.
+running one), plus the state of its UI tab. `at` is the cursor of the session live
+channel; `system` is sampled at request time. Uptime and resource measurements do
+not advance `at` or emit live events. A client that only lists sessions ignores
+`at` and `system`. With management access, an empty account gets an initial session.
 
 ### System status
 
-`GET /api/system` returns the running daemon's version, start time, uptime,
-platform, resource usage and cached update status. Resource fields describe the
-klax process; backend child processes are excluded:
+`GET /api/system` returns the same object as `system` in `/api/state`, without
+loading sessions. Both endpoints sample current system status:
 
 | Field | Meaning |
 | --- | --- |
+| `version` | Running daemon's version, without the `v` prefix. |
+| `startup` | Reason for this process's startup: `installed` after installation, otherwise `started`. |
+| `started_at` | Daemon start time in RFC 3339 format. |
+| `uptime_sec` | Whole seconds since daemon start. |
+| `home` | Server's home directory; the UI abbreviates paths under it to `~`. |
 | `rss_bytes` | Current resident memory (RSS), in bytes. |
 | `cpu_time_sec` | Cumulative user and system CPU time, in seconds, including fractions. |
+| `platform` | Operating system and architecture, such as `linux/amd64`. |
+| `update` | Cached release checks and installation status. |
 
-An unavailable resource metric is `null`.
+Resource metrics describe the klax process; backend child processes are excluded.
+An unavailable resource metric is `null`. `update.installed`, when present, is
+the installed artifact's version. It can differ from `version` while the running
+daemon finishes its tasks before restarting.
+
+The UI announces a changed server epoch only when it has a saved previous epoch
+and `uptime_sec < 300`. The new epoch is saved even when the notice is suppressed.
+A tab without a saved epoch shows no startup notice. `startup` selects the
+installation or restart message; `version` names the running version.
 
 ### Access roles and read markers
 

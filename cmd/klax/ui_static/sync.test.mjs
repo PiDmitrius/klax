@@ -6,15 +6,18 @@ import { TurnModel, ordLess, applyMerge } from "./model.js";
 import { cursorEpoch, cursorSeq } from "./events.js";
 import { pos, parsePos, decodePos, answerBlock } from "./render.js";
 
-function harness(){
+function harness(epoch = null){
   const requests = [];
+  const notices = [], homes = [];
+  const stored = new Map(epoch === null ? [] : [["klax_server_epoch", epoch]]);
   const context = vm.createContext({
     TurnModel, ordLess, applyMerge, cursorEpoch, cursorSeq, pos, parsePos, decodePos, answerBlock, console, setTimeout, clearTimeout, AbortController,
     requestAnimationFrame: () => 0, cancelAnimationFrame() {},
     api: url => new Promise(resolve => requests.push({ url, resolve })),
     selectionInLog: () => false, isReadOnly: () => true, filterScope: l => l, parseHash: () => ({}),
-    reconcileSessions() {}, renderChip() {}, showNotice() {}, systemRestartNotice: () => "",
-    writeHash() {}, storageKey: () => "session", loadDraft() {}, saveDraft() {}, setHome() {},
+    reconcileSessions() {}, renderChip() {}, showNotice: value => notices.push(value), systemRestartNotice: (kind, version) => ({ kind, version }),
+    writeHash() {}, storageKey: () => "session", loadDraft() {}, saveDraft() {}, setHome: value => homes.push(value),
+    sessionStorage: { getItem: key => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value) },
     document: { visibilityState: "visible", getElementById: () => null },
   });
   const source = readFileSync(new URL("./app.js", import.meta.url), "utf8")
@@ -33,11 +36,48 @@ function harness(){
     globalThis.seqs = () => model.turns("1").map(t => t.turn_seq);
     globalThis.blocks = seq => model.turns("1").find(t => t.turn_seq === seq).blocks.map(b => b.id);
   `, context);
-  const respond = (i, body, ok = true) => requests[i].resolve({ ok, status: ok ? 200 : 503, json: async () => body });
-  return { run: code => vm.runInContext(code, context), requests, respond };
+  const respond = (i, body, ok = true) => {
+    if(requests[i].url === "/api/state" && ok) body = { system: { startup: "started", version: "0.9.0", uptime_sec: 0, home: "/home/<user>" }, ...body };
+    requests[i].resolve({ ok, status: ok ? 200 : 503, json: async () => body });
+  };
+  return { run: code => vm.runInContext(code, context), requests, respond, notices, homes, stored };
 }
 
 const group = (seq, ids, state = "done") => ({ key: "t:" + seq, ord: seq + "." + seq, head: { turn_seq: seq, role: "user", state }, blocks: ids.map(id => ({ id })) });
+
+for(const [name, previous, uptime, startup, show] of [
+  ["a new tab", null, 0, "installed", false],
+  ["the same server epoch", "new", 0, "installed", false],
+  ["a recent installation", "old", 299, "installed", true],
+  ["a recent restart", "old", 299, "started", true],
+  ["a startup exactly five minutes old", "old", 300, "installed", false],
+  ["a startup one week old", "old", 604800, "started", false],
+]){
+  test("startup notice for " + name, async () => {
+    const h = harness(previous);
+    const boot = h.run("bootState()");
+    h.respond(0, { at: "new.12", system: { startup, version: "0.9.10", uptime_sec: uptime, home: "/home/<user>" }, sessions: [] });
+    await boot;
+    assert.deepEqual(h.notices, show ? [{ kind: startup, version: "0.9.10" }] : []);
+    assert.deepEqual(h.homes, ["/home/<user>"]);
+    assert.equal(h.run("serverEpoch"), "new");
+    assert.equal(h.stored.get("klax_server_epoch"), "new");
+    assert.equal(h.run("after"), "new.12");
+  });
+}
+
+test("a suppressed startup notice still adopts the epoch across reloads", async () => {
+  const h = harness("old");
+  const first = h.run("bootState()");
+  h.respond(0, { at: "new.12", system: { startup: "installed", version: "0.9.10", uptime_sec: 604800 }, sessions: [] });
+  await first;
+  const reloaded = harness(h.stored.get("klax_server_epoch"));
+  const second = reloaded.run("bootState()");
+  reloaded.respond(0, { at: "new.13", sessions: [] });
+  await second;
+  assert.deepEqual(h.notices, []);
+  assert.deepEqual(reloaded.notices, []);
+});
 
 test("events during a window load are buffered; those the window already holds are skipped", async () => {
   const h = harness();

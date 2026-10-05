@@ -38,7 +38,7 @@ func TestSPASystemControlsAndNoticeStack(t *testing.T) {
 	if !strings.Contains(string(app), `initSystem({ notice: showNotice })`) {
 		t.Fatal("system modal is not initialized")
 	}
-	if !strings.Contains(string(app), `systemRestartNotice(data.startup, data.version)`) {
+	if !strings.Contains(string(app), `systemRestartNotice(system.startup, system.version)`) {
 		t.Fatal("daemon restart must close the system modal before showing its result")
 	}
 	if !strings.Contains(string(app), `sessionStorage.getItem(SERVER_EPOCH_KEY)`) {

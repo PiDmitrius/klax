@@ -45,8 +45,11 @@ expresses it, so an entry can be checked and can be proven stale.
    publishes them as turn groups and appends each change to a per-user event ring. Snapshots
    (`/api/state`), windows (`/api/transcript`) and the events after a cursor (`/api/changes`) are
    all cut from the same published groups, so applying the events after a snapshot in order equals
-   a reload. A cursor from another process or behind the ring resyncs. Forbidden: a separate reload
-   path, per-client state on the server, or a turn row copying a session-level value.
+   a reload of session state. `at` covers this session stream; `system` in `/api/state` is sampled
+   at request time by `systemView` (`cmd/klax/ui_system.go`), also used by `/api/system`. System
+   uptime and resource measurements do not advance the cursor or emit events. A cursor from another
+   process or behind the ring resyncs. Forbidden: a separate reload path, per-client state on the
+   server, or a turn row copying a session-level value.
 
 6. **The unread axis is the durable `(turn_seq, block_seq)`,** carried on the wire and stored as
    `read_pos` `"<turn_seq>.<block_seq>"` and encoded in the client as `pos = turn * POS_MULT + block`

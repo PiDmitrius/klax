@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +16,7 @@ import (
 
 func systemTestServer() (*uiServer, *systemState) {
 	st := newSystemState(time.Now().Add(-time.Minute))
-	d := &daemon{cfg: &config.Config{SourceDir: "/source"}, uiHub: newUIHub(), system: st}
+	d := &daemon{cfg: &config.Config{SourceDir: "/source"}, uiHub: newUIHub(), system: st, startupKind: "started"}
 	return &uiServer{d: d, tokens: map[string]uiAccess{"token": {User: "owner"}}}, st
 }
 
@@ -66,7 +67,11 @@ func TestSystemAPIAuthAndView(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Version != version || got.Update.Mode != "source" || got.Update.SourceDir != "/source" || got.Update.Checked || len(got.Update.Releases) != 1 {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Version != version || got.Startup != "started" || got.Home != home || got.Update.Mode != "source" || got.Update.SourceDir != "/source" || got.Update.Checked || len(got.Update.Releases) != 1 {
 		t.Fatalf("unexpected view: %+v", got)
 	}
 	if local := got.Update.Releases[0]; local.Source != "local" || local.Tag != "v"+version {

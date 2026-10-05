@@ -61,7 +61,6 @@ type systemUpdateView struct {
 	FinishedAt string              `json:"finished_at,omitempty"`
 	OK         bool                `json:"ok"`
 	Installed  string              `json:"installed,omitempty"`
-	Current    string              `json:"current"`
 	Checked    bool                `json:"checked"`
 	Checking   bool                `json:"checking"`
 	CheckError string              `json:"check_error,omitempty"`
@@ -84,8 +83,10 @@ type systemInstallTarget struct {
 
 type systemView struct {
 	Version    string           `json:"version"`
+	Startup    string           `json:"startup"`
 	StartedAt  string           `json:"started_at"`
 	UptimeSec  int64            `json:"uptime_sec"`
+	Home       string           `json:"home"`
 	RSSBytes   *uint64          `json:"rss_bytes"`
 	CPUTimeSec *float64         `json:"cpu_time_sec"`
 	Platform   string           `json:"platform"`
@@ -110,6 +111,7 @@ func processUsage() (rssBytes *uint64, cpuTimeSec *float64) {
 
 func (d *daemon) systemView() systemView {
 	rss, cpu := processUsage()
+	home, _ := os.UserHomeDir()
 	st := d.systemState()
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -126,8 +128,10 @@ func (d *daemon) systemView() systemView {
 	}
 	return systemView{
 		Version:    version,
+		Startup:    d.startupKind,
 		StartedAt:  st.startedAt.Format(time.RFC3339),
 		UptimeSec:  int64(time.Since(st.startedAt).Seconds()),
+		Home:       home,
 		RSSBytes:   rss,
 		CPUTimeSec: cpu,
 		Platform:   runtime.GOOS + "/" + runtime.GOARCH,
@@ -135,7 +139,7 @@ func (d *daemon) systemView() systemView {
 			Mode: mode, SourceDir: pathutil.TildePathsInText(d.cfg.SourceDir), Running: st.running,
 			StartedAt: formatSystemTime(st.updateStarted), FinishedAt: formatSystemTime(st.updateFinished),
 			OK: st.lastOK, Installed: st.lastVersion,
-			Current: "v" + version, Checked: st.checked, Checking: st.checkRunning, CheckError: st.checkError, Releases: releases,
+			Checked: st.checked, Checking: st.checkRunning, CheckError: st.checkError, Releases: releases,
 		},
 	}
 }

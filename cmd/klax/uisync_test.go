@@ -7,12 +7,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/PiDmitrius/klax/internal/config"
 	"github.com/PiDmitrius/klax/internal/ids"
 	"github.com/PiDmitrius/klax/internal/session"
 )
@@ -62,6 +64,7 @@ func newSyncFixture(t *testing.T) *syncFixture {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	d, klaxID := newReadModelDaemon(t)
+	d.cfg = &config.Config{}
 	store, err := session.LoadStore()
 	if err != nil {
 		t.Fatal(err)
@@ -131,6 +134,59 @@ func (f *syncFixture) state() (string, []uiSessionInfo) {
 		f.t.Fatal(err)
 	}
 	return st.At, st.Sessions
+}
+
+func TestStateIncludesSystemSnapshot(t *testing.T) {
+	f := newSyncFixture(t)
+	f.d.startupKind = "installed"
+	f.d.system = newSystemState(time.Now().Add(-time.Minute))
+	f.d.system.lastVersion = "9.9.9"
+	decode := func(raw []byte) map[string]json.RawMessage {
+		t.Helper()
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			t.Fatal(err)
+		}
+		return fields
+	}
+	state := decode(f.do("GET", "/api/state", "").Body.Bytes())
+	if len(state) != 3 || state["at"] == nil || state["sessions"] == nil || state["system"] == nil {
+		t.Fatalf("state fields = %v", state)
+	}
+	var view systemView
+	if err := json.Unmarshal(state["system"], &view); err != nil {
+		t.Fatal(err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Version != version || view.Startup != "installed" || view.Home != home || view.Update.Installed != "9.9.9" {
+		t.Fatalf("system metadata = %+v", view)
+	}
+	inState := decode(state["system"])
+	standalone := decode(f.do("GET", "/api/system", "").Body.Bytes())
+	if update := decode(inState["update"]); update["current"] != nil {
+		t.Fatal("system update duplicates the running version")
+	}
+	for _, field := range []string{"uptime_sec", "rss_bytes", "cpu_time_sec"} {
+		if inState[field] == nil || standalone[field] == nil {
+			t.Fatalf("missing sampled field %q", field)
+		}
+		delete(inState, field)
+		delete(standalone, field)
+	}
+	if !reflect.DeepEqual(inState, standalone) {
+		t.Fatalf("state system = %v, standalone system = %v", inState, standalone)
+	}
+	f.d.system.startedAt = time.Now().Add(-24 * time.Hour)
+	next := decode(f.do("GET", "/api/state", "").Body.Bytes())
+	if err := json.Unmarshal(next["system"], &view); err != nil {
+		t.Fatal(err)
+	}
+	if string(next["at"]) != string(state["at"]) || view.UptimeSec < 86400 {
+		t.Fatalf("system sample changed session cursor: at = %s, uptime = %d", next["at"], view.UptimeSec)
+	}
 }
 
 func (f *syncFixture) window(klaxID string, query string) syncWindow {

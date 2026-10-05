@@ -6,15 +6,14 @@ package main
 // through the stat-keyed cache, diffs it against the published value, and appends the deltas to a
 // per-user ring of serialized events under one process-wide seq. Snapshots and windows are cut from
 // the same published values under the detector mutex, so a client that applies the events after a
-// snapshot's `at` in order holds exactly the server state. A client that falls behind the ring or
-// across a restart (another epoch) is told to resync. The server keeps no per-client state.
+// snapshot's `at` in order holds exactly the published session state. A client that falls behind
+// the ring or across a restart (another epoch) is told to resync. The server keeps no per-client state.
 
 import (
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"reflect"
 	"slices"
 	"strconv"
@@ -598,16 +597,13 @@ func (s *uiServer) handleState(w http.ResponseWriter, r *http.Request) {
 	}
 	var resp struct {
 		At       string          `json:"at"`
-		Startup  string          `json:"startup"`
-		Version  string          `json:"version"`
-		Home     string          `json:"home"` // the UI abbreviates paths under it to ~
+		System   systemView      `json:"system"`
 		Sessions json.RawMessage `json:"sessions"`
 	}
 	s.d.uiSync(user, sk, roleOf(readOnly), func(u *uiUserSync, at uint64) {
 		resp.At, resp.Sessions = s.d.uiHub.cursor(at), u.tabs[roleOf(readOnly)].wire()
 	})
-	resp.Startup, resp.Version = s.d.startupKind, version
-	resp.Home, _ = os.UserHomeDir()
+	resp.System = s.d.systemView()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 }
