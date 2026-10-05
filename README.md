@@ -217,6 +217,26 @@ HTTP API. A running turn sending a new message to its own session
 must use `return_on: "queued"`: waiting for that message to start or finish would
 block on the current turn's completion.
 
+### List sessions
+
+`GET /api/state` returns the user's sessions in tab order:
+
+```json
+{
+  "at": "Q7fK2mXa.11",
+  "startup": "started",
+  "version": "<version>",
+  "sessions": [
+    {"created": 42, "name": "developer-01", "backend": "claude", "cwd": "/work", "busy": true, "queued": 1}
+  ]
+}
+```
+
+Each session carries `created`, `name`, `backend`, `model`, `cwd`, `busy` and
+`queued` (messages waiting behind the running one), plus the state of its UI tab.
+`at` is the cursor of the UI live channel; a client that only lists sessions
+ignores it. With management access, an empty account gets an initial session.
+
 ### Access roles and read markers
 
 Each configured user may have two independent credentials:
