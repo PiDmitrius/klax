@@ -544,6 +544,7 @@ func TestUIErrorsAreJSON(t *testing.T) {
 		{"POST", "/api/read", "sec", `{"klax_id":"unknown","read_pos":"1."}`, "bad-request"},
 		{"GET", "/api/rename", "sec", "", "method-not-allowed"},
 		{"GET", "/api/file?ref=nope", "sec", "", "forbidden"},
+		{"GET", "/api/missing", "sec", "", "not-found"},
 	} {
 		r := httptest.NewRequest(c.method, c.path, strings.NewReader(c.body))
 		if c.token != "" {

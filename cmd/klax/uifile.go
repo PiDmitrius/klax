@@ -251,7 +251,37 @@ func (s *uiServer) handleFile(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(name))
 	}
-	http.ServeContent(w, r, filepath.Base(path), fi.ModTime(), f)
+	http.ServeContent(&jsonErrorWriter{ResponseWriter: w}, r, filepath.Base(path), fi.ModTime(), f)
+}
+
+// jsonErrorWriter turns the plain-text errors http.ServeContent writes (an unsatisfiable Range)
+// into the API's JSON error.
+type jsonErrorWriter struct {
+	http.ResponseWriter
+	failed bool
+}
+
+func (w *jsonErrorWriter) WriteHeader(status int) {
+	if status < http.StatusBadRequest {
+		w.ResponseWriter.WriteHeader(status)
+		return
+	}
+	w.failed = true
+	h := w.ResponseWriter.Header()
+	h.Del("Content-Disposition")
+	h.Del("Content-Range")
+	if status == http.StatusRequestedRangeNotSatisfiable {
+		apiFail(w.ResponseWriter, status, "bad-range", "Запрошенный диапазон недоступен")
+	} else {
+		apiFail(w.ResponseWriter, status, "bad-request", "Некорректный запрос файла")
+	}
+}
+
+func (w *jsonErrorWriter) Write(b []byte) (int, error) {
+	if w.failed {
+		return len(b), nil
+	}
+	return w.ResponseWriter.Write(b)
 }
 
 // pathInRoots reports whether path (after symlink resolution) lies inside any of the

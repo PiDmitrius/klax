@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -77,6 +78,8 @@ func (e *uiErr) Error() string { return e.msg }
 func settingsFail(w http.ResponseWriter, err error) {
 	ue, ok := err.(*uiErr)
 	switch {
+	case errors.Is(err, session.ErrSessionNotFound):
+		writeAPIError(w, apiFailure("session-not-found"))
 	case ok && ue.status < http.StatusInternalServerError:
 		apiFail(w, ue.status, "invalid-settings", ue.msg)
 	case ok:
@@ -191,7 +194,7 @@ func (d *daemon) applyUISessionSettings(sk string, klaxID string, p uiSettingsPa
 // caller owns the save + broadcast.
 func (d *daemon) applyUISessionSettingsCore(sk string, klaxID string, p uiSettingsPatch) error {
 	if d.store.Get(sk, klaxID) == nil {
-		return &uiErr{http.StatusNotFound, "Сессия не найдена"}
+		return session.ErrSessionNotFound
 	}
 	def := d.scopeDefaults(sk)
 	busy := d.isSessionBusy(sk, klaxID)
@@ -226,16 +229,6 @@ func (d *daemon) applyUISessionSettingsCore(sk string, klaxID string, p uiSettin
 		},
 		func(cur *session.Session) { applySettingsPatch(cur, r) },
 	)
-	return mapSessionStoreErr(err)
-}
-
-// mapSessionStoreErr translates a session.Store sentinel error into the uiErr the HTTP
-// handler expects (a bare error otherwise becomes a generic 500) — e.g. the session was
-// deleted (/nuke) between the Get above and the store mutation.
-func mapSessionStoreErr(err error) error {
-	if err == session.ErrSessionNotFound {
-		return &uiErr{http.StatusNotFound, "Сессия не найдена"}
-	}
 	return err
 }
 

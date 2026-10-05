@@ -92,6 +92,20 @@ func TestHandleFileUsesDisplayNameForDownload(t *testing.T) {
 	if rec.Body.String() != "plan" {
 		t.Fatalf("download body = %q", rec.Body.String())
 	}
+	part := httptest.NewRequest(http.MethodGet, "/api/file?ref="+token, nil)
+	part.Header.Set("Range", "bytes=1-2")
+	rec = httptest.NewRecorder()
+	routes.ServeHTTP(rec, part)
+	if rec.Code != http.StatusPartialContent || rec.Body.String() != "la" {
+		t.Fatalf("range = %d %q, want 206 la", rec.Code, rec.Body.String())
+	}
+	outside := httptest.NewRequest(http.MethodGet, "/api/file?ref="+token, nil)
+	outside.Header.Set("Range", "bytes=100-200")
+	rec = httptest.NewRecorder()
+	routes.ServeHTTP(rec, outside)
+	if rec.Code != http.StatusRequestedRangeNotSatisfiable || !strings.Contains(rec.Body.String(), `"code":"bad-range"`) || rec.Header().Get("Content-Disposition") != "" {
+		t.Fatalf("unsatisfiable range = %d %q %v", rec.Code, rec.Body.String(), rec.Header())
+	}
 	for _, tc := range []struct {
 		method string
 		path   string

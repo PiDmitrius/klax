@@ -269,7 +269,7 @@ func (d *daemon) closeSession(sk string, klaxID string) error {
 		}
 	}
 	if idx == -1 {
-		return errors.New("Сессия не найдена")
+		return session.ErrSessionNotFound
 	}
 	d.abortSession(sk, klaxID, true)
 	d.store.DeleteByID(sk, klaxID)
@@ -535,6 +535,9 @@ func (s *uiServer) routes() http.Handler {
 	mux.HandleFunc("/api/system/update", s.handleSystemUpdate)
 	mux.HandleFunc("/api/transcript", s.handleTranscript)
 	mux.HandleFunc("/api/file", s.handleFile)
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		apiFail(w, http.StatusNotFound, "not-found", "Нет такого метода API")
+	})
 	mux.HandleFunc("/emoji/", s.handleEmoji)
 	mux.HandleFunc("/", s.handleSPA)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -980,7 +983,10 @@ func (s *uiServer) handleClose(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSession(w, sk, body.KlaxID) {
 		return
 	}
-	if err := s.d.closeSession(sk, body.KlaxID); err != nil {
+	if err := s.d.closeSession(sk, body.KlaxID); errors.Is(err, session.ErrSessionNotFound) {
+		writeAPIError(w, apiFailure("session-not-found"))
+		return
+	} else if err != nil {
 		apiFail(w, http.StatusBadRequest, "close-failed", err.Error())
 		return
 	}

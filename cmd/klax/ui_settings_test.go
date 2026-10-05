@@ -2,6 +2,8 @@ package main
 
 import (
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/PiDmitrius/klax/internal/session"
@@ -75,29 +77,23 @@ func TestApplyUISessionSettingsCoreReturns404ForAlreadyDeletedSession(t *testing
 	newCWD := t.TempDir()
 	err := d.applyUISessionSettingsCore(sk, sess.KlaxID, uiSettingsPatch{CWD: &newCWD})
 
-	uerr, ok := err.(*uiErr)
-	if !ok || uerr.status != 404 {
-		t.Fatalf("err = %v, want a 404 *uiErr, not a generic error that the HTTP handler would turn into a 500", err)
+	if err != session.ErrSessionNotFound {
+		t.Fatalf("err = %v, want session.ErrSessionNotFound (reported as session-not-found)", err)
 	}
 }
 
-// mapSessionStoreErr is what actually converts UpdateSessionChecked's ErrSessionNotFound
-// (a session deleted between the initial Get and the store mutation) into a 404 uiErr —
-// tested directly since the real race can't be reproduced deterministically in-process.
-func TestMapSessionStoreErrConvertsErrSessionNotFoundTo404(t *testing.T) {
-	err := mapSessionStoreErr(session.ErrSessionNotFound)
-
-	uerr, ok := err.(*uiErr)
-	if !ok || uerr.status != 404 {
-		t.Fatalf("err = %v, want a 404 *uiErr", err)
+// A session that vanishes during a settings change is reported as session-not-found, like any
+// other request for an unknown session.
+func TestSettingsFailReportsVanishedSession(t *testing.T) {
+	w := httptest.NewRecorder()
+	settingsFail(w, session.ErrSessionNotFound)
+	if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), `"code":"session-not-found"`) {
+		t.Fatalf("settingsFail = %d %s", w.Code, w.Body.String())
 	}
-}
-
-func TestMapSessionStoreErrPassesThroughOtherErrors(t *testing.T) {
-	other := &uiErr{http.StatusConflict, "something else"}
-
-	if got := mapSessionStoreErr(other); got != other {
-		t.Fatalf("mapSessionStoreErr must pass through non-ErrSessionNotFound errors unchanged, got %v", got)
+	w = httptest.NewRecorder()
+	settingsFail(w, &uiErr{http.StatusConflict, "busy"})
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"code":"invalid-settings"`) {
+		t.Fatalf("settingsFail = %d %s", w.Code, w.Body.String())
 	}
 }
 

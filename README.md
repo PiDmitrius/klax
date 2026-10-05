@@ -346,11 +346,12 @@ ready. Every `/api/*` error has this shape:
 | --- | --- | --- |
 | `read-only` | 403 | The authenticated token permits viewing only. |
 | `session-not-found`, `session-deleted` | 404 | Session unavailable in the authenticated scope. |
-| `file-not-found` | 404 | The referenced file is gone. |
+| `file-not-found`, `not-found` | 404 | The referenced file is gone, or no such API method. |
+| `bad-range` | 416 | The requested byte range of a file is unavailable. |
 | `unauthorized` | 401 | Missing or unknown token. |
 | `forbidden` | 403 | File reference not valid for this session. |
 | `bad-request`, `invalid-nonce`, `invalid-return-on`, `empty-message`, `close-failed` | 400 | Invalid input; nothing enqueued or created. |
-| `invalid-settings` | 400, 404, 409 | Settings rejected: invalid value, unknown option, or a change the session no longer allows. |
+| `invalid-settings` | 400, 409 | Settings rejected: invalid value, unknown option, or a change the session no longer allows. |
 | `method-not-allowed` | 405 | Wrong HTTP method. |
 | `too-many-polls` | 429 | Too many concurrent live-channel polls. |
 | `history-unavailable`, `models-unavailable`, `restarting` | 503 | Temporarily unavailable. |
