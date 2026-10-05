@@ -2,13 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import { setHome, tildePath } from "./base.js";
 
 function harness(){
   const rows = [];
   const body = { append: (...values) => rows.push(...values), appendChild() {} };
   const modal = { classList: { contains: () => true } };
   const context = vm.createContext({
-    rows, isReadOnly: () => true, clearTimeout() {}, setTimeout: () => 0,
+    rows, tildePath, isReadOnly: () => true, clearTimeout() {}, setTimeout: () => 0,
     document: { getElementById: id => id === "sysbody" ? body : modal, createElement: () => ({}) },
   });
   const source = readFileSync(new URL("./system.js", import.meta.url), "utf8")
@@ -16,6 +17,16 @@ function harness(){
   vm.runInContext(source + '\nrow = (label, value) => ({ label, value });', context);
   return { rows, run: code => vm.runInContext(code, context) };
 }
+
+test("source directory stays absolute in data and is abbreviated for display", () => {
+  const h = harness();
+  setHome("/home/u");
+  try {
+    h.run('render({ update: { source_dir: "/home/u/work/klax" } })');
+    assert.equal(h.rows.find(r => r.label === "Исходник").value, "~/work/klax");
+    assert.equal(h.run("lastData.update.source_dir"), "/home/u/work/klax");
+  } finally { setHome(""); }
+});
 
 test("system display orders elapsed time, CPU time, current and peak RSS", () => {
   const h = harness();

@@ -7,12 +7,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/PiDmitrius/klax/internal/pathutil"
 )
 
 type systemState struct {
@@ -118,9 +117,10 @@ func (d *daemon) systemView() systemView {
 	st := d.systemState()
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	mode := "release"
+	mode, sourceDir := "release", ""
 	if d.cfg.SourceDir != "" {
 		mode = "source"
+		sourceDir, _ = filepath.Abs(d.cfg.SourceDir)
 	}
 	releases := make([]systemReleaseView, 0, len(st.releases)+1)
 	if d.cfg.SourceDir != "" {
@@ -140,7 +140,7 @@ func (d *daemon) systemView() systemView {
 		RSSPeakBytes: peak,
 		Platform:     runtime.GOOS + "/" + runtime.GOARCH,
 		Update: systemUpdateView{
-			Mode: mode, SourceDir: pathutil.TildePathsInText(d.cfg.SourceDir), Running: st.running,
+			Mode: mode, SourceDir: sourceDir, Running: st.running,
 			StartedAt: formatSystemTime(st.updateStarted), FinishedAt: formatSystemTime(st.updateFinished),
 			OK: st.lastOK, Installed: st.lastVersion,
 			Checked: st.checked, Checking: st.checkRunning, CheckError: st.checkError, Releases: releases,

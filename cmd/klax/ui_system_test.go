@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -35,7 +36,14 @@ func authSystemJSON(method, path, body string) *http.Request {
 }
 
 func TestSystemAPIAuthAndView(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceDir := filepath.Join(home, "work", "klax")
 	s, _ := systemTestServer()
+	s.d.cfg.SourceDir = sourceDir
 	h := s.routes()
 
 	rec := httptest.NewRecorder()
@@ -79,15 +87,27 @@ func TestSystemAPIAuthAndView(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatal(err)
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Version != version || got.Startup != "started" || got.Home != home || got.Update.Mode != "source" || got.Update.SourceDir != "/source" || got.Update.Checked || len(got.Update.Releases) != 1 {
+	if got.Version != version || got.Startup != "started" || got.Home != home || got.Update.Mode != "source" || got.Update.SourceDir != sourceDir || got.Update.Checked || len(got.Update.Releases) != 1 {
 		t.Fatalf("unexpected view: %+v", got)
 	}
 	if local := got.Update.Releases[0]; local.Source != "local" || local.Tag != "v"+version {
 		t.Fatalf("initial local artifact = %+v", local)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.d.cfg.SourceDir, err = filepath.Rel(cwd, sourceDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, authSystemRequest(http.MethodGet, "/api/system"))
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Update.SourceDir != sourceDir {
+		t.Fatalf("relative source_dir is not absolute in API: %q", got.Update.SourceDir)
 	}
 }
 

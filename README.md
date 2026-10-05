@@ -283,6 +283,9 @@ loading sessions. Both endpoints sample current system status:
 | `platform` | Operating system and architecture, such as `linux/amd64`. |
 | `update` | Cached release checks and installation status. |
 
+`update.source_dir`, when present, is an absolute source tree path. The UI uses
+`home` to abbreviate it for display.
+
 Resource metrics describe the klax process; backend child processes are excluded.
 An unavailable resource metric is `null`. `update.installed`, when present, is
 the installed artifact's version. It can differ from `version` while the running

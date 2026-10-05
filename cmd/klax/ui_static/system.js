@@ -1,4 +1,4 @@
-import { api, apiError, copyText, flashCopied } from "./base.js";
+import { api, apiError, copyText, flashCopied, tildePath } from "./base.js";
 import { isReadOnly } from "./auth.js";
 import { uiConfirm } from "./modal.js";
 
@@ -56,7 +56,7 @@ function render(data){
     row("Платформа", data.platform)
   );
   body.appendChild(Object.assign(document.createElement("div"), { className: "syssep" }));
-  if(u.source_dir) body.append(row("Исходник", u.source_dir, { copy: true }));
+  if(u.source_dir) body.append(row("Исходник", tildePath(u.source_dir), { copy: true }));
   const check = document.createElement("button"); check.id = "syscheck"; check.className = "syscheck";
   check.disabled = isReadOnly() || !!u.checking; check.textContent = u.checking ? "Проверяется…" : "Проверить"; check.onclick = checkUpdates;
   body.append(row("Обновления", "", { noValue: true, button: check }));
