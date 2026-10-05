@@ -367,9 +367,9 @@ func (b *scriptBackend) ParseEvent(line []byte) ([]Event, bool) {
 }
 
 func TestRunSessionEnvironmentReachesChildScript(t *testing.T) {
-	t.Setenv("KLAX_SESSION_ID", "inherited-value")
+	t.Setenv("KLAX_ID", "inherited-value")
 	script := filepath.Join(t.TempDir(), "print_klax_id.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$KLAX_SESSION_ID\"\n"), 0700); err != nil {
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$KLAX_ID\"\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	type outcome struct {
@@ -379,9 +379,9 @@ func TestRunSessionEnvironmentReachesChildScript(t *testing.T) {
 	results := make(chan outcome, 2)
 	for _, id := range []string{"aB3dE9xZ", "Kx3pQ9aB"} {
 		go func(id string) {
-			b := &scriptBackend{shellCmd: "printf '%s\\n' \"$KLAX_SESSION_ID\"; " + script, parseAsIntermediate: true}
+			b := &scriptBackend{shellCmd: "printf '%s\\n' \"$KLAX_ID\"; " + script, parseAsIntermediate: true}
 			var r Runner
-			results <- outcome{id, r.Run(context.Background(), b, RunOptions{KlaxSessionID: id}, nil)}
+			results <- outcome{id, r.Run(context.Background(), b, RunOptions{KlaxID: id}, nil)}
 		}(id)
 	}
 	for range 2 {
@@ -392,7 +392,7 @@ func TestRunSessionEnvironmentReachesChildScript(t *testing.T) {
 			t.Errorf("session %s: %+v", got.id, got.result)
 		}
 	}
-	if got := os.Getenv("KLAX_SESSION_ID"); got != "inherited-value" {
+	if got := os.Getenv("KLAX_ID"); got != "inherited-value" {
 		t.Fatalf("parent environment changed: %q", got)
 	}
 }

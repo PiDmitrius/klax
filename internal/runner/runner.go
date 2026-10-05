@@ -382,7 +382,7 @@ func oneLinePreview(s string) string {
 // RunOptions configures a CLI invocation.
 type RunOptions struct {
 	Prompt                    string
-	KlaxSessionID             string
+	KlaxID                    string
 	SessionID                 string // empty = new session
 	CWD                       string // working directory
 	Sandbox                   string // "on" = CLI defaults, "off" = unrestricted
@@ -732,8 +732,8 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 	if err != nil {
 		return RunResult{Error: err}
 	}
-	if opts.KlaxSessionID != "" {
-		cmd.Env = append(cmd.Environ(), "KLAX_SESSION_ID="+opts.KlaxSessionID)
+	if opts.KlaxID != "" {
+		cmd.Env = append(cmd.Environ(), "KLAX_ID="+opts.KlaxID)
 	}
 	// A run reads only the rollout bytes it appended; a different thread is a new file.
 	var codexStartOffset int64

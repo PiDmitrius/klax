@@ -210,7 +210,7 @@ session identifier: an opaque string of `[A-Za-z0-9]` compared only for
 equality; its length is not part of the contract. Every request and response
 names it `klax_id`. Backend session identifiers are managed internally.
 
-Each backend process receives `KLAX_SESSION_ID` in its environment, containing
+Each backend process receives `KLAX_ID` in its environment, containing
 this persistent identifier. Launch wrappers and scripts invoked by the backend
 can use it as the `klax_id` field in `/api/send`; the backend must preserve the
 variable when launching tools. The API URL and the owning user's management
