@@ -16,7 +16,7 @@ function harness(saved="",hash=""){
   }
   let starts=0,reloads=0;
   const hashListeners=[];
-  const ctx={URLSearchParams, AbortController, DOMException, Response, setTimeout, clearTimeout,
+  const ctx={URLSearchParams, AbortController, DOMException, Response, FormData, setTimeout, clearTimeout,
     window:{addEventListener:(name,fn)=>{assert.equal(name,"hashchange");hashListeners.push(fn);}},
     localStorage:{getItem:k=>store.get(k)||null,setItem:(k,v)=>store.set(k,v),removeItem:k=>store.delete(k)},
     location:{pathname:"/mount/",search:"",hash,reload:()=>reloads++},

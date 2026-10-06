@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { TurnModel, ordLess, applyMerge } from "./model.js";
 import { cursorEpoch, cursorSeq } from "./events.js";
-import { retryDelay, syncInterval } from "./base.js";
+import { apiError, retryDelay, syncInterval } from "./base.js";
 globalThis.document = { getElementById: () => ({ textContent: JSON.stringify({request_ms:10000,poll_ms:30000,retry_min_ms:625,retry_max_ms:5000,sync_ms:250}) }) };
 import { pos, parsePos, decodePos, answerBlock } from "./render.js";
 
@@ -13,7 +13,7 @@ function harness(epoch = null){
   const notices = [], homes = [];
   const stored = new Map(epoch === null ? [] : [["klax_server_epoch", epoch]]);
   const context = vm.createContext({
-    TurnModel, ordLess, applyMerge, retryDelay, syncInterval, cursorEpoch, cursorSeq, pos, parsePos, decodePos, answerBlock, console, setTimeout, clearTimeout, AbortController,
+    TurnModel, ordLess, applyMerge, apiError, retryDelay, syncInterval, cursorEpoch, cursorSeq, pos, parsePos, decodePos, answerBlock, console, setTimeout, clearTimeout, AbortController,
     requestAnimationFrame: () => 0, cancelAnimationFrame() {},
     api: url => new Promise(resolve => requests.push({ url, resolve })),
     selectionInLog: () => false, isReadOnly: () => true, filterScope: l => l, parseHash: () => ({}),
@@ -225,6 +225,24 @@ test("published read positions confirm local progress without another report", a
     assert.equal(h.requests.length, 0);
   }
   assert.equal(h.run("readThrough[1]"), pos(3, 0));
+});
+
+test("a published read position stops a pending retry before its deadline", async () => {
+  const h = harness();
+  h.run(`
+    globalThis.readTimers = new Map();
+    setTimeout = (fn, ms) => { const id = Symbol(); readTimers.set(id, { fn, ms }); return id; };
+    clearTimeout = id => readTimers.delete(id);
+    active = "1"; readThrough[1] = pos(2, 3); flushRead("1");
+  `);
+  h.respond(0, null, false);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.run("readTimers.size"), 1);
+  assert.equal(h.run("[...readTimers.values()][0].ms"), 625);
+  await h.run('onSessionsList([{ klax_id: "1", read_pos: "2.3" }])');
+  assert.equal(h.run("readTimers.size"), 0);
+  h.run('flushRead("1")');
+  assert.equal(h.requests.length, 1);
 });
 
 test("tab patches and orders rebuild the strip from the snapshot", async () => {

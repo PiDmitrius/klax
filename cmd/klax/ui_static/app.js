@@ -30,6 +30,7 @@ const unreadJump = {};    // klaxId -> one-shot scroll to the unread divider
 const readGraceUntil = {}, readGraceTimer = {};
 const readReportTimer = {}; // klaxId -> pending POST /api/read timer
 const readSaved = {}, readSending = {}; // klaxId -> confirmed / in-flight read position
+const readRetryAttempt = {};
 const READ_GRACE_MS = 1600;
 let active = "";
 // Live channel. `after` is the ring cursor every applied snapshot/changes response advances. While
@@ -131,23 +132,44 @@ function modelMaxPos(klaxId){
 }
 // Tab-hide flushes pending progress with keepalive before freezing.
 // Confirmed positions and positions already in flight need no repeated report.
-function reportRead(klaxId){
+function clearReadReport(klaxId){
+  clearTimeout(readReportTimer[klaxId]);
+  delete readReportTimer[klaxId];
+}
+function confirmRead(klaxId, p){
+  if(p > (readSaved[klaxId] || 0)) delete readRetryAttempt[klaxId];
+  readSaved[klaxId] = Math.max(readSaved[klaxId] || 0, p);
+  if(readThrough[klaxId] <= readSaved[klaxId]) clearReadReport(klaxId);
+}
+function reportRead(klaxId, delay = syncInterval()){
   if(!klaxId || readThrough[klaxId] === undefined) return;
   if(readReportTimer[klaxId]) return;
-  readReportTimer[klaxId] = setTimeout(() => { delete readReportTimer[klaxId]; flushRead(klaxId); }, syncInterval());
+  readReportTimer[klaxId] = setTimeout(() => { delete readReportTimer[klaxId]; flushRead(klaxId); }, delay);
 }
 function flushRead(klaxId){
   if(!klaxId || readThrough[klaxId] === undefined) return;
-  if(readReportTimer[klaxId]){ clearTimeout(readReportTimer[klaxId]); delete readReportTimer[klaxId]; }
+  clearReadReport(klaxId);
   const p = readThrough[klaxId];
   if(p <= Math.max(readSaved[klaxId] || 0, readSending[klaxId] || 0)) return;
   readSending[klaxId] = p;
+  let retry = false;
   const { turn, block } = decodePos(p);
   api("/api/read", { method: "POST", keepalive: true, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ klax_id: klaxId, read_pos: turn + "." + block }) })
     .then(r => {
-      if(r.ok) readSaved[klaxId] = Math.max(readSaved[klaxId] || 0, p);
-      else return apiError(r, "Не удалось сохранить отметку прочитанного").then(showNotice);
-    }).catch(()=>{}).finally(() => { if(readSending[klaxId] === p) delete readSending[klaxId]; });
+      if(readThrough[klaxId] === undefined) return;
+      if(r.ok) confirmRead(klaxId, p);
+      else {
+        retry = r.status === 408 || r.status === 429 || r.status >= 500;
+        if(!retry || !readRetryAttempt[klaxId]) return apiError(r, "Не удалось сохранить отметку прочитанного").then(showNotice);
+      }
+    }).catch(() => { retry = true; }).finally(() => {
+      if(readSending[klaxId] === p) delete readSending[klaxId];
+      if(retry && readThrough[klaxId] > Math.max(readSaved[klaxId] || 0, readSending[klaxId] || 0)){
+        const attempt = readRetryAttempt[klaxId] || 0;
+        readRetryAttempt[klaxId] = attempt + 1;
+        reportRead(klaxId, retryDelay(attempt));
+      }
+    });
 }
 function jumpToUnread(klaxId){ if(klaxId){ unreadJump[klaxId] = true; startReadGrace(klaxId); } }
 function focusComposer(){
@@ -859,7 +881,7 @@ async function onSessionsList(list){
     // regresses our own, maybe-not-yet-reported, reading), so the divider + badge here catch up.
     // A watermark kept across a resync is raised too, before its window reloads.
     const p = parsePos(s.read_pos);
-    readSaved[s.klax_id] = Math.max(readSaved[s.klax_id] || 0, p);
+    confirmRead(s.klax_id, p);
     if(readThrough[s.klax_id] !== undefined){
       if(p > readThrough[s.klax_id]){
         readThrough[s.klax_id] = p;
@@ -940,6 +962,8 @@ function dropActive(){
 function forgetSession(c){
   winReq[c] = (winReq[c] || 0) + 1;
   model.drop(c);
+  clearReadReport(c); clearReadGrace(c);
+  delete readThrough[c]; delete readSaved[c]; delete readSending[c]; delete readRetryAttempt[c]; delete unreadJump[c];
   delete loaded[c]; delete loading[c]; delete refreshing[c]; delete buffered[c]; delete skips[c];
 }
 
@@ -1257,7 +1281,7 @@ function start(){
     if(document.visibilityState === "hidden"){
       if(active && stick) markRead(active, true);
       resetReadScroll();
-      flushRead(active); // push the read watermark now, before the tab may freeze/close
+      for(const klaxId of Object.keys(readThrough)) flushRead(klaxId);
     } else {
       if(active){
         if(rawUnreadCount(active) > 0){

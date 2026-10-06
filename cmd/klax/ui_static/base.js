@@ -58,7 +58,7 @@ export function retryDelay(attempt){
   return Math.min(delay, p.retry_max_ms);
 }
 
-// api bounds the authenticated request through receipt of the complete body.
+// api bounds authenticated requests; multipart progress renews the deadline.
 export async function api(path, opts = {}, longPoll = false){
   const token = getToken(), ac = new AbortController();
   const abort = () => ac.abort(opts.signal.reason);
@@ -66,19 +66,58 @@ export async function api(path, opts = {}, longPoll = false){
     if(opts.signal.aborted) abort();
     else opts.signal.addEventListener("abort", abort, { once: true });
   }
-  const timer = setTimeout(() => ac.abort(new DOMException("Request timed out", "TimeoutError")), longPoll ? policy().poll_ms : policy().request_ms);
+  let timer;
+  const renew = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => ac.abort(new DOMException("Request timed out", "TimeoutError")), longPoll ? policy().poll_ms : policy().request_ms);
+  };
+  renew();
   try {
     if(ac.signal.aborted) throw ac.signal.reason;
-    const r = await fetch(BASE() + (path[0] === "/" ? path.slice(1) : path), {
+    const url = BASE() + (path[0] === "/" ? path.slice(1) : path);
+    const options = {
       ...opts, signal: ac.signal,
       headers: Object.assign({ "Authorization": "Bearer " + token }, opts.headers || {}),
-    });
+    };
+    const r = opts.body instanceof FormData ? await multipart(url, options, renew) : await fetch(url, options);
     if(r.status === 401 && token === getToken()) authFailure();
     const body = await r.arrayBuffer();
     return new Response([204, 205, 304].includes(r.status) ? null : body, { status: r.status, statusText: r.statusText, headers: r.headers });
   } finally {
     clearTimeout(timer);
     if(opts.signal) opts.signal.removeEventListener("abort", abort);
+  }
+}
+
+async function multipart(url, opts, renew){
+  const xhr = new XMLHttpRequest(), abort = () => xhr.abort();
+  opts.signal.addEventListener("abort", abort, { once: true });
+  try {
+    return await new Promise((resolve, reject) => {
+      let sent = 0, received = 0;
+      xhr.upload.onprogress = e => { if(e.loaded > sent){ sent = e.loaded; renew(); } };
+      xhr.onprogress = e => { if(e.loaded > received){ received = e.loaded; renew(); } };
+      xhr.upload.onload = renew;
+      xhr.onreadystatechange = () => { if(xhr.readyState === 2) renew(); };
+      xhr.onerror = () => reject(new TypeError("Network request failed"));
+      xhr.onabort = () => reject(opts.signal.reason ?? new DOMException("Request aborted", "AbortError"));
+      xhr.onload = () => {
+        try {
+          const headers = new Headers();
+          for(const line of xhr.getAllResponseHeaders().split(/[\r\n]+/)){
+            const colon = line.indexOf(":");
+            if(colon > 0) headers.append(line.slice(0, colon), line.slice(colon + 1).trim());
+          }
+          resolve(new Response([204, 205, 304].includes(xhr.status) ? null : xhr.response, { status: xhr.status, statusText: xhr.statusText, headers }));
+        } catch(e){ reject(e); }
+      };
+      xhr.open(opts.method || "POST", url);
+      xhr.responseType = "arraybuffer";
+      for(const [name, value] of Object.entries(opts.headers)) xhr.setRequestHeader(name, value);
+      xhr.send(opts.body);
+    });
+  } finally {
+    opts.signal.removeEventListener("abort", abort);
   }
 }
 
