@@ -6,7 +6,7 @@
 import { TurnModel, ordLess, applyMerge } from "./model.js";
 import { renderSession, answerBlock, beginShift, playShift, fadeOutDivider, DIVIDER_FADE_MS, pos, parsePos, decodePos } from "./render.js";
 import { esc } from "./markdown.js";
-import { changesLoop, cursorEpoch, cursorSeq } from "./events.js";
+import { changesLoop, cursorEpoch, cursorSeq, wakeChanges } from "./events.js";
 import { api, apiError, hasCoarsePointer, copyText, flashCopied, bindButtonActivation, setHome, retryDelay, syncInterval } from "./base.js";
 import { initAuth, isReadOnly } from "./auth.js";
 import { selectionInLog } from "./scroll.js";
@@ -1283,6 +1283,7 @@ function start(){
       resetReadScroll();
       for(const klaxId of Object.keys(readThrough)) flushRead(klaxId);
     } else {
+      wakeChanges();
       if(active){
         if(rawUnreadCount(active) > 0){
           stick = false;

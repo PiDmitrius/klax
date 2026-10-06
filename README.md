@@ -283,7 +283,10 @@ fields, and `null` removes a field:
 ```
 
 The `tabs` payload is the complete ordered list of session IDs.
-An idle `/api/changes` request waits up to 29 seconds. Its first available event
+An idle `/api/changes` request waits up to 29 seconds, or answers at once with
+`"nowait":true`. The Web UI sends `nowait` after a failed request, so recovery is
+shown within one round trip, and skips the retry pause when its browser tab becomes
+visible again. The first available event
 starts a fixed 250 ms collection window; further updates do not extend it.
 The response includes changes detected at the end of that window. Poll requests
 allow 30 seconds for the complete response; other Web UI requests allow 10 seconds.

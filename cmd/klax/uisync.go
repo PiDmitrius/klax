@@ -612,7 +612,7 @@ func (s *uiServer) handleState(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleChanges is the long-poll: it answers with the ring events after `after` for the request's
-// role, holding the request while there are none.
+// role, holding the request while there are none unless `nowait` asks for an immediate answer.
 func (s *uiServer) handleChanges(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
@@ -624,7 +624,8 @@ func (s *uiServer) handleChanges(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		After string `json:"after"`
+		After  string `json:"after"`
+		NoWait bool   `json:"nowait"`
 	}
 	if err := decodeAPIRequest(r.Body, &req, false); err != nil {
 		apiFail(w, http.StatusBadRequest, "bad-request", "Некорректный запрос")
@@ -651,7 +652,7 @@ func (s *uiServer) handleChanges(w http.ResponseWriter, r *http.Request) {
 		s.d.uiSync(user, sk, role, nil)
 		return h.collect(user, after, role)
 	}
-	expired := false
+	expired := req.NoWait
 	for {
 		ch := h.waitChan(user) // grab BEFORE detecting (lost-wakeup-safe)
 		events, at, resync := collect()
