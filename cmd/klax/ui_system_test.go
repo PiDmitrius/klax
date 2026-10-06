@@ -6,7 +6,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -15,7 +18,7 @@ import (
 
 func systemTestServer() (*uiServer, *systemState) {
 	st := newSystemState(time.Now().Add(-time.Minute))
-	d := &daemon{cfg: &config.Config{SourceDir: "/source"}, uiHub: newUIHub(), system: st}
+	d := &daemon{cfg: &config.Config{SourceDir: "/source"}, uiHub: newUIHub(), system: st, startupKind: "started"}
 	return &uiServer{d: d, tokens: map[string]uiAccess{"token": {User: "owner"}}}, st
 }
 
@@ -33,7 +36,14 @@ func authSystemJSON(method, path, body string) *http.Request {
 }
 
 func TestSystemAPIAuthAndView(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceDir := filepath.Join(home, "work", "klax")
 	s, _ := systemTestServer()
+	s.d.cfg.SourceDir = sourceDir
 	h := s.routes()
 
 	rec := httptest.NewRecorder()
@@ -43,19 +53,61 @@ func TestSystemAPIAuthAndView(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
+	var before, after syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &before); err != nil {
+		t.Fatal(err)
+	}
 	h.ServeHTTP(rec, authSystemRequest(http.MethodGet, "/api/system"))
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &after); err != nil {
+		t.Fatal(err)
+	}
 	if rec.Code != http.StatusOK {
 		t.Fatalf("authenticated status = %d", rec.Code)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fields["pid"]; ok {
+		t.Fatal("system view exposes pid")
+	}
+	var rss uint64
+	var cpu float64
+	if err := json.Unmarshal(fields["rss_bytes"], &rss); err != nil || rss == 0 {
+		t.Fatalf("rss_bytes = %s, error = %v", fields["rss_bytes"], err)
+	}
+	var peak uint64
+	if err := json.Unmarshal(fields["rss_peak_bytes"], &peak); err != nil || peak == 0 || peak < uint64(before.Maxrss)*1024 || peak > uint64(after.Maxrss)*1024 {
+		t.Fatalf("rss_peak_bytes = %s, expected between %d and %d, error = %v", fields["rss_peak_bytes"], uint64(before.Maxrss)*1024, uint64(after.Maxrss)*1024, err)
+	}
+	if err := json.Unmarshal(fields["cpu_time_sec"], &cpu); err != nil || string(fields["cpu_time_sec"]) == "null" || cpu < 0 {
+		t.Fatalf("cpu_time_sec = %s, error = %v", fields["cpu_time_sec"], err)
 	}
 	var got systemView
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Version != version || got.Update.Mode != "source" || got.Update.SourceDir != "/source" || got.Update.Checked || len(got.Update.Releases) != 1 {
+	if got.Version != version || got.Startup != "started" || got.Home != home || got.Update.Mode != "source" || got.Update.SourceDir != sourceDir || got.Update.Checked || len(got.Update.Releases) != 1 {
 		t.Fatalf("unexpected view: %+v", got)
 	}
 	if local := got.Update.Releases[0]; local.Source != "local" || local.Tag != "v"+version {
 		t.Fatalf("initial local artifact = %+v", local)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.d.cfg.SourceDir, err = filepath.Rel(cwd, sourceDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, authSystemRequest(http.MethodGet, "/api/system"))
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Update.SourceDir != sourceDir {
+		t.Fatalf("relative source_dir is not absolute in API: %q", got.Update.SourceDir)
 	}
 }
 
@@ -77,6 +129,13 @@ func TestSystemCheckIsExplicit(t *testing.T) {
 	h.ServeHTTP(rec, authSystemRequest(http.MethodPost, "/api/system/check"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("check status = %d", rec.Code)
+	}
+	var check map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &check); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := check["checking"]; ok {
+		t.Fatal("check response duplicates sampled state")
 	}
 	select {
 	case <-called:
@@ -118,16 +177,10 @@ func TestSystemUpdateMethodAndSingleFlight(t *testing.T) {
 	}
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, authSystemJSON(http.MethodPost, "/api/system/update", `{"tag":"v8.8.8"}`))
-	var rejected map[string]any
-	if err := json.NewDecoder(rec.Body).Decode(&rejected); err != nil {
-		t.Fatal(err)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("unchecked update status = %d", rec.Code)
 	}
-	if rejected["running"] != false {
-		t.Fatalf("unchecked tag accepted: %#v", rejected)
-	}
-	if rejected["started"] != false {
-		t.Fatalf("unchecked tag reported started: %#v", rejected)
-	}
+	errorResponse(t, rec, "update-not-checked")
 
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, authSystemJSON(http.MethodPost, "/api/system/update", `{"tag":"v9.9.9"}`))
@@ -138,26 +191,17 @@ func TestSystemUpdateMethodAndSingleFlight(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&first); err != nil {
 		t.Fatal(err)
 	}
-	if first["started"] != true {
+	if first["started"] != true || first["message"] != installStartMessage("v9.9.9") {
 		t.Fatalf("first update not reported started: %#v", first)
 	}
 	<-started
 
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, authSystemJSON(http.MethodPost, "/api/system/update", `{"tag":"v9.9.9"}`))
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusConflict {
 		t.Fatalf("second update status = %d", rec.Code)
 	}
-	var second map[string]any
-	if err := json.NewDecoder(rec.Body).Decode(&second); err != nil {
-		t.Fatal(err)
-	}
-	if second["message"] != "Обновление уже выполняется" {
-		t.Fatalf("second response = %#v", second)
-	}
-	if second["started"] != false {
-		t.Fatalf("second update reported started: %#v", second)
-	}
+	errorResponse(t, rec, "update-running")
 
 	close(release)
 	deadline := time.Now().Add(time.Second)
@@ -224,7 +268,7 @@ func TestSystemLocalReinstallUsesSourceArtifact(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
 		t.Fatal(err)
 	}
-	if response["started"] != true {
+	if rec.Code != http.StatusOK || response["started"] != true || response["message"] != installStartMessage("v"+version) {
 		t.Fatalf("local reinstall response = %#v", response)
 	}
 	select {

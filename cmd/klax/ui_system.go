@@ -7,11 +7,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
+	"syscall"
 	"time"
-
-	"github.com/PiDmitrius/klax/internal/pathutil"
 )
 
 type systemState struct {
@@ -60,7 +60,6 @@ type systemUpdateView struct {
 	FinishedAt string              `json:"finished_at,omitempty"`
 	OK         bool                `json:"ok"`
 	Installed  string              `json:"installed,omitempty"`
-	Current    string              `json:"current"`
 	Checked    bool                `json:"checked"`
 	Checking   bool                `json:"checking"`
 	CheckError string              `json:"check_error,omitempty"`
@@ -82,21 +81,46 @@ type systemInstallTarget struct {
 }
 
 type systemView struct {
-	Version   string           `json:"version"`
-	StartedAt string           `json:"started_at"`
-	UptimeSec int64            `json:"uptime_sec"`
-	PID       int              `json:"pid"`
-	Platform  string           `json:"platform"`
-	Update    systemUpdateView `json:"update"`
+	Version      string           `json:"version"`
+	Startup      string           `json:"startup"`
+	StartedAt    string           `json:"started_at"`
+	UptimeSec    int64            `json:"uptime_sec"`
+	Home         string           `json:"home"`
+	CPUTimeSec   *float64         `json:"cpu_time_sec"`
+	RSSBytes     *uint64          `json:"rss_bytes"`
+	RSSPeakBytes *uint64          `json:"rss_peak_bytes"`
+	Platform     string           `json:"platform"`
+	Update       systemUpdateView `json:"update"`
+}
+
+func processUsage() (rssBytes, rssPeakBytes *uint64, cpuTimeSec *float64) {
+	if data, err := os.ReadFile("/proc/self/statm"); err == nil {
+		var virtual, resident uint64
+		if _, err := fmt.Sscan(string(data), &virtual, &resident); err == nil {
+			resident *= uint64(os.Getpagesize())
+			rssBytes = &resident
+		}
+	}
+	var usage syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err == nil {
+		seconds := time.Duration(usage.Utime.Nano() + usage.Stime.Nano()).Seconds()
+		cpuTimeSec = &seconds
+		peak := uint64(usage.Maxrss) * 1024
+		rssPeakBytes = &peak
+	}
+	return
 }
 
 func (d *daemon) systemView() systemView {
+	rss, peak, cpu := processUsage()
+	home, _ := os.UserHomeDir()
 	st := d.systemState()
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	mode := "release"
+	mode, sourceDir := "release", ""
 	if d.cfg.SourceDir != "" {
 		mode = "source"
+		sourceDir, _ = filepath.Abs(d.cfg.SourceDir)
 	}
 	releases := make([]systemReleaseView, 0, len(st.releases)+1)
 	if d.cfg.SourceDir != "" {
@@ -106,16 +130,20 @@ func (d *daemon) systemView() systemView {
 		releases = append(releases, systemReleaseView{Tag: release.Tag, Age: releaseAge(release.PublishedAt), URL: release.URL, Action: releaseAction(release.Tag), Source: "github"})
 	}
 	return systemView{
-		Version:   version,
-		StartedAt: st.startedAt.Format(time.RFC3339),
-		UptimeSec: int64(time.Since(st.startedAt).Seconds()),
-		PID:       os.Getpid(),
-		Platform:  runtime.GOOS + "/" + runtime.GOARCH,
+		Version:      version,
+		Startup:      d.startupKind,
+		StartedAt:    st.startedAt.Format(time.RFC3339),
+		UptimeSec:    int64(time.Since(st.startedAt).Seconds()),
+		Home:         home,
+		CPUTimeSec:   cpu,
+		RSSBytes:     rss,
+		RSSPeakBytes: peak,
+		Platform:     runtime.GOOS + "/" + runtime.GOARCH,
 		Update: systemUpdateView{
-			Mode: mode, SourceDir: pathutil.TildePathsInText(d.cfg.SourceDir), Running: st.running,
+			Mode: mode, SourceDir: sourceDir, Running: st.running,
 			StartedAt: formatSystemTime(st.updateStarted), FinishedAt: formatSystemTime(st.updateFinished),
 			OK: st.lastOK, Installed: st.lastVersion,
-			Current: "v" + version, Checked: st.checked, Checking: st.checkRunning, CheckError: st.checkError, Releases: releases,
+			Checked: st.checked, Checking: st.checkRunning, CheckError: st.checkError, Releases: releases,
 		},
 	}
 }
@@ -169,12 +197,12 @@ func (d *daemon) startUpdateCheck() bool {
 	return true
 }
 
-func (d *daemon) startSystemUpdate(tag, source string) (bool, string) {
+func (d *daemon) startSystemUpdate(tag, source string) (string, error) {
 	st := d.systemState()
 	st.mu.Lock()
 	if st.running {
 		st.mu.Unlock()
-		return false, "Обновление уже выполняется"
+		return "", &uiErr{status: http.StatusConflict, code: "update-running", msg: "Обновление уже выполняется"}
 	}
 	allowed := source == "local" && d.cfg.SourceDir != "" && tag == "v"+version
 	if source == "github" {
@@ -187,7 +215,7 @@ func (d *daemon) startSystemUpdate(tag, source string) (bool, string) {
 	}
 	if !allowed || (source == "github" && (!st.checked || st.checkError != "")) {
 		st.mu.Unlock()
-		return false, "Сначала проверьте обновления или выберите версию из списка"
+		return "", &uiErr{status: http.StatusConflict, code: "update-not-checked", msg: "Сначала проверьте обновления или выберите версию из списка"}
 	}
 	st.running = true
 	st.updateStarted = time.Now()
@@ -222,7 +250,7 @@ func (d *daemon) startSystemUpdate(tag, source string) (bool, string) {
 		st.running = false
 		st.mu.Unlock()
 	}()
-	return true, installStartMessage(tag)
+	return installStartMessage(tag), nil
 }
 
 func installStartMessage(tag string) string {
@@ -251,11 +279,11 @@ func (d *daemon) systemUpdateRunning() bool {
 
 func (s *uiServer) handleSystem(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(r); !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		apiFail(w, http.StatusUnauthorized, "unauthorized", "Требуется авторизация")
 		return
 	}
 	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -264,43 +292,51 @@ func (s *uiServer) handleSystem(w http.ResponseWriter, r *http.Request) {
 
 func (s *uiServer) handleSystemCheck(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(r); !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		apiFail(w, http.StatusUnauthorized, "unauthorized", "Требуется авторизация")
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")
+		return
+	}
+	var body struct{}
+	if err := decodeAPIRequest(r.Body, &body, true); err != nil {
+		apiFail(w, http.StatusBadRequest, "bad-request", "Некорректный запрос")
 		return
 	}
 	started := s.d.startUpdateCheck()
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"checking": true, "started": started})
+	_ = json.NewEncoder(w).Encode(map[string]any{"started": started})
 }
 
 func (s *uiServer) handleSystemUpdate(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.auth(r); !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		apiFail(w, http.StatusUnauthorized, "unauthorized", "Требуется авторизация")
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")
 		return
 	}
 	var body struct {
 		Tag    string `json:"tag"`
 		Source string `json:"source"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Tag == "" {
-		http.Error(w, "Tag is required", http.StatusBadRequest)
+	if err := decodeAPIRequest(r.Body, &body, false); err != nil || body.Tag == "" {
+		apiFail(w, http.StatusBadRequest, "bad-request", "Нужно указать тег")
 		return
 	}
 	if body.Source == "" {
 		body.Source = "github"
 	}
-	started, message := s.d.startSystemUpdate(body.Tag, body.Source)
+	message, err := s.d.startSystemUpdate(body.Tag, body.Source)
+	if err != nil {
+		settingsFail(w, err)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"started": started,
-		"running": started || s.d.systemView().Update.Running,
+		"started": true,
 		"message": message,
 	})
 }

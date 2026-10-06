@@ -16,8 +16,8 @@ import (
 )
 
 func TestChildEnvironmentPreservesKlaxSession(t *testing.T) {
-	t.Setenv("KLAX_SESSION_ID", "42")
-	cmd := exec.Command("sh", "-c", "printf '%s' \"$KLAX_SESSION_ID\"")
+	t.Setenv("KLAX_ID", "42")
+	cmd := exec.Command("sh", "-c", "printf '%s' \"$KLAX_ID\"")
 	cmd.Env = childEnv("test-fifo")
 	out, err := cmd.Output()
 	if err != nil || string(out) != "42" {

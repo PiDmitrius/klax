@@ -2,6 +2,8 @@ package main
 
 import (
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/PiDmitrius/klax/internal/session"
@@ -44,16 +46,16 @@ func TestApplyUISessionSettingsCoreRejectsCWDOnceMessagesStarted(t *testing.T) {
 	chatID := "tg:test"
 	sk := d.sessionKey(chatID)
 	sess := d.store.Ensure(sk, "default", t.TempDir(), d.fallbackScopeDefaults())
-	d.store.UpdateSession(sk, sess.Created, func(s *session.Session) { s.Messages = 1 })
+	d.store.UpdateSession(sk, sess.KlaxID, func(s *session.Session) { s.Messages = 1 })
 
 	newCWD := t.TempDir()
-	err := d.applyUISessionSettingsCore(sk, sess.Created, uiSettingsPatch{CWD: &newCWD})
+	err := d.applyUISessionSettingsCore(sk, sess.KlaxID, uiSettingsPatch{CWD: &newCWD})
 
 	uerr, ok := err.(*uiErr)
 	if !ok || uerr.status != 409 {
 		t.Fatalf("err = %v, want a 409 *uiErr conflict", err)
 	}
-	if got := d.store.Get(sk, sess.Created).CWD; got == newCWD {
+	if got := d.store.Get(sk, sess.KlaxID).CWD; got == newCWD {
 		t.Fatal("cwd must not have been applied once Messages > 0")
 	}
 }
@@ -73,31 +75,25 @@ func TestApplyUISessionSettingsCoreReturns404ForAlreadyDeletedSession(t *testing
 	}
 
 	newCWD := t.TempDir()
-	err := d.applyUISessionSettingsCore(sk, sess.Created, uiSettingsPatch{CWD: &newCWD})
+	err := d.applyUISessionSettingsCore(sk, sess.KlaxID, uiSettingsPatch{CWD: &newCWD})
 
-	uerr, ok := err.(*uiErr)
-	if !ok || uerr.status != 404 {
-		t.Fatalf("err = %v, want a 404 *uiErr, not a generic error that the HTTP handler would turn into a 500", err)
+	if err != session.ErrSessionNotFound {
+		t.Fatalf("err = %v, want session.ErrSessionNotFound (reported as session-not-found)", err)
 	}
 }
 
-// mapSessionStoreErr is what actually converts UpdateSessionChecked's ErrSessionNotFound
-// (a session deleted between the initial Get and the store mutation) into a 404 uiErr —
-// tested directly since the real race can't be reproduced deterministically in-process.
-func TestMapSessionStoreErrConvertsErrSessionNotFoundTo404(t *testing.T) {
-	err := mapSessionStoreErr(session.ErrSessionNotFound)
-
-	uerr, ok := err.(*uiErr)
-	if !ok || uerr.status != 404 {
-		t.Fatalf("err = %v, want a 404 *uiErr", err)
+// A session that vanishes during a settings change is reported as session-not-found, like any
+// other request for an unknown session.
+func TestSettingsFailReportsVanishedSession(t *testing.T) {
+	w := httptest.NewRecorder()
+	settingsFail(w, session.ErrSessionNotFound)
+	if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), `"code":"session-not-found"`) {
+		t.Fatalf("settingsFail = %d %s", w.Code, w.Body.String())
 	}
-}
-
-func TestMapSessionStoreErrPassesThroughOtherErrors(t *testing.T) {
-	other := &uiErr{http.StatusConflict, "something else"}
-
-	if got := mapSessionStoreErr(other); got != other {
-		t.Fatalf("mapSessionStoreErr must pass through non-ErrSessionNotFound errors unchanged, got %v", got)
+	w = httptest.NewRecorder()
+	settingsFail(w, &uiErr{status: http.StatusConflict, code: "session-busy", msg: "busy"})
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), `"code":"session-busy"`) {
+		t.Fatalf("settingsFail = %d %s", w.Code, w.Body.String())
 	}
 }
 
@@ -129,6 +125,30 @@ func TestCreateUISessionAtomicPreservesExistingCWDDefault(t *testing.T) {
 	}
 }
 
+func TestCreateUISessionAtomicKeepsCWDFromConfigDynamic(t *testing.T) {
+	d := newTestDaemon(t)
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	var err error
+	d.store, err = session.LoadStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	chatID := "tg:test"
+	sk := d.sessionKey(chatID)
+	for range 2 {
+		d.cfg.DefaultCWD = t.TempDir()
+		sess, err := d.createUISessionAtomic(sk, chatID, uiSettingsPatch{})
+		if err != nil || sess.CWD != d.cfg.DefaultCWD || d.scopeDefaults(sk).CWD != "" {
+			t.Fatalf("create = %+v, defaults = %+v, err = %v", sess, d.scopeDefaults(sk), err)
+		}
+	}
+	explicit := t.TempDir()
+	sess, err := d.createUISessionAtomic(sk, chatID, uiSettingsPatch{CWD: &explicit})
+	if err != nil || sess.CWD != explicit || d.scopeDefaults(sk).CWD != explicit {
+		t.Fatalf("explicit cwd create = %+v, defaults = %+v, err = %v", sess, d.scopeDefaults(sk), err)
+	}
+}
+
 // A group is a view label, not a run parameter: it may be changed at any time, including while the
 // session is answering. Every field that DOES affect the run must stay refused meanwhile — the two
 // halves of that rule are asserted together so neither can drift.
@@ -148,12 +168,12 @@ func TestValidateSettingsPatchTreatsGroupsAsFreeWhileBusy(t *testing.T) {
 	on := true
 	runAffecting := map[string]uiSettingsPatch{
 		"backend": {Backend: str("codex")},
-		"model":   {Model: str("")},
+		"model":   {ModelRequested: str("")},
 		"think":   {Think: str("")},
 		"sandbox": {Sandbox: str("on")},
 		"tty":     {TTY: &on},
 		"cwd":     {CWD: str(t.TempDir())},
-		"prompt":  {Prompt: str("x")},
+		"prompt":  {SystemPrompt: str("x")},
 	}
 	for name, patch := range runAffecting {
 		if _, err := (&daemon{}).validateSettingsPatch(cur, "claude", true, patch); err == nil {
@@ -188,11 +208,11 @@ func TestApplySettingsPatchClearsGroupsOnExplicitEmptySet(t *testing.T) {
 	}
 }
 
-// A name that would make `#<group>` ambiguous against a session id or a computed view is a client
+// A name that would make `#<group>` ambiguous against a session address or a computed view is a client
 // error, not a silently ignored value.
 func TestValidateSettingsPatchRejectsAmbiguousGroupName(t *testing.T) {
 	cur := &session.Session{CWD: t.TempDir()}
-	for _, bad := range []string{"123", "is:unread", "a/b", "a#b", "*"} {
+	for _, bad := range []string{"is:unread", "a/b", "a#b", "*"} {
 		groups := []string{bad}
 		_, err := (&daemon{}).validateSettingsPatch(cur, "claude", false, uiSettingsPatch{Groups: &groups})
 		uerr, ok := err.(*uiErr)

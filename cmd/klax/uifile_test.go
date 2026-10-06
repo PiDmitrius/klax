@@ -61,12 +61,12 @@ func TestHandleFileUsesDisplayNameForDownload(t *testing.T) {
 	d := newTestDeliveryDaemon(&fakeTransport{})
 	d.store = &session.Store{Chats: map[string]*session.ChatSessions{}, Scope: map[string]*session.ScopeDefaults{}}
 	sess := d.store.New("user:alice", "one", cwd, session.ScopeDefaults{})
-	store := sessfiles.Open("user:alice", sess.Created)
+	store := sessfiles.Open("user:alice", sess.KlaxID)
 	stored, _, err := store.Adopt(filepath.Base(src), src)
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, err := d.fileToken(store, "user:alice", sess.Created, stored, sessfiles.DisplayName(stored), "")
+	token, err := d.fileToken(store, "user:alice", sess.KlaxID, stored, sessfiles.DisplayName(stored), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,6 +92,20 @@ func TestHandleFileUsesDisplayNameForDownload(t *testing.T) {
 	if rec.Body.String() != "plan" {
 		t.Fatalf("download body = %q", rec.Body.String())
 	}
+	part := httptest.NewRequest(http.MethodGet, "/api/file?ref="+token, nil)
+	part.Header.Set("Range", "bytes=1-2")
+	rec = httptest.NewRecorder()
+	routes.ServeHTTP(rec, part)
+	if rec.Code != http.StatusPartialContent || rec.Body.String() != "la" {
+		t.Fatalf("range = %d %q, want 206 la", rec.Code, rec.Body.String())
+	}
+	outside := httptest.NewRequest(http.MethodGet, "/api/file?ref="+token, nil)
+	outside.Header.Set("Range", "bytes=100-200")
+	rec = httptest.NewRecorder()
+	routes.ServeHTTP(rec, outside)
+	if rec.Code != http.StatusRequestedRangeNotSatisfiable || !strings.Contains(rec.Body.String(), `"code":"bad-range"`) || rec.Header().Get("Content-Disposition") != "" {
+		t.Fatalf("unsatisfiable range = %d %q %v", rec.Code, rec.Body.String(), rec.Header())
+	}
 	for _, tc := range []struct {
 		method string
 		path   string
@@ -109,7 +123,7 @@ func TestHandleFileUsesDisplayNameForDownload(t *testing.T) {
 			t.Fatalf("%s %s: status %d, want %d", tc.method, tc.path, w.Code, tc.status)
 		}
 	}
-	d.dropFileTokens("user:alice", sess.Created)
+	d.dropFileTokens("user:alice", sess.KlaxID)
 	rec = httptest.NewRecorder()
 	routes.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
@@ -122,7 +136,7 @@ func TestInboundTextShowsAttachmentSize(t *testing.T) {
 	d := newTestDeliveryDaemon(&fakeTransport{})
 	var err error
 
-	store := sessfiles.Open("user:alice", 1)
+	store := sessfiles.Open("user:alice", "s1")
 	_, _, _, _, err = store.Enqueue("user:alice", "", "nonce", "see attached", []sessfiles.NamedReader{{
 		Name: "report.md",
 		R:    bytes.NewReader(bytes.Repeat([]byte("x"), 10000)),
@@ -138,7 +152,7 @@ func TestInboundTextShowsAttachmentSize(t *testing.T) {
 		t.Fatalf("log len = %d, want 1", len(log))
 	}
 
-	got, _ := d.inboundText(store, log[0], "user:alice", 1)
+	got, _ := d.inboundText(store, log[0], "user:alice", "s1")
 	if !strings.Contains(got, "[report.md](/api/file?ref=") {
 		t.Fatalf("inboundText missing attachment link: %q", got)
 	}
@@ -147,30 +161,30 @@ func TestInboundTextShowsAttachmentSize(t *testing.T) {
 	}
 }
 
-// sessionStore must return ONE canonical Store per (sk,created), and after removeSessionStore no late
+// sessionStore must return ONE canonical Store per (sk,klaxID), and after removeSessionStore no late
 // call (a different sessfiles.Open would have its own clean latch) may resurrect the session dir.
 func TestSessionStoreCanonicalNoResurrection(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	d := newTestDeliveryDaemon(&fakeTransport{})
-	sk, created := "user:alice", int64(1)
+	sk, klaxID := "user:alice", "lOGezVsS"
 
-	if s1, s2 := d.sessionStore(sk, created), d.sessionStore(sk, created); s1 != s2 {
+	if s1, s2 := d.sessionStore(sk, klaxID), d.sessionStore(sk, klaxID); s1 != s2 {
 		t.Fatal("sessionStore must return one canonical instance")
 	}
-	if _, err := d.sessionStore(sk, created).Commit(sessfiles.LinkRecord{Blob: "000001-01-a.png", Name: "a.png", ContentType: "image/png"}); err != nil {
+	if _, err := d.sessionStore(sk, klaxID).Commit(sessfiles.LinkRecord{Blob: "000001-01-a.png", Name: "a.png", ContentType: "image/png"}); err != nil {
 		t.Fatal(err)
 	}
-	dir := sessfiles.WorkDir(sk, created)
+	dir := sessfiles.WorkDir(sk, klaxID)
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("session dir should exist after Commit: %v", err)
 	}
 
-	d.removeSessionStore(sk, created)
+	d.removeSessionStore(sk, klaxID)
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("dir should be gone after removeSessionStore: %v", err)
 	}
 	// A late Commit through the canonical store must refuse and NOT re-create the directory.
-	if _, err := d.sessionStore(sk, created).Commit(sessfiles.LinkRecord{Blob: "000001-01-b.png", Name: "b.png", ContentType: "image/png"}); err != sessfiles.ErrRemoved {
+	if _, err := d.sessionStore(sk, klaxID).Commit(sessfiles.LinkRecord{Blob: "000001-01-b.png", Name: "b.png", ContentType: "image/png"}); err != sessfiles.ErrRemoved {
 		t.Fatalf("late Commit after remove = %v, want ErrRemoved", err)
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
@@ -178,8 +192,8 @@ func TestSessionStoreCanonicalNoResurrection(t *testing.T) {
 	}
 }
 
-// After delete, a new session created the same second must get a DIFFERENT Created (never reused) and
-// therefore a FRESH, writable canonical Store — not the deleted session's removed one.
+// After delete, a new session gets a different klax_id and therefore a FRESH, writable canonical
+// Store — not the deleted session's removed one.
 func TestNewSessionAfterDeleteGetsFreshStore(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	d := newTestDeliveryDaemon(&fakeTransport{})
@@ -187,20 +201,20 @@ func TestNewSessionAfterDeleteGetsFreshStore(t *testing.T) {
 	sk := "user:alice"
 
 	a := d.store.New(sk, "a", "/tmp", session.ScopeDefaults{})
-	if _, err := d.sessionStore(sk, a.Created).Commit(sessfiles.LinkRecord{Blob: "000001-01-x.png", Name: "x.png", ContentType: "image/png"}); err != nil {
+	if _, err := d.sessionStore(sk, a.KlaxID).Commit(sessfiles.LinkRecord{Blob: "000001-01-x.png", Name: "x.png", ContentType: "image/png"}); err != nil {
 		t.Fatal(err)
 	}
-	d.removeSessionStore(sk, a.Created) // marks a's canonical Store removed
+	d.removeSessionStore(sk, a.KlaxID) // marks a's canonical Store removed
 	if !d.store.Delete(sk, 0) {
 		t.Fatal("delete failed")
 	}
 
 	b := d.store.New(sk, "b", "/tmp", session.ScopeDefaults{})
-	if b.Created == a.Created {
-		t.Fatalf("Created reused after delete: %d", b.Created)
+	if b.KlaxID == a.KlaxID {
+		t.Fatalf("klax_id reused after delete: %s", b.KlaxID)
 	}
 	// The new session's canonical Store must be a fresh, writable one (not a's removed Store).
-	if _, err := d.sessionStore(sk, b.Created).Commit(sessfiles.LinkRecord{Blob: "000001-01-y.png", Name: "y.png", ContentType: "image/png"}); err != nil {
+	if _, err := d.sessionStore(sk, b.KlaxID).Commit(sessfiles.LinkRecord{Blob: "000001-01-y.png", Name: "y.png", ContentType: "image/png"}); err != nil {
 		t.Fatalf("new session's store must be writable, got %v", err)
 	}
 }
@@ -210,12 +224,12 @@ func TestNewSessionAfterDeleteGetsFreshStore(t *testing.T) {
 func TestFileTokenStableAndPersisted(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
 	d := newTestDeliveryDaemon(&fakeTransport{})
-	store := sessfiles.Open("user:alice", 1)
-	t1, err := d.fileToken(store, "user:alice", 1, "000001-01-a.png", "a.png", "image/png")
+	store := sessfiles.Open("user:alice", "s1")
+	t1, err := d.fileToken(store, "user:alice", "s1", "000001-01-a.png", "a.png", "image/png")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t2, err := d.fileToken(store, "user:alice", 1, "000001-01-a.png", "a.png", "image/png")
+	t2, err := d.fileToken(store, "user:alice", "s1", "000001-01-a.png", "a.png", "image/png")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +237,7 @@ func TestFileTokenStableAndPersisted(t *testing.T) {
 		t.Fatalf("token not stable across rebuilds: %q vs %q", t1, t2)
 	}
 	// A different file gets a distinct token.
-	t3, err := d.fileToken(store, "user:alice", 1, "000001-01-b.png", "b.png", "image/png")
+	t3, err := d.fileToken(store, "user:alice", "s1", "000001-01-b.png", "b.png", "image/png")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +245,7 @@ func TestFileTokenStableAndPersisted(t *testing.T) {
 		t.Fatal("distinct files must get distinct tokens")
 	}
 	// The token survives a fresh Store.Open (i.e. a restart) — it is durable in links.json.
-	links, err := sessfiles.Open("user:alice", 1).Links()
+	links, err := sessfiles.Open("user:alice", "s1").Links()
 	if err != nil {
 		t.Fatal(err)
 	}

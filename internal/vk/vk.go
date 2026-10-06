@@ -12,8 +12,9 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
+	"github.com/PiDmitrius/klax/internal/httpclient"
+	"github.com/PiDmitrius/klax/internal/timing"
 	"github.com/PiDmitrius/klax/internal/transport"
 )
 
@@ -36,7 +37,7 @@ type Bot struct {
 func New(token string) *Bot {
 	return &Bot{
 		token:  token,
-		client: &http.Client{Timeout: 90 * time.Second},
+		client: &http.Client{Timeout: timing.RequestTimeout},
 	}
 }
 
@@ -159,8 +160,8 @@ func (b *Bot) GetUpdates() ([]Update, error) {
 		}
 	}
 
-	u := fmt.Sprintf("%s?act=a_check&key=%s&ts=%s&wait=25", b.lpServer, b.lpKey, b.lpTs)
-	resp, err := b.client.Get(u)
+	u := fmt.Sprintf("%s?act=a_check&key=%s&ts=%s&wait=%d", b.lpServer, b.lpKey, b.lpTs, int(timing.PollHold.Seconds()))
+	resp, err := httpclient.Poll(b.client).Get(u)
 	if err != nil {
 		return nil, err
 	}

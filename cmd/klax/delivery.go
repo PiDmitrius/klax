@@ -8,6 +8,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/PiDmitrius/klax/internal/timing"
 	"github.com/PiDmitrius/klax/internal/transport"
 )
 
@@ -536,31 +537,13 @@ func alignUTF8Cut(text string, cut int) int {
 
 // --- Retry logic ---
 
-const (
-	baseBackoff = 2 * time.Second
-	maxBackoff  = 60 * time.Second
-	sendTimeout = 2 * time.Minute
-)
+const sendTimeout = 2 * time.Minute
 
 func withDeliveryTimeout(parent context.Context) (context.Context, context.CancelFunc) {
 	if deadline, ok := parent.Deadline(); ok && time.Until(deadline) <= sendTimeout {
 		return context.WithCancel(parent)
 	}
 	return context.WithTimeout(parent, sendTimeout)
-}
-
-func transportPauseBackoff(failures int) time.Duration {
-	if failures < 1 {
-		failures = 1
-	}
-	d := 30 * time.Second
-	for i := 1; i < failures; i++ {
-		d *= 2
-	}
-	if d > time.Minute {
-		return time.Minute
-	}
-	return d
 }
 
 func (d *daemon) noteSendResult(name string, err error) {
@@ -572,7 +555,7 @@ func (d *daemon) noteSendResult(name string, err error) {
 		return
 	}
 	d.sendFails[name]++
-	wait := transportPauseBackoff(d.sendFails[name])
+	wait := timing.RetryDelay(d.sendFails[name] - 1)
 	d.sendPause[name] = time.Now().Add(wait)
 	log.Printf("transport %s outbound degraded, pausing inbound reads for %v: %v", name, wait, err)
 }
@@ -619,30 +602,11 @@ func retryDo(ctx context.Context, fn func() error) error {
 		}
 
 		var apiErr *transport.APIError
-		if errors.As(err, &apiErr) {
-			if apiErr.RetryAfter > 0 {
-				wait := time.Duration(apiErr.RetryAfter) * time.Second
-				log.Printf("rate limited, retry after %v: %v", wait, err)
-				if !sleepCtx(ctx, wait) {
-					return ctx.Err()
-				}
-				continue
-			}
-			if apiErr.IsRetryable() {
-				wait := backoff(attempt)
-				log.Printf("server error, retry in %v: %v", wait, err)
-				if !sleepCtx(ctx, wait) {
-					return ctx.Err()
-				}
-				continue
-			}
-			// Permanent API error (400, 401, 403, etc.) — don't retry.
+		if errors.As(err, &apiErr) && apiErr.RetryAfter <= 0 && !apiErr.IsRetryable() {
 			return err
 		}
-
-		// Network error (timeout, DNS, connection refused) — retry indefinitely.
-		wait := backoff(attempt)
-		log.Printf("network error, retry in %v: %v", wait, err)
+		wait := retryWait(err, timing.RetryDelay(attempt))
+		log.Printf("retry in %v: %v", wait, err)
 		if !sleepCtx(ctx, wait) {
 			return ctx.Err()
 		}
@@ -661,15 +625,12 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-func backoff(attempt int) time.Duration {
-	d := baseBackoff
-	for i := 0; i < attempt; i++ {
-		d *= 2
+func retryWait(err error, pause time.Duration) time.Duration {
+	var apiErr *transport.APIError
+	if errors.As(err, &apiErr) && apiErr.RetryAfter > 0 {
+		return time.Duration(apiErr.RetryAfter) * time.Second
 	}
-	if d > maxBackoff {
-		d = maxBackoff
-	}
-	return d
+	return pause
 }
 
 // isReplyTargetError reports whether err is a permanent API error caused by

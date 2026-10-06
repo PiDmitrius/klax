@@ -13,10 +13,10 @@
 // left in the same update is skipped rather than selected into a hole.
 export function neighborIn(order, gone, survivors){
   const list = order || [];
-  const idx = list.findIndex(s => s.created === gone);
-  if(idx < 0) return 0;
-  const ok = c => !survivors || survivors.some(s => s.created === c);
-  for(let i = idx - 1; i >= 0; i--) if(ok(list[i].created)) return list[i].created;
-  for(let i = idx + 1; i < list.length; i++) if(ok(list[i].created)) return list[i].created;
-  return 0;
+  const idx = list.findIndex(s => s.klax_id === gone);
+  if(idx < 0) return "";
+  const ok = c => !survivors || survivors.some(s => s.klax_id === c);
+  for(let i = idx - 1; i >= 0; i--) if(ok(list[i].klax_id)) return list[i].klax_id;
+  for(let i = idx + 1; i < list.length; i++) if(ok(list[i].klax_id)) return list[i].klax_id;
+  return "";
 }

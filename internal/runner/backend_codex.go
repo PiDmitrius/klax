@@ -45,6 +45,10 @@ func (b *CodexBackend) BuildCmd(opts RunOptions) (*exec.Cmd, error) {
 	if opts.Effort != "" {
 		args = append(args, "-c", fmt.Sprintf("model_reasoning_effort=%q", opts.Effort))
 	}
+	if opts.AppendSystemPrompt != "" {
+		instructions, _ := json.Marshal(opts.AppendSystemPrompt)
+		args = append(args, "-c", "developer_instructions="+string(instructions))
+	}
 
 	// Prompt via stdin.
 	args = append(args, "-")

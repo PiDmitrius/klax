@@ -24,7 +24,7 @@ const fileCacheControl = "private, max-age=86400, immutable"
 // the user actually sent, plus a freshly-minted capability-URL image/link per attached
 // file (contract §5/§6 — refs are per-response, never persisted). published reports whether
 // every attached file got its link.
-func (d *daemon) inboundText(store *sessfiles.Store, t sessfiles.Turn, sk string, created int64) (text string, published bool) {
+func (d *daemon) inboundText(store *sessfiles.Store, t sessfiles.Turn, sk string, klaxID string) (text string, published bool) {
 	published = true
 	parts := make([]string, 0, 1+len(t.Files))
 	if t.Text != "" {
@@ -33,7 +33,7 @@ func (d *daemon) inboundText(store *sessfiles.Store, t sessfiles.Turn, sk string
 	for _, name := range t.Files {
 		ct := mime.TypeByExtension(filepath.Ext(name))
 		display := sessfiles.DisplayName(name)
-		token, err := d.fileToken(store, sk, created, name, display, ct)
+		token, err := d.fileToken(store, sk, klaxID, name, display, ct)
 		if err != nil {
 			published = false
 			continue
@@ -109,12 +109,12 @@ func safeMarkdownLabel(s string) string {
 // the session's links.json on first request, reusing it afterwards) and records token -> (session,
 // stored file) in the in-memory index so handleFile can resolve it. The token never changes across
 // read-model rebuilds, so an attachment's /api/file?ref=… URL — and thus its <img src> — is stable.
-func (d *daemon) fileToken(store *sessfiles.Store, sk string, created int64, stored, name, contentType string) (string, error) {
-	return d.commitLink(store, sk, created, sessfiles.LinkRecord{Blob: stored, Name: name, ContentType: contentType})
+func (d *daemon) fileToken(store *sessfiles.Store, sk string, klaxID string, stored, name, contentType string) (string, error) {
+	return d.commitLink(store, sk, klaxID, sessfiles.LinkRecord{Blob: stored, Name: name, ContentType: contentType})
 }
 
 // commitLink persists a link record and registers its token in the daemon's token→session index.
-func (d *daemon) commitLink(store *sessfiles.Store, sk string, created int64, r sessfiles.LinkRecord) (string, error) {
+func (d *daemon) commitLink(store *sessfiles.Store, sk string, klaxID string, r sessfiles.LinkRecord) (string, error) {
 	token, err := store.Commit(r)
 	if err != nil {
 		return "", err
@@ -124,7 +124,7 @@ func (d *daemon) commitLink(store *sessfiles.Store, sk string, created int64, r 
 	if d.fileTokens == nil {
 		d.fileTokens = make(map[string]tokenRef)
 	}
-	d.fileTokens[token] = tokenRef{sk: sk, created: created, stored: stored}
+	d.fileTokens[token] = tokenRef{sk: sk, klaxID: klaxID, stored: stored}
 	d.fileTokensMu.Unlock()
 	return token, nil
 }
@@ -133,20 +133,20 @@ func (d *daemon) commitLink(store *sessfiles.Store, sk string, created int64, r 
 // a token minted before the restart still resolves immediately.
 func (d *daemon) rebuildFileTokenIndex() {
 	type ref struct {
-		sk      string
-		created int64
+		sk     string
+		klaxID string
 	}
 	var all []ref
-	d.store.EachSession(func(sk string, created int64) { all = append(all, ref{sk, created}) })
+	d.store.EachSession(func(sk string, klaxID string) { all = append(all, ref{sk, klaxID}) })
 	idx := make(map[string]tokenRef)
 	for _, r := range all {
-		links, err := d.sessionStore(r.sk, r.created).Links()
+		links, err := d.sessionStore(r.sk, r.klaxID).Links()
 		if err != nil {
 			continue
 		}
 		for stored, e := range links {
 			if e.Token != "" {
-				idx[e.Token] = tokenRef{sk: r.sk, created: r.created, stored: stored}
+				idx[e.Token] = tokenRef{sk: r.sk, klaxID: r.klaxID, stored: stored}
 			}
 		}
 	}
@@ -157,11 +157,11 @@ func (d *daemon) rebuildFileTokenIndex() {
 
 // dropFileTokens forgets a removed session's tokens (its dir — files/ + links.json — is gone, so the
 // tokens are already dead; this just bounds the index). Idempotent.
-func (d *daemon) dropFileTokens(sk string, created int64) {
+func (d *daemon) dropFileTokens(sk string, klaxID string) {
 	d.fileTokensMu.Lock()
 	defer d.fileTokensMu.Unlock()
 	for token, tr := range d.fileTokens {
-		if tr.sk == sk && tr.created == created {
+		if tr.sk == sk && tr.klaxID == klaxID {
 			delete(d.fileTokens, token)
 		}
 	}
@@ -181,51 +181,55 @@ var inlineImageTypes = map[string]bool{
 // links.json for the stored file, and the file lies inside the session's files/ dir. One token grants
 // access to exactly one file — there is no session-wide key.
 func (s *uiServer) handleFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")
+		return
+	}
 	token := r.URL.Query().Get("ref")
 	if token == "" {
-		http.Error(w, "Invalid reference", http.StatusForbidden)
+		apiFail(w, http.StatusForbidden, "forbidden", "Доступ запрещён")
 		return
 	}
 	s.d.fileTokensMu.Lock()
 	tr, ok := s.d.fileTokens[token]
 	s.d.fileTokensMu.Unlock()
 	if !ok {
-		http.Error(w, "Invalid reference", http.StatusForbidden)
+		apiFail(w, http.StatusForbidden, "forbidden", "Доступ запрещён")
 		return
 	}
 	// A closed/deleted session's tokens are dead (its dir — files/ + links.json — is gone).
-	if s.d.store.Get(tr.sk, tr.created) == nil {
-		http.NotFound(w, r)
+	if s.d.store.Get(tr.sk, tr.klaxID) == nil {
+		writeAPIError(w, apiFailure("session-not-found"))
 		return
 	}
-	store := s.d.sessionStore(tr.sk, tr.created)
+	store := s.d.sessionStore(tr.sk, tr.klaxID)
 	// Re-verify the token against links.json (the in-memory index could be stale after a concurrent
 	// delete) — it must still map to this stored file.
 	links, err := store.Links()
 	if err != nil {
-		http.Error(w, "Forbidden", http.StatusForbidden)
+		apiFail(w, http.StatusForbidden, "forbidden", "Доступ запрещён")
 		return
 	}
 	entry, ok := links[tr.stored]
 	if !ok || entry.Token != token {
-		http.Error(w, "Forbidden", http.StatusForbidden)
+		apiFail(w, http.StatusForbidden, "forbidden", "Доступ запрещён")
 		return
 	}
 	// Defense in depth: the stored file must lie inside this session's files/ dir.
 	path := store.Path(tr.stored)
-	if !pathInRoots(path, filepath.Join(sessfiles.WorkDir(tr.sk, tr.created), "files")) {
-		http.Error(w, "Forbidden", http.StatusForbidden)
+	if !pathInRoots(path, filepath.Join(sessfiles.WorkDir(tr.sk, tr.klaxID), "files")) {
+		apiFail(w, http.StatusForbidden, "forbidden", "Доступ запрещён")
 		return
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		http.NotFound(w, r)
+		apiFail(w, http.StatusNotFound, "file-not-found", "Файл не найден")
 		return
 	}
 	defer f.Close()
 	fi, err := f.Stat()
 	if err != nil || fi.IsDir() {
-		http.NotFound(w, r)
+		apiFail(w, http.StatusNotFound, "file-not-found", "Файл не найден")
 		return
 	}
 	// Inert serving: only well-known raster images render inline; everything else is
@@ -251,7 +255,37 @@ func (s *uiServer) handleFile(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(name))
 	}
-	http.ServeContent(w, r, filepath.Base(path), fi.ModTime(), f)
+	http.ServeContent(&jsonErrorWriter{ResponseWriter: w}, r, filepath.Base(path), fi.ModTime(), f)
+}
+
+// jsonErrorWriter turns the plain-text errors http.ServeContent writes (an unsatisfiable Range)
+// into the API's JSON error.
+type jsonErrorWriter struct {
+	http.ResponseWriter
+	failed bool
+}
+
+func (w *jsonErrorWriter) WriteHeader(status int) {
+	if status < http.StatusBadRequest {
+		w.ResponseWriter.WriteHeader(status)
+		return
+	}
+	w.failed = true
+	h := w.ResponseWriter.Header()
+	h.Del("Content-Disposition")
+	h.Del("Content-Range")
+	if status == http.StatusRequestedRangeNotSatisfiable {
+		apiFail(w.ResponseWriter, status, "bad-range", "Запрошенный диапазон недоступен")
+	} else {
+		apiFail(w.ResponseWriter, status, "bad-request", "Некорректный запрос файла")
+	}
+}
+
+func (w *jsonErrorWriter) Write(b []byte) (int, error) {
+	if w.failed {
+		return len(b), nil
+	}
+	return w.ResponseWriter.Write(b)
 }
 
 // pathInRoots reports whether path (after symlink resolution) lies inside any of the

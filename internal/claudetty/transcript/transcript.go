@@ -31,9 +31,9 @@ type Line struct {
 	// IsMeta marks an SDK-injected internal row (e.g. the "[Image: …Multiply
 	// coordinates…]" annotation the harness adds when the model views an image).
 	// These are role=user but NOT human input, so they must never render as a message.
-	IsMeta     bool
-	Error      string
-	Compact    *CompactInfo
+	IsMeta  bool
+	Error   string
+	Compact *CompactInfo
 	// Time is the line's transcript timestamp; zero when absent or
 	// unparseable. The driver uses it to tell a boundary written during
 	// this turn from one replayed out of resumed history.

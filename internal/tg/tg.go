@@ -10,8 +10,9 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
+	"github.com/PiDmitrius/klax/internal/httpclient"
+	"github.com/PiDmitrius/klax/internal/timing"
 	"github.com/PiDmitrius/klax/internal/transport"
 )
 
@@ -27,7 +28,7 @@ type Bot struct {
 func New(token string) *Bot {
 	return &Bot{
 		token:  token,
-		client: &http.Client{Timeout: 35 * time.Second},
+		client: &http.Client{Timeout: timing.RequestTimeout},
 	}
 }
 
@@ -127,12 +128,16 @@ type Chat struct {
 type APIError = transport.APIError
 
 func (b *Bot) call(method string, payload interface{}) (json.RawMessage, error) {
+	return b.callWithClient(b.client, method, payload)
+}
+
+func (b *Bot) callWithClient(client *http.Client, method string, payload interface{}) (json.RawMessage, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
 	url := fmt.Sprintf("%s%s/%s", apiBase, b.token, method)
-	resp, err := b.client.Post(url, "application/json", bytes.NewReader(data))
+	resp, err := client.Post(url, "application/json", bytes.NewReader(data))
 	if err != nil {
 		return nil, err // network error
 	}
@@ -210,9 +215,9 @@ type BotCommand struct {
 func (b *Bot) GetUpdates() ([]Update, error) {
 	payload := map[string]interface{}{
 		"offset":  b.offset,
-		"timeout": 30,
+		"timeout": int(timing.PollHold.Seconds()),
 	}
-	raw, err := b.call("getUpdates", payload)
+	raw, err := b.callWithClient(httpclient.Poll(b.client), "getUpdates", payload)
 	if err != nil {
 		return nil, err
 	}
@@ -300,7 +305,7 @@ func (b *Bot) DownloadFile(fileID string) ([]byte, string, error) {
 		return nil, "", err
 	}
 	url := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", b.token, f.FilePath)
-	resp, err := b.client.Get(url)
+	resp, err := httpclient.GetDownload(b.client, url)
 	if err != nil {
 		return nil, "", err
 	}

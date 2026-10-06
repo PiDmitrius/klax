@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -383,14 +382,14 @@ func oneLinePreview(s string) string {
 // RunOptions configures a CLI invocation.
 type RunOptions struct {
 	Prompt                    string
-	KlaxSessionID             int64
+	KlaxID                    string
 	SessionID                 string // empty = new session
 	CWD                       string // working directory
 	Sandbox                   string // "on" = CLI defaults, "off" = unrestricted
 	Model                     string // model override
 	Effort                    string // reasoning effort: low | medium | high (claude also: max; codex also: xhigh)
 	ContextWindowHint         int    // last known context window for progress usage that only reports used tokens
-	AppendSystemPrompt        string // appended to default system prompt
+	AppendSystemPrompt        string // additional backend instructions
 	ClaudeTTY                 bool   // run Claude through klax tty instead of claude -p directly
 	SuppressNarrationProgress bool   // keep final-answer text buffered instead of streaming it as narration
 	// OnSessionID, if set, is called once with the backend session id the moment the run first
@@ -733,8 +732,8 @@ func (r *Runner) Run(ctx context.Context, backend Backend, opts RunOptions, onPr
 	if err != nil {
 		return RunResult{Error: err}
 	}
-	if opts.KlaxSessionID > 0 {
-		cmd.Env = append(cmd.Environ(), "KLAX_SESSION_ID="+strconv.FormatInt(opts.KlaxSessionID, 10))
+	if opts.KlaxID != "" {
+		cmd.Env = append(cmd.Environ(), "KLAX_ID="+opts.KlaxID)
 	}
 	// A run reads only the rollout bytes it appended; a different thread is a new file.
 	var codexStartOffset int64

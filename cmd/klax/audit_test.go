@@ -21,7 +21,7 @@ func TestAuditEventsShareDeterministicTurnID(t *testing.T) {
 	msg := queuedMsg{
 		chatID: "ym:0/0/group#7", msgID: "99",
 		text: "effective", originalText: "@bot effective",
-		turnSeq: 42, sessKey: "user:ivan", sessCreated: 8,
+		turnSeq: 42, sessKey: "user:ivan", klaxID: "s8",
 		acceptedAt: accepted.UnixNano(),
 		origin: inbound.Origin{
 			Transport: "ym",
@@ -58,7 +58,7 @@ func TestAuditEventsShareDeterministicTurnID(t *testing.T) {
 
 func TestFinishedAuditClassifiesAbort(t *testing.T) {
 	now := time.Now()
-	turn, err := newAuditTurn(queuedMsg{turnSeq: 1, sessKey: "group", sessCreated: 1}, nil, &session.Session{CWD: "/work"}, "go", "codex", now)
+	turn, err := newAuditTurn(queuedMsg{turnSeq: 1, sessKey: "group", klaxID: "s1"}, nil, &session.Session{CWD: "/work"}, "go", "codex", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,12 +68,12 @@ func TestFinishedAuditClassifiesAbort(t *testing.T) {
 	}
 }
 
-func TestAuditJSONUsesDocumentedV1Names(t *testing.T) {
+func TestAuditJSONUsesDocumentedV2Names(t *testing.T) {
 	now := time.Now()
 	turn, err := newAuditTurn(
-		queuedMsg{turnSeq: 1, sessKey: "user:test", sessCreated: 1},
+		queuedMsg{turnSeq: 1, sessKey: "user:test", klaxID: "s1"},
 		nil,
-		&session.Session{CWD: "/work", ModelOverride: "requested"},
+		&session.Session{CWD: "/work", ModelRequested: "requested"},
 		"go", "codex", now,
 	)
 	if err != nil {
@@ -147,23 +147,23 @@ func TestInvokeAuditReturnsConfiguredHookFailure(t *testing.T) {
 	}
 }
 
-func TestAuditUsesPublicMaxNameAndDurableAttachmentPath(t *testing.T) {
+func TestAuditUsesTransportPrefixAndDurableAttachmentPath(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
-	store := sessfiles.Open("mx:chat", 2)
+	store := sessfiles.Open("mx:chat", "s2")
 	stored, err := store.WriteFile(1, 1, "report.txt", strings.NewReader("report"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	turn, err := newAuditTurn(queuedMsg{
 		chatID: "mx:chat", files: []string{stored},
-		turnSeq: 1, sessKey: "mx:chat", sessCreated: 2,
+		turnSeq: 1, sessKey: "mx:chat", klaxID: "s2",
 		origin: inbound.Origin{Transport: "mx", Chat: inbound.Chat{ID: "chat"}},
 	}, store, &session.Session{CWD: "/work"}, "inspect", "claude", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if turn.Origin.Transport != "max" {
-		t.Fatalf("audit transport = %q, want max", turn.Origin.Transport)
+	if turn.Origin.Transport != "mx" {
+		t.Fatalf("audit transport = %q, want mx", turn.Origin.Transport)
 	}
 	if len(turn.Request.Attachments) != 1 {
 		t.Fatalf("attachments = %+v", turn.Request.Attachments)

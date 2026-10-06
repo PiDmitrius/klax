@@ -16,7 +16,9 @@ import (
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/config"
+	"github.com/PiDmitrius/klax/internal/httpclient"
 	"github.com/PiDmitrius/klax/internal/pathutil"
+	"github.com/PiDmitrius/klax/internal/timing"
 )
 
 var versionRe = regexp.MustCompile(`(const version = ")(\d+)\.(\d+)\.(\d+)(")`)
@@ -61,14 +63,14 @@ func bumpPatch(srcDir string) error {
 const repo = "PiDmitrius/klax"
 
 var (
-	apiClient      = &http.Client{Timeout: 30 * time.Second}
-	downloadClient = &http.Client{Timeout: 5 * time.Minute}
+	apiClient      = &http.Client{Timeout: timing.RequestTimeout}
+	downloadClient = &http.Client{}
 )
 
 // latestTag returns the latest release tag (e.g. "v1.2.3") via GitHub redirect.
 func latestTag() (string, error) {
 	client := &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout: timing.RequestTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -90,18 +92,13 @@ func latestTag() (string, error) {
 	return tag, nil
 }
 
-// downloadRelease downloads the release binary for the current platform.
-func downloadRelease(tag string) (string, error) {
-	return downloadReleaseTo(tag, os.Stdout)
-}
-
 func downloadReleaseTo(tag string, out io.Writer) (string, error) {
 	arch := runtime.GOARCH
 	name := fmt.Sprintf("klax-%s-linux-%s", tag, arch)
 	url := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", repo, tag, name)
 
 	fmt.Fprintf(out, "downloading %s...\n", name)
-	resp, err := downloadClient.Get(url)
+	resp, err := httpclient.GetDownload(downloadClient, url)
 	if err != nil {
 		return "", err
 	}
@@ -179,6 +176,9 @@ func performUpdate(ctx context.Context, srcDir string, out io.Writer) updateResu
 }
 
 func performReleaseUpdate(ctx context.Context, tag string, out io.Writer) updateResult {
+	if !readsCurrentData(tag) {
+		return updateResult{Message: fmt.Sprintf("%s cannot read the current data; going back below %s needs a copy of the data dir taken with that release", tag, oldestDataRelease)}
+	}
 	binPath, err := downloadReleaseTo(tag, out)
 	if err != nil {
 		return updateResult{Message: fmt.Sprintf("download failed: %v", err)}
@@ -258,7 +258,14 @@ type releaseInfo struct {
 	URL         string `json:"html_url"`
 }
 
-// fetchReleases returns releases sorted descending (newest first).
+// oldestDataRelease is the oldest release that reads the current data format: an older one would
+// silently drop the session ids and fields of sessions.json on its first save. Older releases are
+// neither listed nor installed; going back below it means restoring a copy of the data dir.
+const oldestDataRelease = "v0.9.0"
+
+func readsCurrentData(tag string) bool { return !versionLess(tag, oldestDataRelease) }
+
+// fetchReleases lists the releases that can run on the current data, newest first.
 func fetchReleases() ([]releaseInfo, error) {
 	var all []releaseInfo
 	for page := 1; page <= 10; page++ {
@@ -269,7 +276,11 @@ func fetchReleases() ([]releaseInfo, error) {
 		if len(releases) == 0 {
 			break
 		}
-		all = append(all, releases...)
+		for _, r := range releases {
+			if readsCurrentData(r.Tag) {
+				all = append(all, r)
+			}
+		}
 	}
 	return all, nil
 }
@@ -354,20 +365,8 @@ func runFallback() {
 		tag = "v" + tag
 	}
 	fmt.Printf("installing %s...\n", tag)
-
-	binPath, err := downloadRelease(tag)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "download failed: %v\n", err)
+	if res := performReleaseUpdate(context.Background(), tag, os.Stdout); !res.OK {
+		fmt.Fprintln(os.Stderr, res.Message)
 		os.Exit(1)
 	}
-	defer os.Remove(binPath)
-
-	install := exec.Command(binPath, "install")
-	install.Stdout = os.Stdout
-	install.Stderr = os.Stderr
-	if err := install.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "install failed: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println("daemon will restart via marker")
 }

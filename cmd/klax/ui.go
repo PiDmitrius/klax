@@ -14,16 +14,16 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/config"
 	"github.com/PiDmitrius/klax/internal/history"
+	"github.com/PiDmitrius/klax/internal/ids"
 	"github.com/PiDmitrius/klax/internal/inbound"
-	"github.com/PiDmitrius/klax/internal/pathutil"
 	"github.com/PiDmitrius/klax/internal/session"
+	"github.com/PiDmitrius/klax/internal/timing"
 )
 
 // uiPrefix is the chatID/transport prefix for the web UI. A request authenticated
@@ -34,7 +34,9 @@ const uiPrefix = "ui"
 
 // uiPollHold is how long /api/changes holds a request open when there is nothing new. Well under
 // typical proxy/browser limits; a cut request is just re-issued from the same cursor (idempotent).
-var uiPollHold = 25 * time.Second
+var uiPollHold = timing.PollHold
+
+const uiFileLinkRetry = timing.RetryMax
 
 // uiMaxInflightPerUser bounds concurrently-held polls per user — cheap hygiene
 // against a buggy client loop or an abusive token. Excess polls get 429 + client backoff.
@@ -42,23 +44,23 @@ const uiMaxInflightPerUser = 32
 
 // uiSessionInfo is one tab in the strip.
 type uiSessionInfo struct {
-	ReadOnly  bool   `json:"read_only"`
-	Created   int64  `json:"created"`
-	Name      string `json:"name"`
-	Active    bool   `json:"active"`
-	Busy      bool   `json:"busy"`
-	Queued    int    `json:"queued"` // messages waiting behind the running one
-	Backend   string `json:"backend"`
-	Model     string `json:"model"`
-	CWD       string `json:"cwd"`
-	Messages  int    `json:"messages"`
-	CtxUsed   int    `json:"ctx_used"`
-	CtxWindow int    `json:"ctx_window"`
-	// Durable unread state. ReadThrough is the "<turn>.<block>" watermark the client seeds its
-	// divider from; Unread is the count the badge shows for a session the client has not loaded
-	// (a loaded one counts its replicated rows).
-	ReadThrough string `json:"read_through,omitempty"`
-	Unread      int    `json:"unread,omitempty"`
+	KlaxID         string `json:"klax_id"`
+	Name           string `json:"name"`
+	Active         bool   `json:"active"`
+	Busy           bool   `json:"busy"`
+	Queued         int    `json:"queued"` // messages waiting behind the running one
+	Backend        string `json:"backend"`
+	ModelRequested string `json:"model_requested,omitempty"`
+	ModelUsed      string `json:"model_used,omitempty"`
+	CWD            string `json:"cwd"`
+	Messages       int    `json:"messages"`
+	CtxUsed        int    `json:"ctx_used"`
+	CtxWindow      int    `json:"ctx_window"`
+	// Durable unread state for the requesting role. ReadPos is the "<turn_seq>.<block_seq>" position
+	// the client seeds its divider from; Unread is the count the badge shows for a session the client
+	// has not loaded (a loaded one counts its replicated rows).
+	ReadPos string `json:"read_pos,omitempty"`
+	Unread  int    `json:"unread,omitempty"`
 	// Groups the session belongs to. The client filters the strip and derives the whole group list
 	// from this — there is no group registry and no /api/groups.
 	Groups []string `json:"groups,omitempty"`
@@ -84,8 +86,8 @@ func uiUserForKey(sk string) string {
 // transcript's AND queue's (mtime,size), so an unchanged session's rows cost two os.Stat calls, not a
 // transcript read + rebuild.
 type uiUnreadKey struct {
-	sk      string
-	created int64
+	sk     string
+	klaxID string
 }
 type readModelEntry struct {
 	tMtime   time.Time
@@ -97,7 +99,7 @@ type readModelEntry struct {
 	memo     map[rowKey]uiTurn
 	gen      uint64 // transcript index generation the memo was built from
 	build    uint64 // identifies this build; the detector skips a session whose build it published
-	degraded bool   // a file link could not be published yet; rebuilt once uiPollHold has passed
+	degraded bool   // a file link could not be published yet; rebuilt once uiFileLinkRetry has passed
 	builtAt  time.Time
 }
 
@@ -114,20 +116,9 @@ type uiHub struct {
 	rmBuild   uint64
 }
 
-// newEpoch returns 8 random characters of [A-Za-z0-9]: compared only for equality, never parsed.
-func newEpoch() string {
-	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-	var b [8]byte
-	rand.Read(b[:])
-	for i := range b {
-		b[i] = alphabet[int(b[i])%len(alphabet)]
-	}
-	return string(b[:])
-}
-
 func newUIHub() *uiHub {
 	return &uiHub{
-		epoch:     newEpoch(),
+		epoch:     ids.New(),
 		notify:    make(map[string]chan struct{}),
 		users:     make(map[string]*uiUserSync),
 		polls:     make(map[*uiPoll]struct{}),
@@ -186,8 +177,8 @@ func (d *daemon) uiUserForChat(chatID string) string {
 
 // queuedCount is the number of messages waiting in a session's queue (excludes
 // the one currently running).
-func (d *daemon) queuedCount(sk string, created int64) int {
-	sr := d.lookupRunner(sk, created)
+func (d *daemon) queuedCount(sk string, klaxID string) int {
+	sr := d.lookupRunner(sk, klaxID)
 	if sr == nil {
 		return 0
 	}
@@ -206,13 +197,13 @@ func (d *daemon) createUISessionAtomic(sk, chatID string, patch uiSettingsPatch)
 	// Seed a message-less session from the scope defaults (what createSession would have produced),
 	// then validate + apply the draft on it — all in memory, before the store is touched.
 	sess := &session.Session{
-		Name:          "session",
-		Backend:       backend,
-		ModelOverride: def.Model,
-		ThinkOverride: def.Think,
-		Sandbox:       effectiveSandboxMode(def, nil),
-		ClaudeTTY:     def.ClaudeTTY && backend == "claude",
-		CWD:           d.defaultSessionCWD(chatID, sk),
+		Name:           "session",
+		Backend:        backend,
+		ModelRequested: def.ModelRequested,
+		Think:          def.Think,
+		Sandbox:        effectiveSandboxMode(def, nil),
+		TTY:            def.TTY && backend == "claude",
+		CWD:            d.defaultSessionCWD(chatID, sk),
 	}
 	if draftHasFields(patch) {
 		r, err := d.validateSettingsPatch(sess, backend, false, patch) // fresh session: never busy/locked
@@ -222,109 +213,78 @@ func (d *daemon) createUISessionAtomic(sk, chatID string, patch uiSettingsPatch)
 		applySettingsPatch(sess, r)
 	}
 	newDefaults := session.ScopeDefaults{
-		Backend:      resolveSessionBackend(sess, def, d.cfg.GetDefaultBackend()),
-		Model:        sess.ModelOverride,
-		Think:        sess.ThinkOverride,
-		Sandbox:      sess.Sandbox,
-		ClaudeTTY:    sess.ClaudeTTY,
-		CWD:          sess.CWD,
-		GroupMode:    def.GroupMode,
-		GroupVerbose: def.GroupVerbose,
+		Backend:             resolveSessionBackend(sess, def, d.cfg.GetDefaultBackend()),
+		ModelRequested:      sess.ModelRequested,
+		Think:               sess.Think,
+		Sandbox:             sess.Sandbox,
+		TTY:                 sess.TTY,
+		CWD:                 def.CWD,
+		GroupMode:           def.GroupMode,
+		GroupVerbose:        def.GroupVerbose,
+		GroupAttachmentMode: def.GroupAttachmentMode,
 	}
-	created, err := d.store.AddPersisted(sk, sess, &newDefaults)
+	if patch.CWD != nil {
+		newDefaults.CWD = sess.CWD
+	}
+	klaxID, err := d.store.AddPersisted(sk, sess, &newDefaults)
 	if err != nil {
-		return nil, &uiErr{http.StatusInternalServerError, "Не удалось сохранить сессию"}
+		return nil, &uiErr{status: http.StatusInternalServerError, msg: "Не удалось сохранить сессию"}
 	}
 	d.broadcastSessions(sk)
-	return created, nil
+	return klaxID, nil
 }
 
-// renameSession renames one session (by Created) and pushes the updated tab strip.
-func (d *daemon) renameSession(sk string, created int64, name string) bool {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return false
-	}
-	if d.store.UpdateSession(sk, created, func(cur *session.Session) { cur.Name = name }) == nil {
-		return false
-	}
-	d.saveStore()
-	d.broadcastSessions(sk)
-	return true
+// renameSession renames one session (by klax_id) and pushes the updated tab strip.
+func (d *daemon) renameSession(sk string, klaxID string, name string) error {
+	return d.applyUISessionSettings(sk, klaxID, uiSettingsPatch{Name: &name})
 }
 
-// reorderSessions applies the tab strip's drag-and-drop order (by Created id) and
+// reorderSessions applies the tab strip's drag-and-drop order (by klax_id) and
 // pushes the updated strip. A no-op order change persists nothing.
-func (d *daemon) reorderSessions(sk string, order []int64) bool {
-	if !d.store.Reorder(sk, order) {
-		return false
+func (d *daemon) reorderSessions(sk string, order []string) (bool, error) {
+	changed, err := d.store.ReorderPersisted(sk, order)
+	if err != nil || !changed {
+		return false, err
 	}
-	d.saveStore()
 	d.broadcastSessions(sk)
-	return true
+	return true, nil
 }
 
-// closeSession aborts any in-flight run on a session and removes it (the
-// transcript JSONL stays on disk). Refuses the last remaining session; promotes
-// a new active one if the closed tab was active. Mirrors the /nuke teardown
-// order (abort → delete → dropRunner).
-func (d *daemon) closeSession(sk string, created int64) error {
-	sessions := d.store.SessionsFor(sk)
-	if len(sessions) <= 1 {
-		return errors.New("Нельзя закрыть последнюю сессию")
+// closeSession persists removal before aborting work and deleting session files.
+func (d *daemon) closeSession(sk string, klaxID string) (bool, error) {
+	if err := d.store.ClosePersisted(sk, klaxID); err != nil {
+		return false, err
 	}
-	idx, wasActive := -1, false
-	for i, s := range sessions {
-		if s.Created == created {
-			idx, wasActive = i, s.Active
-			break
-		}
-	}
-	if idx == -1 {
-		return errors.New("Сессия не найдена")
-	}
-	d.abortSession(sk, created, true)
-	d.store.DeleteCreated(sk, created)
-	d.removeSessionStore(sk, created) // latch + delete the runner-owned store before dropping it
-	d.dropRunner(sk, created)
-	if wasActive {
-		d.store.Switch(sk, 0) // promote the first remaining session
-	}
-	d.saveStore()
+	aborted := d.abortSession(sk, klaxID, true)
+	d.removeSessionStore(sk, klaxID) // latch + delete the runner-owned store before dropping it
+	d.dropRunner(sk, klaxID)
 	d.broadcastSessions(sk)
-	return nil
+	return aborted, nil
 }
 
 // sessionsSnapshot builds the tab strip of one access role from the sessions and read-model rows
 // the detector took in one pass, so the strip and the published groups describe the same build.
-func (d *daemon) sessionsSnapshot(sk string, sessions []*session.Session, rows map[int64][]uiTurn, readOnly bool) []uiSessionInfo {
+func (d *daemon) sessionsSnapshot(sk string, sessions []*session.Session, rows map[string][]uiTurn, readOnly bool) []uiSessionInfo {
 	out := make([]uiSessionInfo, 0, len(sessions))
 	for _, s := range sessions {
-		backend := s.Backend
-		if backend == "" {
-			backend = "claude"
-		}
-		model := s.ModelOverride
-		if model == "" {
-			model = s.Model
-		}
-		readTurn, readBlock := s.ReadThrough(readOnly)
+		backend := resolveSessionBackend(s, d.scopeDefaults(sk), d.cfg.GetDefaultBackend())
+		readTurn, readBlock := s.ReadPosition(readOnly)
 		out = append(out, uiSessionInfo{
-			Created:     s.Created,
-			ReadOnly:    readOnly,
-			Name:        s.Name,
-			Active:      s.Active,
-			Busy:        d.isSessionBusy(sk, s.Created),
-			Queued:      d.queuedCount(sk, s.Created),
-			Backend:     backend,
-			Model:       model,
-			CWD:         pathutil.TildePathsInText(s.CWD),
-			Messages:    s.Messages,
-			CtxUsed:     s.ContextUsed,
-			CtxWindow:   s.ContextWindow,
-			ReadThrough: fmt.Sprintf("%d.%d", readTurn, readBlock),
-			Unread:      unreadAfter(rows[s.Created], readTurn, readBlock),
-			Groups:      s.Groups,
+			KlaxID:         s.KlaxID,
+			Name:           s.Name,
+			Active:         s.Active,
+			Busy:           d.isSessionBusy(sk, s.KlaxID),
+			Queued:         d.queuedCount(sk, s.KlaxID),
+			Backend:        backend,
+			ModelRequested: s.ModelRequested,
+			ModelUsed:      s.ModelUsed,
+			CWD:            s.CWD,
+			Messages:       s.Messages,
+			CtxUsed:        s.ContextUsed,
+			CtxWindow:      s.ContextWindow,
+			ReadPos:        session.FormatReadPos(readTurn, readBlock),
+			Unread:         unreadAfter(rows[s.KlaxID], readTurn, readBlock),
+			Groups:         s.Groups,
 		})
 	}
 	return out
@@ -335,37 +295,34 @@ func (d *daemon) sessionsSnapshot(sk string, sessions []*session.Session, rows m
 // buildReadModel, not a delivery channel: the key is EVERY input — the transcript's and queue's
 // (mtime,size) plus busy — so a hit is identical to a rebuild, and any change rebuilds once, reusing
 // the rows of turns it did not touch (rowMemo). A build with a not-yet-publishable file link is
-// retried once uiPollHold has passed. ok is false when the history could not be read; nothing is
+// retried once uiFileLinkRetry has passed. ok is false when the history could not be read; nothing is
 // cached then.
 func (d *daemon) readModelBuild(sk string, sess *session.Session) (rows []uiTurn, build uint64, ok bool) {
-	st := d.sessionStore(sk, sess.Created)
+	st := d.sessionStore(sk, sess.KlaxID)
 	if st == nil {
 		return nil, 0, false
 	}
-	backend := sess.Backend
-	if backend == "" {
-		backend = "claude"
-	}
-	tm, ts, _ := history.Stat(backend, sess.ID, sess.CWD)
+	backend := resolveSessionBackend(sess, d.scopeDefaults(sk), d.cfg.GetDefaultBackend())
+	tm, ts, _ := history.Stat(backend, sess.BackendID, sess.CWD)
 	qm, qs := st.QueueStat()
-	busy := d.isSessionBusy(sk, sess.Created)
-	key := uiUnreadKey{sk: sk, created: sess.Created}
+	busy := d.isSessionBusy(sk, sess.KlaxID)
+	key := uiUnreadKey{sk: sk, klaxID: sess.KlaxID}
 	var prev readModelEntry
 	if d.uiHub != nil {
 		h := d.uiHub
 		h.rmMu.Lock()
 		e, hit := h.rm[key]
 		if hit && e.tSize == ts && e.tMtime.Equal(tm) && e.qSize == qs && e.qMtime.Equal(qm) && e.busy == busy &&
-			!(e.degraded && time.Since(e.builtAt) >= uiPollHold) {
+			!(e.degraded && time.Since(e.builtAt) >= uiFileLinkRetry) {
 			h.rmMu.Unlock()
 			return e.rows, e.build, true
 		}
 		prev = e
 		h.rmMu.Unlock()
 	}
-	items, gen, err := history.LoadGeneration(backend, sess.ID, sess.CWD)
+	items, gen, err := history.LoadGeneration(backend, sess.BackendID, sess.CWD)
 	if err != nil {
-		log.Printf("ui: transcript load (%s/%d): %v", sk, sess.Created, err)
+		log.Printf("ui: transcript load (%s/%s): %v", sk, sess.KlaxID, err)
 		return prev.rows, prev.build, false
 	}
 	memo := &rowMemo{}
@@ -373,7 +330,7 @@ func (d *daemon) readModelBuild(sk string, sess *session.Session) (rows []uiTurn
 		memo.prev = prev.memo
 	}
 	queueTurns, _ := st.InboundLog()
-	rows = d.buildReadModel(sk, sess.Created, groupTurns(items), queueTurns, busy, memo)
+	rows = d.buildReadModel(sk, sess.KlaxID, groupTurns(items), queueTurns, busy, memo)
 	if d.uiHub != nil {
 		h := d.uiHub
 		h.rmMu.Lock()
@@ -387,12 +344,12 @@ func (d *daemon) readModelBuild(sk string, sess *session.Session) (rows []uiTurn
 }
 
 // dropReadModel forgets a closed session's cached rows.
-func (d *daemon) dropReadModel(sk string, created int64) {
+func (d *daemon) dropReadModel(sk string, klaxID string) {
 	if d.uiHub == nil {
 		return
 	}
 	d.uiHub.rmMu.Lock()
-	delete(d.uiHub.rm, uiUnreadKey{sk: sk, created: created})
+	delete(d.uiHub.rm, uiUnreadKey{sk: sk, klaxID: klaxID})
 	d.uiHub.rmMu.Unlock()
 }
 
@@ -401,7 +358,7 @@ func (d *daemon) dropReadModel(sk string, created int64) {
 // follows (klax does not own the transcript write, and a stdout event can precede the file append).
 // A brand-new session has no transcript address (id) at run start, so it waits for idKnown first.
 // Polls history.Stat on a short tick until stop is closed (the run returns). No-op when UI is off.
-func (d *daemon) watchRunTranscript(stop <-chan struct{}, idKnown <-chan string, backendName, cwd, sk string, created int64, initialID string) {
+func (d *daemon) watchRunTranscript(stop <-chan struct{}, idKnown <-chan string, backendName, cwd, sk string, klaxID string, initialID string) {
 	if d.uiHub == nil {
 		return
 	}
@@ -416,7 +373,7 @@ func (d *daemon) watchRunTranscript(stop <-chan struct{}, idKnown <-chan string,
 	user := uiUserForKey(sk)
 	var lastM time.Time
 	var lastS int64
-	ticker := time.NewTicker(300 * time.Millisecond)
+	ticker := time.NewTicker(uiSyncInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -425,7 +382,7 @@ func (d *daemon) watchRunTranscript(stop <-chan struct{}, idKnown <-chan string,
 		case <-ticker.C:
 			if m, s, ok := history.Stat(backendName, id, cwd); ok && (s != lastS || !m.Equal(lastM)) {
 				lastM, lastS = m, s
-				d.reconcileBindings(sk, created, backendName, id, cwd)
+				d.reconcileBindings(sk, klaxID, backendName, id, cwd)
 				d.uiPoke(user)
 			}
 		}
@@ -551,6 +508,9 @@ func (s *uiServer) routes() http.Handler {
 	mux.HandleFunc("/api/system/update", s.handleSystemUpdate)
 	mux.HandleFunc("/api/transcript", s.handleTranscript)
 	mux.HandleFunc("/api/file", s.handleFile)
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		apiFail(w, http.StatusNotFound, "not-found", "Нет такого метода API")
+	})
 	mux.HandleFunc("/emoji/", s.handleEmoji)
 	mux.HandleFunc("/", s.handleSPA)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -561,7 +521,7 @@ func (s *uiServer) routes() http.Handler {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			access, ok := s.access(r)
 			if !ok {
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				apiFail(w, http.StatusUnauthorized, "unauthorized", "Требуется авторизация")
 				return
 			}
 			w.Header().Set("Cache-Control", "no-store")
@@ -609,7 +569,7 @@ func readerRequest(r *http.Request) bool {
 
 func (s *uiServer) handleAuth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")
 		return
 	}
 	access, _ := s.access(r)
@@ -622,11 +582,11 @@ func (s *uiServer) chatID(user string) string { return uiPrefix + ":" + user }
 func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		apiFail(w, http.StatusUnauthorized, "unauthorized", "Требуется авторизация")
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")
 		return
 	}
 	// Accept-during-drain: do NOT refuse here. enqueueToSession durably persists the
@@ -640,64 +600,67 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		nonce               string
 		returnOn            = "queued"
 		nonceRaw, returnRaw json.RawMessage
-		targetCreated       int64
+		targetKlaxID        string
 		attachments         []attachment
 	)
+	var body struct {
+		KlaxID   string          `json:"klax_id"`
+		Text     string          `json:"text"`
+		Nonce    json.RawMessage `json:"nonce"`
+		ReturnOn json.RawMessage `json:"return_on"`
+	}
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			http.Error(w, "Bad multipart", http.StatusBadRequest)
+			apiFail(w, http.StatusBadRequest, "bad-request", "Некорректная multipart-форма")
 			return
 		}
 		defer r.MultipartForm.RemoveAll()
-		text = r.FormValue("text")
-		if values, ok := r.MultipartForm.Value["nonce"]; ok {
+		fields := make(map[string]string, len(r.MultipartForm.Value))
+		for field, values := range r.MultipartForm.Value {
 			if len(values) != 1 {
-				http.Error(w, "Invalid nonce", http.StatusBadRequest)
+				apiFail(w, http.StatusBadRequest, "bad-request", "Поле формы указано несколько раз")
 				return
 			}
-			nonceRaw, _ = json.Marshal(values[0])
+			fields[field] = values[0]
 		}
-		if values, ok := r.MultipartForm.Value["return_on"]; ok {
-			if len(values) != 1 {
-				http.Error(w, "Invalid return_on", http.StatusBadRequest)
+		data, _ := json.Marshal(fields)
+		if err := decodeAPIRequest(bytes.NewReader(data), &body, false); err != nil {
+			apiFail(w, http.StatusBadRequest, "bad-request", "Некорректная multipart-форма")
+			return
+		}
+		for field := range r.MultipartForm.File {
+			if field != "files" {
+				apiFail(w, http.StatusBadRequest, "bad-request", "Неизвестное поле вложения")
 				return
 			}
-			returnRaw, _ = json.Marshal(values[0])
 		}
-		targetCreated, _ = strconv.ParseInt(r.FormValue("session"), 10, 64)
 		for _, fh := range r.MultipartForm.File["files"] {
 			f, err := fh.Open()
 			if err != nil {
-				http.Error(w, "Не удалось прочитать вложение", http.StatusBadRequest)
+				apiFail(w, http.StatusBadRequest, "bad-request", "Не удалось прочитать вложение")
 				return
 			}
 			data, err := io.ReadAll(f)
 			f.Close()
 			if err != nil {
-				http.Error(w, "Не удалось прочитать вложение", http.StatusBadRequest)
+				apiFail(w, http.StatusBadRequest, "bad-request", "Не удалось прочитать вложение")
 				return
 			}
 			attachments = append(attachments, attachment{filename: fh.Filename, data: data})
 		}
 	} else {
-		var body struct {
-			Session  int64           `json:"session"`
-			Text     string          `json:"text"`
-			Nonce    json.RawMessage `json:"nonce"`
-			ReturnOn json.RawMessage `json:"return_on"`
-		}
 		if err := decodeAPIRequest(r.Body, &body, false); err != nil {
-			http.Error(w, "Bad request", http.StatusBadRequest)
+			apiFail(w, http.StatusBadRequest, "bad-request", "Некорректный запрос")
 			return
 		}
-		text = body.Text
-		nonceRaw, returnRaw = body.Nonce, body.ReturnOn
-		targetCreated = body.Session
 	}
+	text = body.Text
+	nonceRaw, returnRaw = body.Nonce, body.ReturnOn
+	targetKlaxID = body.KlaxID
 	// The UI always targets a specific tab; never silently fall back to the
 	// active session the way the messenger paths do.
-	if targetCreated <= 0 {
-		http.Error(w, "A positive session is required", http.StatusBadRequest)
+	if targetKlaxID == "" {
+		writeAPIError(w, apiFailure("session-not-found"))
 		return
 	}
 	var parseErr *apiError
@@ -727,7 +690,7 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, &apiError{Code: "empty-message", Message: "Сообщение пусто", status: http.StatusBadRequest})
 		return
 	}
-	if !s.requireSession(w, s.d.sessionKey(s.chatID(user)), targetCreated) {
+	if !s.requireSession(w, s.d.sessionKey(s.chatID(user)), targetKlaxID) {
 		return
 	}
 	if s.sendTest.intercept(w, r, user) {
@@ -739,13 +702,13 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	// first visible copy.
 	admission := &sendAdmission{}
 	if !s.d.handleInbound(Inbound{
-		admission:     admission,
-		ChatID:        s.chatID(user),
-		Text:          text,
-		Attachments:   attachments,
-		TargetCreated: targetCreated,
-		Nonce:         nonce,
-		RawMessage:    true, // the UI has no chat commands — "/"-text is a message
+		admission:    admission,
+		ChatID:       s.chatID(user),
+		Text:         text,
+		Attachments:  attachments,
+		TargetKlaxID: targetKlaxID,
+		Nonce:        nonce,
+		RawMessage:   true, // the UI has no chat commands — "/"-text is a message
 		Origin: inbound.Origin{
 			Transport: "ui",
 			Chat:      inbound.Chat{ID: user, Type: "private"},
@@ -759,7 +722,7 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		}
 		// Dropped after our entry checks (drain flipped in the window) — tell the
 		// client so it restores the composer instead of silently losing the draft.
-		http.Error(w, "Сервис перезапускается — попробуйте через минуту", http.StatusServiceUnavailable)
+		apiFail(w, http.StatusServiceUnavailable, "restarting", "Сервис перезапускается — попробуйте через минуту")
 		return
 	}
 	if returnOn != "queued" {
@@ -772,30 +735,30 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 func (s *uiServer) handleAbort(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		apiFail(w, http.StatusUnauthorized, "unauthorized", "Требуется авторизация")
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")
 		return
 	}
 	var body struct {
-		Session int64 `json:"session"`
+		KlaxID string `json:"klax_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "Bad request", http.StatusBadRequest)
+	if err := decodeAPIRequest(r.Body, &body, false); err != nil {
+		apiFail(w, http.StatusBadRequest, "bad-request", "Некорректный запрос")
 		return
 	}
-	if body.Session <= 0 {
-		http.Error(w, "A positive session is required", http.StatusBadRequest)
+	if body.KlaxID == "" {
+		writeAPIError(w, apiFailure("session-not-found"))
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
-	if s.d.store.Get(sk, body.Session) == nil {
-		http.Error(w, "Session not found", http.StatusNotFound)
+	if s.d.store.Get(sk, body.KlaxID) == nil {
+		writeAPIError(w, apiFailure("session-not-found"))
 		return
 	}
-	s.d.abortSession(sk, body.Session, false)
+	s.d.abortSession(sk, body.KlaxID, false)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -803,28 +766,28 @@ func (s *uiServer) handleAbort(w http.ResponseWriter, r *http.Request) {
 func (s *uiServer) handleCancel(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		apiFail(w, http.StatusUnauthorized, "unauthorized", "Требуется авторизация")
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")
 		return
 	}
 	var body struct {
-		Session int64 `json:"session"`
-		Seq     int64 `json:"seq"`
+		KlaxID  string `json:"klax_id"`
+		TurnSeq int64  `json:"turn_seq"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Session <= 0 || body.Seq <= 0 {
-		http.Error(w, "A positive session and seq are required", http.StatusBadRequest)
+	if err := decodeAPIRequest(r.Body, &body, false); err != nil || body.TurnSeq <= 0 {
+		apiFail(w, http.StatusBadRequest, "bad-request", "Нужен положительный turn_seq")
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
-	if !s.requireSession(w, sk, body.Session) {
+	if !s.requireSession(w, sk, body.KlaxID) {
 		return
 	}
-	found, err := s.d.cancelQueued(sk, body.Session, body.Seq)
+	found, err := s.d.cancelQueued(sk, body.KlaxID, body.TurnSeq)
 	if err != nil {
-		log.Printf("durable MarkErr cancelled (%s/%d): %v", sk, body.Session, err)
+		log.Printf("durable MarkErr cancelled (%s/%s): %v", sk, body.KlaxID, err)
 		writeAPIError(w, apiFailure("cancel-failed"))
 		return
 	}
@@ -844,38 +807,50 @@ func (s *uiServer) handleCancel(w http.ResponseWriter, r *http.Request) {
 func (s *uiServer) handleRead(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		apiFail(w, http.StatusUnauthorized, "unauthorized", "Требуется авторизация")
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")
 		return
 	}
 	var body struct {
-		Session int64 `json:"session"`
-		Turn    int64 `json:"turn"`
-		Block   int   `json:"block"`
+		KlaxID  string `json:"klax_id"`
+		ReadPos string `json:"read_pos"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "Bad request", http.StatusBadRequest)
+	if err := decodeAPIRequest(r.Body, &body, false); err != nil {
+		apiFail(w, http.StatusBadRequest, "bad-request", "Некорректный запрос")
 		return
 	}
-	if body.Session <= 0 {
-		http.Error(w, "A positive session is required", http.StatusBadRequest)
+	turn, block, err := session.ParseReadPos(body.ReadPos)
+	if err != nil {
+		apiFail(w, http.StatusBadRequest, "bad-request", "Некорректный read_pos")
+		return
+	}
+	if body.KlaxID == "" {
+		writeAPIError(w, apiFailure("session-not-found"))
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
-	if s.d.store.Get(sk, body.Session) == nil {
-		http.Error(w, "Session not found", http.StatusNotFound)
+	if s.d.store.Get(sk, body.KlaxID) == nil {
+		writeAPIError(w, apiFailure("session-not-found"))
 		return
 	}
 	raised := false
-	s.d.store.UpdateSession(sk, body.Session, func(cur *session.Session) {
-		raised = cur.AdvanceReadThrough(s.readOnly(r), body.Turn, body.Block)
+	_, err = s.d.store.UpdateSessionPersisted(sk, body.KlaxID, nil, func(cur *session.Session) {
+		raised = cur.AdvanceReadPos(s.readOnly(r), turn, block)
 	})
+	if err != nil {
+		if errors.Is(err, session.ErrSessionNotFound) {
+			writeAPIError(w, apiFailure("session-not-found"))
+		} else {
+			log.Printf("save read position: %v", err)
+			writeAPIError(w, apiFailure("read-save-failed"))
+		}
+		return
+	}
 	if raised {
-		s.d.saveStore()
-		s.d.broadcastSessions(sk) // push the new read_through/unread to this user's other tabs/devices
+		s.d.broadcastSessions(sk) // push the new read_pos/unread to this user's other tabs/devices
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -883,75 +858,59 @@ func (s *uiServer) handleRead(w http.ResponseWriter, r *http.Request) {
 func (s *uiServer) handleNew(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		apiFail(w, http.StatusUnauthorized, "unauthorized", "Требуется авторизация")
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")
 		return
 	}
-	// Optional initial settings from the "new session" draft dialog: the tab strip
-	// now defers creation until the draft is confirmed, sending the chosen fields
-	// here so the session is born configured. An empty body keeps the old behaviour.
-	var body struct {
-		uiSettingsPatch
-		ControlToken json.RawMessage `json:"control_token"`
-	}
+	// Optional initial settings — the same fields as POST /api/settings — so the session is born
+	// configured. An empty body creates a session with the scope defaults.
+	var body uiSettingsPatch
 	if err := decodeAPIRequest(r.Body, &body, true); err != nil {
-		http.Error(w, "Bad request", http.StatusBadRequest)
+		apiFail(w, http.StatusBadRequest, "bad-request", "Некорректный запрос")
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
 	// Atomic create: validate + configure the session, then a SINGLE save + broadcast. A rejected
 	// draft (e.g. an inaccessible cwd) creates nothing and returns the real reason; nothing external
 	// ever sees a defaults placeholder, and a crash before the save leaves no half-built session.
-	if len(body.ControlToken) != 0 {
-		writeAPIError(w, &apiError{Code: "unsupported-control-token", Message: "Используйте ui_token или ui_read_token", status: http.StatusBadRequest})
-		return
-	}
-	sess, createErr := s.d.createUISessionAtomic(sk, s.chatID(user), body.uiSettingsPatch)
+	sess, createErr := s.d.createUISessionAtomic(sk, s.chatID(user), body)
 	if createErr != nil {
-		status := http.StatusBadRequest
-		if ue, ok := createErr.(*uiErr); ok {
-			status = ue.status
-		}
-		http.Error(w, createErr.Error(), status)
+		settingsFail(w, createErr)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
-		Created int64 `json:"created"`
-	}{sess.Created})
+		KlaxID string `json:"klax_id"`
+	}{sess.KlaxID})
 }
 
 func (s *uiServer) handleRename(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		apiFail(w, http.StatusUnauthorized, "unauthorized", "Требуется авторизация")
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")
 		return
 	}
 	var body struct {
-		Session int64  `json:"session"`
-		Name    string `json:"name"`
+		KlaxID string `json:"klax_id"`
+		Name   string `json:"name"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "Bad request", http.StatusBadRequest)
-		return
-	}
-	if body.Session <= 0 || strings.TrimSpace(body.Name) == "" {
-		http.Error(w, "Session and name are required", http.StatusBadRequest)
+	if err := decodeAPIRequest(r.Body, &body, false); err != nil {
+		apiFail(w, http.StatusBadRequest, "bad-request", "Некорректный запрос")
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
-	if !s.requireSession(w, sk, body.Session) {
+	if !s.requireSession(w, sk, body.KlaxID) {
 		return
 	}
-	if !s.d.renameSession(sk, body.Session, body.Name) {
-		http.Error(w, "Session not found", http.StatusNotFound)
+	if err := s.d.renameSession(sk, body.KlaxID, body.Name); err != nil {
+		settingsFail(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -960,52 +919,63 @@ func (s *uiServer) handleRename(w http.ResponseWriter, r *http.Request) {
 func (s *uiServer) handleReorder(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		apiFail(w, http.StatusUnauthorized, "unauthorized", "Требуется авторизация")
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")
 		return
 	}
 	var body struct {
-		Order []int64 `json:"order"`
+		Tabs []string `json:"tabs"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "Bad request", http.StatusBadRequest)
+	if err := decodeAPIRequest(r.Body, &body, false); err != nil {
+		apiFail(w, http.StatusBadRequest, "bad-request", "Некорректный запрос")
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
-	s.d.reorderSessions(sk, body.Order)
+	if _, err := s.d.reorderSessions(sk, body.Tabs); err != nil {
+		log.Printf("save tab order: %v", err)
+		writeAPIError(w, apiFailure("reorder-save-failed"))
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *uiServer) handleClose(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.auth(r)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		apiFail(w, http.StatusUnauthorized, "unauthorized", "Требуется авторизация")
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		apiFail(w, http.StatusMethodNotAllowed, "method-not-allowed", "Метод не поддерживается")
 		return
 	}
 	var body struct {
-		Session int64 `json:"session"`
+		KlaxID string `json:"klax_id"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "Bad request", http.StatusBadRequest)
+	if err := decodeAPIRequest(r.Body, &body, false); err != nil {
+		apiFail(w, http.StatusBadRequest, "bad-request", "Некорректный запрос")
 		return
 	}
-	if body.Session <= 0 {
-		http.Error(w, "A positive session is required", http.StatusBadRequest)
+	if body.KlaxID == "" {
+		writeAPIError(w, apiFailure("session-not-found"))
 		return
 	}
 	sk := s.d.sessionKey(s.chatID(user))
-	if !s.requireSession(w, sk, body.Session) {
+	if !s.requireSession(w, sk, body.KlaxID) {
 		return
 	}
-	if err := s.d.closeSession(sk, body.Session); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if _, err := s.d.closeSession(sk, body.KlaxID); errors.Is(err, session.ErrSessionNotFound) {
+		writeAPIError(w, apiFailure("session-not-found"))
+		return
+	} else if errors.Is(err, session.ErrLastSession) {
+		apiFail(w, http.StatusConflict, "last-session", "Нельзя закрыть последнюю сессию")
+		return
+	} else if err != nil {
+		log.Printf("save session closure: %v", err)
+		writeAPIError(w, apiFailure("close-save-failed"))
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -1048,6 +1018,14 @@ func (s *uiServer) handleSPA(w http.ResponseWriter, r *http.Request) {
 	}
 	// Inject the configured product name (browser tab title + login heading).
 	page := bytes.ReplaceAll(spaHTML, []byte("__KLAX_UI_TITLE__"), []byte(html.EscapeString(s.d.cfg.GetUITitle())))
+	policy, _ := json.Marshal(map[string]int64{
+		"request_ms":   timing.RequestTimeout.Milliseconds(),
+		"poll_ms":      timing.PollTimeout.Milliseconds(),
+		"retry_min_ms": timing.RetryMin.Milliseconds(),
+		"retry_max_ms": timing.RetryMax.Milliseconds(),
+		"sync_ms":      uiSyncInterval.Milliseconds(),
+	})
+	page = bytes.ReplaceAll(page, []byte("__KLAX_REQUEST_POLICY__"), policy)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(page)
 }

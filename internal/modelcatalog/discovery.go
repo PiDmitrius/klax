@@ -13,18 +13,19 @@ import (
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/runner"
+	"github.com/PiDmitrius/klax/internal/timing"
 )
 
 type Model struct {
-	Value   string   `json:"value"`
-	Label   string   `json:"label"`
-	Efforts []string `json:"efforts,omitempty"`
-	Default bool     `json:"default,omitempty"`
+	Value       string   `json:"value"`
+	Label       string   `json:"label"`
+	ThinkLevels []string `json:"think_levels,omitempty"`
+	Default     bool     `json:"default,omitempty"`
 }
 
 // Fetch reads CLI control messages only; it never submits a user turn.
 func Fetch(ctx context.Context, backend string) ([]Model, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, timing.WorkTimeout)
 	defer cancel()
 	var args []string
 	switch backend {
@@ -168,7 +169,7 @@ func (p *protocol) codex() ([]Model, error) {
 			if !m.Hidden {
 				entry := Model{Value: m.Model, Label: m.Model, Default: m.IsDefault}
 				for _, effort := range m.Efforts {
-					entry.Efforts = append(entry.Efforts, effort.Value)
+					entry.ThinkLevels = append(entry.ThinkLevels, effort.Value)
 				}
 				models = append(models, entry)
 			}
@@ -221,7 +222,7 @@ func (p *protocol) claude() ([]Model, error) {
 			}
 			if !seen[m.ResolvedModel] {
 				seen[m.ResolvedModel] = true
-				models = append(models, Model{Value: m.ResolvedModel, Label: m.ResolvedModel, Efforts: m.Efforts, Default: m.Value == "default"})
+				models = append(models, Model{Value: m.ResolvedModel, Label: m.ResolvedModel, ThinkLevels: m.Efforts, Default: m.Value == "default"})
 			} else if m.Value == "default" {
 				for i := range models {
 					if models[i].Value == m.ResolvedModel {

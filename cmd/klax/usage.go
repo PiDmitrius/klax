@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/fmtutil"
+	"github.com/PiDmitrius/klax/internal/timing"
 )
 
 type claudeUsageWindow struct {
@@ -54,7 +55,7 @@ func fetchClaudeUsage() (*claudeUsageResp, error) {
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: timing.RequestTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err

@@ -11,8 +11,9 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
+	"github.com/PiDmitrius/klax/internal/httpclient"
+	"github.com/PiDmitrius/klax/internal/timing"
 	"github.com/PiDmitrius/klax/internal/transport"
 )
 
@@ -28,7 +29,7 @@ type Bot struct {
 func New(token string) *Bot {
 	return &Bot{
 		token:  token,
-		client: &http.Client{Timeout: 35 * time.Second},
+		client: &http.Client{Timeout: timing.RequestTimeout},
 	}
 }
 
@@ -254,10 +255,7 @@ func (b *Bot) DrainUpdates() error {
 	return nil
 }
 
-// GetUpdates performs a single poll call and returns new updates. Yandex
-// Messenger's getUpdates does not document a server-side long-poll wait (no
-// "timeout" parameter, unlike Telegram/MAX/VK) — the caller is responsible for
-// pacing repeated calls when the result is empty.
+// GetUpdates performs a short poll; the caller paces empty responses.
 func (b *Bot) GetUpdates() ([]Update, error) {
 	raw, err := b.do(http.MethodPost, "messages/getUpdates/", map[string]interface{}{
 		"offset": b.offset,
@@ -389,7 +387,7 @@ func (b *Bot) DownloadFile(fileID string) ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "OAuth "+b.token)
-	resp, err := b.client.Do(req)
+	resp, err := httpclient.Download(b.client, req)
 	if err != nil {
 		return nil, err
 	}

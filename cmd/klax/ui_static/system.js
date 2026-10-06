@@ -1,4 +1,5 @@
-import { api, copyText, flashCopied } from "./base.js";
+import { api, apiError, copyText, flashCopied, tildePath } from "./base.js";
+import { fmtDate, fmtTime } from "./markdown.js";
 import { isReadOnly } from "./auth.js";
 import { uiConfirm } from "./modal.js";
 
@@ -18,6 +19,7 @@ function codeValue(value){
 function row(label, value, opts){
   opts = opts || {};
   const el = document.createElement("div"); el.className = "sysrow";
+  if(opts.title) el.title = opts.title;
   const k = document.createElement("span"); k.className = "syskey"; k.textContent = label;
   const group = document.createElement("span"); group.className = "sysvalgroup";
   let v = opts.copy ? codeValue(value) : opts.link ? document.createElement("a") : document.createElement("span");
@@ -29,18 +31,33 @@ function row(label, value, opts){
 }
 
 function elapsed(sec){
-  sec = Math.max(0, Number(sec) || 0);
-  const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
-  return (d ? d + " д " : "") + (h ? h + " ч " : "") + m + " мин";
+  if(sec === null || sec === undefined) return "—";
+  const tenths = Math.round(Math.max(0, Number(sec) || 0) * 10);
+  const d = Math.floor(tenths / 864000), h = Math.floor(tenths % 864000 / 36000), m = Math.floor(tenths % 36000 / 600), s = tenths % 600 / 10;
+  return (d ? d + " д " : "") + (h ? h + " ч " : "") + (m ? m + " мин " : "") + s + " с";
+}
+
+function ram(bytes){
+  if(bytes === null || bytes === undefined) return "—";
+  const gib = bytes >= 1073741824;
+  return (bytes / (gib ? 1073741824 : 1048576)).toFixed(1) + (gib ? " ГиБ" : " МиБ");
 }
 
 function render(data){
   lastData = data;
   const body = $("sysbody"), u = data.update || {};
   body.textContent = "";
-  body.append(row("Версия", "v" + data.version, { copy: true }), row("Запущен", new Date(data.started_at).toLocaleString()), row("Работает", elapsed(data.uptime_sec)), row("Процесс", String(data.pid), { copy: true }), row("Платформа", data.platform));
+  body.append(
+    row("Версия", "v" + data.version, { copy: true }),
+    row("Запущен", fmtDate(data.started_at) + " " + fmtTime(data.started_at)),
+    row("Работает", elapsed(data.uptime_sec)),
+    row("Занят", elapsed(data.cpu_time_sec), { title: "Суммарное процессорное время klax по всем потокам" }),
+    row("Рабочая RAM", ram(data.rss_bytes)),
+    row("Максимум RAM", ram(data.rss_peak_bytes), { title: "Пиковая RAM процесса klax с момента запуска" }),
+    row("Платформа", data.platform)
+  );
   body.appendChild(Object.assign(document.createElement("div"), { className: "syssep" }));
-  if(u.source_dir) body.append(row("Исходник", u.source_dir, { copy: true }));
+  if(u.source_dir) body.append(row("Исходник", tildePath(u.source_dir), { copy: true }));
   const check = document.createElement("button"); check.id = "syscheck"; check.className = "syscheck";
   check.disabled = isReadOnly() || !!u.checking; check.textContent = u.checking ? "Проверяется…" : "Проверить"; check.onclick = checkUpdates;
   body.append(row("Обновления", "", { noValue: true, button: check }));
@@ -74,7 +91,7 @@ function render(data){
 async function refresh(){
   try {
     const r = await api("/api/system");
-    if(!r.ok) throw new Error(await r.text());
+    if(!r.ok) throw new Error(await apiError(r, ""));
     render(await r.json());
   } catch(e){ $("sysbody").textContent = "Не удалось получить состояние klax"; }
 }
@@ -99,7 +116,7 @@ async function checkUpdates(){
   const b = $("syscheck"); if(b){ b.disabled = true; b.textContent = "Проверяется…"; }
   try {
     const r = await api("/api/system/check", { method: "POST" });
-    if(!r.ok) throw new Error(await r.text());
+    if(!r.ok) throw new Error(await apiError(r, ""));
     refresh();
   } catch(e){ notify(errorNotice("Ошибка проверки обновлений", e), { error: true }); refresh(); }
 }
@@ -118,9 +135,8 @@ async function beginInstall(chosen){
   try {
     const r = await api("/api/system/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tag: chosen.tag, source: chosen.source }) });
     const data = await r.json();
-    if(!r.ok) throw new Error(data.message || "Ошибка установки");
-    notify(data.message, data.started ? "info" : "warning");
-    if(lastData && lastData.update){ lastData.update.running = !!data.running; render(lastData); }
+    if(!r.ok) throw new Error((data.error && data.error.message) || "Ошибка установки");
+    notify(data.message, "info");
     refresh();
   } catch(e){ notify(errorNotice("Ошибка установки", e), { error: true }); refresh(); }
 }

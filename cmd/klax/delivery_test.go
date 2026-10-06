@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	"github.com/PiDmitrius/klax/internal/config"
 	"github.com/PiDmitrius/klax/internal/transport"
 )
 
@@ -226,6 +228,7 @@ func (f *fakeTransport) EditMessage(chatID, messageID, text, replyTo, format str
 
 func newTestDeliveryDaemon(tp transport.Transport) *daemon {
 	return &daemon{
+		cfg:        &config.Config{},
 		transports: map[string]transport.Transport{"tg": tp},
 		formats:    map[string]string{"tg": "html"},
 		sendPause:  make(map[string]time.Time),
@@ -610,5 +613,14 @@ func TestSplitMessagePlainNoFenceUsesFastPath(t *testing.T) {
 	// a straight concatenation must reproduce the source exactly.
 	if rebuilt.String() != text {
 		t.Fatalf("text mismatch after fence-free split")
+	}
+}
+
+func TestRetryWaitHonorsPlatformDelay(t *testing.T) {
+	if got := retryWait(&transport.APIError{Code: 429, RetryAfter: 12}, 625*time.Millisecond); got != 12*time.Second {
+		t.Fatalf("platform retry delay: %v", got)
+	}
+	if got := retryWait(errors.New("offline"), 625*time.Millisecond); got != 625*time.Millisecond {
+		t.Fatalf("network retry delay: %v", got)
 	}
 }

@@ -18,7 +18,7 @@ func TestRefreshDurableAndFailuresPreserveCatalog(t *testing.T) {
 	load := func(models []Model) func(context.Context, string) ([]Model, error) {
 		return func(context.Context, string) ([]Model, error) { return models, nil }
 	}
-	original := []Model{{Value: "old", Label: "Old", Default: true, Efforts: []string{"high", "max"}}}
+	original := []Model{{Value: "old", Label: "Old", Default: true, ThinkLevels: []string{"high", "max"}}}
 	for _, backend := range []string{"codex", "claude"} {
 		if _, err = s.refresh(context.Background(), backend, load(original)); err != nil {
 			t.Fatal(err)
@@ -57,8 +57,8 @@ func TestRefreshDurableAndFailuresPreserveCatalog(t *testing.T) {
 	}
 	copy := s.Models("codex")
 	copy[0].Value = "changed"
-	copy[0].Efforts[0] = "changed"
-	if s.Models("codex")[0].Efforts[0] != "high" {
+	copy[0].ThinkLevels[0] = "changed"
+	if s.Models("codex")[0].ThinkLevels[0] != "high" {
 		t.Fatal("caller mutated efforts")
 	}
 	if s.Models("codex")[0].Value != "old" {
@@ -85,7 +85,7 @@ func TestRefreshSerializesPerBackendWithoutBlockingReaders(t *testing.T) {
 	if _, err := s.refresh(context.Background(), "codex", fetch); !errors.Is(err, ErrUpdating) {
 		t.Fatal(err)
 	}
-	if s.Models("codex") != nil {
+	if len(s.Models("codex")) != 0 {
 		t.Fatal("published before completion")
 	}
 	if _, err := s.refresh(context.Background(), "claude", fetch); err != nil {
@@ -101,5 +101,19 @@ func TestRefreshSerializesPerBackendWithoutBlockingReaders(t *testing.T) {
 	}
 	if reloaded.Models("claude")[0].Value != "chat" || reloaded.Models("codex")[0].Value != "code" {
 		t.Fatal("parallel save lost a backend")
+	}
+}
+
+func TestOpenAdoptsEffortsAsThinkLevels(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "models.json")
+	if err := os.WriteFile(path, []byte(`{"codex":[{"value":"gpt-a","label":"A","efforts":["low"]}]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Models("codex"); len(got) != 1 || len(got[0].ThinkLevels) != 1 || got[0].ThinkLevels[0] != "low" {
+		t.Fatalf("efforts must become think_levels, got %+v", got)
 	}
 }

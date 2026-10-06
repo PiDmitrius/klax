@@ -28,13 +28,13 @@ func proposeBindings(turns []sessfiles.Turn, items []history.Item, backend, sess
 	claimed := make(map[string]bool)
 	for _, t := range turns {
 		if t.Bound {
-			claimed[coordinateKey(t.Backend, t.Session, t.Event)] = true
+			claimed[coordinateKey(t.Backend, t.BackendID, t.Event)] = true
 		}
 	}
 	var users []history.Item
 	var out []turnBinding
 	for i, t := range turns {
-		if t.Bound || t.Backend != backend || t.Session != session || t.PromptDigest == "" {
+		if t.Bound || t.Backend != backend || t.BackendID != session || t.PromptDigest == "" {
 			continue
 		}
 		if users == nil {
@@ -48,7 +48,7 @@ func proposeBindings(turns []sessfiles.Turn, items []history.Item, backend, sess
 		upper := end
 		for j := i + 1; j < len(turns); j++ {
 			n := turns[j]
-			if n.Backend == backend && n.Session == session {
+			if n.Backend == backend && n.BackendID == session {
 				upper = n.FromEvent
 				break
 			}
@@ -82,10 +82,10 @@ func unboundBackendSessions(turns []sessfiles.Turn) [][2]string {
 	last := make(map[[2]string]sessfiles.Turn)
 	var order [][2]string
 	for _, t := range turns {
-		if t.Backend == "" || t.Session == "" {
+		if t.Backend == "" || t.BackendID == "" {
 			continue
 		}
-		key := [2]string{t.Backend, t.Session}
+		key := [2]string{t.Backend, t.BackendID}
 		if _, ok := last[key]; !ok {
 			order = append(order, key)
 		}
@@ -103,15 +103,15 @@ func unboundBackendSessions(turns []sessfiles.Turn) [][2]string {
 // bindingRepair is one backend session to re-match, addressed by the klax session that owns it.
 type bindingRepair struct {
 	sk               string
-	created          int64
+	klaxID           string
 	cwd              string
 	backend, session string
 }
 
-func bindingRepairs(sk string, created int64, cwd string, turns []sessfiles.Turn) []bindingRepair {
+func bindingRepairs(sk string, klaxID string, cwd string, turns []sessfiles.Turn) []bindingRepair {
 	var out []bindingRepair
 	for _, bs := range unboundBackendSessions(turns) {
-		out = append(out, bindingRepair{sk: sk, created: created, cwd: cwd, backend: bs[0], session: bs[1]})
+		out = append(out, bindingRepair{sk: sk, klaxID: klaxID, cwd: cwd, backend: bs[0], session: bs[1]})
 	}
 	return out
 }
@@ -123,7 +123,7 @@ func bindingRepairs(sk string, created int64, cwd string, turns []sessfiles.Turn
 // safe because Store.Bind is the single one-to-one authority and rejects a conflict.
 func (d *daemon) repairBindings(work []bindingRepair) {
 	for _, w := range work {
-		if d.reconcileBindings(w.sk, w.created, w.backend, w.session, w.cwd) {
+		if d.reconcileBindings(w.sk, w.klaxID, w.backend, w.session, w.cwd) {
 			// A repaired turn changes an already-rendered answer, and unlike the lifecycle
 			// call sites nothing else here wakes the surfaces afterwards.
 			d.broadcastSessions(w.sk)
@@ -132,23 +132,23 @@ func (d *daemon) repairBindings(work []bindingRepair) {
 }
 
 // reconcileBindings reports whether a proposed binding is now durably present.
-func (d *daemon) reconcileBindings(sk string, created int64, backend, sessionID, cwd string) bool {
+func (d *daemon) reconcileBindings(sk string, klaxID string, backend, sessionID, cwd string) bool {
 	if sessionID == "" {
 		return false
 	}
 	items, end, err := history.Snapshot(backend, sessionID, cwd)
 	if err != nil {
-		log.Printf("turn binding transcript %s/%d: %v", sk, created, err)
+		log.Printf("turn binding transcript %s/%s: %v", sk, klaxID, err)
 		return false
 	}
-	return d.reconcileBindingsSnapshot(sk, created, backend, sessionID, items, end)
+	return d.reconcileBindingsSnapshot(sk, klaxID, backend, sessionID, items, end)
 }
 
-func (d *daemon) reconcileBindingsSnapshot(sk string, created int64, backend, sessionID string, items []history.Item, end int64) bool {
-	st := d.sessionStore(sk, created)
+func (d *daemon) reconcileBindingsSnapshot(sk string, klaxID string, backend, sessionID string, items []history.Item, end int64) bool {
+	st := d.sessionStore(sk, klaxID)
 	turns, err := st.InboundLog()
 	if err != nil {
-		log.Printf("turn binding queue %s/%d: %v", sk, created, err)
+		log.Printf("turn binding queue %s/%s: %v", sk, klaxID, err)
 		return false
 	}
 	var bound bool
@@ -156,9 +156,9 @@ func (d *daemon) reconcileBindingsSnapshot(sk string, created int64, backend, se
 		if err := st.Bind(b.Seq, b.Backend, b.Session, b.Event, b.RecordDigest); err == nil {
 			bound = true
 		} else if err == sessfiles.ErrBindConflict {
-			log.Printf("turn bind conflict %s/%d turn %d event %d", sk, created, b.Seq, b.Event)
+			log.Printf("turn bind conflict %s/%s turn %d event %d", sk, klaxID, b.Seq, b.Event)
 		} else {
-			log.Printf("turn bind %s/%d turn %d: %v", sk, created, b.Seq, err)
+			log.Printf("turn bind %s/%s turn %d: %v", sk, klaxID, b.Seq, err)
 		}
 	}
 	return bound

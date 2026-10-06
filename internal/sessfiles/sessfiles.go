@@ -1,5 +1,5 @@
 // Package sessfiles owns a session's working directory under the klax data dir
-// (<data>/sessions/<keydir>/<created>/): durable inbound/outbound files named by
+// (<data>/sessions/<keydir>/<klax_id>/): durable inbound/outbound files named by
 // turn, and — wired later — the durable queue log.
 //
 // Files are named "<turn_seq>-<NN>-name.ext": the turn id (allocated by the
@@ -9,20 +9,18 @@
 // (no whole-file buffering), are durable (temp → fsync → exclusive link → dir
 // fsync) and idempotent on replay. The agent never sees these paths — Materialize
 // copies a clean per-turn view (the "<seq>-<NN>-" prefix stripped); a whole
-// session's files are owned by one (key, created), so cleanup is one RemoveAll.
+// session's files are owned by one (key, klax_id), so cleanup is one RemoveAll.
 package sessfiles
 
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,39 +29,14 @@ import (
 	"github.com/PiDmitrius/klax/internal/session"
 )
 
-// keyDir maps a sessionKey to one safe, injective path component
-// "<hint>--<base64url(raw key)>". The base64url suffix is lossless, so the
-// component is unique per key regardless of the cosmetic hint; base64url's
-// alphabet ([A-Za-z0-9_-]) is filesystem-safe. (A char-replacement sanitizer is
-// NOT injective — e.g. "a:b" and "a/b" would collide — so it is not used here.)
-func keyDir(key string) string {
-	return keyHint(key) + "--" + base64.RawURLEncoding.EncodeToString([]byte(key))
-}
-
-// keyHint is a short, sanitized, lossy label for human eyes only (ls legibility).
-func keyHint(key string) string {
-	h := strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '.':
-			return r
-		default:
-			return '_'
-		}
-	}, key)
-	if len(h) > 32 {
-		h = h[:32]
-	}
-	return h
-}
-
-// WorkDir is the per-session directory: <data>/sessions/<keyDir>/<created>.
-func WorkDir(key string, created int64) string {
-	return filepath.Join(session.StoreDir(), "sessions", keyDir(key), strconv.FormatInt(created, 10))
+// WorkDir is the per-session directory: <data>/sessions/<keyDir>/<klax_id>.
+func WorkDir(key, klaxID string) string {
+	return session.WorkDir(key, klaxID)
 }
 
 // Store is a session's durable store: its files/ subdir and its queue.jsonl, plus
 // the per-session durable-store lock and the cached turn_seq high-water. One Store
-// per (key, created); the daemon keeps it on the sessionRunner. The durable-store
+// per (key, klax_id); the daemon keeps it on the sessionRunner. The durable-store
 // lock (mu) is DISTINCT from the runner's sr.mu — never held across runner waits.
 type Store struct {
 	dir        string
@@ -78,7 +51,7 @@ type Store struct {
 }
 
 // Open binds a Store to a session. No I/O — directories are created lazily.
-func Open(key string, created int64) *Store { return &Store{dir: WorkDir(key, created)} }
+func Open(key, klaxID string) *Store { return &Store{dir: WorkDir(key, klaxID)} }
 
 func (s *Store) filesDir() string { return filepath.Join(s.dir, "files") }
 

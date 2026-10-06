@@ -10,29 +10,28 @@ import (
 	"github.com/PiDmitrius/klax/internal/session"
 )
 
-// TestRaiseReadThroughIsMonotonic locks the durable read-watermark ingest: a report only ever
-// moves the watermark forward — a later turn, or the same turn with a
-// further block — and a stale/duplicate/out-of-order report is a no-op, so nothing can un-read.
-func TestRaiseReadThroughIsMonotonic(t *testing.T) {
+// TestRaiseReadPosIsMonotonic locks the durable read-position ingest: a report only ever moves the
+// position forward — a later turn, or the same turn with a further block — and a stale, duplicate
+// or out-of-order report is a no-op, so nothing can un-read.
+func TestRaiseReadPosIsMonotonic(t *testing.T) {
 	s := &session.Session{}
-
-	if !s.AdvanceReadThrough(false, 42, 3) || s.ReadThroughTurn != 42 || s.ReadThroughBlock != 3 {
-		t.Fatalf("initial raise: watermark = (%d,%d), want moved to (42,3)", s.ReadThroughTurn, s.ReadThroughBlock)
+	steps := []struct {
+		turn   int64
+		block  int
+		raised bool
+		want   string
+	}{
+		{42, 3, true, "42.3"},
+		{42, 5, true, "42.5"},
+		{42, 5, false, "42.5"},
+		{42, 2, false, "42.5"},
+		{41, 999, false, "42.5"},
+		{43, 0, true, "43.0"},
 	}
-	if !s.AdvanceReadThrough(false, 42, 5) || s.ReadThroughBlock != 5 {
-		t.Fatalf("same-turn further block: block = %d, want moved to 5", s.ReadThroughBlock)
-	}
-	if s.AdvanceReadThrough(false, 42, 5) {
-		t.Fatal("re-report of the same position must be a no-op")
-	}
-	if s.AdvanceReadThrough(false, 42, 2) || s.ReadThroughBlock != 5 {
-		t.Fatalf("earlier block on same turn regressed watermark to %d", s.ReadThroughBlock)
-	}
-	if s.AdvanceReadThrough(false, 41, 999) || s.ReadThroughTurn != 42 || s.ReadThroughBlock != 5 {
-		t.Fatalf("earlier turn regressed watermark to (%d,%d)", s.ReadThroughTurn, s.ReadThroughBlock)
-	}
-	if !s.AdvanceReadThrough(false, 43, 0) || s.ReadThroughTurn != 43 || s.ReadThroughBlock != 0 {
-		t.Fatalf("later turn: watermark = (%d,%d), want moved to (43,0)", s.ReadThroughTurn, s.ReadThroughBlock)
+	for _, st := range steps {
+		if got := s.AdvanceReadPos(false, st.turn, st.block); got != st.raised || s.ReadPos != st.want {
+			t.Fatalf("AdvanceReadPos(%d,%d) = %v, read_pos %q; want %v, %q", st.turn, st.block, got, s.ReadPos, st.raised, st.want)
+		}
 	}
 }
 
@@ -85,7 +84,7 @@ func TestGroupRowsKeysAndOrd(t *testing.T) {
 		{Role: "user", Seq: 3, event: 8},
 		{Role: "user", Seq: 4, queueOnly: true},
 	}
-	groups := groupRows(9, rows)
+	groups := groupRows("s9", rows)
 	var keys []string
 	for i, g := range groups {
 		keys = append(keys, g.Key)
@@ -93,19 +92,22 @@ func TestGroupRowsKeysAndOrd(t *testing.T) {
 			t.Fatalf("ord not increasing at %d: %+v then %+v", i, groups[i-1].Ord, g.Ord)
 		}
 	}
-	if want := []string{"t:9:0", "t:9:1", "t:9:2", "t:9:3", "t:9:4"}; !slices.Equal(keys, want) {
+	if want := []string{"t:0", "t:1", "t:2", "t:3", "t:4"}; !slices.Equal(keys, want) {
 		t.Fatalf("keys = %v, want %v", keys, want)
 	}
 	if len(groups[0].Rows) != 1 || groups[0].Head != nil || len(groups[1].Rows) != 1 || groups[1].Rows[0].Text != "note" {
 		t.Fatalf("standalone rows misplaced: %+v", groups)
 	}
-	for i, want := range []string{"[-1,0]", "[3,1]", "[8,2]", "[8,3]", "[null,4]"} {
+	for i, want := range []string{`"0.-1"`, `"1.3"`, `"2.8"`, `"3.8"`, `"4"`} {
 		if got, _ := json.Marshal(groups[i].Ord); string(got) != want {
 			t.Fatalf("ord %d = %s, want %s", i, got, want)
 		}
 	}
-	if o, ok := parseOrd("null,4"); !ok || o != groups[4].Ord {
-		t.Fatalf("parseOrd(null,4) = %+v, %v", o, ok)
+	if o, ok := parseBound("3.8"); !ok || o != groups[3].Ord {
+		t.Fatalf("parseBound(3.8) = %+v, %v", o, ok)
+	}
+	if _, ok := parseBound("4"); ok {
+		t.Fatal("a bound without a transcript record must be rejected")
 	}
 }
 
@@ -191,7 +193,7 @@ func TestDiffGroupsSendsOnlyChanges(t *testing.T) {
 		{Key: "t:1:5", Ord: uiOrd{event: 2, seq: 5}, Head: next, Blocks: []uiBlock{block("A"), {Role: "assistant", Text: "B", Time: "t1"}, block("C"), block("D")}},
 		{Key: "t:1:6", Ord: uiOrd{event: 3, seq: 6}, Head: &uiTurn{Role: "user", Seq: 6, State: "done"}},
 	}
-	evs := diffGroups(1, old, cur)
+	evs := diffGroups("s1", old, cur)
 	if len(evs) != 3 || evs[0].ev.Group == nil || evs[1].ev.Group == nil || evs[2].ev.Removed == nil {
 		t.Fatalf("events = %+v, want two group deltas then one removal", evs)
 	}
@@ -214,11 +216,11 @@ func TestDiffGroupsSendsOnlyChanges(t *testing.T) {
 		t.Fatalf("removal = %+v", rm)
 	}
 	shrunk := []uiGroup{old[0], {Key: "t:1:5", Ord: old[1].Ord, Head: old[1].Head, Blocks: old[1].Blocks[:1]}, old[2]}
-	evs = diffGroups(1, old, shrunk)
+	evs = diffGroups("s1", old, shrunk)
 	if len(evs) != 1 || evs[0].ev.Group.Head != nil || evs[0].ev.Group.Blocks.Length == nil || *evs[0].ev.Group.Blocks.Length != 1 {
 		t.Fatalf("shrunk group delta = %+v", evs)
 	}
-	if evs := diffGroups(1, old, old); len(evs) != 0 {
+	if evs := diffGroups("s1", old, old); len(evs) != 0 {
 		t.Fatalf("unchanged groups produced %d events", len(evs))
 	}
 }
@@ -226,22 +228,22 @@ func TestDiffGroupsSendsOnlyChanges(t *testing.T) {
 // A tab patch carries only the changed fields (null for a dropped one); a new tab arrives whole
 // and membership changes send the order.
 func TestDiffTabsSendsOnlyChanges(t *testing.T) {
-	a := uiSessionInfo{Created: 1, Name: "one", Unread: 3, ReadThrough: "1.0"}
-	b := uiSessionInfo{Created: 2, Name: "two"}
+	a := uiSessionInfo{KlaxID: "a1", Name: "one", Unread: 3, ReadPos: "1.0"}
+	b := uiSessionInfo{KlaxID: "b2", Name: "two"}
 	pub, evs := diffTabs(roleRW, nil, []uiSessionInfo{a, b})
 	if len(evs) != 0 {
 		t.Fatalf("first publication sent %d events", len(evs))
 	}
-	a.Unread, a.ReadThrough = 0, "2.0"
-	c := uiSessionInfo{Created: 3, Name: "three"}
+	a.Unread, a.ReadPos = 0, "2.0"
+	c := uiSessionInfo{KlaxID: "c3", Name: "three"}
 	_, evs = diffTabs(roleRW, pub, []uiSessionInfo{a, c})
 	if len(evs) != 3 {
 		t.Fatalf("events = %+v, want two tab patches and the order", evs)
 	}
-	if got := string(evs[0].ev.Tab); got != `{"created":1,"read_through":"2.0","unread":null}` {
+	if got := string(evs[0].ev.Tab); evs[0].ev.KlaxID != a.KlaxID || got != `{"read_pos":"2.0","unread":null}` {
 		t.Fatalf("tab patch = %s", got)
 	}
-	if !strings.Contains(string(evs[1].ev.Tab), `"name":"three"`) || !slices.Equal(evs[2].ev.Tabs, []int64{1, 3}) || evs[2].role != roleRW {
+	if evs[1].ev.KlaxID != c.KlaxID || !strings.Contains(string(evs[1].ev.Tab), `"name":"three"`) || !slices.Equal(evs[2].ev.Tabs, []string{"a1", "c3"}) || evs[2].role != roleRW {
 		t.Fatalf("new tab and order = %s %v", evs[1].ev.Tab, evs[2].ev.Tabs)
 	}
 }

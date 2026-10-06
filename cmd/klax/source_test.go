@@ -28,7 +28,7 @@ func TestEnqueueToSessionRejectsMissingTarget(t *testing.T) {
 	d.store = newStoreWithChat("tg:1", "one")
 	d.runners = make(map[runnerKey]*sessionRunner)
 
-	d.enqueueToSession("tg:1", "100", "hi", nil, 99999, "")
+	d.enqueueToSession("tg:1", "100", "hi", nil, "s99999", "")
 
 	if len(d.runners) != 0 {
 		t.Fatalf("missing target must not create a runner, got %d", len(d.runners))
@@ -52,30 +52,30 @@ func TestEnqueueToSessionBindsExplicitTarget(t *testing.T) {
 	d.store = newStoreWithChat("tg:1", "active", "other")
 	d.runners = make(map[runnerKey]*sessionRunner)
 
-	var targetCreated, activeCreated int64
+	var targetKlaxID, activeKlaxID string
 	for _, s := range d.store.SessionsFor("tg:1") {
 		if s.Active {
-			activeCreated = s.Created
+			activeKlaxID = s.KlaxID
 		} else {
-			targetCreated = s.Created
+			targetKlaxID = s.KlaxID
 		}
 	}
-	if targetCreated == 0 || activeCreated == 0 || targetCreated == activeCreated {
-		t.Fatalf("setup: need a distinct active/target pair, got active=%d target=%d", activeCreated, targetCreated)
+	if targetKlaxID == "" || activeKlaxID == "" || targetKlaxID == activeKlaxID {
+		t.Fatalf("setup: need a distinct active/target pair, got active=%s target=%s", activeKlaxID, targetKlaxID)
 	}
 
 	sr := &sessionRunner{runner: runner.New(), processing: true}
-	d.runners[runnerKey{sk: "tg:1", created: targetCreated}] = sr
+	d.runners[runnerKey{sk: "tg:1", klaxID: targetKlaxID}] = sr
 
-	d.enqueueToSession("tg:1", "100", "hi", nil, targetCreated, "")
+	d.enqueueToSession("tg:1", "100", "hi", nil, targetKlaxID, "")
 
 	sr.mu.Lock()
 	defer sr.mu.Unlock()
 	if len(sr.queue) != 1 {
 		t.Fatalf("expected 1 queued message on the target runner, got %d", len(sr.queue))
 	}
-	if sr.queue[0].sessCreated != targetCreated {
-		t.Fatalf("message bound to %d, want explicit target %d (not active %d)", sr.queue[0].sessCreated, targetCreated, activeCreated)
+	if sr.queue[0].klaxID != targetKlaxID {
+		t.Fatalf("message bound to %s, want explicit target %s (not active %s)", sr.queue[0].klaxID, targetKlaxID, activeKlaxID)
 	}
 }
 
@@ -91,12 +91,12 @@ func TestEnqueueToSessionRendersMessengerDMInReadModel(t *testing.T) {
 	d.uiHub = newUIHub()
 
 	sess := d.store.SessionsFor("user:alice")[0]
-	created := sess.Created
+	klaxID := sess.KlaxID
 	// Pre-seed the runner as processing so the spawned queue pump returns at its
 	// guard and no real backend runs.
-	d.runners[runnerKey{sk: "user:alice", created: created}] = &sessionRunner{runner: runner.New(), processing: true}
+	d.runners[runnerKey{sk: "user:alice", klaxID: klaxID}] = &sessionRunner{runner: runner.New(), processing: true}
 
-	d.enqueueToSession("tg:1", "100", "hi there", nil, created, "") // mapped messenger DM: no nonce
+	d.enqueueToSession("tg:1", "100", "hi there", nil, klaxID, "") // mapped messenger DM: no nonce
 
 	found := false
 	rows, _, _ := d.readModelBuild("user:alice", sess)
@@ -122,14 +122,14 @@ func TestEnqueueToSessionRendersInboundImageAsMarkdown(t *testing.T) {
 	d.uiHub = newUIHub()
 
 	sess := d.store.SessionsFor("user:alice")[0]
-	created := sess.Created
-	d.runners[runnerKey{sk: "user:alice", created: created}] = &sessionRunner{runner: runner.New(), processing: true}
+	klaxID := sess.KlaxID
+	d.runners[runnerKey{sk: "user:alice", klaxID: klaxID}] = &sessionRunner{runner: runner.New(), processing: true}
 
 	png, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAIAAAB7QOjdAAAAD0lEQVR4nGP8z8DAwMAAAAYIAQHLR3Z1AAAAAElFTkSuQmCC")
 	if err != nil {
 		t.Fatal(err)
 	}
-	d.enqueueToSession("tg:1", "100", "", []attachment{{filename: "image.png", data: png}}, created, "")
+	d.enqueueToSession("tg:1", "100", "", []attachment{{filename: "image.png", data: png}}, klaxID, "")
 
 	found := false
 	rows, _, _ := d.readModelBuild("user:alice", sess)
@@ -164,12 +164,12 @@ func TestAbortSessionMarksQueuedTurnsErrInReadModel(t *testing.T) {
 	d.uiHub = newUIHub()
 
 	sess := d.store.SessionsFor("user:alice")[0]
-	created := sess.Created
-	d.runners[runnerKey{sk: "user:alice", created: created}] = &sessionRunner{runner: runner.New(), processing: true}
-	d.enqueueToSession("tg:1", "100", "one", nil, created, "")
-	d.enqueueToSession("tg:1", "101", "two", nil, created, "")
+	klaxID := sess.KlaxID
+	d.runners[runnerKey{sk: "user:alice", klaxID: klaxID}] = &sessionRunner{runner: runner.New(), processing: true}
+	d.enqueueToSession("tg:1", "100", "one", nil, klaxID, "")
+	d.enqueueToSession("tg:1", "101", "two", nil, klaxID, "")
 
-	if !d.abortSession("user:alice", created, false) {
+	if !d.abortSession("user:alice", klaxID, false) {
 		t.Fatal("abortSession returned false for queued turns")
 	}
 

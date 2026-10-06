@@ -7,7 +7,7 @@ import (
 
 func TestEnsureLinkStablePersistedAndRemoved(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
-	s := Open("user:alice", 1)
+	s := Open("user:alice", "s1")
 
 	tok, err := s.Commit(LinkRecord{Blob: "000001-01-a.png", Name: "a.png", ContentType: "image/png"})
 	if err != nil {
@@ -21,7 +21,7 @@ func TestEnsureLinkStablePersistedAndRemoved(t *testing.T) {
 		t.Fatalf("the token must be stable: %q vs %q (err %v)", again, tok, err)
 	}
 	// A fresh Store (a restart) reads the SAME token + metadata from links.json.
-	links, err := Open("user:alice", 1).Links()
+	links, err := Open("user:alice", "s1").Links()
 	if err != nil {
 		t.Fatal(err)
 	}

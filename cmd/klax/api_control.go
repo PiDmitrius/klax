@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -45,8 +46,20 @@ func apiFailure(code string) *apiError {
 		message = "Не удалось сохранить сообщение"
 	case "cancel-failed":
 		message = "Не удалось отменить сообщение"
+	case "read-save-failed":
+		message = "Не удалось сохранить отметку прочитанного"
+	case "settings-save-failed":
+		message = "Не удалось сохранить настройки"
+	case "reorder-save-failed":
+		message = "Не удалось сохранить порядок вкладок"
+	case "close-save-failed":
+		message = "Не удалось сохранить закрытие сессии"
 	}
 	return &apiError{Code: code, Message: message, status: status}
+}
+
+func apiFail(w http.ResponseWriter, status int, code, message string) {
+	writeAPIError(w, &apiError{Code: code, Message: message, status: status})
 }
 
 func writeAPIError(w http.ResponseWriter, err *apiError) {
@@ -69,8 +82,8 @@ func optionalNonemptyString(raw json.RawMessage, field, fallback string) (string
 	return value, nil
 }
 
-func (s *uiServer) requireSession(w http.ResponseWriter, sk string, created int64) bool {
-	if s.d.store.Get(sk, created) == nil {
+func (s *uiServer) requireSession(w http.ResponseWriter, sk string, klaxID string) bool {
+	if s.d.store.Get(sk, klaxID) == nil {
 		writeAPIError(w, apiFailure("session-not-found"))
 		return false
 	}
@@ -161,17 +174,42 @@ func awaitTurn(w http.ResponseWriter, r *http.Request, t *turnWait, boundary str
 
 func decodeAPIRequest(body io.Reader, value any, allowEmpty bool) error {
 	decoder := json.NewDecoder(body)
-	if err := decoder.Decode(value); err != nil {
+	var fields map[string]json.RawMessage
+	if err := decoder.Decode(&fields); err != nil {
 		if allowEmpty && err == io.EOF {
 			return nil
 		}
 		return err
 	}
+	if fields == nil {
+		return fmt.Errorf("expected one JSON object")
+	}
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return fmt.Errorf("expected one JSON object")
 	}
-	return nil
+	for field, raw := range fields {
+		tokens := json.NewDecoder(bytes.NewReader(raw))
+		for {
+			token, err := tokens.Token()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return err
+			}
+			if token == nil {
+				return fmt.Errorf("field %q must not contain null", field)
+			}
+		}
+	}
+	data, err := json.Marshal(fields)
+	if err != nil {
+		return err
+	}
+	strict := json.NewDecoder(bytes.NewReader(data))
+	strict.DisallowUnknownFields()
+	return strict.Decode(value)
 }
 
 const retainedTurnResults = 64

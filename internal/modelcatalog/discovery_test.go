@@ -22,7 +22,7 @@ func TestCodexPagesAndNotifications(t *testing.T) {
 	var sent bytes.Buffer
 	p := protocol{json.NewEncoder(&sent), bufio.NewScanner(strings.NewReader(input))}
 	got, err := p.codex()
-	if err != nil || !reflect.DeepEqual(got, []Model{{Value: "gpt-a", Label: "gpt-a", Default: true, Efforts: []string{"low", "high"}}, {Value: "gpt-b", Label: "gpt-b"}}) {
+	if err != nil || !reflect.DeepEqual(got, []Model{{Value: "gpt-a", Label: "gpt-a", Default: true, ThinkLevels: []string{"low", "high"}}, {Value: "gpt-b", Label: "gpt-b"}}) {
 		t.Fatal(got, err)
 	}
 	dec := json.NewDecoder(&sent)
@@ -51,7 +51,7 @@ func TestClaudeUsesResolvedIDsAndDeduplicates(t *testing.T) {
 	var sent bytes.Buffer
 	p := protocol{json.NewEncoder(&sent), bufio.NewScanner(strings.NewReader(input))}
 	got, err := p.claude()
-	if err != nil || !reflect.DeepEqual(got, []Model{{Value: "claude-opus-example[1m]", Label: "claude-opus-example[1m]", Default: true, Efforts: []string{"high", "max"}}, {Value: "claude-example-1", Label: "claude-example-1"}}) {
+	if err != nil || !reflect.DeepEqual(got, []Model{{Value: "claude-opus-example[1m]", Label: "claude-opus-example[1m]", Default: true, ThinkLevels: []string{"high", "max"}}, {Value: "claude-example-1", Label: "claude-example-1"}}) {
 		t.Fatal(got, err)
 	}
 	var req struct {

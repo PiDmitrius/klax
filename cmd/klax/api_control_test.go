@@ -16,15 +16,16 @@ import (
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/config"
+	"github.com/PiDmitrius/klax/internal/sessfiles"
 	"github.com/PiDmitrius/klax/internal/session"
 	"github.com/PiDmitrius/klax/internal/turnaudit"
 )
 
 type apiFixture struct {
-	d       *daemon
-	s       *uiServer
-	dir     string
-	created int64
+	d      *daemon
+	s      *uiServer
+	dir    string
+	klaxID string
 }
 
 func newAPIFixture(t *testing.T, start, finish, backend string) *apiFixture {
@@ -60,7 +61,7 @@ func newAPIFixture(t *testing.T, start, finish, backend string) *apiFixture {
 	if backend == "block" {
 		script += "while [ -d \"$KLAX_API_TEST_DIR\" ] && [ ! -f \"$KLAX_API_TEST_DIR/backend.release\" ]; do sleep 0.01; done\n"
 	}
-	script += "printf '%s' \"$KLAX_SESSION_ID\" > \"$KLAX_API_TEST_DIR/session-env\"\n"
+	script += "printf '%s' \"$KLAX_ID\" > \"$KLAX_API_TEST_DIR/session-env\"\n"
 	if backend == "fail" {
 		script += "exit 1\n"
 	} else {
@@ -70,7 +71,7 @@ func newAPIFixture(t *testing.T, start, finish, backend string) *apiFixture {
 		t.Fatal(err)
 	}
 	sess := d.store.New("user:test", "test", dir, session.ScopeDefaults{Backend: "codex"})
-	f := &apiFixture{d: d, s: &uiServer{d: d, tokens: map[string]uiAccess{"access": {User: "test"}, "other": {User: "other"}}}, dir: dir, created: sess.Created}
+	f := &apiFixture{d: d, s: &uiServer{d: d, tokens: map[string]uiAccess{"access": {User: "test"}, "other": {User: "other"}}}, dir: dir, klaxID: sess.KlaxID}
 	t.Cleanup(func() {
 		for _, phase := range []string{"start", "finish", "backend"} {
 			if err := os.WriteFile(filepath.Join(dir, phase+".release"), nil, 0600); err != nil {
@@ -121,7 +122,7 @@ func (f *apiFixture) request(path, body, token string) *httptest.ResponseRecorde
 	return w
 }
 func (f *apiFixture) send(boundary, nonce string) *httptest.ResponseRecorder {
-	return f.request("/api/send", fmt.Sprintf(`{"session":%d,"text":"hello","return_on":%q,"nonce":%q}`, f.created, boundary, nonce), "")
+	return f.request("/api/send", fmt.Sprintf(`{"klax_id":%q,"text":"hello","return_on":%q,"nonce":%q}`, f.klaxID, boundary, nonce), "")
 }
 func (f *apiFixture) entered(t *testing.T, phase string) {
 	t.Helper()
@@ -231,8 +232,8 @@ func TestAPIWaitBoundariesAndSharedHookSnapshot(t *testing.T) {
 	f.release(t, "finish")
 	end := eventResponse(t, response(t, finish), "finish", "success")
 	env, err := os.ReadFile(filepath.Join(f.dir, "session-env"))
-	if err != nil || string(env) != fmt.Sprint(f.created) {
-		t.Fatalf("backend session environment = %q, want %d, error = %v", env, f.created, err)
+	if err != nil || string(env) != fmt.Sprint(f.klaxID) {
+		t.Fatalf("backend session environment = %q, want %s, error = %v", env, f.klaxID, err)
 	}
 	raw, err = os.ReadFile(filepath.Join(f.dir, "finish.json"))
 	if err != nil {
@@ -260,13 +261,13 @@ func TestAPIWaitBoundariesAndSharedHookSnapshot(t *testing.T) {
 func TestAPIImmediateFinishWithoutHooks(t *testing.T) {
 	f := newAPIFixture(t, "", "", "")
 	for i := 0; i < 8; i++ {
-		w := f.request("/api/send", fmt.Sprintf(`{"session":%d,"text":"hello","return_on":"finish"}`, f.created), "")
+		w := f.request("/api/send", fmt.Sprintf(`{"klax_id":%q,"text":"hello","return_on":"finish"}`, f.klaxID), "")
 		ev := eventResponse(t, w, "finish", "success")
 		if ev.Turn.Result.Output.Text != "done" {
 			t.Fatal("missing backend output")
 		}
 	}
-	turns, err := f.d.getRunner("user:test", f.created).store.InboundLog()
+	turns, err := f.d.getRunner("user:test", f.klaxID).store.InboundLog()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +292,7 @@ func TestAPIErrorsAndAbort(t *testing.T) {
 			ch := asyncResponse(func() *httptest.ResponseRecorder { return f.send("finish", "n") })
 			if tc.backend == "block" {
 				f.entered(t, "backend")
-				f.d.abortSession("user:test", f.created, false)
+				f.d.abortSession("user:test", f.klaxID, false)
 			}
 			w := response(t, ch)
 			if tc.code != "" {
@@ -316,7 +317,7 @@ func TestAPIQueuedAbortAndDeleteWakeWaiters(t *testing.T) {
 			f.send("queued", "second")
 			wait := asyncResponse(func() *httptest.ResponseRecorder { return f.send("finish", "second") })
 			blocked(t, wait)
-			f.d.abortSession("user:test", f.created, closing)
+			f.d.abortSession("user:test", f.klaxID, closing)
 			code := "aborted"
 			if closing {
 				code = "session-deleted"
@@ -332,7 +333,7 @@ func TestAPIQueuedAbortAndDeleteWakeWaiters(t *testing.T) {
 
 func TestAPINonceUnavailableAndValidation(t *testing.T) {
 	f := newAPIFixture(t, "", "", "")
-	sr := f.d.getRunner("user:test", f.created)
+	sr := f.d.getRunner("user:test", f.klaxID)
 	if _, _, _, _, err := sr.store.Enqueue("ui:test", "", "historical", "hello", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -341,7 +342,7 @@ func TestAPINonceUnavailableAndValidation(t *testing.T) {
 	}
 	errorResponse(t, f.send("finish", "historical"), "result-unavailable")
 	for _, fields := range []string{`"nonce":""`, `"nonce":null`, `"nonce":1`, `"return_on":""`, `"return_on":true`, `"return_on":"later"`} {
-		w := f.request("/api/send", fmt.Sprintf(`{"session":%d,"text":"hello",%s}`, f.created, fields), "")
+		w := f.request("/api/send", fmt.Sprintf(`{"klax_id":%q,"text":"hello",%s}`, f.klaxID, fields), "")
 		if w.Code != 400 {
 			t.Fatalf("%s: %d", fields, w.Code)
 		}
@@ -352,13 +353,233 @@ func TestAPINonceUnavailableAndValidation(t *testing.T) {
 	}
 }
 
+func TestAPIRejectsMalformedRequestsWithoutMutations(t *testing.T) {
+	f := newAPIFixture(t, "", "", "")
+	before, _ := json.Marshal(f.d.store.SessionsFor("user:test"))
+	for _, c := range []struct{ path, fields string }{
+		{"/api/new", `"model":"wrong"`},
+		{"/api/settings", `"model":"wrong"`},
+		{"/api/settings", `"tty":null`},
+		{"/api/settings", `"groups":null`},
+		{"/api/settings", `"groups":[null]`},
+		{"/api/send", `"text":"hello","session":"wrong"`},
+		{"/api/abort", `"extra":true`},
+		{"/api/cancel", `"turn_seq":1,"extra":true`},
+		{"/api/read", `"read_pos":"9.2","extra":true`},
+		{"/api/rename", `"name":"changed","extra":true`},
+		{"/api/reorder", `"tabs":[],"order":[]`},
+		{"/api/reorder", `"tabs":[null]`},
+		{"/api/close", `"extra":true`},
+		{"/api/changes", `"after":"","extra":true`},
+		{"/api/models/refresh", `"backend":"codex","extra":true`},
+		{"/api/system/update", `"tag":"v0.9.3","extra":true`},
+		{"/api/system/check", `"extra":true`},
+	} {
+		t.Run(c.path+"/"+c.fields, func(t *testing.T) {
+			body := fmt.Sprintf(`{"klax_id":%q,%s}`, f.klaxID, c.fields)
+			switch c.path {
+			case "/api/new", "/api/reorder", "/api/changes", "/api/models/refresh", "/api/system/update", "/api/system/check":
+				body = "{" + c.fields + "}"
+			}
+			w := f.request(c.path, body, "")
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("%s: %d %s", body, w.Code, w.Body.String())
+			}
+			errorResponse(t, w, "bad-request")
+		})
+	}
+	for _, body := range []string{"null", "[]", `{"name":"changed"} {}`, `{"name":"changed"} garbage`} {
+		w := f.request("/api/new", body, "")
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s: %d %s", body, w.Code, w.Body.String())
+		}
+	}
+	after, _ := json.Marshal(f.d.store.SessionsFor("user:test"))
+	if !bytes.Equal(before, after) {
+		t.Fatalf("rejected requests changed sessions: %s -> %s", before, after)
+	}
+	if _, err := os.Stat(filepath.Join(f.dir, "backend.entered")); !os.IsNotExist(err) {
+		t.Fatal("rejected request started a backend", err)
+	}
+}
+
+func TestAPISessionMutationsRollbackFailedSaveAndRetry(t *testing.T) {
+	for _, c := range []struct{ path, code, token string }{
+		{"/api/settings", "settings-save-failed", ""},
+		{"/api/rename", "settings-save-failed", ""},
+		{"/api/read", "read-save-failed", ""},
+		{"/api/read", "read-save-failed", "reader"},
+		{"/api/reorder", "reorder-save-failed", ""},
+		{"/api/close", "close-save-failed", ""},
+	} {
+		t.Run(c.path+"/"+c.token, func(t *testing.T) {
+			f := newAPIFixture(t, "", "", "")
+			f.s.tokens["reader"] = uiAccess{User: "test", ReadOnly: true}
+			second := f.d.store.New("user:test", "second", f.dir, session.ScopeDefaults{Backend: "codex"})
+			if err := f.d.store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			before, _ := json.Marshal(f.d.store.SessionsFor("user:test"))
+			keep := f.d.sessionStore("user:test", f.klaxID).Path("keep.txt")
+			if err := os.MkdirAll(filepath.Dir(keep), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(keep, []byte("keep"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(session.StoreDir(), "sessions.json")
+			if err := os.Rename(path, path+".before"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0700); err != nil {
+				t.Fatal(err)
+			}
+			body := fmt.Sprintf(`{"klax_id":%q}`, f.klaxID)
+			switch c.path {
+			case "/api/settings", "/api/rename":
+				body = fmt.Sprintf(`{"klax_id":%q,"name":"changed"}`, f.klaxID)
+			case "/api/read":
+				body = fmt.Sprintf(`{"klax_id":%q,"read_pos":"9.2"}`, f.klaxID)
+			case "/api/reorder":
+				body = fmt.Sprintf(`{"tabs":[%q,%q]}`, second.KlaxID, f.klaxID)
+			}
+			w := f.request(c.path, body, c.token)
+			if w.Code != http.StatusInternalServerError {
+				t.Fatalf("failed save: %d %s", w.Code, w.Body.String())
+			}
+			errorResponse(t, w, c.code)
+			after, _ := json.Marshal(f.d.store.SessionsFor("user:test"))
+			if !bytes.Equal(before, after) {
+				t.Fatalf("failed save changed sessions: %s -> %s", before, after)
+			}
+			if data, err := os.ReadFile(keep); err != nil || string(data) != "keep" {
+				t.Fatal("failed mutation removed session files", err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(path+".before", path); err != nil {
+				t.Fatal(err)
+			}
+			w = f.request(c.path, body, c.token)
+			if w.Code != http.StatusOK && w.Code != http.StatusNoContent {
+				t.Fatalf("retry: %d %s", w.Code, w.Body.String())
+			}
+			reloaded, err := session.LoadStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			live, _ := json.Marshal(f.d.store.SessionsFor("user:test"))
+			disk, _ := json.Marshal(reloaded.SessionsFor("user:test"))
+			if !bytes.Equal(live, disk) || bytes.Equal(live, before) {
+				t.Fatalf("retry was not durable: live=%s disk=%s prior=%s", live, disk, before)
+			}
+		})
+	}
+}
+
+func TestAPIMultipartRejectsUnknownAndDuplicateFields(t *testing.T) {
+	f := newAPIFixture(t, "", "", "")
+	for _, field := range []string{"session", "klax_id", "upload"} {
+		var body bytes.Buffer
+		mw := multipart.NewWriter(&body)
+		_ = mw.WriteField("klax_id", f.klaxID)
+		_ = mw.WriteField("text", "hello")
+		if field == "upload" {
+			part, err := mw.CreateFormFile(field, "note.txt")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.WriteString(part, "contents")
+		} else {
+			_ = mw.WriteField(field, "wrong")
+		}
+		_ = mw.Close()
+		r := httptest.NewRequest("POST", "/api/send", &body)
+		r.Header.Set("Authorization", "Bearer access")
+		r.Header.Set("Content-Type", mw.FormDataContentType())
+		w := httptest.NewRecorder()
+		f.s.routes().ServeHTTP(w, r)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("%s: %d %s", field, w.Code, w.Body.String())
+		}
+		errorResponse(t, w, "bad-request")
+	}
+	if _, err := os.Stat(filepath.Join(f.dir, "backend.entered")); !os.IsNotExist(err) {
+		t.Fatal("invalid form started a backend", err)
+	}
+}
+
+func TestAPISettingsOmittedAndEmptyFields(t *testing.T) {
+	f := newAPIFixture(t, "", "", "")
+	f.d.store.UpdateSession("user:test", f.klaxID, func(cur *session.Session) {
+		cur.ModelRequested, cur.Think, cur.SystemPrompt = "retained-model", "high", "prompt"
+		cur.Groups = []string{"group"}
+	})
+	w := f.request("/api/settings", fmt.Sprintf(`{"klax_id":%q,"groups":[null]}`, f.klaxID), "")
+	if w.Code != http.StatusBadRequest {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	cur := f.d.store.Get("user:test", f.klaxID)
+	if len(cur.Groups) != 1 || cur.Groups[0] != "group" {
+		t.Fatal("rejected groups changed", cur.Groups)
+	}
+	w = f.request("/api/settings", fmt.Sprintf(`{"klax_id":%q,"name":"renamed"}`, f.klaxID), "")
+	if w.Code != http.StatusOK {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	cur = f.d.store.Get("user:test", f.klaxID)
+	if cur.ModelRequested != "retained-model" || cur.Think != "high" || cur.SystemPrompt != "prompt" || len(cur.Groups) != 1 {
+		t.Fatal("omitted fields changed", cur)
+	}
+	w = f.request("/api/settings", fmt.Sprintf(`{"klax_id":%q,"model_requested":"","think":"","system_prompt":"","groups":[]}`, f.klaxID), "")
+	if w.Code != http.StatusOK {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	reloaded, err := session.LoadStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur = reloaded.Get("user:test", f.klaxID)
+	if cur.Name != "renamed" || cur.ModelRequested != "" || cur.Think != "" || cur.SystemPrompt != "" || len(cur.Groups) != 0 {
+		t.Fatal("empty overrides not persisted", cur)
+	}
+}
+
+func TestAPISettingsConflictsHaveDistinctCodes(t *testing.T) {
+	f := newAPIFixture(t, "", "", "")
+	f.d.store.UpdateSession("user:test", f.klaxID, func(cur *session.Session) { cur.Messages = 1 })
+	for _, c := range []struct{ fields, code string }{
+		{`"backend":"claude"`, "backend-locked"},
+		{fmt.Sprintf(`"cwd":%q`, f.dir), "cwd-locked"},
+	} {
+		w := f.request("/api/settings", fmt.Sprintf(`{"klax_id":%q,%s}`, f.klaxID, c.fields), "")
+		if w.Code != http.StatusConflict {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		errorResponse(t, w, c.code)
+	}
+	sr := f.d.getRunner("user:test", f.klaxID)
+	sr.mu.Lock()
+	sr.processing = true
+	sr.mu.Unlock()
+	w := f.request("/api/settings", fmt.Sprintf(`{"klax_id":%q,"think":""}`, f.klaxID), "")
+	sr.mu.Lock()
+	sr.processing = false
+	sr.mu.Unlock()
+	if w.Code != http.StatusConflict {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	errorResponse(t, w, "session-busy")
+}
+
 func TestAPIDisconnectDoesNotCancelAndNoIntermediateResponse(t *testing.T) {
 	f := newAPIFixture(t, "block", "", "")
 	server := httptest.NewServer(f.s.routes())
 	defer server.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, "POST", server.URL+"/api/send", strings.NewReader(fmt.Sprintf(`{"session":%d,"text":"hello","return_on":"finish","nonce":"lost"}`, f.created)))
+	req, _ := http.NewRequestWithContext(ctx, "POST", server.URL+"/api/send", strings.NewReader(fmt.Sprintf(`{"klax_id":%q,"text":"hello","return_on":"finish","nonce":"lost"}`, f.klaxID)))
 	req.Header.Set("Authorization", "Bearer access")
 	done := make(chan error, 1)
 	go func() {
@@ -392,7 +613,7 @@ func TestAPIMultipartWait(t *testing.T) {
 	f := newAPIFixture(t, "", "", "")
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
-	_ = mw.WriteField("session", fmt.Sprint(f.created))
+	_ = mw.WriteField("klax_id", f.klaxID)
 	_ = mw.WriteField("text", "read file")
 	_ = mw.WriteField("return_on", "finish")
 	part, _ := mw.CreateFormFile("files", "note.txt")
@@ -411,7 +632,7 @@ func TestAPIMultipartWait(t *testing.T) {
 
 func TestAPINewRejectsInvalidWithoutPartialSession(t *testing.T) {
 	f := newAPIFixture(t, "", "", "")
-	for _, body := range []string{`{"control_token":""}`, `{"control_token":null}`, `{"control_token":false}`, `{"backend":"unknown"}`, `{"cwd":"/nonexistent/klax-api-test"}`} {
+	for _, body := range []string{`{"backend":"unknown"}`, `{"cwd":"/nonexistent/klax-api-test"}`} {
 		w := f.request("/api/new", body, "")
 		if w.Code != 400 {
 			t.Fatalf("%s: %d", body, w.Code)
@@ -454,7 +675,7 @@ func TestAPIPreparationFailuresWakeBothBoundaries(t *testing.T) {
 	for _, missingFiles := range []bool{false, true} {
 		t.Run(fmt.Sprint(missingFiles), func(t *testing.T) {
 			f := newAPIFixture(t, "", "", "")
-			sr := f.d.getRunner("user:test", f.created)
+			sr := f.d.getRunner("user:test", f.klaxID)
 			sr.mu.Lock()
 			sr.processing = true
 			sr.mu.Unlock()
@@ -463,7 +684,7 @@ func TestAPIPreparationFailuresWakeBothBoundaries(t *testing.T) {
 			if missingFiles {
 				files = []attachment{{filename: "missing.txt", data: []byte("data")}}
 			}
-			if !f.d.handleInbound(Inbound{ChatID: "ui:test", Text: "hello", TargetCreated: f.created, Nonce: "n", Attachments: files, RawMessage: true, admission: admission}) {
+			if !f.d.handleInbound(Inbound{ChatID: "ui:test", Text: "hello", TargetKlaxID: f.klaxID, Nonce: "n", Attachments: files, RawMessage: true, admission: admission}) {
 				t.Fatal("enqueue rejected")
 			}
 			sr.mu.Lock()
@@ -527,7 +748,7 @@ func (w *delayedAPIWriter) Write(p []byte) (int, error) {
 func TestAPISlowFailedWriterDoesNotBlockQueue(t *testing.T) {
 	f := newAPIFixture(t, "", "", "")
 	w := &delayedAPIWriter{header: make(http.Header), writing: make(chan struct{}), release: make(chan struct{})}
-	req := httptest.NewRequest("POST", "/api/send", strings.NewReader(fmt.Sprintf(`{"session":%d,"text":"hello","return_on":"finish","nonce":"slow"}`, f.created)))
+	req := httptest.NewRequest("POST", "/api/send", strings.NewReader(fmt.Sprintf(`{"klax_id":%q,"text":"hello","return_on":"finish","nonce":"slow"}`, f.klaxID)))
 	req.Header.Set("Authorization", "Bearer access")
 	done := make(chan struct{})
 	go func() { defer close(done); f.s.handleSend(w, req) }()
@@ -552,7 +773,7 @@ func TestAPIDeletionReleasesActiveGateWaiter(t *testing.T) {
 	f.d.store.New("user:test", "other", f.dir, session.ScopeDefaults{Backend: "codex"})
 	wait := asyncResponse(func() *httptest.ResponseRecorder { return f.send("finish", "deleted") })
 	f.entered(t, "start")
-	w := f.request("/api/close", fmt.Sprintf(`{"session":%d}`, f.created), "")
+	w := f.request("/api/close", fmt.Sprintf(`{"klax_id":%q}`, f.klaxID), "")
 	if w.Code != 204 {
 		t.Fatal(w.Code, w.Body.String())
 	}
@@ -576,9 +797,106 @@ func TestAPIFinalSaveFailure(t *testing.T) {
 	errorResponse(t, response(t, wait), "result-save-failed")
 }
 
+func TestMessengerDeletionPreservesFilesOnSaveFailure(t *testing.T) {
+	for _, command := range []string{"cleanup", "nuke"} {
+		t.Run(command, func(t *testing.T) {
+			f := newAPIFixture(t, "", "", "")
+			const sk = "user:test"
+			f.d.store.New(sk, "active", f.dir, session.ScopeDefaults{Backend: "codex"})
+			if err := f.d.store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			sr := f.d.getRunner(sk, f.klaxID)
+			cancelled := false
+			sr.cancel = func() { cancelled = true }
+			_, _, files, _, err := sr.store.Enqueue("tg:1", "", "pending", "pending", []sessfiles.NamedReader{{Name: "report.txt", R: strings.NewReader("DATA")}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(session.StoreDir(), "sessions.json")
+			if err := os.Rename(path, path+".saved"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if command == "cleanup" {
+				f.d.handleSessionDelete("tg:1", "", sk, "1")
+			} else if deleted, aborted, err := f.d.deleteInactiveSessions(sk); err == nil || deleted != 0 || aborted != 0 {
+				t.Fatalf("failed deletion = %d, %d, %v", deleted, aborted, err)
+			}
+			if f.d.store.Get(sk, f.klaxID) == nil || cancelled || f.d.lookupRunner(sk, f.klaxID) != sr {
+				t.Fatal("failed deletion removed or aborted the session")
+			}
+			data, err := os.ReadFile(sr.store.Path(files[0]))
+			if err != nil || string(data) != "DATA" {
+				t.Fatalf("file destroyed: %q, %v", data, err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(path+".saved", path); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := session.LoadStore()
+			if err != nil || loaded.Get(sk, f.klaxID) == nil {
+				t.Fatalf("persisted session lost: %v", err)
+			}
+		})
+	}
+}
+
+func TestEmptySessionBackendStaysResolvedAcrossTurns(t *testing.T) {
+	f := newAPIFixture(t, "", "", "")
+	f.d.cfg.DefaultBackend = "claude"
+	f.d.store.UpdateSession("user:test", f.klaxID, func(sess *session.Session) { sess.Backend = "" })
+	f.d.store.UpdateScopeDefaults("user:test", func(def *session.ScopeDefaults) { def.Backend = "codex" })
+	settings, _ := f.d.uiSessionSettings("user:test", f.klaxID)
+	tabs := f.d.sessionsSnapshot("user:test", f.d.store.SessionsFor("user:test"), nil, false)
+	if settings.Backend != "codex" || tabs[0].Backend != "codex" {
+		t.Fatalf("settings and tabs disagree: %s, %s", settings.Backend, tabs[0].Backend)
+	}
+	for _, nonce := range []string{"first", "second"} {
+		w := f.send("finish", nonce)
+		eventResponse(t, w, "finish", "success")
+	}
+	loaded, err := session.LoadStore()
+	if err != nil || loaded.Get("user:test", f.klaxID).Backend != "codex" {
+		t.Fatalf("backend not persisted: %v", err)
+	}
+	runs, err := os.ReadFile(filepath.Join(f.dir, "runs"))
+	if err != nil || strings.Count(string(runs), "x") != 2 {
+		t.Fatalf("both turns did not use the selected backend: %q, %v", runs, err)
+	}
+}
+
+func TestSettingsEmptyListsAndRenameErrors(t *testing.T) {
+	f := newAPIFixture(t, "", "", "")
+	f.d.models = nil
+	for _, query := range []string{"", "?klax_id=" + f.klaxID} {
+		r := httptest.NewRequest(http.MethodGet, "/api/settings"+query, nil)
+		r.Header.Set("Authorization", "Bearer access")
+		w := httptest.NewRecorder()
+		f.s.routes().ServeHTTP(w, r)
+		var data map[string]json.RawMessage
+		if err := json.Unmarshal(w.Body.Bytes(), &data); err != nil || w.Code != http.StatusOK {
+			t.Fatalf("settings: %d %s, %v", w.Code, w.Body.String(), err)
+		}
+		for _, field := range []string{"models", "groups"} {
+			if string(data[field]) != "[]" {
+				t.Fatalf("%s = %s, want []", field, data[field])
+			}
+		}
+	}
+	for _, path := range []string{"/api/rename", "/api/settings"} {
+		w := f.request(path, fmt.Sprintf(`{"klax_id":%q,"name":""}`, f.klaxID), "")
+		errorResponse(t, w, "invalid-settings")
+	}
+}
+
 func TestAPIResultRetentionPreservesPendingWaiters(t *testing.T) {
 	f := newAPIFixture(t, "", "", "")
-	sr := f.d.getRunner("user:test", f.created)
+	sr := f.d.getRunner("user:test", f.klaxID)
 	sr.mu.Lock()
 	sr.results = make(map[int64]*turnWait)
 	pending := newTurnWait()
@@ -610,11 +928,11 @@ func TestMessengerSessionControl(t *testing.T) {
 			if w := f.request("/api/new", `{"name":"managed"}`, ""); w.Code != 200 {
 				t.Fatal(w.Code, w.Body.String())
 			}
-			id := f.d.store.Active("user:test").Created
+			id := f.d.store.Active("user:test").KlaxID
 			f.d.handleCommand(chatID, "", "/name renamed")
 			f.d.handleCommand(chatID, "", "/prompt instructions")
 			got := f.d.store.Get("user:test", id)
-			if got.Name != "renamed" || got.AppendSystemPrompt != "instructions" {
+			if got.Name != "renamed" || got.SystemPrompt != "instructions" {
 				t.Fatal("messenger settings blocked")
 			}
 			if !f.d.handleInbound(Inbound{ChatID: chatID, MsgID: "1", Text: "hello", Attachments: []attachment{{filename: "note.txt", data: []byte("note")}}}) {
@@ -657,9 +975,10 @@ func TestMessengerNukeWakesAPI(t *testing.T) {
 	if w := f.request("/api/new", `{"name":"managed"}`, ""); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	id := f.d.store.Active("user:test").Created
+	f.d.store.UpdateScopeDefaults("user:test", func(def *session.ScopeDefaults) { def.GroupAttachmentMode = "any" })
+	id := f.d.store.Active("user:test").KlaxID
 	wait := asyncResponse(func() *httptest.ResponseRecorder {
-		return f.request("/api/send", fmt.Sprintf(`{"session":%d,"text":"hello","return_on":"finish"}`, id), "")
+		return f.request("/api/send", fmt.Sprintf(`{"klax_id":%q,"text":"hello","return_on":"finish"}`, id), "")
 	})
 	f.entered(t, "start")
 	f.d.handleCommand("tg:1", "", "/nuke fresh")
@@ -667,6 +986,17 @@ func TestMessengerNukeWakesAPI(t *testing.T) {
 	got := f.d.store.SessionsFor("user:test")
 	if len(got) != 1 || got[0].Name != "fresh" || !got[0].Active {
 		t.Fatal("nuke did not replace all sessions")
+	}
+	if f.d.scopeDefaults("user:test").GroupAttachmentMode != "any" {
+		t.Fatal("nuke reset the scope's attachment mode")
+	}
+	if got := f.d.scopeDefaults("user:test").CWD; got != "" {
+		t.Fatalf("nuke pinned the configured cwd: %q", got)
+	}
+	nextCWD := t.TempDir()
+	f.d.cfg.DefaultCWD = nextCWD
+	if next, _ := f.d.createSession("tg:1", "user:test", "next"); next.CWD != nextCWD {
+		t.Fatalf("new session cwd = %q, want changed config %q", next.CWD, nextCWD)
 	}
 	f.release(t, "start")
 }

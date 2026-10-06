@@ -45,13 +45,18 @@ expresses it, so an entry can be checked and can be proven stale.
    publishes them as turn groups and appends each change to a per-user event ring. Snapshots
    (`/api/state`), windows (`/api/transcript`) and the events after a cursor (`/api/changes`) are
    all cut from the same published groups, so applying the events after a snapshot in order equals
-   a reload. A cursor from another process or behind the ring resyncs. Forbidden: a separate reload
-   path, per-client state on the server, or a turn row copying a session-level value.
+   a reload of session state. `at` covers this session stream; `system` in `/api/state` is sampled
+   at request time by `systemView` (`cmd/klax/ui_system.go`), also used by `/api/system`. System
+   uptime and resource measurements do not advance the cursor or emit events. A cursor from another
+   process or behind the ring resyncs. Forbidden: a separate reload path, per-client state on the
+   server, or a turn row copying a session-level value.
 
-6. **The unread axis is the durable `(turn_seq, block)`,** encoded `pos = turn * POS_MULT + block`
+6. **The unread axis is the durable `(turn_seq, block_seq)`,** carried on the wire and stored as
+   `read_pos` `"<turn_seq>.<block_seq>"` and encoded in the client as `pos = turn * POS_MULT + block`
    (`cmd/klax/ui_static/render.js`). Forbidden: a second position scheme, and forbidden: re-zeroing
    an axis the server did not move. Management and viewing access select independent persistent
-   watermarks on this same axis; changing a credential does not change its role's watermark.
+   positions on this same axis (`read_pos`, `read_pos_ro`); changing a credential does not change
+   its role's position.
 
 7. **Live animation has one serialization point.** Every live trigger goes through `commitLive`
    guarded by `liveBusy` (`cmd/klax/ui_static/app.js`), which accumulates instead of stacking.
@@ -75,10 +80,12 @@ expresses it, so an entry can be checked and can be proven stale.
 
 ## Session identity
 
-12. **A session is `(sessKey, Created)`.** `Created` advances from a store-global high-water and is
-    never reused (`internal/session/session.go`); runners are keyed by it (`runnerKey`,
-    `cmd/klax/daemon.go`) and a queued message binds to it at enqueue. Forbidden: resolving a
-    running turn through the chat's *active* session.
+12. **A session is `(sessKey, klax_id)`.** `klax_id` is an opaque id of `[A-Za-z0-9]`
+    (`internal/ids`), unique across the store at creation and compared only for equality; its
+    length is not part of any contract (`internal/session/session.go`). Every surface names it
+    `klax_id`. Runners are keyed by it (`runnerKey`, `cmd/klax/daemon.go`) and a queued message
+    binds to it at enqueue. Forbidden: resolving a running turn through the chat's *active*
+    session, and forbidden: parsing an id or relying on its length.
 
 13. **Backend and CWD freeze once a session has messages.** Both surfaces refuse the change under
     the store lock (`cmd/klax/commands.go`, `cmd/klax/ui_settings.go`), which is what keeps a
@@ -100,10 +107,10 @@ expresses it, so an entry can be checked and can be proven stale.
 
 ## Public surfaces
 
-17. **`docs/audit-v1.md` + `docs/audit-v1.schema.json` are the external contract** for the audit
+17. **`docs/audit-v2.md` + `docs/audit-v2.schema.json` are the external contract** for the audit
     stream. A turn's terminal outcome is carried by `result.status` and `result.error`; blocks are
     a rendering helper, not forensic evidence. Forbidden: changing the meaning or required shape of
-    an existing event inside v1.
+    an existing event inside v2.
 
 ## Backend transcript
 

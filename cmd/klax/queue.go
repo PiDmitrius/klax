@@ -79,17 +79,17 @@ func (d *daemon) syncFinalMessageChain(fullChatID, replyTo string, chain *messag
 	return d.syncMessageChain(ctx, fullChatID, replyTo, chain, text, format)
 }
 
-// enqueueToSessionOrigin queues a message against a session in the chat. targetCreated
-// selects which: 0 binds to whichever session is active right now (every
+// enqueueToSessionOrigin queues a message against a session in the chat. targetKlaxID
+// selects which: "" binds to whichever session is active right now (every
 // messenger path — /switch and /new after this only affect future messages),
-// while a positive value binds to exactly that session (a web-UI tab), validated
+// while a klax id binds to exactly that session (a web-UI tab), validated
 // up front so a stale tab gets a clear error instead of silently hitting the
 // active session.
 // enqueueToSession returns true if the message was durably accepted (queued, or
 // persisted-for-replay while draining), false if it was dropped (empty text and no
 // files, no such session, or a durable-write failure) — the web UI's handleSend
 // uses this to answer success vs restore the composer.
-func (d *daemon) enqueueToSessionOrigin(chatID, msgID, text, originalText string, attachments []attachment, targetCreated int64, nonce string, origin inbound.Origin, admission *sendAdmission) bool {
+func (d *daemon) enqueueToSessionOrigin(chatID, msgID, text, originalText string, attachments []attachment, targetKlaxID, nonce string, origin inbound.Origin, admission *sendAdmission) bool {
 	if text == "" && len(attachments) == 0 {
 		d.sendMessage(chatID, msgID, "∅")
 		return false
@@ -98,9 +98,9 @@ func (d *daemon) enqueueToSessionOrigin(chatID, msgID, text, originalText string
 
 	sk := d.sessionKey(chatID)
 	var sess *session.Session
-	if targetCreated > 0 {
+	if targetKlaxID != "" {
 		// Explicit target (a UI tab): bind to exactly that session.
-		sess = d.store.Get(sk, targetCreated)
+		sess = d.store.Get(sk, targetKlaxID)
 		if sess == nil {
 			d.sendMessage(chatID, msgID, "❌ Сессия не найдена.")
 			return false
@@ -115,13 +115,13 @@ func (d *daemon) enqueueToSessionOrigin(chatID, msgID, text, originalText string
 			return false
 		}
 	}
-	sr := d.getRunner(sk, sess.Created)
+	sr := d.getRunner(sk, sess.KlaxID)
 	sr.acceptMu.Lock()
 	defer sr.acceptMu.Unlock()
 	sr.mu.Lock()
 	closing := sr.closing
 	sr.mu.Unlock()
-	if closing || d.store.Get(sk, sess.Created) == nil {
+	if closing || d.store.Get(sk, sess.KlaxID) == nil {
 		if admission != nil {
 			admission.err = apiFailure("session-deleted")
 		}
@@ -141,7 +141,7 @@ func (d *daemon) enqueueToSessionOrigin(chatID, msgID, text, originalText string
 		if admission != nil {
 			admission.err = apiFailure("enqueue-failed")
 		}
-		log.Printf("durable enqueue (%s/%d): %v", sk, sess.Created, err)
+		log.Printf("durable enqueue (%s/%s): %v", sk, sess.KlaxID, err)
 		d.sendMessage(chatID, msgID, "❌ Не удалось сохранить сообщение, попробуйте снова.")
 		return false
 	}
@@ -181,7 +181,7 @@ func (d *daemon) enqueueToSessionOrigin(chatID, msgID, text, originalText string
 	}
 
 	sr.mu.Lock()
-	qm := queuedMsg{completion: completion, chatID: chatID, msgID: msgID, text: text, originalText: originalText, turnSeq: turnSeq, files: files, sessKey: sk, sessCreated: sess.Created, acceptedAt: acceptedAt, origin: origin}
+	qm := queuedMsg{completion: completion, chatID: chatID, msgID: msgID, text: text, originalText: originalText, turnSeq: turnSeq, files: files, sessKey: sk, klaxID: sess.KlaxID, acceptedAt: acceptedAt, origin: origin}
 	busy := sr.runner.IsBusy()
 	// The "В очереди" notice is a messenger placeholder later reused as the progress
 	// message; the UI streams independently, so skip it there.
@@ -225,30 +225,27 @@ func (d *daemon) replayDurableQueues() {
 	var warm [][3]string
 	for sk, cs := range d.store.Chats {
 		for _, sess := range cs.Sessions {
-			if sess.ID != "" {
-				backend := sess.Backend
-				if backend == "" {
-					backend = "claude"
-				}
-				warm = append(warm, [3]string{backend, sess.ID, sess.CWD})
+			if sess.BackendID != "" {
+				backend := resolveSessionBackend(sess, d.scopeDefaults(sk), d.cfg.GetDefaultBackend())
+				warm = append(warm, [3]string{backend, sess.BackendID, sess.CWD})
 			}
-			sr := d.getRunner(sk, sess.Created)
+			sr := d.getRunner(sk, sess.KlaxID)
 			reenq, recovered, err := sr.store.Replay()
 			if err != nil {
-				log.Printf("durable replay (%s/%d): %v", sk, sess.Created, err)
-				d.dropRunner(sk, sess.Created)
+				log.Printf("durable replay (%s/%s): %v", sk, sess.KlaxID, err)
+				d.dropRunner(sk, sess.KlaxID)
 				continue
 			}
 			for _, t := range recovered {
-				log.Printf("durable replay: recovered run without terminal for %s/%d turn %d", sk, sess.Created, t.Seq)
+				log.Printf("durable replay: recovered run without terminal for %s/%s turn %d", sk, sess.KlaxID, t.Seq)
 			}
 			if turns, err := sr.store.InboundLog(); err != nil {
-				log.Printf("durable replay queue (%s/%d): %v", sk, sess.Created, err)
+				log.Printf("durable replay queue (%s/%s): %v", sk, sess.KlaxID, err)
 			} else {
-				repair = append(repair, bindingRepairs(sk, sess.Created, sess.CWD, turns)...)
+				repair = append(repair, bindingRepairs(sk, sess.KlaxID, sess.CWD, turns)...)
 			}
 			if len(reenq) == 0 {
-				d.dropRunner(sk, sess.Created) // no pending work — don't keep the runner
+				d.dropRunner(sk, sess.KlaxID) // no pending work — don't keep the runner
 				continue
 			}
 			sr.mu.Lock()
@@ -257,13 +254,13 @@ func (d *daemon) replayDurableQueues() {
 					chatID: t.ChatID, msgID: t.MsgID, text: t.Text,
 					originalText: t.OriginalText,
 					turnSeq:      t.Seq, files: t.Files,
-					sessKey: sk, sessCreated: sess.Created,
+					sessKey: sk, klaxID: sess.KlaxID,
 					acceptedAt: t.TS, origin: t.Origin,
 				})
 			}
 			n := len(sr.queue)
 			sr.mu.Unlock()
-			log.Printf("durable replay: re-enqueued %d message(s) for %s/%d", n, sk, sess.Created)
+			log.Printf("durable replay: re-enqueued %d message(s) for %s/%s", n, sk, sess.KlaxID)
 			go d.processSessionQueue(sr)
 		}
 	}
@@ -354,8 +351,8 @@ func (d *daemon) notifyQueuePositions(remaining []queuedMsg) {
 	}
 }
 
-func (d *daemon) clearSessionQueue(sk string, created int64) []queuedMsg {
-	sr := d.lookupRunner(sk, created)
+func (d *daemon) clearSessionQueue(sk string, klaxID string) []queuedMsg {
+	sr := d.lookupRunner(sk, klaxID)
 	if sr == nil {
 		return nil
 	}
@@ -378,8 +375,8 @@ func (d *daemon) clearSessionQueue(sk string, created int64) []queuedMsg {
 // — so the same window is reported as aborted. Plain /abort (closing=false)
 // keeps the original IsBusy()-only check: it cannot stop a run that has no
 // cancel handle yet, so claiming it did would be a lie.
-func (d *daemon) abortSession(sk string, created int64, closing bool) bool {
-	sr := d.lookupRunner(sk, created)
+func (d *daemon) abortSession(sk string, klaxID string, closing bool) bool {
+	sr := d.lookupRunner(sk, klaxID)
 	var cancelFn context.CancelFunc
 	var active bool
 	if sr != nil {
@@ -396,14 +393,14 @@ func (d *daemon) abortSession(sk string, created int64, closing bool) bool {
 		active = sr.runner.IsBusy() || (closing && sr.processing)
 		sr.mu.Unlock()
 	}
-	queued := d.clearSessionQueue(sk, created)
+	queued := d.clearSessionQueue(sk, klaxID)
 	// Durably mark the dropped queued turns aborted, so a restart's replay does not
 	// resurrect work the user just aborted (they were enq-without-run on disk).
 	if sr != nil {
 		for _, qm := range queued {
 			qm.completion.fail("aborted")
 			if err := sr.store.MarkErr(qm.turnSeq, turnErrAborted, 0); err != nil && !errors.Is(err, sessfiles.ErrRemoved) {
-				log.Printf("durable MarkErr aborted (%s/%d): %v", sk, created, err)
+				log.Printf("durable MarkErr aborted (%s/%s): %v", sk, klaxID, err)
 			}
 			// The err is durable (MarkErr); the broadcastSessions below pokes the live channel, which
 			// publishes the error block from the durable log — no separate error event.
@@ -426,8 +423,8 @@ func (d *daemon) abortSession(sk string, created int64, closing bool) bool {
 // cancelQueued removes one not-yet-started message from the session queue once its
 // cancellation is durable. found is false when it is no longer queued; a durable-write
 // failure leaves it queued and returns the error.
-func (d *daemon) cancelQueued(sk string, created, seq int64) (found bool, err error) {
-	sr := d.lookupRunner(sk, created)
+func (d *daemon) cancelQueued(sk, klaxID string, seq int64) (found bool, err error) {
+	sr := d.lookupRunner(sk, klaxID)
 	if sr == nil {
 		return false, nil
 	}
@@ -498,14 +495,14 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	// Look up the session bound at enqueue time. If the user deleted the
 	// session in the meantime the message has nowhere to land — surface that
 	// instead of silently picking a different session.
-	sess := d.store.Get(sk, msg.sessCreated)
+	sess := d.store.Get(sk, msg.klaxID)
 	if sess == nil {
 		msg.completion.fail("session-deleted")
 		d.sendMessage(msg.chatID, msg.msgID, "❌ Сессия удалена, сообщение не обработано.")
 		return
 	}
 
-	sr := d.getRunner(sk, sess.Created)
+	sr := d.getRunner(sk, sess.KlaxID)
 
 	// Create a cancellable context for this run.
 	// /abort cancels it, which stops both claude and retry loops.
@@ -530,8 +527,8 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	// The remaining case is /nuke having already dropped the runner, so getRunner
 	// above handed us a fresh sr without closing; the store.Get re-check catches
 	// it, since dropRunner only happens after the session is Deleted.
-	if closing || d.store.Get(sk, sess.Created) == nil {
-		d.dropRunner(sk, sess.Created)
+	if closing || d.store.Get(sk, sess.KlaxID) == nil {
+		d.dropRunner(sk, sess.KlaxID)
 		d.abortQueuedMessages([]queuedMsg{msg})
 		return
 	}
@@ -551,22 +548,33 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	}
 	if err != nil {
 		msg.completion.fail(turnErrAttachmentsMissing)
-		log.Printf("buildTurnPrompt (%s/%d): %v", sk, sess.Created, err)
+		log.Printf("buildTurnPrompt (%s/%s): %v", sk, sess.KlaxID, err)
 		if mErr := sr.store.MarkErr(msg.turnSeq, turnErrAttachmentsMissing, 0); mErr != nil && !errors.Is(mErr, sessfiles.ErrRemoved) {
-			log.Printf("durable MarkErr (%s/%d): %v", sk, sess.Created, mErr)
+			log.Printf("durable MarkErr (%s/%s): %v", sk, sess.KlaxID, mErr)
 		}
 		del.Final(runner.RunResult{Error: errors.New(turnErrAttachmentsMissing)})
 		return
 	}
 
 	prompt = promptcanon.Canonical(prompt)
-	backend := d.backendFor(sess)
+	backend := d.backendFor(sk, sess)
+	if sess.Backend == "" {
+		sess, err = d.store.UpdateSessionPersisted(sk, sess.KlaxID, nil, func(cur *session.Session) {
+			cur.Backend = backend.Name()
+		})
+		if err != nil {
+			log.Printf("save session backend (%s/%s): %v", sk, msg.klaxID, err)
+			_ = sr.store.MarkErr(msg.turnSeq, turnErrRunStartFailed, 0)
+			del.Final(runner.RunResult{Error: errors.New(turnErrRunStartFailed)})
+			return
+		}
+	}
 	fromEvent := int64(0)
-	if sess.ID != "" {
-		if _, cursor, snapErr := history.Snapshot(backend.Name(), sess.ID, sess.CWD); snapErr != nil {
-			log.Printf("transcript cursor (%s/%d): %v", sk, sess.Created, snapErr)
+	if sess.BackendID != "" {
+		if _, cursor, snapErr := history.Snapshot(backend.Name(), sess.BackendID, sess.CWD); snapErr != nil {
+			log.Printf("transcript cursor (%s/%s): %v", sk, sess.KlaxID, snapErr)
 			if mErr := sr.store.MarkErr(msg.turnSeq, turnErrRunStartFailed, 0); mErr != nil && !errors.Is(mErr, sessfiles.ErrRemoved) {
-				log.Printf("durable MarkErr (%s/%d): %v", sk, sess.Created, mErr)
+				log.Printf("durable MarkErr (%s/%s): %v", sk, sess.KlaxID, mErr)
 			}
 			del.Final(runner.RunResult{Error: errors.New(turnErrRunStartFailed)})
 			return
@@ -576,18 +584,18 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	}
 	// MarkRun is a hard pre-run fence: if the durable append fails we must NOT run
 	// the backend, or a crash would replay the (still enq) turn and duplicate work.
-	if err := sr.store.MarkRunMeta(msg.turnSeq, backend.Name(), sess.ID, promptcanon.Digest(prompt), fromEvent); err != nil {
-		log.Printf("durable MarkRun (%s/%d): %v", sk, sess.Created, err)
+	if err := sr.store.MarkRunMeta(msg.turnSeq, backend.Name(), sess.BackendID, promptcanon.Digest(prompt), fromEvent); err != nil {
+		log.Printf("durable MarkRun (%s/%s): %v", sk, sess.KlaxID, err)
 		if mErr := sr.store.MarkErr(msg.turnSeq, turnErrRunStartFailed, 0); mErr != nil && !errors.Is(mErr, sessfiles.ErrRemoved) {
-			log.Printf("durable MarkErr (%s/%d): %v", sk, sess.Created, mErr)
+			log.Printf("durable MarkErr (%s/%s): %v", sk, sess.KlaxID, mErr)
 		}
 		del.Final(runner.RunResult{Error: errors.New(turnErrRunStartFailed)})
 		return
 	}
-	if sess.ID != "" {
+	if sess.BackendID != "" {
 		// This durable cursor closes the preceding run's interval; reconcile it
 		// before the backend can append this turn's record.
-		d.reconcileBindings(sk, sess.Created, backend.Name(), sess.ID, sess.CWD)
+		d.reconcileBindings(sk, sess.KlaxID, backend.Name(), sess.BackendID, sess.CWD)
 	}
 	// enq→run is now durable — poke so the tab flips "queued"→"processing" immediately. The turn
 	// has no answer block yet (the backend may "think" for seconds), and the delivery-creation poke
@@ -604,9 +612,9 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		snapshotAt := time.Now()
 		turn, auditErr := newAuditTurn(msg, sr.store, sess, prompt, backend.Name(), snapshotAt)
 		if auditErr != nil {
-			log.Printf("audit turn.start snapshot (%s/%d): %v", sk, sess.Created, auditErr)
+			log.Printf("audit turn.start snapshot (%s/%s): %v", sk, sess.KlaxID, auditErr)
 			if mErr := sr.store.MarkHookError(msg.turnSeq, "audit.turn.start", turnErrAuditStartFailed); mErr != nil && !errors.Is(mErr, sessfiles.ErrRemoved) {
-				log.Printf("durable audit.turn.start error (%s/%d): %v", sk, sess.Created, mErr)
+				log.Printf("durable audit.turn.start error (%s/%s): %v", sk, sess.KlaxID, mErr)
 			}
 			d.broadcastSessions(sk)
 			msg.completion.fail(turnErrAuditStartFailed)
@@ -619,7 +627,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		startEvent := startAuditEvent(turn)
 		if auditErr := d.invokeAudit(startEvent); auditErr != nil {
 			if mErr := sr.store.MarkHookError(msg.turnSeq, "audit.turn.start", turnErrAuditStartFailed); mErr != nil && !errors.Is(mErr, sessfiles.ErrRemoved) {
-				log.Printf("durable audit.turn.start error (%s/%d): %v", sk, sess.Created, mErr)
+				log.Printf("durable audit.turn.start error (%s/%s): %v", sk, sess.KlaxID, mErr)
 			}
 			d.broadcastSessions(sk)
 			msg.completion.fail(turnErrAuditStartFailed)
@@ -647,17 +655,17 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		if id == "" {
 			return
 		}
-		if sess.ID == "" {
+		if sess.BackendID == "" {
 			if err := sr.store.MarkRunSession(msg.turnSeq, backend.Name(), id, 0); err != nil {
-				log.Printf("durable MarkRunSession (%s/%d): %v", sk, sess.Created, err)
+				log.Printf("durable MarkRunSession (%s/%s): %v", sk, sess.KlaxID, err)
 				sessionFenceErr = err
 				cancel()
 				return
 			}
 		}
-		d.store.UpdateSession(sk, sess.Created, func(cur *session.Session) {
-			if cur.ID == "" {
-				cur.ID = id
+		d.store.UpdateSession(sk, sess.KlaxID, func(cur *session.Session) {
+			if cur.BackendID == "" {
+				cur.BackendID = id
 			}
 		})
 		d.saveStore()
@@ -666,21 +674,21 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		default:
 		}
 		d.uiPoke(uiUserForKey(sk)) // transcript now addressable → let the live channel pick up first-turn content
-		d.reconcileBindings(sk, sess.Created, backend.Name(), id, sess.CWD)
+		d.reconcileBindings(sk, sess.KlaxID, backend.Name(), id, sess.CWD)
 	}
-	go d.watchRunTranscript(watchStop, idKnown, backend.Name(), sess.CWD, sk, sess.Created, sess.ID)
+	go d.watchRunTranscript(watchStop, idKnown, backend.Name(), sess.CWD, sk, sess.KlaxID, sess.BackendID)
 
 	result := sr.runner.Run(ctx, backend, runner.RunOptions{
 		Prompt:                    prompt,
-		KlaxSessionID:             sess.Created,
-		SessionID:                 sess.ID,
+		KlaxID:                    sess.KlaxID,
+		SessionID:                 sess.BackendID,
 		CWD:                       sess.CWD,
 		Sandbox:                   sess.Sandbox,
-		Model:                     sess.ModelOverride,
-		Effort:                    sess.ThinkOverride,
+		Model:                     sess.ModelRequested,
+		Effort:                    sess.Think,
 		ContextWindowHint:         sess.ContextWindow,
-		AppendSystemPrompt:        sess.AppendSystemPrompt,
-		ClaudeTTY:                 sess.ClaudeTTY,
+		AppendSystemPrompt:        sess.SystemPrompt,
+		ClaudeTTY:                 sess.TTY,
 		SuppressNarrationProgress: !verbose,
 		OnSessionID:               onSessionID,
 	}, del.Progress)
@@ -690,20 +698,20 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	}
 	effBindID := result.SessionID
 	if effBindID == "" {
-		effBindID = sess.ID
+		effBindID = sess.BackendID
 	}
 	var auditSession *history.AuditSession
 	if auditTurn != nil && effBindID != "" {
 		var snapshotErr error
 		auditSession, snapshotErr = history.ReadAuditSession(backend.Name(), effBindID, sess.CWD)
 		if snapshotErr != nil {
-			log.Printf("audit transcript snapshot (%s/%d): %v", sk, sess.Created, snapshotErr)
+			log.Printf("audit transcript snapshot (%s/%s): %v", sk, sess.KlaxID, snapshotErr)
 		} else {
-			d.reconcileBindingsSnapshot(sk, sess.Created, backend.Name(), effBindID, auditSession.Items, auditSession.ToEvent)
+			d.reconcileBindingsSnapshot(sk, sess.KlaxID, backend.Name(), effBindID, auditSession.Items, auditSession.ToEvent)
 		}
 	}
 	if auditSession == nil {
-		d.reconcileBindings(sk, sess.Created, backend.Name(), effBindID, sess.CWD)
+		d.reconcileBindings(sk, sess.KlaxID, backend.Name(), effBindID, sess.CWD)
 	}
 
 	// The context snapshot comes from the SAME source the timeline draws — the transcript's
@@ -714,7 +722,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	var trace *turnaudit.Trace
 	effID := result.SessionID
 	if effID == "" {
-		effID = sess.ID
+		effID = sess.BackendID
 	}
 	var traceCtxUsed, traceCtxWindow int
 	if auditTurn != nil && effID != "" && auditSession != nil {
@@ -722,7 +730,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		var traceErr error
 		trace, traceErr = auditTrace(sr.store, msg.turnSeq, backend.Name(), effID, auditSession)
 		if traceErr != nil {
-			log.Printf("audit trace (%s/%d): %v", sk, sess.Created, traceErr)
+			log.Printf("audit trace (%s/%s): %v", sk, sess.KlaxID, traceErr)
 		}
 	}
 	if result.Error == nil {
@@ -746,21 +754,21 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		termErr = sr.store.MarkDone(msg.turnSeq, ctxWindow)
 	}
 	if termErr != nil && !errors.Is(termErr, sessfiles.ErrRemoved) {
-		log.Printf("durable terminal mark (%s/%d): %v", sk, sess.Created, termErr)
+		log.Printf("durable terminal mark (%s/%s): %v", sk, sess.KlaxID, termErr)
 	}
 
 	// Persist changes onto the same session record that started the run.
-	d.store.UpdateSession(sk, sess.Created, func(current *session.Session) {
+	d.store.UpdateSession(sk, sess.KlaxID, func(current *session.Session) {
 		current.Messages++
 		current.LastUsed = time.Now().Unix()
 		if result.SessionID != "" {
-			current.ID = result.SessionID
+			current.BackendID = result.SessionID
 		}
 		// Only update model/usage from successful runs.
 		// On kill/error, system event may report a wrong default model.
 		if result.Error == nil {
 			if result.Usage.Model != "" {
-				current.Model = result.Usage.Model
+				current.ModelUsed = result.Usage.Model
 			}
 			if ctxWindow > 0 {
 				current.ContextWindow = ctxWindow
@@ -783,10 +791,10 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	// chunks or a later reconstruction from the transcript.
 	runFinished := time.Now()
 	if auditTurn != nil && result.SessionID != "" {
-		if auditTurn.Execution.BackendSessionID == "" {
-			auditTurn.Execution.BackendSessionID = result.SessionID
-		} else if auditTurn.Execution.BackendSessionID != result.SessionID {
-			log.Printf("audit backend session changed (%s/%d): %s -> %s", sk, sess.Created, auditTurn.Execution.BackendSessionID, result.SessionID)
+		if auditTurn.Execution.BackendID == "" {
+			auditTurn.Execution.BackendID = result.SessionID
+		} else if auditTurn.Execution.BackendID != result.SessionID {
+			log.Printf("audit backend session changed (%s/%s): %s -> %s", sk, sess.KlaxID, auditTurn.Execution.BackendID, result.SessionID)
 			trace = nil
 		}
 	}
@@ -796,7 +804,7 @@ func (d *daemon) runBackend(msg queuedMsg) {
 		if auditErr := d.invokeAudit(event); auditErr != nil {
 			warnings = []apiWarning{{Code: turnWarnAuditFinishFailed, Message: turnWarnAuditFinishText}}
 			if mErr := sr.store.MarkHookError(msg.turnSeq, "audit.turn.finish", turnWarnAuditFinishFailed); mErr != nil && !errors.Is(mErr, sessfiles.ErrRemoved) {
-				log.Printf("durable audit.turn.finish error (%s/%d): %v", sk, sess.Created, mErr)
+				log.Printf("durable audit.turn.finish error (%s/%s): %v", sk, sess.KlaxID, mErr)
 			}
 			d.broadcastSessions(sk)
 			del.Warning(turnWarnAuditFinishText)

@@ -3,12 +3,57 @@ package ym
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/PiDmitrius/klax/internal/transport"
 )
+
+type pollTransport func(*http.Request) (*http.Response, error)
+
+func (f pollTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestShortPollBudgetAndDrain(t *testing.T) {
+	b := New("test-token")
+	budget := 10 * time.Second
+	calls := 0
+	b.client.Transport = pollTransport(func(r *http.Request) (*http.Response, error) {
+		deadline, ok := r.Context().Deadline()
+		if !ok || time.Until(deadline) < budget-time.Second || time.Until(deadline) > budget {
+			t.Fatalf("call %d has an unexpected deadline: %v", calls, deadline)
+		}
+		if r.Header.Get("Authorization") != "OAuth test-token" {
+			t.Fatal("missing authorization")
+		}
+		if calls < 2 {
+			var payload map[string]int
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := payload["timeout"]; ok {
+				t.Fatal("undocumented server hold parameter")
+			}
+		}
+		calls++
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"ok":true,"updates":[]}`))}, nil
+	})
+	if _, err := b.GetUpdates(); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.DrainUpdates(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.GetMe(); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 3 {
+		t.Fatalf("calls = %d, want 3", calls)
+	}
+}
 
 // newTestBot starts an httptest.Server, points the package-level apiBase at
 // it (restored via t.Cleanup), and returns a Bot wired to it.

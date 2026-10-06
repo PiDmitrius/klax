@@ -28,77 +28,76 @@ function at(hash){
   };
 }
 
-const sess = (created, ...groups) => ({ created, groups });
+const sess = (klaxId, ...groups) => ({ klax_id: klaxId, groups });
 
 beforeEach(() => { setScope(ROOT); at(""); });
 
-test("parseHash tells a session id, a group and a computed view apart", () => {
-  at("#1783809783");
-  assert.deepEqual(parseHash(), { scope: ROOT, created: 1783809783 });
+test("parseHash tells a session, a group and a computed view apart", () => {
+  at("#/lOGezVsS");
+  assert.deepEqual(parseHash(), { scope: ROOT, klax_id: "lOGezVsS" });
 
   at("#work");
-  assert.deepEqual(parseHash(), { scope: { kind: "group", name: "work" }, created: 0 });
+  assert.deepEqual(parseHash(), { scope: { kind: "group", name: "work" }, klax_id: "" });
 
-  at("#work/1783809783");
-  assert.deepEqual(parseHash(), { scope: { kind: "group", name: "work" }, created: 1783809783 });
+  at("#work/lOGezVsS");
+  assert.deepEqual(parseHash(), { scope: { kind: "group", name: "work" }, klax_id: "lOGezVsS" });
+
+  // A bare segment is always a group, even one that looks like an id or a number.
+  at("#123");
+  assert.deepEqual(parseHash(), { scope: { kind: "group", name: "123" }, klax_id: "" });
 
   at("#is:unread");
-  assert.deepEqual(parseHash(), { scope: { kind: "builtin", name: "is:unread" }, created: 0 });
+  assert.deepEqual(parseHash(), { scope: { kind: "builtin", name: "is:unread" }, klax_id: "" });
 
   // An empty or absent fragment is the root, not a group with an empty name.
   at("");
-  assert.deepEqual(parseHash(), { scope: ROOT, created: 0 });
+  assert.deepEqual(parseHash(), { scope: ROOT, klax_id: "" });
   at("#");
-  assert.deepEqual(parseHash(), { scope: ROOT, created: 0 });
+  assert.deepEqual(parseHash(), { scope: ROOT, klax_id: "" });
 });
 
 test("parseHash decodes percent-encoded names and survives a malformed escape", () => {
   at("#" + encodeURIComponent("дом"));
   assert.equal(parseHash().scope.name, "дом");
 
-  at("#" + encodeURIComponent("дом") + "/42");
-  assert.deepEqual(parseHash(), { scope: { kind: "group", name: "дом" }, created: 42 });
+  at("#" + encodeURIComponent("дом") + "/lOGezVsS");
+  assert.deepEqual(parseHash(), { scope: { kind: "group", name: "дом" }, klax_id: "lOGezVsS" });
 
   // A hand-mangled address must not throw, and must degrade to the RAW segment — asserting the name
   // itself, so an implementation that truncated or substituted it could not pass.
   at("#%E0%A4%A");
   assert.doesNotThrow(parseHash);
-  assert.deepEqual(parseHash(), { scope: { kind: "group", name: "%E0%A4%A" }, created: 0 });
-});
-
-test("a non-numeric second segment is not a session id", () => {
-  at("#work/notanid");
-  assert.deepEqual(parseHash(), { scope: { kind: "group", name: "work" }, created: 0 });
+  assert.deepEqual(parseHash(), { scope: { kind: "group", name: "%E0%A4%A" }, klax_id: "" });
 });
 
 test("hashFor round-trips through parseHash for every scope", () => {
   const cases = [
-    [ROOT, 0, ""],
-    [ROOT, 42, "42"],
-    [{ kind: "group", name: "work" }, 0, "work"],
-    [{ kind: "group", name: "work" }, 42, "work/42"],
-    [{ kind: "builtin", name: "is:unread" }, 42, "is:unread/42"], // the colon stays readable
+    [ROOT, "", ""],
+    [ROOT, "lOGezVsS", "/lOGezVsS"],
+    [{ kind: "group", name: "work" }, "", "work"],
+    [{ kind: "group", name: "work" }, "lOGezVsS", "work/lOGezVsS"],
+    [{ kind: "builtin", name: "is:unread" }, "lOGezVsS", "is:unread/lOGezVsS"], // the colon stays readable
   ];
-  for(const [scope, created, want] of cases){
+  for(const [scope, klaxId, want] of cases){
     setScope(scope);
-    assert.equal(hashFor(created), want);
+    assert.equal(hashFor(klaxId), want);
     at("#" + want);
     const back = parseHash();
     assert.ok(sameScope(back.scope, scope), `${want}: scope round-trip`);
-    assert.equal(back.created, created, `${want}: created round-trip`);
+    assert.equal(back.klax_id, klaxId, `${want}: klax_id round-trip`);
   }
 });
 
 test("writeHash replaces the address instead of navigating", () => {
   setScope({ kind: "group", name: "work" });
   at("#work");
-  writeHash(42);
-  assert.equal(globalThis.history.lastURL, "/klax/#work/42");
+  writeHash("lOGezVsS");
+  assert.equal(globalThis.history.lastURL, "/klax/#work/lOGezVsS");
 
   // Already correct: no history write at all, so a repeated reconcile cannot spam the address bar.
-  at("#work/42");
+  at("#work/lOGezVsS");
   globalThis.history.lastURL = "";
-  writeHash(42);
+  writeHash("lOGezVsS");
   assert.equal(globalThis.history.lastURL, "");
 });
 
@@ -107,10 +106,10 @@ test("membership is by group, root holds everything, a computed view holds nothi
 
   setScope(ROOT);
   assert.ok(isRoot());
-  assert.deepEqual(filterScope(list).map(s => s.created), [1, 2, 3, 4]);
+  assert.deepEqual(filterScope(list).map(s => s.klax_id), [1, 2, 3, 4]);
 
   setScope({ kind: "group", name: "work" });
-  assert.deepEqual(filterScope(list).map(s => s.created), [1, 2]);
+  assert.deepEqual(filterScope(list).map(s => s.klax_id), [1, 2]);
   assert.equal(inScope(sess(9)), false);
   assert.equal(inScope(undefined), false);
 
@@ -170,11 +169,11 @@ test("neighborIn prefers the left tab, falls back to the right, and skips non-su
   // Nothing survives to the left, so it walks right.
   assert.equal(neighborIn(order, 2, [sess(4)]), 4);
 
-  assert.equal(neighborIn([sess(7)], 7), 0, "sole member has no neighbour");
-  assert.equal(neighborIn(order, 99), 0, "unknown session has no neighbour");
-  assert.equal(neighborIn(undefined, 1), 0);
-  assert.equal(neighborIn(order, 3, []), 0, "no survivors at all");
+  assert.equal(neighborIn([sess(7)], 7), "", "sole member has no neighbour");
+  assert.equal(neighborIn(order, 99), "", "unknown session has no neighbour");
+  assert.equal(neighborIn(undefined, 1), "");
+  assert.equal(neighborIn(order, 3, []), "", "no survivors at all");
 
   // Reading the rule must not disturb the list it was given.
-  assert.deepEqual(order.map(s => s.created), [1, 2, 3, 4]);
+  assert.deepEqual(order.map(s => s.klax_id), [1, 2, 3, 4]);
 });

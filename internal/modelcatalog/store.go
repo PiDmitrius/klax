@@ -32,6 +32,7 @@ func Open(path string) (*Store, error) {
 	if err = json.Unmarshal(data, &s.models); err != nil {
 		return nil, err
 	}
+	adoptEfforts(data, s.models)
 	if s.models == nil {
 		s.models = map[string][]Model{}
 	}
@@ -45,11 +46,11 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Models(backend string) []Model {
 	if s == nil {
-		return nil
+		return []Model{}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return cloneModels(s.models[backend])
+	return append([]Model{}, cloneModels(s.models[backend])...)
 }
 
 func (s *Store) Refresh(ctx context.Context, backend string) ([]Model, error) {
@@ -115,7 +116,24 @@ func (s *Store) refresh(ctx context.Context, backend string, fetch func(context.
 func cloneModels(models []Model) []Model {
 	out := slices.Clone(models)
 	for i := range out {
-		out[i].Efforts = slices.Clone(out[i].Efforts)
+		out[i].ThinkLevels = slices.Clone(out[i].ThinkLevels)
 	}
 	return out
+}
+
+// adoptEfforts carries the think levels of a cache written before they were named think_levels.
+func adoptEfforts(data []byte, models map[string][]Model) {
+	var old map[string][]struct {
+		Efforts []string `json:"efforts"`
+	}
+	if json.Unmarshal(data, &old) != nil {
+		return
+	}
+	for backend, list := range old {
+		for i, m := range list {
+			if m.Efforts != nil && i < len(models[backend]) && models[backend][i].ThinkLevels == nil {
+				models[backend][i].ThinkLevels = m.Efforts
+			}
+		}
+	}
 }

@@ -63,10 +63,21 @@ function harness(){
   return { calls, render: context.renderSession, pos: context.pos, col: new Element() };
 }
 
+test("unknown outcome shows its note without a stop button", () => {
+  const h = harness();
+  const turn = { turn_seq: 1, role: "user", text: "request", state: "unknown", blocks: [] };
+  h.render(h.col, [turn]);
+  const tail = h.col.children[0].children.at(-1);
+  assert.ok(tail.html.includes("статус неизвестен"));
+  assert.equal(tail.querySelector(".stop"), null);
+  h.render(h.col, [{ ...turn, state: "done" }]);
+  assert.equal(h.col.children[0].children.length, 1);
+});
+
 test("divider collapse and join preserve unchanged tool contents and skip text formatting", () => {
   const h = harness();
   const blocks = Array.from({ length: 301 }, (_, i) => ({ id: String(i), role: "tool", text: "tool " + i }));
-  const turn = { seq: 1, role: "user", text: "request", state: "done", blocks };
+  const turn = { turn_seq: 1, role: "user", text: "request", state: "done", blocks };
   h.render(h.col, [turn], h.pos(1, 299));
   const container = h.col.children[0];
   const [user, tools, divider, tail] = container.children;
@@ -96,7 +107,7 @@ test("divider collapse and join preserve unchanged tool contents and skip text f
 
 test("content updates patch retained bubbles and join flags clear without rewriting content", () => {
   const h = harness();
-  const turn = { seq: 1, role: "user", text: "request", state: "done", blocks: [
+  const turn = { turn_seq: 1, role: "user", text: "request", state: "done", blocks: [
     { id: "a", role: "assistant", text: "one" },
     { id: "b", role: "assistant", text: "two" },
   ] };
@@ -124,8 +135,8 @@ test("queued ✕ stops only its own turn and re-enables after a failed cancel", 
   let result = false;
   const onStop = (state, seq) => { calls.push([state, seq]); return Promise.resolve(result); };
   h.render(h.col, [
-    { seq: 1, role: "user", text: "running", state: "run", blocks: [] },
-    { seq: 2, role: "user", text: "queued", state: "enq", blocks: [] },
+    { turn_seq: 1, role: "user", text: "running", state: "run", blocks: [] },
+    { turn_seq: 2, role: "user", text: "queued", state: "enq", blocks: [] },
   ], undefined, onStop);
   const [runDots, queuedDots] = h.col.children.map(turn => turn.children.find(c => c.dataset.flip === "dots"));
   assert.match(runDots.html, /title="Прервать"/);
@@ -147,8 +158,8 @@ test("queued ✕ stops only its own turn and re-enables after a failed cancel", 
 test("a cancelled note neither drives read-advance nor opens the unread divider", () => {
   const h = harness();
   h.render(h.col, [
-    { seq: 1, role: "user", text: "running", state: "run", blocks: [{ id: "a", role: "assistant", text: "one" }] },
-    { seq: 2, role: "user", text: "dropped", state: "err", blocks: [{ id: "c", role: "system", kind: "cancelled", text: "Отменено" }] },
+    { turn_seq: 1, role: "user", text: "running", state: "run", blocks: [{ id: "a", role: "assistant", text: "one" }] },
+    { turn_seq: 2, role: "user", text: "dropped", state: "err", blocks: [{ id: "c", role: "system", kind: "cancelled", text: "Отменено" }] },
   ], h.pos(1, 0));
   const [, note] = h.col.children[1].children;
   assert.equal(note.className.split(" ").includes("cancelled"), true);
@@ -158,15 +169,15 @@ test("a cancelled note neither drives read-advance nor opens the unread divider"
 
 test("a running turn measures its tokens against the last window a turn ran with", () => {
   const items = renderModel([
-    { seq: 1, role: "user", state: "done", ctx_used: 100000, ctx_window: 1000000, blocks: [{ id: "a", role: "assistant" }] },
-    { seq: 2, role: "user", state: "done", ctx_used: 150000, blocks: [{ id: "b", role: "assistant" }] },
-    { seq: 3, role: "user", state: "run", ctx_used: 200000, blocks: [{ id: "c", role: "tool" }] },
+    { turn_seq: 1, role: "user", state: "done", ctx_used: 100000, ctx_window: 1000000, blocks: [{ id: "a", role: "assistant" }] },
+    { turn_seq: 2, role: "user", state: "done", ctx_used: 150000, blocks: [{ id: "b", role: "assistant" }] },
+    { turn_seq: 3, role: "user", state: "run", ctx_used: 200000, blocks: [{ id: "c", role: "tool" }] },
   ], undefined);
   const lines = items.filter(i => i.kind === "turn").map(i => i.ctxLine);
   assert.deepEqual(lines, ["📊 Контекст: 10% (100k/1000k)", "📊 Контекст: 150k", "📊 Контекст: 20% (200k/1000k)"]);
 });
 
 test("a running turn without a known window uses the tab's window", () => {
-  const items = renderModel([{ seq: 1, role: "user", state: "run", ctx_used: 200000, blocks: [{ id: "c", role: "tool" }] }], undefined, null, false, 1000000);
+  const items = renderModel([{ turn_seq: 1, role: "user", state: "run", ctx_used: 200000, blocks: [{ id: "c", role: "tool" }] }], undefined, null, false, 1000000);
   assert.equal(items.find(i => i.kind === "turn").ctxLine, "📊 Контекст: 20% (200k/1000k)");
 });

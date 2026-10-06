@@ -278,6 +278,38 @@ func TestStartupAnnouncementDoesNotBlockStartup(t *testing.T) {
 	}
 }
 
+func TestStartupAnnouncementLeavesUINoticeToState(t *testing.T) {
+	sent := make(chan fakeSendCall, 1)
+	tp := &fakeTransport{sendErrFn: func(call fakeSendCall) error {
+		sent <- call
+		return nil
+	}}
+	d := newTestDeliveryDaemon(tp)
+	d.cfg = &config.Config{AllowedUsers: []int64{1}}
+	d.uiHub = newUIHub()
+	d.uiHub.userSync("alice")
+	wake := d.uiHub.waitChan("alice")
+	d.announceStartup("startup")
+	select {
+	case call := <-sent:
+		if call.text != "startup" {
+			t.Fatalf("startup text = %q", call.text)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("startup announcement did not reach the messenger")
+	}
+	select {
+	case <-wake:
+		t.Fatal("startup announcement also emitted a UI notice")
+	case <-time.After(100 * time.Millisecond):
+	}
+	seq := d.notifyAllUsers("restart")
+	events, at, resync := d.uiHub.collect("alice", 0, roleRW)
+	if resync || at != seq || len(events) != 1 || decodeEvent(t, events[0]).Notice != "restart" {
+		t.Fatalf("restart notice: n=%d at=%d seq=%d resync=%v", len(events), at, seq, resync)
+	}
+}
+
 // blockingTransport stands in for an unreachable platform.
 type blockingTransport struct {
 	fakeTransport

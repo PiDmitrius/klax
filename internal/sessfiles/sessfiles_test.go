@@ -7,13 +7,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/PiDmitrius/klax/internal/session"
 )
 
 // A turn's files are named <turnSeq>-<NN>-name; duplicate names within one turn
 // get distinct indices (no collision), and the bytes land.
 func TestWriteTurnNamesAndBytes(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
-	s := Open("user:alice", 1719500000)
+	s := Open("user:alice", "s1719500000")
 	names, err := s.WriteTurn(42, []Blob{{"image.png", []byte("a")}, {"image.png", []byte("b")}})
 	if err != nil {
 		t.Fatal(err)
@@ -31,7 +33,7 @@ func TestWriteTurnNamesAndBytes(t *testing.T) {
 // same stored name, no error, original bytes intact.
 func TestWriteFileIdempotentReplay(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
-	s := Open("user:alice", 7)
+	s := Open("user:alice", "s7")
 	n1, err := s.WriteFile(3, 1, "doc.pdf", bytes.NewReader([]byte("orig")))
 	if err != nil {
 		t.Fatal(err)
@@ -50,7 +52,7 @@ func TestWriteFileIdempotentReplay(t *testing.T) {
 // run-view realpath stays in the run dir, not the internal store).
 func TestMaterializeCleanNamesAndCollision(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
-	s := Open("user:alice", 42)
+	s := Open("user:alice", "s42")
 	names, _ := s.WriteTurn(5, []Blob{{"shot.png", []byte("1")}, {"shot.png", []byte("2")}})
 	run := filepath.Join(t.TempDir(), "klax-attach-x")
 	paths, err := s.Materialize(names, run)
@@ -72,21 +74,21 @@ func TestMaterializeCleanNamesAndCollision(t *testing.T) {
 // would collide ("a:b" vs "a/b") map to distinct dirs, and none leaks a separator.
 func TestKeyDirSafeAndInjective(t *testing.T) {
 	for _, k := range []string{"user:alice", "tg:123/x", `mx:\weird`, "a:b", "a/b"} {
-		if strings.ContainsAny(keyDir(k), "/:\\") {
-			t.Fatalf("keyDir(%q)=%q leaked a path separator", k, keyDir(k))
+		if strings.ContainsAny(session.KeyDir(k), "/:\\") {
+			t.Fatalf("keyDir(%q)=%q leaked a path separator", k, session.KeyDir(k))
 		}
 	}
-	if keyDir("a:b") == keyDir("a/b") {
+	if session.KeyDir("a:b") == session.KeyDir("a/b") {
 		t.Fatalf("keyDir not injective: a:b and a/b collide")
 	}
-	if !strings.HasSuffix(keyDir("user:alice"), base64.RawURLEncoding.EncodeToString([]byte("user:alice"))) {
+	if !strings.HasSuffix(session.KeyDir("user:alice"), base64.RawURLEncoding.EncodeToString([]byte("user:alice"))) {
 		t.Fatalf("keyDir should end with the lossless base64url of the key")
 	}
 }
 
 func TestRemove(t *testing.T) {
 	t.Setenv("KLAX_DATA_DIR", t.TempDir())
-	s := Open("user:alice", 7)
+	s := Open("user:alice", "s7")
 	if _, err := s.WriteFile(1, 1, "a.txt", bytes.NewReader([]byte("x"))); err != nil {
 		t.Fatal(err)
 	}

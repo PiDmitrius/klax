@@ -20,9 +20,10 @@ func TestSessionNameArg(t *testing.T) {
 
 func TestDeleteInactiveSessions(t *testing.T) {
 	const sk = "tg:1"
-	st := &session.Store{
-		Chats: make(map[string]*session.ChatSessions),
-		Scope: make(map[string]*session.ScopeDefaults),
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	st, err := session.LoadStore()
+	if err != nil {
+		t.Fatal(err)
 	}
 	st.New(sk, "one", "/tmp", session.ScopeDefaults{})
 	st.New(sk, "two", "/tmp", session.ScopeDefaults{})
@@ -34,22 +35,25 @@ func TestDeleteInactiveSessions(t *testing.T) {
 	}
 	// First session is busy (has an in-flight run cancel handle): /nuke must
 	// abort and delete it, not spare it.
-	busyCreated := sessions[0].Created
+	busyCreated := sessions[0].KlaxID
 	// Second session is idle but has a leftover runner; deleting it must also
 	// drop that runner.
-	idleCreated := sessions[1].Created
-	activeCreated := sessions[2].Created
+	idleCreated := sessions[1].KlaxID
+	activeCreated := sessions[2].KlaxID
 
 	_, cancel := context.WithCancel(context.Background())
 	cancelled := false
 	d := &daemon{store: st, runners: make(map[runnerKey]*sessionRunner)}
-	d.runners[runnerKey{sk: sk, created: busyCreated}] = &sessionRunner{
+	d.runners[runnerKey{sk: sk, klaxID: busyCreated}] = &sessionRunner{
 		runner: runner.New(),
 		cancel: func() { cancelled = true; cancel() },
 	}
-	d.runners[runnerKey{sk: sk, created: idleCreated}] = &sessionRunner{runner: runner.New()}
+	d.runners[runnerKey{sk: sk, klaxID: idleCreated}] = &sessionRunner{runner: runner.New()}
 
-	deleted, aborted := d.deleteInactiveSessions(sk)
+	deleted, aborted, err := d.deleteInactiveSessions(sk)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if deleted != 2 {
 		t.Fatalf("deleted = %d, want 2", deleted)
 	}
@@ -64,14 +68,14 @@ func TestDeleteInactiveSessions(t *testing.T) {
 	if len(remaining) != 1 {
 		t.Fatalf("remaining = %d sessions, want 1 (only the new active session)", len(remaining))
 	}
-	if !remaining[0].Active || remaining[0].Created != activeCreated {
+	if !remaining[0].Active || remaining[0].KlaxID != activeCreated {
 		t.Fatalf("surviving session = %+v, want the active one", remaining[0])
 	}
 
-	if _, ok := d.runners[runnerKey{sk: sk, created: idleCreated}]; ok {
+	if _, ok := d.runners[runnerKey{sk: sk, klaxID: idleCreated}]; ok {
 		t.Fatal("runner for deleted idle session was not dropped")
 	}
-	if _, ok := d.runners[runnerKey{sk: sk, created: busyCreated}]; ok {
+	if _, ok := d.runners[runnerKey{sk: sk, klaxID: busyCreated}]; ok {
 		t.Fatal("runner for nuked busy session was not dropped")
 	}
 }
@@ -86,15 +90,15 @@ func TestAbortSessionDetectsProcessingAndFlagsClosing(t *testing.T) {
 		Scope: make(map[string]*session.ScopeDefaults),
 	}
 	st.New(sk, "one", "/tmp", session.ScopeDefaults{})
-	created := st.SessionsFor(sk)[0].Created
+	klaxID := st.SessionsFor(sk)[0].KlaxID
 
 	d := &daemon{store: st, runners: make(map[runnerKey]*sessionRunner)}
 	sr := &sessionRunner{runner: runner.New(), processing: true} // dequeued, cancel not set yet
-	d.runners[runnerKey{sk: sk, created: created}] = sr
+	d.runners[runnerKey{sk: sk, klaxID: klaxID}] = sr
 
 	// Plain /abort cannot stop a run with no cancel handle yet, so it must not
 	// claim it did — original IsBusy()-only behaviour, no closing side effect.
-	if d.abortSession(sk, created, false) {
+	if d.abortSession(sk, klaxID, false) {
 		t.Fatal("/abort must not report work for a run with no cancel handle yet")
 	}
 	sr.mu.Lock()
@@ -106,7 +110,7 @@ func TestAbortSessionDetectsProcessingAndFlagsClosing(t *testing.T) {
 
 	// /nuke (closing=true) must recognise the processing run, flag it closing so
 	// the starting run bails, and report it as aborted.
-	if !d.abortSession(sk, created, true) {
+	if !d.abortSession(sk, klaxID, true) {
 		t.Fatal("/nuke must report work for a processing session")
 	}
 	sr.mu.Lock()
@@ -448,14 +452,14 @@ func TestModelCommandsResolveCatalog(t *testing.T) {
 		{"/model claude-sonnet-5", "claude-sonnet-5"},
 	} {
 		f.d.handleCommand(chatID, "", tc.command)
-		if got := f.d.store.Get("user:test", f.created).ModelOverride; got != tc.model {
+		if got := f.d.store.Get("user:test", f.klaxID).ModelRequested; got != tc.model {
 			t.Fatalf("%s: selected %q, want %q", tc.command, got, tc.model)
 		}
 		store, err := session.LoadStore()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := store.Get("user:test", f.created).ModelOverride; got != tc.model {
+		if got := store.Get("user:test", f.klaxID).ModelRequested; got != tc.model {
 			t.Fatalf("%s: persisted %q, want %q", tc.command, got, tc.model)
 		}
 	}
@@ -473,7 +477,7 @@ func TestModelCommandRejectsAmbiguousOrMissing(t *testing.T) {
 	f.d.handleCommand(f.s.chatID("test"), "", "/model custom-model")
 	f.d.models = nil
 	f.d.handleCommand(f.s.chatID("test"), "", "/m_"+token)
-	if got := f.d.store.Get("user:test", f.created).ModelOverride; got != "custom-model" {
+	if got := f.d.store.Get("user:test", f.klaxID).ModelRequested; got != "custom-model" {
 		t.Fatal(got)
 	}
 }

@@ -16,12 +16,12 @@ type Inbound struct {
 	MsgID       string // user's message ID (for replyTo)
 	Text        string
 	Attachments []attachment
-	// TargetCreated binds the message to a specific session. 0 means "the
+	// TargetKlaxID binds the message to a specific session. "" means "the
 	// active session" — every messenger uses this. The web UI sets it to a
-	// tab's Created so a message lands in that tab even when it is not active.
-	TargetCreated int64
-	FromID        int64 // sender ID (platform-scoped), for diagnostics
-	Origin        inbound.Origin
+	// tab's klax_id so a message lands in that tab even when it is not active.
+	TargetKlaxID string
+	FromID       int64 // sender ID (platform-scoped), for diagnostics
+	Origin       inbound.Origin
 	// RawMessage suppresses "/"-command dispatch: the text is always queued as a
 	// message, never parsed as a slash command. The web UI sets this — it has no
 	// chat commands (every action is a native control), so a message that starts

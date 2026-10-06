@@ -20,15 +20,16 @@ import (
 var ErrRemoved = errors.New("sessfiles: session store removed")
 
 // queue.jsonl is the per-session durable queue AND the session-lifetime inbound
-// log: append-only records enq → run → done/err, never deleted. fsync on every
-// append; enq is the durability point (a turn's files are fsynced first). Replay
+// log: append-only records reserve → enq → run → done/err, never deleted. fsync on every
+// append; reserve burns the sequence before files are written, and enq accepts the turn.
+// A turn's files are fsynced first. Replay
 // re-enqueues enq-without-run and flags run-without-terminal for transcript
 // reconciliation. `turn_seq` is the monotonic canonical turn id. Legacy enqueues
 // may carry a prompt marker; new runs bind to physical transcript coordinates.
 
 type record struct {
-	Ev           string         `json:"ev"` // enq|run|run_session|bind|done|err|hook
-	Seq          int64          `json:"seq"`
+	Ev           string         `json:"ev"` // reserve|enq|run|run_session|bind|done|err|hook
+	Seq          int64          `json:"turn_seq"`
 	ChatID       string         `json:"chat,omitempty"` // originating chat, for replay delivery
 	MsgID        string         `json:"msg,omitempty"`
 	Nonce        string         `json:"nonce,omitempty"`
@@ -42,7 +43,7 @@ type record struct {
 	Hook         string         `json:"hook,omitempty"`
 	Status       string         `json:"status,omitempty"`
 	Backend      string         `json:"backend,omitempty"`
-	Session      string         `json:"session,omitempty"`
+	BackendID    string         `json:"backend_id,omitempty"`
 	PromptDigest string         `json:"prompt_digest,omitempty"`
 	FromEvent    int64          `json:"from_event,omitempty"`
 	Event        *int64         `json:"event,omitempty"`
@@ -66,7 +67,7 @@ type Turn struct {
 	CtxWindow    int // context window the turn ran with, from its terminal record
 	HookFailures []HookFailure
 	Backend      string
-	Session      string
+	BackendID    string
 	PromptDigest string
 	FromEvent    int64
 	Bound        bool
@@ -139,8 +140,11 @@ func (s *Store) EnqueueOrigin(chatID, msgID, nonce, text, originalText string, f
 			}
 		}
 	}
-	s.seq++ // reserve first: a failure below just burns the seq (gaps are fine)
+	s.seq++
 	seq = s.seq
+	if err = s.appendRecord(record{Ev: "reserve", Seq: seq}); err != nil {
+		return
+	}
 	for i, f := range files {
 		var name string
 		if name, err = s.WriteFile(seq, i+1, f.Name, f.R); err != nil {
@@ -155,17 +159,17 @@ func (s *Store) EnqueueOrigin(chatID, msgID, nonce, text, originalText string, f
 
 // MarkRun/MarkDone/MarkErr append progress/terminal records for a turn.
 func (s *Store) MarkRun(seq int64) error { return s.mark(record{Ev: "run", Seq: seq}) }
-func (s *Store) MarkRunMeta(seq int64, backend, session, promptDigest string, fromEvent int64) error {
-	return s.mark(record{Ev: "run", Seq: seq, Backend: backend, Session: session, PromptDigest: promptDigest, FromEvent: fromEvent})
+func (s *Store) MarkRunMeta(seq int64, backend, backendID, promptDigest string, fromEvent int64) error {
+	return s.mark(record{Ev: "run", Seq: seq, Backend: backend, BackendID: backendID, PromptDigest: promptDigest, FromEvent: fromEvent})
 }
-func (s *Store) MarkRunSession(seq int64, backend, session string, fromEvent int64) error {
-	return s.mark(record{Ev: "run_session", Seq: seq, Backend: backend, Session: session, FromEvent: fromEvent})
+func (s *Store) MarkRunSession(seq int64, backend, backendID string, fromEvent int64) error {
+	return s.mark(record{Ev: "run_session", Seq: seq, Backend: backend, BackendID: backendID, FromEvent: fromEvent})
 }
 
 var ErrBindConflict = errors.New("sessfiles: transcript binding conflict")
 
 // Bind establishes an immutable one-to-one queue/transcript association.
-func (s *Store) Bind(seq int64, backend, session string, event int64, recordDigest string) error {
+func (s *Store) Bind(seq int64, backend, backendID string, event int64, recordDigest string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	turns, err := s.turns()
@@ -175,7 +179,7 @@ func (s *Store) Bind(seq int64, backend, session string, event int64, recordDige
 	var target *Turn
 	for i := range turns {
 		t := &turns[i]
-		if t.Bound && t.Backend == backend && t.Session == session && t.Event == event {
+		if t.Bound && t.Backend == backend && t.BackendID == backendID && t.Event == event {
 			if t.Seq == seq && t.RecordDigest == recordDigest {
 				return nil
 			}
@@ -185,21 +189,21 @@ func (s *Store) Bind(seq int64, backend, session string, event int64, recordDige
 			target = t
 		}
 	}
-	if target == nil || target.Backend != backend || target.Session != session {
+	if target == nil || target.Backend != backend || target.BackendID != backendID {
 		return ErrBindConflict
 	}
 	if target.Bound {
 		return ErrBindConflict
 	}
 	for _, t := range turns {
-		if !t.Bound || t.Backend != backend || t.Session != session {
+		if !t.Bound || t.Backend != backend || t.BackendID != backendID {
 			continue
 		}
 		if (t.Seq < seq && t.Event >= event) || (t.Seq > seq && t.Event <= event) {
 			return ErrBindConflict
 		}
 	}
-	return s.appendRecord(record{Ev: "bind", Seq: seq, Backend: backend, Session: session, Event: &event, RecordDigest: recordDigest, TS: time.Now().UnixNano()})
+	return s.appendRecord(record{Ev: "bind", Seq: seq, Backend: backend, BackendID: backendID, Event: &event, RecordDigest: recordDigest, TS: time.Now().UnixNano()})
 }
 func (s *Store) MarkDone(seq int64, ctxWindow int) error {
 	return s.mark(record{Ev: "done", Seq: seq, CtxWindow: ctxWindow})
@@ -336,6 +340,9 @@ func (q *queueProjection) fold(r record) {
 	if r.Seq > q.maxSeq {
 		q.maxSeq = r.Seq
 	}
+	if r.Ev == "reserve" {
+		return
+	}
 	t := q.byseq[r.Seq]
 	if t == nil {
 		t = &Turn{Seq: r.Seq}
@@ -353,14 +360,14 @@ func (q *queueProjection) fold(r record) {
 		t.enqueued = true
 	case "run":
 		t.Last, t.Reason = r.Ev, r.Reason
-		t.Backend, t.Session, t.PromptDigest, t.FromEvent = r.Backend, r.Session, r.PromptDigest, r.FromEvent
+		t.Backend, t.BackendID, t.PromptDigest, t.FromEvent = r.Backend, r.BackendID, r.PromptDigest, r.FromEvent
 	case "run_session":
 		if r.Backend != "" {
 			t.Backend = r.Backend
 		}
-		t.Session, t.FromEvent = r.Session, r.FromEvent
+		t.BackendID, t.FromEvent = r.BackendID, r.FromEvent
 	case "bind":
-		if !t.Bound && r.Event != nil && t.Backend == r.Backend && t.Session == r.Session {
+		if !t.Bound && r.Event != nil && t.Backend == r.Backend && t.BackendID == r.BackendID {
 			t.Bound, t.Event, t.RecordDigest = true, *r.Event, r.RecordDigest
 		}
 	case "done", "err":

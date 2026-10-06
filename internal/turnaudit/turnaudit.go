@@ -5,8 +5,6 @@ package turnaudit
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,10 +19,7 @@ import (
 	"github.com/PiDmitrius/klax/internal/inbound"
 )
 
-const (
-	Schema       = "klax.audit/v1"
-	turnIDDomain = "klax.turn/v1"
-)
+const Schema = "klax.audit/v2"
 
 type Attachment struct {
 	Name   string `json:"name"`
@@ -34,9 +29,9 @@ type Attachment struct {
 }
 
 type Routing struct {
-	SessionKey     string `json:"session_key"`
-	SessionCreated int64  `json:"session_created"`
-	SessionName    string `json:"session_name,omitempty"`
+	SessionKey string `json:"session_key"`
+	KlaxID     string `json:"klax_id"`
+	Name       string `json:"name,omitempty"`
 }
 
 type Request struct {
@@ -46,14 +41,14 @@ type Request struct {
 }
 
 type Execution struct {
-	Backend            string `json:"backend"`
-	BackendSessionID   string `json:"backend_session_id,omitempty"`
-	CWD                string `json:"cwd"`
-	ModelRequested     string `json:"model_requested,omitempty"`
-	Effort             string `json:"effort,omitempty"`
-	Sandbox            string `json:"sandbox,omitempty"`
-	TTY                bool   `json:"tty"`
-	AppendSystemPrompt string `json:"append_system_prompt,omitempty"`
+	Backend        string `json:"backend"`
+	BackendID      string `json:"backend_id,omitempty"`
+	CWD            string `json:"cwd"`
+	ModelRequested string `json:"model_requested,omitempty"`
+	Think          string `json:"think,omitempty"`
+	Sandbox        string `json:"sandbox,omitempty"`
+	TTY            bool   `json:"tty"`
+	SystemPrompt   string `json:"system_prompt,omitempty"`
 }
 
 type Tokens struct {
@@ -129,13 +124,10 @@ type Event struct {
 	Turn   Turn   `json:"turn"`
 }
 
-// TurnID is the lowercase hex form of the first 160 bits of SHA-256 over the
-// canonical durable identity of a turn. The JSON array is the versioned,
-// unambiguous byte contract; changing it would change public IDs.
-func TurnID(sessionKey string, sessionCreated, seq int64) string {
-	raw, _ := json.Marshal([]any{turnIDDomain, sessionKey, sessionCreated, seq})
-	sum := sha256.Sum256(raw)
-	return hex.EncodeToString(sum[:20])
+// TurnID is the turn's key "<klax_id>.<turn_seq>": klax_id is unique across the store and
+// turn_seq within the session, so it links turn.start to turn.finish without a lookup.
+func TurnID(klaxID string, seq int64) string {
+	return klaxID + "." + strconv.FormatInt(seq, 10)
 }
 
 func Time(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }

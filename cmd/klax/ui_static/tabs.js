@@ -1,19 +1,19 @@
 // tabs.js — the tab strip reconcile, new/close, and the per-session
 // settings modal (engine/model/effort/sandbox/tty/cwd/prompt + context gauge), ported
-// from the monolith. deps: { select(created), onNew(created), afterClose(created),
+// from the monolith. deps: { select(klaxId), onNew(klaxId), afterClose(klaxId),
 // notice(text) }.
 
-import { api, copyText, flashCopied } from "./base.js";
+import { api, apiError, copyText, flashCopied, tildePath } from "./base.js";
 import { esc } from "./markdown.js";
 import { isReadOnly } from "./auth.js";
 import { uiConfirm } from "./modal.js";
 import { titlePrefix, currentScope, sameScope, isRoot, knownGroups } from "./scope.js";
 
-let sessions = [], deps = {}, settingsFor = 0, settingsAutofocused = false;
+let sessions = [], deps = {}, settingsFor = "", settingsAutofocused = false;
 // draft (non-null) = the "new session" dialog is open for a session that does NOT exist yet.
 // The "+" no longer creates immediately: it opens this draft, and the session is born only on
 // OK/Enter. Closing the dialog (✕ / backdrop / Escape) discards the draft and creates nothing.
-// draftView caches the last server option-lists (models/efforts for the chosen backend).
+// draftView caches the last server option-lists (models/think levels for the chosen backend).
 let draft = null, draftView = null, draftSubmitting = false;
 const refreshingModels = new Set();
 let modelMenu = null;
@@ -30,8 +30,6 @@ let renderedScope = null;
 let tabsResizeObserver = null;
 // The shell's <title> (product name, server-injected) — the base for the unread prefix.
 const BASE_TITLE = (typeof document !== "undefined" && document.title) || "klax";
-function sameSession(a, b){ return String(a) === String(b); }
-
 export function initTabs(d){
   deps = d;
   const tabs = document.getElementById("tabs");
@@ -89,21 +87,21 @@ export function renderTabs(active){
   // reader scrolls and hitting 0 exactly when the divider collapses. The title just sums the
   // same per-tab counts, so title and tabs never disagree — and no instant reset on entry.
   const existing = new Map();
-  strip.querySelectorAll(".tab[data-created]").forEach(t => existing.set(t.dataset.created, t));
+  strip.querySelectorAll(".tab[data-klax_id]").forEach(t => existing.set(t.dataset.klax_id, t));
   const keep = new Set();
   for(const [index, s] of sessions.entries()){
-    const unread = deps.unread ? deps.unread(s.created) : 0;
-    const isActive = sameSession(s.created, active);
+    const unread = deps.unread ? deps.unread(s.klax_id) : 0;
+    const isActive = s.klax_id === active;
     totalUnread += unread;
     if(s.busy) busyCount++;
-    const key = String(s.created);
+    const key = s.klax_id;
     const t = existing.get(key) || createTab();
     keep.add(key);
-    t.dataset.created = key;
+    t.dataset.klax_id = key;
     t._sessionName = s.name || "";
-    t.querySelector(".tx").classList.toggle("disabled", !!s.read_only);
+    t.querySelector(".tx").classList.toggle("disabled", isReadOnly());
     t.className = "tab" + (isActive ? " active" : "") + (s.busy ? " busy" : "") + (unread ? " unread" : "");
-    t.querySelector(".tname").textContent = s.name || ("сессия " + s.created);
+    t.querySelector(".tname").textContent = s.name || ("сессия " + s.klax_id);
     const badge = t.querySelector(".badge");
     badge.textContent = unread || "";
     badge.classList.toggle("hidden", !unread);
@@ -156,19 +154,19 @@ function createTab(){
     if(didDrag){ didDrag = false; return; } // this click is the tail of a drop — don't also select
     if(pointerSelected){ pointerSelected = false; clearTimeout(pointerSelectTimer); return; }
     if(e.target.classList.contains("tx")) return;
-    const created = parseInt(t.dataset.created, 10);
-    if(created && deps.select) deps.select(created);
+    const klaxId = t.dataset.klax_id;
+    if(klaxId && deps.select) deps.select(klaxId);
   });
   t.addEventListener("dblclick", e => {
     if(e.target.classList.contains("tx")) return;
     e.preventDefault();
-    const created = parseInt(t.dataset.created, 10);
-    if(created) openSettings(created, "Настройки сессии");
+    const klaxId = t.dataset.klax_id;
+    if(klaxId) openSettings(klaxId, "Настройки сессии");
   }); // settings via double-click (no per-tab gear)
   t.querySelector(".tx").addEventListener("click", e => {
     e.stopPropagation();
-    const created = parseInt(t.dataset.created, 10);
-    if(created) closeSession(created, t._sessionName);
+    const klaxId = t.dataset.klax_id;
+    if(klaxId) closeSession(klaxId, t._sessionName);
   });
   t.addEventListener("pointerdown", e => {
     if(e.button !== 0 || e.target.classList.contains("tx")) return; // left-button, not the close ✕
@@ -185,8 +183,8 @@ function createTab(){
     if(e.pointerType !== "touch" || e.pointerId !== touchPointer) return;
     touchPointer = 0;
     if(Math.hypot(e.clientX - touchX, e.clientY - touchY) > TOUCH_TAP_PX) return;
-    const created = parseInt(t.dataset.created, 10);
-    if(created && deps.select) deps.select(created);
+    const klaxId = t.dataset.klax_id;
+    if(klaxId && deps.select) deps.select(klaxId);
     pointerSelected = true;
     clearTimeout(pointerSelectTimer);
     pointerSelectTimer = setTimeout(() => { pointerSelected = false; }, 1200);
@@ -204,7 +202,7 @@ function createTab(){
 function startDrag(e, tab){
   if(isReadOnly()) return;
   const strip = document.getElementById("tabs");
-  if(!strip || strip.querySelectorAll(".tab[data-created]").length < 2) return; // nothing to reorder
+  if(!strip || strip.querySelectorAll(".tab[data-klax_id]").length < 2) return; // nothing to reorder
   didDrag = false; // fresh gesture — clear any stale flag so it can't swallow this click
   const startX = e.clientX, startY = e.clientY;
   let active = false, gap = 0, foot = 0, halfW = 0, fromIdx = 0, origCenter = 0, startScroll = 0,
@@ -216,7 +214,7 @@ function startDrag(e, tab){
     active = true; dragging = true;
     try { tab.setPointerCapture(e.pointerId); } catch(_){}
     document.body.classList.add("dragging-tab");
-    const full = Array.from(strip.querySelectorAll(".tab[data-created]"));
+    const full = Array.from(strip.querySelectorAll(".tab[data-klax_id]"));
     fromIdx = full.indexOf(tab);
     const gcs = getComputedStyle(strip);
     gap = parseFloat(gcs.columnGap || gcs.gap) || 0;
@@ -358,10 +356,10 @@ function startDrag(e, tab){
     };
     tab.addEventListener("transitionend", done, { once: true });
     setTimeout(done, DRAG_SETTLE_MS + 80); // fallback if transitionend doesn't fire (no visible change)
-    const order = ordered.map(el => parseInt(el.dataset.created, 10)).filter(Boolean);
+    const order = ordered.map(el => el.dataset.klax_id).filter(Boolean);
     // On failure the server's (unchanged) order reconciles back via the next broadcast; tell the user
     // why their reorder didn't stick, matching rename/close/settings error handling elsewhere.
-    api("/api/reorder", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ order }) })
+    api("/api/reorder", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tabs: order }) })
       .then(r => { if(!r.ok) notice("Не удалось сохранить порядок вкладок"); })
       .catch(() => notice("Не удалось сохранить порядок вкладок"));
   };
@@ -377,14 +375,14 @@ function notice(t){ if(deps.notice) deps.notice(t); }
 // fetchDraft loads the "new session" option-lists + default values from the server. `backend`
 // (optional) previews a specific backend's model/effort lists while the dialog is open.
 function fetchDraft(backend){
-  return api("/api/settings?session=0" + (backend ? "&backend=" + encodeURIComponent(backend) : ""))
+  return api("/api/settings" + (backend ? "?backend=" + encodeURIComponent(backend) : ""))
     .then(r => r.ok ? r.json() : Promise.reject(r));
 }
-// openDraft opens the deferred-creation dialog. No session exists yet — settingsFor stays 0 and
+// openDraft opens the deferred-creation dialog. No session exists yet — settingsFor stays "" and
 // `draft` holds the pending field values; nothing is created until onModalOk/createFromDraft.
 function openDraft(){
   if(isReadOnly()) return;
-  settingsFor = 0; settingsAutofocused = false; groupAdding = false;
+  settingsFor = ""; settingsAutofocused = false; groupAdding = false;
   draft = {}; draftView = null; draftSubmitting = false;
   const tt = document.querySelector(".smodal-title"); if(tt) tt.textContent = "Новая сессия";
   const ok = document.querySelector(".smodal-ok"); if(ok){ ok.textContent = "Создать"; ok.disabled = false; }
@@ -395,13 +393,13 @@ function openDraft(){
     // Creating a session INSIDE a group view must not produce a session invisible in that very view,
     // so the draft is pre-seeded with the current group (only that one, not the neighbours' groups).
     const seed = isRoot() || currentScope().kind !== "group" ? [] : [currentScope().name];
-    draft = { name: "", backend: d.backend, model: d.model || "", think: d.think || "", sandbox: d.sandbox, tty: !!d.tty, cwd: d.cwd || "", prompt: d.prompt || "", groups: seed };
+    draft = { name: "", backend: d.backend, model_requested: d.model_requested || "", think: d.think || "", sandbox: d.sandbox, tty: !!d.tty, cwd: d.cwd || "", system_prompt: d.system_prompt || "", groups: seed };
     renderDraft(d);
   }).catch(() => { if(draft) document.getElementById("sbody").innerHTML = '<div class="shint">Не удалось загрузить настройки</div>'; });
 }
-function modelEfforts(d){
-  const model = (d.models || []).find(m => d.model ? m.value === d.model : m.default);
-  return (model?.efforts || []).map(value => ({ value, label: value }));
+function thinkLevels(d){
+  const model = (d.models || []).find(m => d.model_requested ? m.value === d.model_requested : m.default);
+  return (model?.think_levels || []).map(value => ({ value, label: value }));
 }
 // renderDraft paints the draft dialog by overlaying the pending `draft` values onto the cached
 // server option-lists (draftView), then reusing the shared renderSettings in draft mode.
@@ -409,10 +407,10 @@ function renderDraft(view){
   if(view) draftView = view;
   if(!draftView || !draft) return;
   const d = Object.assign({}, draftView, {
-    created: 0, busy: false, backend_locked: false, cwd_locked: false,
-    name: draft.name || "", backend: draft.backend, model: draft.model || "", think: draft.think || "",
-    sandbox: draft.sandbox, tty: !!draft.tty, cwd: draft.cwd || "", prompt: draft.prompt || "", groups: draft.groups || [],
-    assigned_model: "", session_id: "", messages: 0, ctx_window: 0, ctx_used: 0,
+    klax_id: "", busy: false, backend_locked: false, cwd_locked: false,
+    name: draft.name || "", backend: draft.backend, model_requested: draft.model_requested || "", think: draft.think || "",
+    sandbox: draft.sandbox, tty: !!draft.tty, cwd: draft.cwd || "", system_prompt: draft.system_prompt || "", groups: draft.groups || [],
+    model_used: "", backend_id: "", messages: 0, ctx_window: 0, ctx_used: 0,
   });
   renderSettings(d, true);
 }
@@ -423,28 +421,28 @@ function draftApply(patch){
   if(!draft) return;
   Object.assign(draft, patch);
   if("backend" in patch){
-    draft.model = ""; draft.think = "";
+    draft.model_requested = ""; draft.think = "";
     if(patch.backend !== "claude") draft.tty = false;
     fetchDraft(patch.backend).then(d => { if(draft) renderDraft(d); }).catch(() => {});
     return;
   }
-  if("model" in patch && !modelEfforts({ models: draftView?.models, model: draft.model }).some(e => e.value === draft.think)) draft.think = "";
+  if("model_requested" in patch && !thinkLevels({ models: draftView?.models, model_requested: draft.model_requested }).some(e => e.value === draft.think)) draft.think = "";
   renderDraft();
 }
 // onModalOk is the shared OK button: confirm-and-create for a draft, plain close for a real session.
 function onModalOk(){ if(draft) createFromDraft(); else closeSettings(); }
 // createFromDraft POSTs the pending draft to /api/new (creation happens HERE, not on "+"), then
-// switches to the freshly-created session. model/think are sent explicitly so "По умолчанию" is
-// honoured; name/cwd/prompt only when non-empty (empty keeps the server-seeded default).
+// switches to the freshly created session. model/think are sent explicitly so "По умолчанию" is
+// honoured; name/cwd only when non-empty (empty keeps the server-seeded default).
 async function createFromDraft(){
   if(!draft || draftSubmitting) return;
   draftSubmitting = true;
   const ok = document.querySelector(".smodal-ok"); if(ok) ok.disabled = true;
   const d = draft, trim = v => (v || "").trim();
-  const body = { backend: d.backend, model: d.model || "", think: d.think || "", sandbox: d.sandbox, tty: !!d.tty };
+  const body = { backend: d.backend, model_requested: d.model_requested || "", think: d.think || "", sandbox: d.sandbox, tty: !!d.tty };
   if(trim(d.name)) body.name = trim(d.name);
   if(trim(d.cwd)) body.cwd = trim(d.cwd);
-  body.prompt = trim(d.prompt);
+  body.system_prompt = trim(d.system_prompt);
   if((d.groups || []).length) body.groups = d.groups;
   // Keep `draft` intact until the server accepts: on a rejected draft (e.g. an inaccessible working
   // directory) the server creates nothing and returns the reason, so we surface THAT and leave the
@@ -453,30 +451,30 @@ async function createFromDraft(){
   try {
     r = await api("/api/new", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   } catch(e){ draftSubmitting = false; if(ok) ok.disabled = false; notice("Не удалось создать сессию"); return; }
-  if(!r.ok){ draftSubmitting = false; if(ok) ok.disabled = false; notice((await r.text()).trim() || "Не удалось создать сессию"); return; }
+  if(!r.ok){ draftSubmitting = false; if(ok) ok.disabled = false; notice(await apiError(r, "Не удалось создать сессию")); return; }
   const j = await r.json();
   draft = null; draftView = null; modelMenu = null;
   draftSubmitting = false; if(ok) ok.disabled = false;
   document.getElementById("smodal").classList.add("hidden");
-  settingsFor = 0; settingsAutofocused = false;
-  if(j.created && deps.onNew) await deps.onNew(j.created);
+  settingsFor = ""; settingsAutofocused = false;
+  if(j.klax_id && deps.onNew) await deps.onNew(j.klax_id);
 }
 
-async function closeSession(created, name){
-  if(sessions.find(s => sameSession(s.created, created))?.read_only) return;
+async function closeSession(klaxId, name){
+  if(isReadOnly()) return;
   // The close glyph is not a focusable control, so this flow supplies its canonical destination to
   // the modal instead of running a second, competing focus-restoration timer after it resolves.
-  const confirmed = await uiConfirm("Закрыть сессию «" + (name || ("#" + created)) + "»?", "Закрыть", true, deps.focus);
+  const confirmed = await uiConfirm("Закрыть сессию «" + (name || ("#" + klaxId)) + "»?", "Закрыть", true, deps.focus);
   if(!confirmed) return;
   try {
-    const r = await api("/api/close", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: created }) });
-    if(!r.ok){ notice((await r.text()).trim() || "Не удалось закрыть"); return; }
-    if(deps.afterClose) deps.afterClose(created);
+    const r = await api("/api/close", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ klax_id: klaxId }) });
+    if(!r.ok){ notice(await apiError(r, "Не удалось закрыть")); return; }
+    if(deps.afterClose) deps.afterClose(klaxId);
   } catch(e){ notice("Не удалось закрыть"); }
 }
 
 // --- settings modal ---
-function fetchSettings(created){ return api("/api/settings?session=" + created).then(r => r.ok ? r.json() : Promise.reject(r)); }
+function fetchSettings(klaxId){ return api("/api/settings?klax_id=" + encodeURIComponent(klaxId)).then(r => r.ok ? r.json() : Promise.reject(r)); }
 
 // Custom dropdown (no native <select>, which renders in the OS style and whose open state we cannot
 // see): a styled button + an absolutely-positioned menu. "Open" is our own class, so a background
@@ -523,7 +521,7 @@ function wireSelect(id, onPick){
   }));
 }
 
-const catalogSelects = [["s-model", "model", "models"], ["s-think", "think", "efforts"]];
+const catalogSelects = [["s-model", "model_requested", "models"], ["s-think", "think", "think_levels"]];
 
 function wireModelSelect(d, isDraft, apply){
   modelMenu = { root: document.getElementById("s-model"), d, isDraft, apply };
@@ -559,7 +557,7 @@ async function refreshModels(backend){
   let models;
   try {
     const r = await api("/api/models/refresh", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ backend }) });
-    if(!r.ok) throw new Error((await r.text()).trim() || "Не удалось обновить список моделей");
+    if(!r.ok) throw new Error(await apiError(r, "Не удалось обновить список моделей"));
     models = (await r.json()).models;
   } catch(e){ notice(e.message || "Не удалось обновить список моделей"); }
   finally {
@@ -568,7 +566,7 @@ async function refreshModels(backend){
     if(view && view.d.backend === backend && view.root.isConnected){
       if(models){
         view.d.models = models;
-        view.d.efforts = modelEfforts(view.d);
+        view.d.think_levels = thinkLevels(view.d);
         if(view.isDraft && draftView) draftView.models = models;
       }
       const open = new Set();
@@ -576,7 +574,7 @@ async function refreshModels(backend){
         const root = document.getElementById(id);
         if(!root) continue;
         if(root.classList.contains("open")) open.add(id);
-        root.outerHTML = selectHTML(id, view.d[list], view.d[field], true, !!(view.d.busy || view.d.read_only));
+        root.outerHTML = selectHTML(id, view.d[list], view.d[field], true, !!(view.d.busy || isReadOnly()));
       }
       wireModelSelect(view.d, view.isDraft, view.apply);
       for(const id of open){
@@ -588,18 +586,18 @@ async function refreshModels(backend){
   }
 }
 
-export function openSettings(created, title){
-  settingsFor = created; settingsAutofocused = false; groupAdding = false;
+export function openSettings(klaxId, title){
+  settingsFor = klaxId; settingsAutofocused = false; groupAdding = false;
   draft = null; draftView = null; // opening a real session's settings supersedes any stale draft state
   const tt = document.querySelector(".smodal-title"); if(tt) tt.textContent = title || "Настройки сессии";
   const ok = document.querySelector(".smodal-ok"); if(ok) ok.textContent = "OK";
   document.getElementById("smodal").classList.remove("hidden");
   document.getElementById("sbody").innerHTML = '<div class="shint">Загрузка…</div>';
-  fetchSettings(created).then(d => { if(settingsFor === created) renderSettings(d); })
-    .catch(() => { if(settingsFor === created) document.getElementById("sbody").innerHTML = '<div class="shint">Не удалось загрузить настройки</div>'; });
+  fetchSettings(klaxId).then(d => { if(settingsFor === klaxId) renderSettings(d); })
+    .catch(() => { if(settingsFor === klaxId) document.getElementById("sbody").innerHTML = '<div class="shint">Не удалось загрузить настройки</div>'; });
 }
 function closeSettings(){
-  settingsFor = 0; settingsAutofocused = false; groupAdding = false;
+  settingsFor = ""; settingsAutofocused = false; groupAdding = false;
   modelMenu = null;
   draft = null; draftView = null; draftSubmitting = false; // discard any pending "new session" draft — closing creates nothing
   const ok = document.querySelector(".smodal-ok"); if(ok) ok.disabled = false;
@@ -610,18 +608,18 @@ function closeSettings(){
 }
 
 function renderSettings(d, isDraft){
-  d.efforts = modelEfforts(d);
-  if(isDraft){ if(!draft) return; } else if(settingsFor !== d.created) return;
+  d.think_levels = thinkLevels(d);
+  if(isDraft){ if(!draft) return; } else if(settingsFor !== d.klax_id) return;
   // In draft mode every control edits the pending `draft` object (nothing exists to PATCH yet);
   // for a real session each change applies immediately via patchSettings.
-  const apply = isDraft ? draftApply : patch => patchSettings(d.created, patch);
-  const lock = d.busy || d.read_only, dis = lock ? " disabled" : "";
+  const apply = isDraft ? draftApply : patch => patchSettings(d.klax_id, patch);
+  const lock = d.busy || isReadOnly(), dis = lock ? " disabled" : "";
   let h = "";
   if(d.busy) h += '<div class="sbusy">⏳ Сессия занята — параметры запуска нельзя менять до завершения.</div>';
   h += '<div class="srow"><label>Имя</label><div class="sctl"><input class="sname" type="text" maxlength="80" value="'+esc(d.name)+'"></div></div>';
   h += '<div class="srow"><label>Движок</label><div class="sctl">'+selectHTML("s-backend", d.backends, d.backend, false, !!(d.backend_locked || lock))+'</div></div>';
-  h += '<div class="srow"><label>Модель</label><div class="sctl">'+selectHTML("s-model", d.models, d.model, true, !!lock)+'</div></div>';
-  h += '<div class="srow"><label>Мышление</label><div class="sctl">'+selectHTML("s-think", d.efforts, d.think, true, !!lock)+'</div></div>';
+  h += '<div class="srow"><label>Модель</label><div class="sctl">'+selectHTML("s-model", d.models, d.model_requested, true, !!lock)+'</div></div>';
+  h += '<div class="srow"><label>Мышление</label><div class="sctl">'+selectHTML("s-think", d.think_levels, d.think, true, !!lock)+'</div></div>';
   h += '<div class="srow"><label>Sandbox</label><div class="sctl"><label class="stoggle"><input type="checkbox" id="s-sandbox"'+(d.sandbox==="on"?" checked":"")+dis+'><span>'+(d.sandbox==="on"?"вкл":"выкл")+'</span></label></div></div>';
   // Groups are picked, not typed as prose: each one is a chip you can drop with ✕, and "+" offers
   // the groups this session is not in yet plus an explicit "new group" entry.
@@ -639,19 +637,19 @@ function renderSettings(d, isDraft){
           + freeGroups.map(g => '<div class="sselect-opt" data-value="'+esc(g)+'">'+esc(g)+'</div>').join("")
           + '<div class="sselect-opt sgroupnewopt" data-value="">…</div></div></div>')
     + '</div></div>';
-  h += '<div class="sfield"><label>Рабочий каталог</label><input class="scwd" type="text"'+((d.cwd_locked||lock)?" disabled":"")+' value="'+esc(d.cwd||"")+'"></div>';
-  h += '<div class="sfield"><label>Системный промпт</label><textarea class="sprompt" rows="1"'+dis+' placeholder="добавляется к системному промпту">'+esc(d.prompt||"")+'</textarea></div>';
+  h += '<div class="sfield"><label>Рабочий каталог</label><input class="scwd" type="text"'+((d.cwd_locked||lock)?" disabled":"")+' value="'+esc(tildePath(d.cwd||""))+'"></div>';
+  h += '<div class="sfield"><label>Системный промпт</label><textarea class="sprompt" rows="1"'+dis+' placeholder="добавляется к системному промпту">'+esc(d.system_prompt||"")+'</textarea></div>';
   // Read-only facts — the model the backend actually answered with (may differ from the selected
-  // default) and the resolved session UUID. Only for a real session that has already answered (the
+  // default) and the backend session id. Only for a real session that has already answered (the
   // context gauge lives in the chat now, so it's no longer duplicated here).
-  if(!isDraft && (d.assigned_model || d.session_id)){
+  if(!isDraft && (d.model_used || d.backend_id)){
     h += '<div class="ssep"></div>';
-    if(d.assigned_model) h += '<div class="sfact"><span class="sfact-k">Модель</span><span class="sfact-v">'+esc(d.assigned_model)+'</span></div>';
-    if(d.session_id) h += '<div class="sfact"><span class="sfact-k">UUID</span><code class="suuid" title="Скопировать">'+esc(d.session_id)+'</code></div>';
+    if(d.model_used) h += '<div class="sfact"><span class="sfact-k">Модель</span><span class="sfact-v">'+esc(d.model_used)+'</span></div>';
+    if(d.backend_id) h += '<div class="sfact"><span class="sfact-k">UUID</span><code class="suuid" title="Скопировать">'+esc(d.backend_id)+'</code></div>';
   }
   const b = document.getElementById("sbody");
   b.innerHTML = h;
-  if(d.read_only){
+  if(isReadOnly()){
     b.querySelectorAll("input, textarea, button").forEach(el => { el.disabled = true; });
     b.querySelectorAll(".sselect").forEach(el => el.classList.add("disabled"));
   }
@@ -660,7 +658,7 @@ function renderSettings(d, isDraft){
   const applyName = () => {
     const v = nameInput.value.trim();
     if(isDraft){ if(draft) draft.name = v; return; } // draft: hold locally, applied on create
-    if(v && v !== d.name) patchSettings(d.created, { name: v });
+    if(v && v !== d.name) patchSettings(d.klax_id, { name: v });
   };
   nameInput.addEventListener("keydown", e => {
     if(e.key !== "Enter") return;
@@ -671,7 +669,7 @@ function renderSettings(d, isDraft){
   nameInput.addEventListener("blur", applyName);
   // Grab the name field on every open (create AND double-click) so it can be edited and
   // committed with Enter straight away; the guard fires it once per open, not on each refresh.
-  if((isDraft || settingsFor === d.created) && !settingsAutofocused){
+  if((isDraft || settingsFor === d.klax_id) && !settingsAutofocused){
     settingsAutofocused = true;
     nameInput.focus();
     nameInput.select();
@@ -685,7 +683,7 @@ function renderSettings(d, isDraft){
     const applyCwd = () => {
       const v = cwd.value.trim();
       if(isDraft){ if(draft) draft.cwd = v; return; }
-      if(v && v !== d.cwd) patchSettings(d.created, { cwd: v });
+      if(v && v !== tildePath(d.cwd)) patchSettings(d.klax_id, { cwd: v });
     };
     cwd.addEventListener("keydown", e => { if(e.key === "Enter"){ e.preventDefault(); cwd.blur(); } });
     cwd.addEventListener("blur", applyCwd);
@@ -695,7 +693,7 @@ function renderSettings(d, isDraft){
   const applyGroups = list => {
     groupAdding = false;
     if(isDraft){ draftApply({ groups: list }); return; }
-    if(list.join("\u0000") !== (d.groups||[]).join("\u0000")) patchSettings(d.created, { groups: list });
+    if(list.join("\u0000") !== (d.groups||[]).join("\u0000")) patchSettings(d.klax_id, { groups: list });
     else renderSettings(d, isDraft);
   };
   b.querySelectorAll(".sgroupx").forEach(x => x.addEventListener("click", () => {
@@ -739,19 +737,19 @@ function renderSettings(d, isDraft){
   const prompt = b.querySelector(".sprompt");
   if(prompt) prompt.addEventListener("blur", () => {
     const v = prompt.value.trim();
-    if(isDraft){ if(draft) draft.prompt = v; return; }
-    if(v !== (d.prompt||"")) patchSettings(d.created, { prompt: v });
+    if(isDraft){ if(draft) draft.system_prompt = v; return; }
+    if(v !== (d.system_prompt||"")) patchSettings(d.klax_id, { system_prompt: v });
   });
   const uuid = b.querySelector(".suuid");
   if(uuid) uuid.addEventListener("click", () => copyText(uuid.textContent || "", () => flashCopied(uuid)));
 }
 
-function patchSettings(created, patch){
-  if(sessions.find(s => sameSession(s.created, created))?.read_only) return;
-  patch.session = created;
+function patchSettings(klaxId, patch){
+  if(isReadOnly()) return;
+  patch.klax_id = klaxId;
   api("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) })
-    .then(r => { if(r.ok) return r.json(); r.text().then(t => notice(t.trim() || "Не удалось применить")); return fetchSettings(created); })
-    .then(d => { if(d && settingsFor === created) renderSettings(d); })
+    .then(r => { if(r.ok) return r.json(); apiError(r, "Не удалось применить").then(notice); return fetchSettings(klaxId); })
+    .then(d => { if(d && settingsFor === klaxId) renderSettings(d); })
     .catch(() => notice("Не удалось применить"));
 }
 
@@ -769,7 +767,7 @@ function maybeRefreshSettings(){
   if(inBody && (ae.tagName === "TEXTAREA" || (ae.tagName === "INPUT" && (ae.type || "text") === "text"))) return;
   const keepId = inBody ? ae.id : "";
   fetchSettings(settingsFor).then(d => {
-    if(settingsFor !== d.created) return;
+    if(settingsFor !== d.klax_id) return;
     const refocus = keepId && document.activeElement && document.activeElement.id === keepId; // still there after the async fetch
     renderSettings(d);
     if(refocus){ const el = document.getElementById(keepId); if(el && !el.disabled) el.focus(); }

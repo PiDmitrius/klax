@@ -19,7 +19,7 @@ import "strings"
 
 const (
 	maxExecInput = 128 * 1024 // cap the wrapper source we scan
-	maxExecCalls = 32          // cap actions decoded from one wrapper
+	maxExecCalls = 32         // cap actions decoded from one wrapper
 )
 
 type codexToolCall struct {
