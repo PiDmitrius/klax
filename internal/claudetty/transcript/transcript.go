@@ -31,9 +31,12 @@ type Line struct {
 	// IsMeta marks an SDK-injected internal row (e.g. the "[Image: …Multiply
 	// coordinates…]" annotation the harness adds when the model views an image).
 	// These are role=user but NOT human input, so they must never render as a message.
-	IsMeta  bool
-	Error   string
-	Compact *CompactInfo
+	IsMeta bool
+	// OriginKind is the harness origin of a role=user row, e.g. "task-notification"
+	// for a background task or Monitor report; empty for typed input.
+	OriginKind string
+	Error      string
+	Compact    *CompactInfo
 	// Time is the line's transcript timestamp; zero when absent or
 	// unparseable. The driver uses it to tell a boundary written during
 	// this turn from one replayed out of resumed history.
@@ -51,13 +54,16 @@ type CompactInfo struct {
 }
 
 type rawLine struct {
-	Type              string `json:"type"`
-	Subtype           string `json:"subtype"`
-	SessionID         string `json:"sessionId"`
-	SessionIDp        string `json:"session_id"`
-	Timestamp         string `json:"timestamp"`
-	IsSidechain       bool   `json:"isSidechain"`
-	IsMeta            bool   `json:"isMeta"`
+	Type        string `json:"type"`
+	Subtype     string `json:"subtype"`
+	SessionID   string `json:"sessionId"`
+	SessionIDp  string `json:"session_id"`
+	Timestamp   string `json:"timestamp"`
+	IsSidechain bool   `json:"isSidechain"`
+	IsMeta      bool   `json:"isMeta"`
+	Origin      struct {
+		Kind string `json:"kind"`
+	} `json:"origin"`
 	IsAPIErrorMessage bool   `json:"isApiErrorMessage"`
 	Error             string `json:"error"`
 	CompactMetadata   *struct {
@@ -105,6 +111,7 @@ func Parse(line []byte) (Line, bool) {
 		SessionID:  sid,
 		IsAPIError: r.IsAPIErrorMessage,
 		IsMeta:     r.IsMeta,
+		OriginKind: r.Origin.Kind,
 		Error:      r.Error,
 		Compact:    compact,
 		Time:       ts,

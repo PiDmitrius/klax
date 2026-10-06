@@ -48,14 +48,16 @@ function harness(epoch = null){
 const group = (seq, ids, state = "done") => ({ key: "t:" + seq, ord: seq + "." + seq, head: { turn_seq: seq, role: "user", state }, blocks: ids.map(id => ({ id })) });
 
 test("live retries preserve the cursor, cap their pauses and reset after successful application", async () => {
-  const pauses = [], cursors = [], health = [];
+  const pauses = [], cursors = [], nowaits = [], health = [];
   let call = 0, after = "epoch.7", applied = 0;
   const context = {
     retryDelay,
     setTimeout: (fn, ms) => { pauses.push(ms); queueMicrotask(fn); },
     api: async (_url, opts, longPoll) => {
       assert.equal(longPoll, true);
-      cursors.push(JSON.parse(opts.body).after);
+      const body = JSON.parse(opts.body);
+      cursors.push(body.after);
+      nowaits.push(body.nowait);
       if(call++ < 5 || call === 7) throw new Error("offline");
       if(call === 8) return { status: 401 };
       return { ok: true, json: async () => ({ at: "epoch.8", events: [{ seq: 8 }] }) };
@@ -70,9 +72,32 @@ test("live retries preserve the cursor, cap their pauses and reset after success
   await vm.runInNewContext(source + "\nchangesLoop(host)", context);
   assert.deepEqual(pauses, [625, 1250, 2500, 5000, 5000, 625]);
   assert.deepEqual(cursors, ["epoch.7", "epoch.7", "epoch.7", "epoch.7", "epoch.7", "epoch.7", "epoch.8", "epoch.8"]);
+  assert.deepEqual(nowaits, [false, true, true, true, true, true, false, true]);
   assert.equal(applied, 1);
   assert.deepEqual(health.at(-2), [true, 0]);
   assert.deepEqual(health.at(-1), [false, 1]);
+});
+
+test("a returning page cuts the retry pause short", async () => {
+  let calls = 0, fire;
+  const context = {
+    retryDelay: () => 5000,
+    setTimeout: fn => { fire = fn; return 1; },
+    clearTimeout: () => { fire = null; },
+    api: async () => {
+      if(++calls === 1) throw new Error("offline");
+      return { status: 401 };
+    },
+    host: { after: () => "epoch.7" },
+  };
+  const source = readFileSync(new URL("./events.js", import.meta.url), "utf8").replace(/^import .*;\n/gm, "").replace(/export /g, "");
+  const loop = vm.runInNewContext(source + "\nconst loop = changesLoop(host); wakeChanges(); loop", context);
+  await new Promise(res => setImmediate(res));
+  assert.equal(calls, 1);
+  vm.runInContext("wakeChanges()", context);
+  await loop;
+  assert.equal(calls, 2);
+  assert.equal(fire, null);
 });
 
 for(const [name, previous, uptime, startup, show] of [

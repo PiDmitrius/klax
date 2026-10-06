@@ -437,3 +437,34 @@ func TestReadClaudeAPIErrorShowsMessageNotBareCode(t *testing.T) {
 		t.Fatalf("item1 = %q, want the error field as fallback", items[1].Text)
 	}
 }
+
+func TestReadClaudeRendersTaskNotificationsAsTool(t *testing.T) {
+	path := writeLines(t, []string{
+		`{"type":"user","message":{"role":"user","content":"Ты закончил? Даблвью на diff пожалуйста тогда"},"promptSource":"sdk","turnOrigin":"sdk","version":"2.1.288"}`,
+		`{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>b68qsb3zg</task-id>\n<summary>Monitor event: \"проверка исправлений обоими бэкендами\"</summary>\n<event>reviewer-a: проверка исправлений закончена (CLAUDE EXIT 0, 42 строк)</event>\n</task-notification>"},"origin":{"kind":"task-notification","producer":"session-task"},"promptSource":"system","turnOrigin":"task_notification","version":"2.1.288"}`,
+		`{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>b68qsb3zg</task-id>\n<tool-use-id>toolu_012DqmhmiVxSCYJj9LLvfVBk</tool-use-id>\n<output-file>/tmp/tasks/b68qsb3zg.output</output-file>\n<status>completed</status>\n<summary>Monitor \"проверка исправлений обоими бэкендами\" stream ended</summary>\n<event>reviewer-b: проверка исправлений закончена (CODEX EXIT 0, 14 строк)</event>\n</task-notification>"},"origin":{"kind":"task-notification","producer":"session-task"},"promptSource":"system","turnOrigin":"task_notification","version":"2.1.288"}`,
+		`{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>bi66hj5rv</task-id>\n<summary>Monitor event: \"reviewer-b / reviewer-a review completion\"</summary>\n<event>reviewer-b finished: CODEX EXIT 0, 14 lines in /tmp/review-codex.log</event>\n</task-notification>"},"origin":{"kind":"task-notification"},"promptSource":"sdk","version":"2.1.261"}`,
+		`{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>biwn0o3i3</task-id>\n<status>failed</status>\n<summary>Background command \"make &amp;&amp; ./run 2&gt;&amp;1\" failed with exit code 1</summary>\n</task-notification>"},"version":"2.1.267"}`,
+		`{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>x</task-id>\n</task-notification>"},"origin":{"kind":"task-notification"}}`,
+	})
+	items, err := readClaude(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Item{
+		{Role: "user", Text: "Ты закончил? Даблвью на diff пожалуйста тогда"},
+		{Role: "tool", Text: `🔔 Monitor event: "проверка исправлений обоими бэкендами": reviewer-a: проверка исправлений закончена (CLAUDE EXIT 0, 42 строк)`},
+		{Role: "tool", Text: `✓ Monitor "проверка исправлений обоими бэкендами" stream ended (completed): reviewer-b: проверка исправлений закончена (CODEX EXIT 0, 14 строк)`},
+		{Role: "tool", Text: `🔔 Monitor event: "reviewer-b / reviewer-a review completion": reviewer-b finished: CODEX EXIT 0, 14 lines in /tmp/review-codex.log`},
+		{Role: "tool", Text: `✗ Background command "make && ./run 2>&1" failed with exit code 1 (failed)`},
+		{Role: "tool", Text: "<task-notification>\n<task-id>x</task-id>\n</task-notification>"},
+	}
+	if len(items) != len(want) {
+		t.Fatalf("want %d items, got %d: %+v", len(want), len(items), items)
+	}
+	for i, w := range want {
+		if items[i].Role != w.Role || items[i].Text != w.Text {
+			t.Fatalf("item%d = %q %q, want %q %q", i, items[i].Role, items[i].Text, w.Role, w.Text)
+		}
+	}
+}

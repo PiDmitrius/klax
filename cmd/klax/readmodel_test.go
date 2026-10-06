@@ -245,6 +245,37 @@ func TestReadModelContextFromToolOnlyBlock(t *testing.T) {
 	}
 }
 
+// Background task notifications arrive as role=user transcript rows inside a running turn;
+// they must stay blocks of that turn rather than start a new one.
+func TestGroupTurnsKeepsTaskNotificationsInTurn(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	const cwd = "/tmp/proj"
+	dir := filepath.Join(home, ".claude", "projects", "-tmp-proj")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Join([]string{
+		`{"type":"user","message":{"role":"user","content":"check <!-- klax-turn:1111111111111111 -->"}}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"waiting"}]}}`,
+		`{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>a</task-id>\n<summary>Monitor event: \"review\"</summary>\n<event>done</event>\n</task-notification>"},"origin":{"kind":"task-notification"}}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"one done"}]}}`,
+		`{"type":"user","message":{"role":"user","content":"<task-notification>\n<task-id>a</task-id>\n<status>completed</status>\n<summary>Monitor \"review\" stream ended</summary>\n</task-notification>"},"origin":{"kind":"task-notification","producer":"session-task"}}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"all done"}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "s1.jsonl"), []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	items, err := history.Load("claude", "s1", cwd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := groupTurns(items)
+	if len(g) != 1 || g[0].lead.Marker != "1111111111111111" || len(g[0].blocks) != 5 {
+		t.Fatalf("want one turn with 5 blocks, got %+v", g)
+	}
+}
+
 // groupTurns nests answer/tool blocks under their user turn and keeps non-answer
 // system notices as their own top-level unit.
 func TestGroupTurns(t *testing.T) {

@@ -325,6 +325,22 @@ func TestSyncIdlePollReturnsSameAt(t *testing.T) {
 	}
 }
 
+func TestSyncNoWaitPollAnswersImmediately(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newSyncFixture(t)
+		uiPollHold = time.Hour
+		at, _ := f.state()
+		start := time.Now()
+		body := f.do("POST", "/api/changes", fmt.Sprintf(`{"after":%q,"nowait":true}`, at)).Body.String()
+		if want := fmt.Sprintf(`{"at":%q}`, at) + "\n"; body != want {
+			t.Fatalf("nowait poll = %q, want %q", body, want)
+		}
+		if waited := time.Since(start); waited != 0 {
+			t.Fatalf("nowait poll held for %v", waited)
+		}
+	})
+}
+
 func TestSyncChangesBatchHasFixedDeadline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newSyncFixture(t)
