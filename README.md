@@ -22,6 +22,12 @@ At a high level:
 3. It starts or resumes the selected backend in that session's working directory.
 4. It streams tool activity and the final result back to the messenger.
 
+Incoming polls allow 30 seconds for the complete HTTP response. Telegram, MAX,
+and VK wait for updates for up to 29 seconds. Yandex Messenger has no documented
+server wait parameter; Klax pauses for 2 seconds after an empty response.
+Other outbound messenger API requests allow 10 seconds. Failed polls retry after 625 ms, 1.25 s,
+2.5 s, then 5 s; success resets the sequence, and platform `RetryAfter` takes priority.
+
 ## Features
 
 - Telegram, MAX, VK, and Yandex Messenger transports
@@ -275,11 +281,12 @@ fields, and `null` removes a field:
 ```
 
 The `tabs` payload is the complete ordered list of session IDs.
-An idle `/api/changes` request waits up to 5 seconds. Its first available event
+An idle `/api/changes` request waits up to 29 seconds. Its first available event
 starts a fixed 100 ms collection window; further updates do not extend it.
-The response includes changes detected at the end of that window. Web UI requests
-allow 10 seconds for the complete response. Live and history retries wait 625 ms,
-1.25 s, 2.5 s, then 5 s; a successful response resets this sequence.
+The response includes changes detected at the end of that window. Poll requests
+allow 30 seconds for the complete response; other Web UI requests allow 10 seconds.
+Live and history retries wait 625 ms, 1.25 s, 2.5 s, then 5 s; a successful
+response resets this sequence.
 
 ### System status
 

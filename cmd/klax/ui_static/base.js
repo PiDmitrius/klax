@@ -58,14 +58,14 @@ export function retryDelay(attempt){
 }
 
 // api bounds the authenticated request through receipt of the complete body.
-export async function api(path, opts = {}){
+export async function api(path, opts = {}, longPoll = false){
   const token = getToken(), ac = new AbortController();
   const abort = () => ac.abort(opts.signal.reason);
   if(opts.signal){
     if(opts.signal.aborted) abort();
     else opts.signal.addEventListener("abort", abort, { once: true });
   }
-  const timer = setTimeout(() => ac.abort(new DOMException("Request timed out", "TimeoutError")), policy().request_ms);
+  const timer = setTimeout(() => ac.abort(new DOMException("Request timed out", "TimeoutError")), longPoll ? policy().poll_ms : policy().request_ms);
   try {
     if(ac.signal.aborted) throw ac.signal.reason;
     const r = await fetch(BASE() + (path[0] === "/" ? path.slice(1) : path), {

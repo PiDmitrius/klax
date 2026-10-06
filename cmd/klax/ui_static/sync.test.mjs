@@ -5,7 +5,7 @@ import vm from "node:vm";
 import { TurnModel, ordLess, applyMerge } from "./model.js";
 import { cursorEpoch, cursorSeq } from "./events.js";
 import { retryDelay } from "./base.js";
-globalThis.document = { getElementById: () => ({ textContent: JSON.stringify({request_ms:10000,retry_min_ms:625,retry_max_ms:5000}) }) };
+globalThis.document = { getElementById: () => ({ textContent: JSON.stringify({request_ms:10000,poll_ms:30000,retry_min_ms:625,retry_max_ms:5000}) }) };
 import { pos, parsePos, decodePos, answerBlock } from "./render.js";
 
 function harness(epoch = null){
@@ -53,7 +53,8 @@ test("live retries preserve the cursor, cap their pauses and reset after success
   const context = {
     retryDelay,
     setTimeout: (fn, ms) => { pauses.push(ms); queueMicrotask(fn); },
-    api: async (_url, opts) => {
+    api: async (_url, opts, longPoll) => {
+      assert.equal(longPoll, true);
       cursors.push(JSON.parse(opts.body).after);
       if(call++ < 5 || call === 7) throw new Error("offline");
       if(call === 8) return { status: 401 };

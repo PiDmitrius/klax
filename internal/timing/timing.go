@@ -8,7 +8,8 @@ const (
 	WorkTimeout    = RequestTimeout * 3 / 4
 	RetryMin       = RequestTimeout / 16
 	RetryMax       = RequestTimeout / 2
-	PollHold       = RequestTimeout / 2
+	PollTimeout    = 30 * time.Second
+	PollHold       = PollTimeout - time.Second
 )
 
 func RetryDelay(attempt int) time.Duration {

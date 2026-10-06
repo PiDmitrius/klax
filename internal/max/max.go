@@ -163,6 +163,10 @@ func httpError(code int, desc string) *transport.APIError {
 }
 
 func (b *Bot) request(method, path string, body io.Reader) (*http.Response, error) {
+	return b.requestWithClient(b.client, method, path, body)
+}
+
+func (b *Bot) requestWithClient(client *http.Client, method, path string, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequest(method, apiBase+path, body)
 	if err != nil {
 		return nil, err
@@ -171,7 +175,7 @@ func (b *Bot) request(method, path string, body io.Reader) (*http.Response, erro
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	return b.client.Do(req)
+	return client.Do(req)
 }
 
 // GetMe validates the bot token.
@@ -195,7 +199,7 @@ func (b *Bot) GetUpdates() ([]Update, error) {
 	if b.marker != nil {
 		path += "&marker=" + strconv.FormatInt(*b.marker, 10)
 	}
-	resp, err := b.request("GET", path, nil)
+	resp, err := b.requestWithClient(httpclient.Poll(b.client), "GET", path, nil)
 	if err != nil {
 		return nil, err
 	}

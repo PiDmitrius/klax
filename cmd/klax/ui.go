@@ -1020,6 +1020,7 @@ func (s *uiServer) handleSPA(w http.ResponseWriter, r *http.Request) {
 	page := bytes.ReplaceAll(spaHTML, []byte("__KLAX_UI_TITLE__"), []byte(html.EscapeString(s.d.cfg.GetUITitle())))
 	policy, _ := json.Marshal(map[string]int64{
 		"request_ms":   timing.RequestTimeout.Milliseconds(),
+		"poll_ms":      timing.PollTimeout.Milliseconds(),
 		"retry_min_ms": timing.RetryMin.Milliseconds(),
 		"retry_max_ms": timing.RetryMax.Milliseconds(),
 	})

@@ -128,12 +128,16 @@ type Chat struct {
 type APIError = transport.APIError
 
 func (b *Bot) call(method string, payload interface{}) (json.RawMessage, error) {
+	return b.callWithClient(b.client, method, payload)
+}
+
+func (b *Bot) callWithClient(client *http.Client, method string, payload interface{}) (json.RawMessage, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
 	url := fmt.Sprintf("%s%s/%s", apiBase, b.token, method)
-	resp, err := b.client.Post(url, "application/json", bytes.NewReader(data))
+	resp, err := client.Post(url, "application/json", bytes.NewReader(data))
 	if err != nil {
 		return nil, err // network error
 	}
@@ -213,7 +217,7 @@ func (b *Bot) GetUpdates() ([]Update, error) {
 		"offset":  b.offset,
 		"timeout": int(timing.PollHold.Seconds()),
 	}
-	raw, err := b.call("getUpdates", payload)
+	raw, err := b.callWithClient(httpclient.Poll(b.client), "getUpdates", payload)
 	if err != nil {
 		return nil, err
 	}

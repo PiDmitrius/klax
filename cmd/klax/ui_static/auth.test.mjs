@@ -21,7 +21,7 @@ function harness(saved="",hash=""){
     localStorage:{getItem:k=>store.get(k)||null,setItem:(k,v)=>store.set(k,v),removeItem:k=>store.delete(k)},
     location:{pathname:"/mount/",search:"",hash,reload:()=>reloads++},
     history:{replaceState:(_s,_t,url)=>{ctx.location.hash="";ctx.cleanedURL=url;}},
-    document:{getElementById:id=>id === "request-policy" ? {textContent: JSON.stringify({request_ms:10000,retry_min_ms:625,retry_max_ms:5000})} : elements[id]},
+    document:{getElementById:id=>id === "request-policy" ? {textContent: JSON.stringify({request_ms:10000,poll_ms:30000,retry_min_ms:625,retry_max_ms:5000})} : elements[id]},
     fetch:(url,options)=>new Promise(resolve=>calls.push({url,options,resolve})),
   };
   const source=["base.js","auth.js"].map(name=>readFileSync(new URL(name,import.meta.url),"utf8").replace(/^import .*;\n/gm,"").replace(/export /g,"")).join("\n");

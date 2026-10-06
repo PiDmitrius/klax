@@ -19,7 +19,7 @@ export async function changesLoop(host){
   for(;;){
     const after = host.after();
     try {
-      const r = await api("/api/changes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ after }) });
+      const r = await api("/api/changes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ after }) }, true);
       if(r.status === 401){ if(host.onAuthFail) host.onAuthFail(); return; }
       if(!r.ok) throw new Error("changes HTTP " + r.status);
       const data = await r.json();

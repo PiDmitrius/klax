@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/PiDmitrius/klax/internal/httpclient"
 	"github.com/PiDmitrius/klax/internal/timing"
 	"github.com/PiDmitrius/klax/internal/transport"
 )
@@ -160,7 +161,7 @@ func (b *Bot) GetUpdates() ([]Update, error) {
 	}
 
 	u := fmt.Sprintf("%s?act=a_check&key=%s&ts=%s&wait=%d", b.lpServer, b.lpKey, b.lpTs, int(timing.PollHold.Seconds()))
-	resp, err := b.client.Get(u)
+	resp, err := httpclient.Poll(b.client).Get(u)
 	if err != nil {
 		return nil, err
 	}
