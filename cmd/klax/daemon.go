@@ -1411,10 +1411,7 @@ func (d *daemon) pollYM(ctx context.Context) {
 		}
 		attempt = 0
 		if len(updates) == 0 {
-			// getUpdates has no server-side long-poll wait, unlike tg/mx/vk
-			// (see YM_API_NOTES.md) — pace client-side so an empty result
-			// doesn't hammer the API.
-			if !sleepCtx(ctx, 2*time.Second) {
+			if !sleepCtx(ctx, timing.ShortPollPause) {
 				return
 			}
 			continue

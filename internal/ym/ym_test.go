@@ -17,13 +17,13 @@ type pollTransport func(*http.Request) (*http.Response, error)
 
 func (f pollTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func TestPollBudgetAndDrain(t *testing.T) {
+func TestShortPollBudgetAndDrain(t *testing.T) {
 	b := New("test-token")
-	budgets := []time.Duration{30 * time.Second, 10 * time.Second, 10 * time.Second}
+	budget := 10 * time.Second
 	calls := 0
 	b.client.Transport = pollTransport(func(r *http.Request) (*http.Response, error) {
 		deadline, ok := r.Context().Deadline()
-		if !ok || time.Until(deadline) < budgets[calls]-time.Second || time.Until(deadline) > budgets[calls] {
+		if !ok || time.Until(deadline) < budget-time.Second || time.Until(deadline) > budget {
 			t.Fatalf("call %d has an unexpected deadline: %v", calls, deadline)
 		}
 		if r.Header.Get("Authorization") != "OAuth test-token" {

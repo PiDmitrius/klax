@@ -22,11 +22,13 @@ At a high level:
 3. It starts or resumes the selected backend in that session's working directory.
 4. It streams tool activity and the final result back to the messenger.
 
-Incoming polls allow 30 seconds for the complete HTTP response. Telegram, MAX,
-and VK wait for updates for up to 29 seconds. Yandex Messenger has no documented
-server wait parameter; Klax pauses for 2 seconds after an empty response.
-Other outbound messenger API requests allow 10 seconds. Failed polls retry after 625 ms, 1.25 s,
-2.5 s, then 5 s; success resets the sequence, and platform `RetryAfter` takes priority.
+Telegram, MAX, and VK use long polling: the server waits up to 29 seconds, and
+the complete HTTP response has a 30-second deadline. Yandex Messenger uses short
+polling with a 10-second deadline and a 2.5-second pause after a successful empty
+response; a response with messages triggers the next poll without that pause.
+Other outbound messenger API requests allow 10 seconds. Failed polls retry after
+625 ms, 1.25 s, 2.5 s, then 5 s; success resets the sequence, and platform
+`RetryAfter` takes priority.
 
 ## Features
 

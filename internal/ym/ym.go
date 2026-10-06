@@ -156,10 +156,6 @@ type APIError = transport.APIError
 // unlike Telegram there is no nested "result" field), so callers unmarshal
 // whatever fields they need directly out of it.
 func (b *Bot) do(method, path string, payload interface{}) (json.RawMessage, error) {
-	return b.doWithClient(b.client, method, path, payload)
-}
-
-func (b *Bot) doWithClient(client *http.Client, method, path string, payload interface{}) (json.RawMessage, error) {
 	var body io.Reader
 	if payload != nil {
 		data, err := json.Marshal(payload)
@@ -176,7 +172,7 @@ func (b *Bot) doWithClient(client *http.Client, method, path string, payload int
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := client.Do(req)
+	resp, err := b.client.Do(req)
 	if err != nil {
 		return nil, err // network error
 	}
@@ -259,12 +255,9 @@ func (b *Bot) DrainUpdates() error {
 	return nil
 }
 
-// GetUpdates performs a single poll call and returns new updates. Yandex
-// Messenger's getUpdates does not document a server-side long-poll wait (no
-// "timeout" parameter, unlike Telegram/MAX/VK) — the caller is responsible for
-// pacing repeated calls when the result is empty.
+// GetUpdates performs a short poll; the caller paces empty responses.
 func (b *Bot) GetUpdates() ([]Update, error) {
-	raw, err := b.doWithClient(httpclient.Poll(b.client), http.MethodPost, "messages/getUpdates/", map[string]interface{}{
+	raw, err := b.do(http.MethodPost, "messages/getUpdates/", map[string]interface{}{
 		"offset": b.offset,
 		"limit":  100,
 	})
