@@ -8,6 +8,7 @@ package main
 // the same published values under the detector mutex, so a client that applies the events after a
 // snapshot's `at` in order holds exactly the published session state. A client that falls behind
 // the ring or across a restart (another epoch) is told to resync. The server keeps no per-client state.
+// A changes response batches for 100 ms after its first event, with a fresh detection at the cut.
 
 import (
 	"bytes"
@@ -25,6 +26,7 @@ import (
 const (
 	uiRingSoftBytes = 4 << 20 // evict while above this…
 	uiRingMinEvents = 128     // …and while more than this many events remain
+	uiChangesBatch  = 100 * time.Millisecond
 )
 
 const (
@@ -644,31 +646,43 @@ func (s *uiServer) handleChanges(w http.ResponseWriter, r *http.Request) {
 	sk := s.d.sessionKey(s.chatID(user))
 	deadline := time.NewTimer(uiPollHold)
 	defer deadline.Stop()
-	answer := func() bool {
+	collect := func() ([]json.RawMessage, uint64, bool) {
 		s.d.uiSync(user, sk, role, nil)
-		events, at, resync := h.collect(user, after, role)
-		switch {
-		case resync:
-			_, _ = w.Write([]byte(`{"resync":true}` + "\n"))
-		case len(events) > 0:
-			writeChanges(w, h.cursor(at), events)
-		default:
-			return false
-		}
-		return true
+		return h.collect(user, after, role)
 	}
+	expired := false
 	for {
 		ch := h.waitChan(user) // grab BEFORE detecting (lost-wakeup-safe)
-		if answer() {
+		events, at, resync := collect()
+		if resync {
+			_, _ = w.Write([]byte(`{"resync":true}` + "\n"))
+			return
+		}
+		if len(events) > 0 {
+			deadline.Stop()
+			batch := time.NewTimer(uiChangesBatch)
+			defer batch.Stop()
+			select {
+			case <-batch.C:
+			case <-r.Context().Done():
+				return
+			}
+			events, at, resync = collect()
+			if resync {
+				_, _ = w.Write([]byte(`{"resync":true}` + "\n"))
+			} else {
+				writeChanges(w, h.cursor(at), events)
+			}
+			return
+		}
+		if expired {
+			writeChanges(w, h.cursor(after), nil)
 			return
 		}
 		select {
 		case <-ch:
 		case <-deadline.C:
-			if !answer() {
-				writeChanges(w, h.cursor(after), nil)
-			}
-			return
+			expired = true
 		case <-r.Context().Done():
 			return
 		}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/config"
@@ -321,6 +323,145 @@ func TestSyncIdlePollReturnsSameAt(t *testing.T) {
 	if want := fmt.Sprintf(`{"at":%q}`, at) + "\n"; body != want {
 		t.Fatalf("idle poll = %q, want %q", body, want)
 	}
+}
+
+func TestSyncChangesBatchHasFixedDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newSyncFixture(t)
+		uiPollHold = 5 * time.Second
+		at, _ := f.state()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		r := httptest.NewRequest("POST", "/api/changes", strings.NewReader(fmt.Sprintf(`{"after":%q}`, at))).WithContext(ctx)
+		r.Header.Set("Authorization", "Bearer tok")
+		w := httptest.NewRecorder()
+		done := make(chan time.Time, 1)
+		go func() { f.s.routes().ServeHTTP(w, r); done <- time.Now() }()
+		synctest.Wait()
+		f.d.uiPoke("alice")
+		synctest.Wait()
+		time.Sleep(200 * time.Millisecond)
+		synctest.Wait()
+		select {
+		case <-done:
+			t.Fatal("an empty wake released the poll")
+		default:
+		}
+		start := time.Now()
+		f.d.uiNotice("alice", "one")
+		synctest.Wait()
+		time.Sleep(40 * time.Millisecond)
+		f.d.uiNotice("alice", "two")
+		synctest.Wait()
+		time.Sleep(40 * time.Millisecond)
+		f.d.uiNotice("alice", "three")
+		synctest.Wait()
+		time.Sleep(20 * time.Millisecond)
+		synctest.Wait()
+		var finished time.Time
+		select {
+		case finished = <-done:
+		default:
+			t.Fatal("later events extended the collection window")
+		}
+		var c syncChanges
+		if err := json.Unmarshal(w.Body.Bytes(), &c); err != nil {
+			t.Fatal(err)
+		}
+		if len(c.Events) != 3 {
+			t.Fatalf("events = %+v, want all three notices", c.Events)
+		}
+		for i, notice := range []string{"one", "two", "three"} {
+			if c.Events[i].Notice != notice || (i > 0 && c.Events[i].Seq <= c.Events[i-1].Seq) {
+				t.Fatalf("events out of order: %+v", c.Events)
+			}
+		}
+		if elapsed := finished.Sub(start); elapsed != 100*time.Millisecond {
+			t.Fatalf("collection window = %s, want 100ms", elapsed)
+		}
+		f.d.uiNotice("alice", "next")
+		if next := f.changes(c.At); len(next.Events) != 1 || next.Events[0].Notice != "next" {
+			t.Fatalf("next response = %+v", next)
+		}
+	})
+}
+
+func TestSyncChangesBatchDetectsLateTranscriptUsage(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newSyncFixture(t)
+		uiPollHold = 5 * time.Second
+		f.write("s1", "u:first")
+		at, _ := f.state()
+		replayed := make(replica)
+		replayed.load(f.window(f.klaxID, ""))
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		r := httptest.NewRequest("POST", "/api/changes", strings.NewReader(fmt.Sprintf(`{"after":%q}`, at))).WithContext(ctx)
+		r.Header.Set("Authorization", "Bearer tok")
+		w := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() { f.s.routes().ServeHTTP(w, r); close(done) }()
+		synctest.Wait()
+		f.write("s1", "answer")
+		f.d.uiPoke("alice")
+		synctest.Wait()
+		time.Sleep(50 * time.Millisecond)
+		fh, err := os.OpenFile(filepath.Join(f.dir, "s1.jsonl"), os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = fh.WriteString(`{"type":"assistant","message":{"content":[{"type":"text","text":"tail"}],"usage":{"input_tokens":900}}}` + "\n")
+		closeErr := fh.Close()
+		if err != nil || closeErr != nil {
+			t.Fatalf("append usage: %v, close: %v", err, closeErr)
+		}
+		time.Sleep(50 * time.Millisecond)
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("poll did not finish its collection window")
+		}
+		var c syncChanges
+		if err := json.Unmarshal(w.Body.Bytes(), &c); err != nil {
+			t.Fatal(err)
+		}
+		replayed.apply(t, f.klaxID, c.Events)
+		groups := replayed.list()
+		if len(groups) != 1 || groups[0].Head.CtxUsed != 900 || len(groups[0].Blocks) != 2 {
+			t.Fatalf("late transcript update missing from response: %+v", groups)
+		}
+		if latest, _ := f.state(); latest != c.At {
+			t.Fatalf("response cursor %s omitted changes through %s", c.At, latest)
+		}
+	})
+}
+
+func TestSyncChangesBatchCancellation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newSyncFixture(t)
+		at, _ := f.state()
+		f.d.uiNotice("alice", "hello")
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		r := httptest.NewRequest("POST", "/api/changes", strings.NewReader(fmt.Sprintf(`{"after":%q}`, at))).WithContext(ctx)
+		r.Header.Set("Authorization", "Bearer tok")
+		w := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() { f.s.routes().ServeHTTP(w, r); close(done) }()
+		synctest.Wait()
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("cancelled request kept collecting events")
+		}
+		if w.Body.Len() != 0 || len(f.d.uiHub.polls) != 0 {
+			t.Fatalf("cancelled request wrote %q or retained a poll", w.Body.String())
+		}
+	})
 }
 
 func TestSyncRenameSendsOnlyTheName(t *testing.T) {

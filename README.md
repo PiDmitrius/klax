@@ -275,6 +275,9 @@ fields, and `null` removes a field:
 ```
 
 The `tabs` payload is the complete ordered list of session IDs.
+An idle `/api/changes` request waits up to 25 seconds. Its first available event
+starts a fixed 100 ms collection window; further updates do not extend it.
+The response includes changes detected at the end of that window.
 
 ### System status
 
