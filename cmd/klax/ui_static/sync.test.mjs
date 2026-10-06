@@ -4,8 +4,8 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { TurnModel, ordLess, applyMerge } from "./model.js";
 import { cursorEpoch, cursorSeq } from "./events.js";
-import { retryDelay } from "./base.js";
-globalThis.document = { getElementById: () => ({ textContent: JSON.stringify({request_ms:10000,poll_ms:30000,retry_min_ms:625,retry_max_ms:5000}) }) };
+import { retryDelay, syncInterval } from "./base.js";
+globalThis.document = { getElementById: () => ({ textContent: JSON.stringify({request_ms:10000,poll_ms:30000,retry_min_ms:625,retry_max_ms:5000,sync_ms:250}) }) };
 import { pos, parsePos, decodePos, answerBlock } from "./render.js";
 
 function harness(epoch = null){
@@ -13,7 +13,7 @@ function harness(epoch = null){
   const notices = [], homes = [];
   const stored = new Map(epoch === null ? [] : [["klax_server_epoch", epoch]]);
   const context = vm.createContext({
-    TurnModel, ordLess, applyMerge, retryDelay, cursorEpoch, cursorSeq, pos, parsePos, decodePos, answerBlock, console, setTimeout, clearTimeout, AbortController,
+    TurnModel, ordLess, applyMerge, retryDelay, syncInterval, cursorEpoch, cursorSeq, pos, parsePos, decodePos, answerBlock, console, setTimeout, clearTimeout, AbortController,
     requestAnimationFrame: () => 0, cancelAnimationFrame() {},
     api: url => new Promise(resolve => requests.push({ url, resolve })),
     selectionInLog: () => false, isReadOnly: () => true, filterScope: l => l, parseHash: () => ({}),

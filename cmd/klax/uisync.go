@@ -8,8 +8,8 @@ package main
 // the same published values under the detector mutex, so a client that applies the events after a
 // snapshot's `at` in order holds exactly the published session state. A client that falls behind
 // the ring or across a restart (another epoch) is told to resync. The server keeps no per-client state.
-// Transcript checks and change collection share one interval. A response collects from its first
-// event, then performs a fresh detection at the cut.
+// Transcript checks, change collection and read reports share one interval. A changes response
+// collects from its first event, then performs a fresh detection at the cut.
 
 import (
 	"bytes"

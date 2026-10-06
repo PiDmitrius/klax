@@ -1023,6 +1023,7 @@ func (s *uiServer) handleSPA(w http.ResponseWriter, r *http.Request) {
 		"poll_ms":      timing.PollTimeout.Milliseconds(),
 		"retry_min_ms": timing.RetryMin.Milliseconds(),
 		"retry_max_ms": timing.RetryMax.Milliseconds(),
+		"sync_ms":      uiSyncInterval.Milliseconds(),
 	})
 	page = bytes.ReplaceAll(page, []byte("__KLAX_REQUEST_POLICY__"), policy)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

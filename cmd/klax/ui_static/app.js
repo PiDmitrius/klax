@@ -7,7 +7,7 @@ import { TurnModel, ordLess, applyMerge } from "./model.js";
 import { renderSession, answerBlock, beginShift, playShift, fadeOutDivider, DIVIDER_FADE_MS, pos, parsePos, decodePos } from "./render.js";
 import { esc } from "./markdown.js";
 import { changesLoop, cursorEpoch, cursorSeq } from "./events.js";
-import { api, apiError, hasCoarsePointer, copyText, flashCopied, bindButtonActivation, setHome, retryDelay } from "./base.js";
+import { api, apiError, hasCoarsePointer, copyText, flashCopied, bindButtonActivation, setHome, retryDelay, syncInterval } from "./base.js";
 import { initAuth, isReadOnly } from "./auth.js";
 import { selectionInLog } from "./scroll.js";
 import { initCompose, updateComposerAccess, saveDraft, loadDraft, dropDraft, recoverOutbox, outboxList } from "./compose.js";
@@ -28,7 +28,7 @@ const transcriptLoads = {}; // klaxId -> shared initial-load promise
 const readThrough = {};   // klaxId -> encoded (turn,block) read watermark (pos()); undefined until seeded
 const unreadJump = {};    // klaxId -> one-shot scroll to the unread divider
 const readGraceUntil = {}, readGraceTimer = {};
-const readReportTimer = {}; // klaxId -> pending POST /api/read debounce timer
+const readReportTimer = {}; // klaxId -> pending POST /api/read timer
 const readSaved = {}, readSending = {}; // klaxId -> confirmed / in-flight read position
 const READ_GRACE_MS = 1600;
 let active = "";
@@ -129,12 +129,12 @@ function modelMaxPos(klaxId){
   }
   return max;
 }
-// Read reports are debounced; tab-hide flushes pending progress with keepalive before freezing.
+// Tab-hide flushes pending progress with keepalive before freezing.
 // Confirmed positions and positions already in flight need no repeated report.
 function reportRead(klaxId){
   if(!klaxId || readThrough[klaxId] === undefined) return;
   if(readReportTimer[klaxId]) return;
-  readReportTimer[klaxId] = setTimeout(() => { delete readReportTimer[klaxId]; flushRead(klaxId); }, 400);
+  readReportTimer[klaxId] = setTimeout(() => { delete readReportTimer[klaxId]; flushRead(klaxId); }, syncInterval());
 }
 function flushRead(klaxId){
   if(!klaxId || readThrough[klaxId] === undefined) return;

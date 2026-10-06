@@ -287,6 +287,8 @@ An idle `/api/changes` request waits up to 29 seconds. Its first available event
 starts a fixed 250 ms collection window; further updates do not extend it.
 The response includes changes detected at the end of that window. Poll requests
 allow 30 seconds for the complete response; other Web UI requests allow 10 seconds.
+The Web UI collects read-progress reports over the same fixed window and flushes
+pending progress when the browser tab is hidden.
 Live and history retries wait 625 ms, 1.25 s, 2.5 s, then 5 s; a successful
 response resets this sequence.
 

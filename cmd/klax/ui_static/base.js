@@ -50,6 +50,7 @@ export function apiHref(href){ return href.charAt(0) === "/" ? BASE() + href.sli
 
 let requestPolicy;
 function policy(){ return requestPolicy ||= JSON.parse(document.getElementById("request-policy").textContent); }
+export function syncInterval(){ return policy().sync_ms; }
 export function retryDelay(attempt){
   const p = policy();
   let delay = p.retry_min_ms;

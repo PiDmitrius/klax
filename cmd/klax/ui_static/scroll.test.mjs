@@ -4,7 +4,8 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { TurnModel } from "./model.js";
 import { pos, decodePos, answerBlock } from "./render.js";
-import { apiError } from "./base.js";
+import { apiError, syncInterval } from "./base.js";
+globalThis.document = { getElementById: () => ({ textContent: JSON.stringify({ sync_ms: 250 }) }) };
 
 function harness(){
   let now = 0, nextTimer = 0;
@@ -15,7 +16,7 @@ function harness(){
   log.addEventListener = (name, fn) => { logEvents[name] = fn; };
   const arm = (fn, delay) => { const id = ++nextTimer; timers.set(id, { fn, at: now + delay }); return id; };
   const context = vm.createContext({
-    TurnModel, calls, pos, decodePos, answerBlock, apiError, fadeOutDivider: () => false,
+    TurnModel, calls, pos, decodePos, answerBlock, apiError, syncInterval, fadeOutDivider: () => false,
     document: { visibilityState: "visible", getElementById: id => id === "log" ? log : col,
       addEventListener: (name, fn) => { documentEvents[name] = fn; } },
     setTimeout: arm, requestAnimationFrame: fn => arm(fn, 16),
@@ -126,21 +127,28 @@ test("a network failure leaves the read position available for retry", async () 
   assert.deepEqual(h.calls, ["failed", "saved"]);
 });
 
-test("flushing a pending read sends it immediately and cancels the debounce", async () => {
+test("read reports collect the latest position for 250 ms and allow an immediate flush", async () => {
   const h = harness();
   h.run(`
     reportRead = reportReadActual;
     readThrough[1] = pos(2, 3);
-    api = async () => { calls.push("saved"); return { ok: true }; };
+    api = async (url, opts) => { calls.push(JSON.parse(opts.body).read_pos); return { ok: true }; };
     reportRead(1);
   `);
-  h.tick(399);
+  h.tick(200);
+  h.run("readThrough[1] = pos(2, 4); reportRead(1)");
+  h.tick(49);
   assert.deepEqual(h.calls, []);
+  h.tick(1);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(h.calls, ["2.4"]);
+  h.run("readThrough[1] = pos(3, 0); reportRead(1)");
+  h.tick(100);
   h.run("flushRead(1)");
   await new Promise(resolve => setImmediate(resolve));
-  h.tick(400);
+  h.tick(250);
   h.run("flushRead(1)");
-  assert.deepEqual(h.calls, ["saved"]);
+  assert.deepEqual(h.calls, ["2.4", "3.0"]);
 });
 
 test("bottom jump animates to settled geometry and has no persistent scroll lock", () => {

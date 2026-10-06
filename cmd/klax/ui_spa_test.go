@@ -30,7 +30,8 @@ func TestSPARequestPolicy(t *testing.T) {
 	if policy["request_ms"] != timing.RequestTimeout.Milliseconds() ||
 		policy["poll_ms"] != timing.PollTimeout.Milliseconds() ||
 		policy["retry_min_ms"] != timing.RetryMin.Milliseconds() ||
-		policy["retry_max_ms"] != timing.RetryMax.Milliseconds() {
+		policy["retry_max_ms"] != timing.RetryMax.Milliseconds() ||
+		policy["sync_ms"] != uiSyncInterval.Milliseconds() {
 		t.Fatalf("browser policy differs from the server: %v", policy)
 	}
 	if uiPollHold >= timing.PollTimeout {
