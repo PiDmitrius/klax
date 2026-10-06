@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -612,5 +613,14 @@ func TestSplitMessagePlainNoFenceUsesFastPath(t *testing.T) {
 	// a straight concatenation must reproduce the source exactly.
 	if rebuilt.String() != text {
 		t.Fatalf("text mismatch after fence-free split")
+	}
+}
+
+func TestRetryWaitHonorsPlatformDelay(t *testing.T) {
+	if got := retryWait(&transport.APIError{Code: 429, RetryAfter: 12}, 625*time.Millisecond); got != 12*time.Second {
+		t.Fatalf("platform retry delay: %v", got)
+	}
+	if got := retryWait(errors.New("offline"), 625*time.Millisecond); got != 625*time.Millisecond {
+		t.Fatalf("network retry delay: %v", got)
 	}
 }

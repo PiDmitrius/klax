@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { TurnModel, ordLess, applyMerge } from "./model.js";
 import { cursorEpoch, cursorSeq } from "./events.js";
+import { retryDelay } from "./base.js";
+globalThis.document = { getElementById: () => ({ textContent: JSON.stringify({request_ms:10000,retry_min_ms:625,retry_max_ms:5000}) }) };
 import { pos, parsePos, decodePos, answerBlock } from "./render.js";
 
 function harness(epoch = null){
@@ -11,7 +13,7 @@ function harness(epoch = null){
   const notices = [], homes = [];
   const stored = new Map(epoch === null ? [] : [["klax_server_epoch", epoch]]);
   const context = vm.createContext({
-    TurnModel, ordLess, applyMerge, cursorEpoch, cursorSeq, pos, parsePos, decodePos, answerBlock, console, setTimeout, clearTimeout, AbortController,
+    TurnModel, ordLess, applyMerge, retryDelay, cursorEpoch, cursorSeq, pos, parsePos, decodePos, answerBlock, console, setTimeout, clearTimeout, AbortController,
     requestAnimationFrame: () => 0, cancelAnimationFrame() {},
     api: url => new Promise(resolve => requests.push({ url, resolve })),
     selectionInLog: () => false, isReadOnly: () => true, filterScope: l => l, parseHash: () => ({}),
@@ -44,6 +46,33 @@ function harness(epoch = null){
 }
 
 const group = (seq, ids, state = "done") => ({ key: "t:" + seq, ord: seq + "." + seq, head: { turn_seq: seq, role: "user", state }, blocks: ids.map(id => ({ id })) });
+
+test("live retries preserve the cursor, cap their pauses and reset after successful application", async () => {
+  const pauses = [], cursors = [], health = [];
+  let call = 0, after = "epoch.7", applied = 0;
+  const context = {
+    retryDelay,
+    setTimeout: (fn, ms) => { pauses.push(ms); queueMicrotask(fn); },
+    api: async (_url, opts) => {
+      cursors.push(JSON.parse(opts.body).after);
+      if(call++ < 5 || call === 7) throw new Error("offline");
+      if(call === 8) return { status: 401 };
+      return { ok: true, json: async () => ({ at: "epoch.8", events: [{ seq: 8 }] }) };
+    },
+    host: {
+      after: () => after,
+      apply: (_events, at) => { applied++; after = at; },
+      onHealth: (ok, failures) => health.push([ok, failures]),
+    },
+  };
+  const source = readFileSync(new URL("./events.js", import.meta.url), "utf8").replace(/^import .*;\n/gm, "").replace(/export /g, "");
+  await vm.runInNewContext(source + "\nchangesLoop(host)", context);
+  assert.deepEqual(pauses, [625, 1250, 2500, 5000, 5000, 625]);
+  assert.deepEqual(cursors, ["epoch.7", "epoch.7", "epoch.7", "epoch.7", "epoch.7", "epoch.7", "epoch.8", "epoch.8"]);
+  assert.equal(applied, 1);
+  assert.deepEqual(health.at(-2), [true, 0]);
+  assert.deepEqual(health.at(-1), [false, 1]);
+});
 
 for(const [name, previous, uptime, startup, show] of [
   ["a new tab", null, 0, "installed", false],
@@ -299,7 +328,7 @@ test("a long-failing refresh keeps retrying with a bounded pause", async () => {
   const refresh = h.run("refreshWindow('1', 25)");
   h.respond(1, {}, false);
   await refresh;
-  assert.equal(h.run("delays.at(-1)"), 32000);
+  assert.equal(h.run("delays.at(-1)"), 5000);
   assert.equal(h.run("model.has('1') && loaded[1]"), true);
 });
 

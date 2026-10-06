@@ -7,7 +7,7 @@ import { TurnModel, ordLess, applyMerge } from "./model.js";
 import { renderSession, answerBlock, beginShift, playShift, fadeOutDivider, DIVIDER_FADE_MS, pos, parsePos, decodePos } from "./render.js";
 import { esc } from "./markdown.js";
 import { changesLoop, cursorEpoch, cursorSeq } from "./events.js";
-import { api, apiError, hasCoarsePointer, copyText, flashCopied, bindButtonActivation, setHome } from "./base.js";
+import { api, apiError, hasCoarsePointer, copyText, flashCopied, bindButtonActivation, setHome, retryDelay } from "./base.js";
 import { initAuth, isReadOnly } from "./auth.js";
 import { selectionInLog } from "./scroll.js";
 import { initCompose, updateComposerAccess, saveDraft, loadDraft, dropDraft, recoverOutbox, outboxList } from "./compose.js";
@@ -444,15 +444,10 @@ function endLoad(klaxId, e, data){
   applySessionEvents(klaxId, buf);
   flushAffected();
 }
-// fetchJSON bounds a whole request, body included, so a half-open socket cannot wedge a load.
 async function fetchJSON(url){
-  const ac = new AbortController();
-  const t = setTimeout(() => ac.abort(), 30000);
-  try {
-    const r = await api(url, { signal: ac.signal });
-    if(!r.ok) throw new Error(url + " HTTP " + r.status);
-    return await r.json();
-  } finally { clearTimeout(t); }
+  const r = await api(url);
+  if(!r.ok) throw new Error(url + " HTTP " + r.status);
+  return await r.json();
 }
 
 // fetchRange requests a window or a page before `before`; null when a resync or a server restart
@@ -545,8 +540,8 @@ async function refreshWindow(klaxId, attempt = 0){
     }
   } catch(err){
     if(req !== winReq[klaxId]) return;
-    if(attempt === 2) showNotice("Не удалось обновить историю сессии — повторяю", "warning");
-    setTimeout(() => { if(winReq[klaxId] === req && refreshing[klaxId] === req) refreshWindow(klaxId, attempt + 1); }, 1000 << Math.min(attempt, 5));
+    if(attempt === 0) showNotice("Не удалось обновить историю сессии — повторяю", "warning");
+    setTimeout(() => { if(winReq[klaxId] === req && refreshing[klaxId] === req) refreshWindow(klaxId, attempt + 1); }, retryDelay(attempt));
     return;
   }
   if(req !== winReq[klaxId]) return;
@@ -1100,10 +1095,7 @@ const host = {
     }
     refreshStrip();
   },
-  // Show the amber logo only after the 2nd consecutive failure, so a single dropped poll
-  // (or a fast daemon restart the next poll rides through) never flashes it; clear on any
-  // good poll. The poll loop keeps retrying regardless — this is purely the visible signal.
-  onHealth: (ok, fails) => setDegraded(!ok && fails >= 2),
+  onHealth: ok => setDegraded(!ok),
 };
 
 // refreshStrip repaints BOTH surfaces that display unread counts — the tab badges and the scope

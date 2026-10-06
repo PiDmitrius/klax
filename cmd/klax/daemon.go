@@ -28,6 +28,7 @@ import (
 	"github.com/PiDmitrius/klax/internal/sessfiles"
 	"github.com/PiDmitrius/klax/internal/session"
 	"github.com/PiDmitrius/klax/internal/tg"
+	"github.com/PiDmitrius/klax/internal/timing"
 	"github.com/PiDmitrius/klax/internal/transport"
 	"github.com/PiDmitrius/klax/internal/turnaudit"
 	"github.com/PiDmitrius/klax/internal/vk"
@@ -107,17 +108,6 @@ type tokenRef struct {
 	stored string
 }
 
-func startupBackoff(attempt int) time.Duration {
-	d := 10 * time.Second
-	for i := 0; i < attempt; i++ {
-		d *= 2
-	}
-	if d > time.Minute {
-		return time.Minute
-	}
-	return d
-}
-
 // connectTransport runs one transport's startup handshake in the background and starts its poll loop
 // when it succeeds. A transient failure retries forever; a permanent one (bad or revoked token)
 // abandons this transport's connection attempt and leaves the rest of the daemon running.
@@ -136,7 +126,7 @@ func connectTransport(name string, handshake func() error, onReady, onDone func(
 				log.Printf("[FAIL] %s not connected: %v — other transports are unaffected", name, err)
 				return
 			}
-			wait := connectBackoff(attempt)
+			wait := retryWait(err, connectBackoff(attempt))
 			log.Printf("%s unreachable: %v (retry in %v)", name, err, wait)
 			time.Sleep(wait)
 		}
@@ -173,7 +163,7 @@ func (d *daemon) connect(name string) {
 }
 
 // connectBackoff is a variable so tests can shorten the schedule.
-var connectBackoff = startupBackoff
+var connectBackoff = timing.RetryDelay
 
 // secretRes match credentials a transport error can quote back: Go's http client puts the full
 // request URL in its error text, and a token may sit in the path or in a query parameter. The bot
@@ -1088,6 +1078,7 @@ func (d *daemon) dispatchInbound(chatID, msgID, text string, attachments []attac
 
 func (d *daemon) pollTG(ctx context.Context) {
 	bot := d.transports["tg"].(*tg.Bot)
+	attempt := 0
 	for {
 		if !d.waitOutboundReady(ctx, "tg") {
 			return
@@ -1097,12 +1088,15 @@ func (d *daemon) pollTG(ctx context.Context) {
 		}
 		updates, err := bot.GetUpdates()
 		if err != nil {
-			log.Printf("tg: getUpdates error: %v (retry in 5s)", err)
-			if !sleepCtx(ctx, 5*time.Second) {
+			wait := retryWait(err, timing.RetryDelay(attempt))
+			attempt++
+			log.Printf("tg: getUpdates error: %v (retry in %v)", err, wait)
+			if !sleepCtx(ctx, wait) {
 				return
 			}
 			continue
 		}
+		attempt = 0
 		for _, u := range updates {
 			msg := u.Message
 			if msg == nil {
@@ -1186,6 +1180,7 @@ func (d *daemon) pollTG(ctx context.Context) {
 
 func (d *daemon) pollMAX(ctx context.Context) {
 	bot := d.transports["mx"].(*max.Bot)
+	attempt := 0
 	for {
 		if !d.waitOutboundReady(ctx, "mx") {
 			return
@@ -1195,12 +1190,15 @@ func (d *daemon) pollMAX(ctx context.Context) {
 		}
 		updates, err := bot.GetUpdates()
 		if err != nil {
-			log.Printf("mx: getUpdates error: %v (retry in 5s)", err)
-			if !sleepCtx(ctx, 5*time.Second) {
+			wait := retryWait(err, timing.RetryDelay(attempt))
+			attempt++
+			log.Printf("mx: getUpdates error: %v (retry in %v)", err, wait)
+			if !sleepCtx(ctx, wait) {
 				return
 			}
 			continue
 		}
+		attempt = 0
 		for _, upd := range updates {
 			if upd.UpdateType != "message_created" {
 				continue
@@ -1267,6 +1265,7 @@ func (d *daemon) isTGAllowed(id int64) bool {
 
 func (d *daemon) pollVK(ctx context.Context) {
 	bot := d.transports["vk"].(*vk.Bot)
+	attempt := 0
 	for {
 		if !d.waitOutboundReady(ctx, "vk") {
 			return
@@ -1276,12 +1275,15 @@ func (d *daemon) pollVK(ctx context.Context) {
 		}
 		updates, err := bot.GetUpdates()
 		if err != nil {
-			log.Printf("vk: getUpdates error: %v (retry in 5s)", err)
-			if !sleepCtx(ctx, 5*time.Second) {
+			wait := retryWait(err, timing.RetryDelay(attempt))
+			attempt++
+			log.Printf("vk: getUpdates error: %v (retry in %v)", err, wait)
+			if !sleepCtx(ctx, wait) {
 				return
 			}
 			continue
 		}
+		attempt = 0
 		for _, upd := range updates {
 			if upd.Type != "message_new" {
 				continue
@@ -1389,6 +1391,7 @@ func (d *daemon) ymThreadChatID(parentChatID string, threadID int64) string {
 
 func (d *daemon) pollYM(ctx context.Context) {
 	bot := d.transports["ym"].(*ym.Bot)
+	attempt := 0
 	for {
 		if !d.waitOutboundReady(ctx, "ym") {
 			return
@@ -1398,12 +1401,15 @@ func (d *daemon) pollYM(ctx context.Context) {
 		}
 		updates, err := bot.GetUpdates()
 		if err != nil {
-			log.Printf("ym: getUpdates error: %v (retry in 5s)", err)
-			if !sleepCtx(ctx, 5*time.Second) {
+			wait := retryWait(err, timing.RetryDelay(attempt))
+			attempt++
+			log.Printf("ym: getUpdates error: %v (retry in %v)", err, wait)
+			if !sleepCtx(ctx, wait) {
 				return
 			}
 			continue
 		}
+		attempt = 0
 		if len(updates) == 0 {
 			// getUpdates has no server-side long-poll wait, unlike tg/mx/vk
 			// (see YM_API_NOTES.md) — pace client-side so an empty result

@@ -111,11 +111,9 @@ for(const failure of ["http", "network", "body", "unexpected-success", "timeout"
   test(`${failure} preserves draft and retry nonce until an explicit 204`,async()=>{
     const h=composer(), {ctx,elements,pending,apiCalls,deps}=h;
     elements.input.value="  exact draft\n";
-    let abort;
-    if(failure==="timeout") ctx.setTimeout=fn=>{abort=fn; return 0;};
     const flight=ctx.submit(deps);
     if(failure==="network") pending[0].reject(new Error("offline"));
-    else if(failure==="timeout") abort();
+    else if(failure==="timeout") pending[0].reject(new DOMException("Request timed out", "TimeoutError"));
     else pending[0].resolve({status:failure==="unexpected-success"?200:503,text:async()=>{if(failure==="body") throw new Error("body interrupted"); return "";}});
     await flight;
     assert.equal(elements.input.value,"  exact draft\n");
@@ -227,8 +225,6 @@ for(const outcome of ["reject", "timeout", "accept"]){
   test(`mobile send clears focus once, blocks refocus while pending, and allows a fresh tap after ${outcome}`,async()=>{
     const h=composer(), {ctx,elements,deps,pending}=h;
     ctx.hasCoarsePointer=()=>true;
-      let abort;
-    if(outcome==="timeout") ctx.setTimeout=fn=>{abort=fn; return 0;};
     elements.input.focus();
     const flight=ctx.submit(deps);
     assert.equal(ctx.document.activeElement,null);
@@ -242,7 +238,7 @@ for(const outcome of ["reject", "timeout", "accept"]){
     assert.equal(prevented,true);
     elements.input.focus();
     assert.equal(ctx.document.activeElement,null);
-    if(outcome==="timeout") abort();
+    if(outcome==="timeout") pending[0].reject(new DOMException("Request timed out", "TimeoutError"));
     else pending[0].resolve({status:outcome==="accept"?204:503,text:async()=>"rejected"});
     await flight;
     assert.equal(ctx.document.activeElement,null);
@@ -660,7 +656,7 @@ for(const outcome of ["accept", "reject", "cancel", "timeout"]){
       assert.equal(h.elements.sendbtn.classList.contains("cancel-send"),true);
       h.elements.sendbtn.fire("click");
       h.switchTo(7);
-    } else if(outcome==="timeout") timers[1].fn();
+    } else if(outcome==="timeout") h.pending[0].reject(new DOMException("Request timed out", "TimeoutError"));
     else h.pending[0].resolve({status:outcome==="accept"?204:503,text:async()=>"rejected"});
     await first;
     assert.equal(h.elements.input.value,"second draft");

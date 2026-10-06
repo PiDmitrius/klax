@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/PiDmitrius/klax/internal/httpclient"
+	"github.com/PiDmitrius/klax/internal/timing"
 	"github.com/PiDmitrius/klax/internal/transport"
 )
 
@@ -189,7 +191,7 @@ func (b *Bot) GetMe() (*User, error) {
 
 // GetUpdates performs a single long-poll call and returns new updates.
 func (b *Bot) GetUpdates() ([]Update, error) {
-	path := "/updates?timeout=30&types=message_created"
+	path := "/updates?timeout=" + strconv.Itoa(int(timing.PollHold.Seconds())) + "&types=message_created"
 	if b.marker != nil {
 		path += "&marker=" + strconv.FormatInt(*b.marker, 10)
 	}
@@ -281,7 +283,7 @@ func (b *Bot) sendMsg(chatID, text, replyTo, format string) (string, error) {
 
 // DownloadURL downloads a file from a direct URL (from attachment payload).
 func (b *Bot) DownloadURL(url string) ([]byte, error) {
-	resp, err := b.client.Get(url)
+	resp, err := httpclient.GetDownload(b.client, url)
 	if err != nil {
 		return nil, err
 	}

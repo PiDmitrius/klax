@@ -2,13 +2,40 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/PiDmitrius/klax/internal/config"
+	"github.com/PiDmitrius/klax/internal/timing"
 )
+
+func TestSPARequestPolicy(t *testing.T) {
+	s := &uiServer{d: &daemon{cfg: &config.Config{}}}
+	w := httptest.NewRecorder()
+	s.handleSPA(w, httptest.NewRequest("GET", "/", nil))
+	match := regexp.MustCompile(`<script id="request-policy" type="application/json">(.*?)</script>`).FindSubmatch(w.Body.Bytes())
+	if len(match) != 2 {
+		t.Fatal("missing request policy in the SPA shell")
+	}
+	var policy map[string]int64
+	if err := json.Unmarshal(match[1], &policy); err != nil {
+		t.Fatal(err)
+	}
+	if policy["request_ms"] != timing.RequestTimeout.Milliseconds() ||
+		policy["retry_min_ms"] != timing.RetryMin.Milliseconds() ||
+		policy["retry_max_ms"] != timing.RetryMax.Milliseconds() {
+		t.Fatalf("browser policy differs from the server: %v", policy)
+	}
+	if uiPollHold >= timing.RequestTimeout {
+		t.Fatal("the held poll leaves no time to receive the response")
+	}
+}
 
 func TestSPASystemControlsAndNoticeStack(t *testing.T) {
 	page := string(spaHTML)

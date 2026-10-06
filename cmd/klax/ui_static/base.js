@@ -48,15 +48,37 @@ export function bindButtonActivation(button, activate){
 // the mount proxy; remote (http/https) URLs pass through untouched.
 export function apiHref(href){ return href.charAt(0) === "/" ? BASE() + href.slice(1) : href; }
 
-// api is the authenticated fetch: Bearer token + BASE-relative path.
-export function api(path, opts){
-  opts = opts || {};
-  const token = getToken();
-  opts.headers = Object.assign({ "Authorization": "Bearer " + token }, opts.headers || {});
-  return fetch(BASE() + (path[0] === "/" ? path.slice(1) : path), opts).then(r => {
+let requestPolicy;
+function policy(){ return requestPolicy ||= JSON.parse(document.getElementById("request-policy").textContent); }
+export function retryDelay(attempt){
+  const p = policy();
+  let delay = p.retry_min_ms;
+  for(let i = 0; i < attempt && delay < p.retry_max_ms; i++) delay *= 2;
+  return Math.min(delay, p.retry_max_ms);
+}
+
+// api bounds the authenticated request through receipt of the complete body.
+export async function api(path, opts = {}){
+  const token = getToken(), ac = new AbortController();
+  const abort = () => ac.abort(opts.signal.reason);
+  if(opts.signal){
+    if(opts.signal.aborted) abort();
+    else opts.signal.addEventListener("abort", abort, { once: true });
+  }
+  const timer = setTimeout(() => ac.abort(new DOMException("Request timed out", "TimeoutError")), policy().request_ms);
+  try {
+    if(ac.signal.aborted) throw ac.signal.reason;
+    const r = await fetch(BASE() + (path[0] === "/" ? path.slice(1) : path), {
+      ...opts, signal: ac.signal,
+      headers: Object.assign({ "Authorization": "Bearer " + token }, opts.headers || {}),
+    });
     if(r.status === 401 && token === getToken()) authFailure();
-    return r;
-  });
+    const body = await r.arrayBuffer();
+    return new Response([204, 205, 304].includes(r.status) ? null : body, { status: r.status, statusText: r.statusText, headers: r.headers });
+  } finally {
+    clearTimeout(timer);
+    if(opts.signal) opts.signal.removeEventListener("abort", abort);
+  }
 }
 
 // home is the server's home directory (from /api/state): paths are absolute on the wire and shown

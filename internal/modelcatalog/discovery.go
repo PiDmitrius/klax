@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/runner"
+	"github.com/PiDmitrius/klax/internal/timing"
 )
 
 type Model struct {
@@ -24,7 +25,7 @@ type Model struct {
 
 // Fetch reads CLI control messages only; it never submits a user turn.
 func Fetch(ctx context.Context, backend string) ([]Model, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, timing.WorkTimeout)
 	defer cancel()
 	var args []string
 	switch backend {

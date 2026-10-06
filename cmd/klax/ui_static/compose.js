@@ -267,7 +267,6 @@ async function send(deps){
     sending.cancelReady = true;
     updateComposerAccess(accessReadOnly);
   }, 3000);
-  const timer = setTimeout(() => controller.abort(), 60000);
   let accepted = false;
   try {
     let r;
@@ -287,7 +286,6 @@ async function send(deps){
       ? "Ожидание отменено. Черновик сохранён; сообщение могло быть принято сервером."
       : "Отправка не подтверждена — сообщение сохранено во вводе. Можно повторить отправку.");
   } finally {
-    clearTimeout(timer);
     clearTimeout(cancelTimer);
     pendingSends.delete(klaxId);
     updateComposerAccess(accessReadOnly);

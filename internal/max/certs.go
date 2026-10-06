@@ -4,7 +4,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"net/http"
-	"time"
+
+	"github.com/PiDmitrius/klax/internal/timing"
 )
 
 func newMaxHTTPClient() *http.Client {
@@ -16,7 +17,7 @@ func newMaxHTTPClient() *http.Client {
 		panic("invalid embedded MAX CA bundle")
 	}
 	return &http.Client{
-		Timeout: 90 * time.Second,
+		Timeout: timing.RequestTimeout,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{RootCAs: roots},
 		},

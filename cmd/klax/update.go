@@ -16,7 +16,9 @@ import (
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/config"
+	"github.com/PiDmitrius/klax/internal/httpclient"
 	"github.com/PiDmitrius/klax/internal/pathutil"
+	"github.com/PiDmitrius/klax/internal/timing"
 )
 
 var versionRe = regexp.MustCompile(`(const version = ")(\d+)\.(\d+)\.(\d+)(")`)
@@ -61,14 +63,14 @@ func bumpPatch(srcDir string) error {
 const repo = "PiDmitrius/klax"
 
 var (
-	apiClient      = &http.Client{Timeout: 30 * time.Second}
-	downloadClient = &http.Client{Timeout: 5 * time.Minute}
+	apiClient      = &http.Client{Timeout: timing.RequestTimeout}
+	downloadClient = &http.Client{}
 )
 
 // latestTag returns the latest release tag (e.g. "v1.2.3") via GitHub redirect.
 func latestTag() (string, error) {
 	client := &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout: timing.RequestTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -96,7 +98,7 @@ func downloadReleaseTo(tag string, out io.Writer) (string, error) {
 	url := fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", repo, tag, name)
 
 	fmt.Fprintf(out, "downloading %s...\n", name)
-	resp, err := downloadClient.Get(url)
+	resp, err := httpclient.GetDownload(downloadClient, url)
 	if err != nil {
 		return "", err
 	}

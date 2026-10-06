@@ -23,6 +23,7 @@ import (
 	"github.com/PiDmitrius/klax/internal/ids"
 	"github.com/PiDmitrius/klax/internal/inbound"
 	"github.com/PiDmitrius/klax/internal/session"
+	"github.com/PiDmitrius/klax/internal/timing"
 )
 
 // uiPrefix is the chatID/transport prefix for the web UI. A request authenticated
@@ -33,7 +34,9 @@ const uiPrefix = "ui"
 
 // uiPollHold is how long /api/changes holds a request open when there is nothing new. Well under
 // typical proxy/browser limits; a cut request is just re-issued from the same cursor (idempotent).
-var uiPollHold = 25 * time.Second
+var uiPollHold = timing.PollHold
+
+const uiFileLinkRetry = timing.RetryMax
 
 // uiMaxInflightPerUser bounds concurrently-held polls per user — cheap hygiene
 // against a buggy client loop or an abusive token. Excess polls get 429 + client backoff.
@@ -96,7 +99,7 @@ type readModelEntry struct {
 	memo     map[rowKey]uiTurn
 	gen      uint64 // transcript index generation the memo was built from
 	build    uint64 // identifies this build; the detector skips a session whose build it published
-	degraded bool   // a file link could not be published yet; rebuilt once uiPollHold has passed
+	degraded bool   // a file link could not be published yet; rebuilt once uiFileLinkRetry has passed
 	builtAt  time.Time
 }
 
@@ -292,7 +295,7 @@ func (d *daemon) sessionsSnapshot(sk string, sessions []*session.Session, rows m
 // buildReadModel, not a delivery channel: the key is EVERY input — the transcript's and queue's
 // (mtime,size) plus busy — so a hit is identical to a rebuild, and any change rebuilds once, reusing
 // the rows of turns it did not touch (rowMemo). A build with a not-yet-publishable file link is
-// retried once uiPollHold has passed. ok is false when the history could not be read; nothing is
+// retried once uiFileLinkRetry has passed. ok is false when the history could not be read; nothing is
 // cached then.
 func (d *daemon) readModelBuild(sk string, sess *session.Session) (rows []uiTurn, build uint64, ok bool) {
 	st := d.sessionStore(sk, sess.KlaxID)
@@ -310,7 +313,7 @@ func (d *daemon) readModelBuild(sk string, sess *session.Session) (rows []uiTurn
 		h.rmMu.Lock()
 		e, hit := h.rm[key]
 		if hit && e.tSize == ts && e.tMtime.Equal(tm) && e.qSize == qs && e.qMtime.Equal(qm) && e.busy == busy &&
-			!(e.degraded && time.Since(e.builtAt) >= uiPollHold) {
+			!(e.degraded && time.Since(e.builtAt) >= uiFileLinkRetry) {
 			h.rmMu.Unlock()
 			return e.rows, e.build, true
 		}
@@ -1015,6 +1018,12 @@ func (s *uiServer) handleSPA(w http.ResponseWriter, r *http.Request) {
 	}
 	// Inject the configured product name (browser tab title + login heading).
 	page := bytes.ReplaceAll(spaHTML, []byte("__KLAX_UI_TITLE__"), []byte(html.EscapeString(s.d.cfg.GetUITitle())))
+	policy, _ := json.Marshal(map[string]int64{
+		"request_ms":   timing.RequestTimeout.Milliseconds(),
+		"retry_min_ms": timing.RetryMin.Milliseconds(),
+		"retry_max_ms": timing.RetryMax.Milliseconds(),
+	})
+	page = bytes.ReplaceAll(page, []byte("__KLAX_REQUEST_POLICY__"), policy)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(page)
 }

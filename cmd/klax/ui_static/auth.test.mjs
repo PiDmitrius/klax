@@ -16,17 +16,17 @@ function harness(saved="",hash=""){
   }
   let starts=0,reloads=0;
   const hashListeners=[];
-  const ctx={URLSearchParams,
+  const ctx={URLSearchParams, AbortController, DOMException, Response, setTimeout, clearTimeout,
     window:{addEventListener:(name,fn)=>{assert.equal(name,"hashchange");hashListeners.push(fn);}},
     localStorage:{getItem:k=>store.get(k)||null,setItem:(k,v)=>store.set(k,v),removeItem:k=>store.delete(k)},
     location:{pathname:"/mount/",search:"",hash,reload:()=>reloads++},
     history:{replaceState:(_s,_t,url)=>{ctx.location.hash="";ctx.cleanedURL=url;}},
-    document:{getElementById:id=>elements[id]},
+    document:{getElementById:id=>id === "request-policy" ? {textContent: JSON.stringify({request_ms:10000,retry_min_ms:625,retry_max_ms:5000})} : elements[id]},
     fetch:(url,options)=>new Promise(resolve=>calls.push({url,options,resolve})),
   };
   const source=["base.js","auth.js"].map(name=>readFileSync(new URL(name,import.meta.url),"utf8").replace(/^import .*;\n/gm,"").replace(/export /g,"")).join("\n");
   runInNewContext(source+"\nthis.boot=initAuth; this.readOnly=isReadOnly; this.api=api; this.setToken=setToken; this.getToken=getToken;",ctx);
-  const respond=(n,status=200,read_only=false)=>calls[n].resolve({status,ok:status===200,json:async()=>({user:"owner",read_only})});
+  const respond=(n,status=200,read_only=false)=>calls[n].resolve(Response.json({user:"owner",read_only},{status}));
   ctx.boot(()=>{starts++;elements.gate.classList.add("hidden");elements.app.classList.add("active");});
   const navigate=hash=>{
     ctx.location.hash=hash;
