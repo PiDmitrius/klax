@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"os"
 	"path/filepath"
@@ -320,6 +321,10 @@ func (p *claudeParser) add(rec rawRecord) {
 	}
 	switch line.Type {
 	case "user":
+		if text, ok := claudeTaskNotificationText(line); ok {
+			p.append(Item{Role: "tool", Text: text, Time: ts})
+			return
+		}
 		if text, marker := claudeUserText(line.Raw); text != "" {
 			if marker == "" {
 				if compactText, ok := claudeCompactContinuationToolText(text); ok {
@@ -390,6 +395,47 @@ func claudeUserText(raw json.RawMessage) (clean, marker string) {
 		return "", ""
 	}
 	return StripTurnMarker(s)
+}
+
+// Claude reports background task and Monitor events as role=user rows. They belong to the
+// running turn, so they render as a tool-style line instead of a user message.
+func claudeTaskNotificationText(line transcript.Line) (string, bool) {
+	s, ok := claudeUserPayload(line.Raw)
+	s = strings.TrimSpace(s)
+	if !ok || line.OriginKind != "task-notification" && !strings.HasPrefix(s, "<task-notification>") {
+		return "", false
+	}
+	summary, event, status := xmlTag(s, "summary"), xmlTag(s, "event"), xmlTag(s, "status")
+	switch {
+	case summary == "":
+		return s, true
+	case status == "":
+		if event == "" {
+			return "🔔 " + summary, true
+		}
+		return "🔔 " + summary + ": " + event, true
+	}
+	mark := "✓"
+	if status != "completed" {
+		mark = "✗"
+	}
+	text := mark + " " + summary + " (" + status + ")"
+	if event != "" {
+		text += ": " + event
+	}
+	return text, true
+}
+
+func xmlTag(s, name string) string {
+	_, rest, ok := strings.Cut(s, "<"+name+">")
+	if !ok {
+		return ""
+	}
+	v, _, ok := strings.Cut(rest, "</"+name+">")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(html.UnescapeString(v))
 }
 
 // Claude writes its own compaction/resume summary as a role=user transcript
