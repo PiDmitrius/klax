@@ -160,7 +160,7 @@ func sortedKeys(mapping map[string][]migratedSession) []string {
 
 func migrateDirs(mapping map[string][]migratedSession) error {
 	for _, key := range sortedKeys(mapping) {
-		parent := filepath.Join(session.StoreDir(), "sessions", keyDir(key))
+		parent := WorkDir(key, "")
 		moved := false // a directory now lives under its new name: the parent must be durable
 		for _, m := range mapping[key] {
 			src := filepath.Join(parent, fmt.Sprint(m.Created))

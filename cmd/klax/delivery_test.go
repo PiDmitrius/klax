@@ -7,6 +7,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/PiDmitrius/klax/internal/config"
 	"github.com/PiDmitrius/klax/internal/transport"
 )
 
@@ -226,6 +227,7 @@ func (f *fakeTransport) EditMessage(chatID, messageID, text, replyTo, format str
 
 func newTestDeliveryDaemon(tp transport.Transport) *daemon {
 	return &daemon{
+		cfg:        &config.Config{},
 		transports: map[string]transport.Transport{"tg": tp},
 		formats:    map[string]string{"tg": "html"},
 		sendPause:  make(map[string]time.Time),

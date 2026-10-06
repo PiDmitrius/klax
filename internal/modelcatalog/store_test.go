@@ -85,7 +85,7 @@ func TestRefreshSerializesPerBackendWithoutBlockingReaders(t *testing.T) {
 	if _, err := s.refresh(context.Background(), "codex", fetch); !errors.Is(err, ErrUpdating) {
 		t.Fatal(err)
 	}
-	if s.Models("codex") != nil {
+	if len(s.Models("codex")) != 0 {
 		t.Fatal("published before completion")
 	}
 	if _, err := s.refresh(context.Background(), "claude", fetch); err != nil {

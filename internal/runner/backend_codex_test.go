@@ -1,10 +1,43 @@
 package runner
 
 import (
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestCodexAdditionalInstructionsOnNewAndResumedRuns(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "codex"), []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	for _, id := range []string{"", "thread-1"} {
+		instructions := "Use \"quotes\",\nUnicode 😀 and control \x01."
+		cmd, err := (&CodexBackend{}).BuildCmd(RunOptions{SessionID: id, AppendSystemPrompt: instructions, Prompt: "request"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for i, arg := range cmd.Args {
+			if !strings.HasPrefix(arg, "developer_instructions=") {
+				continue
+			}
+			var decoded string
+			if i == 0 || cmd.Args[i-1] != "-c" || json.Unmarshal([]byte(strings.TrimPrefix(arg, "developer_instructions=")), &decoded) != nil || decoded != instructions {
+				t.Fatalf("invalid instructions argument: %q", cmd.Args)
+			}
+			found = true
+		}
+		prompt, err := io.ReadAll(cmd.Stdin)
+		if !found || err != nil || string(prompt) != "request" {
+			t.Fatalf("instructions missing or user prompt changed: %q, %v", prompt, err)
+		}
+	}
+}
 
 func TestCodexTokenCountCarriesContextWindow(t *testing.T) {
 	line := []byte(`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":26126634},"last_token_usage":{"input_tokens":142257},"model_context_window":258400}}}`)

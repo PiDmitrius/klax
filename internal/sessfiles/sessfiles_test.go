@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/PiDmitrius/klax/internal/session"
 )
 
 // A turn's files are named <turnSeq>-<NN>-name; duplicate names within one turn
@@ -72,14 +74,14 @@ func TestMaterializeCleanNamesAndCollision(t *testing.T) {
 // would collide ("a:b" vs "a/b") map to distinct dirs, and none leaks a separator.
 func TestKeyDirSafeAndInjective(t *testing.T) {
 	for _, k := range []string{"user:alice", "tg:123/x", `mx:\weird`, "a:b", "a/b"} {
-		if strings.ContainsAny(keyDir(k), "/:\\") {
-			t.Fatalf("keyDir(%q)=%q leaked a path separator", k, keyDir(k))
+		if strings.ContainsAny(session.KeyDir(k), "/:\\") {
+			t.Fatalf("keyDir(%q)=%q leaked a path separator", k, session.KeyDir(k))
 		}
 	}
-	if keyDir("a:b") == keyDir("a/b") {
+	if session.KeyDir("a:b") == session.KeyDir("a/b") {
 		t.Fatalf("keyDir not injective: a:b and a/b collide")
 	}
-	if !strings.HasSuffix(keyDir("user:alice"), base64.RawURLEncoding.EncodeToString([]byte("user:alice"))) {
+	if !strings.HasSuffix(session.KeyDir("user:alice"), base64.RawURLEncoding.EncodeToString([]byte("user:alice"))) {
 		t.Fatalf("keyDir should end with the lossless base64url of the key")
 	}
 }

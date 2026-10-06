@@ -42,10 +42,13 @@ URL="https://github.com/${REPO}/releases/download/${TAG}/klax-${TAG}-linux-${ARC
 info "downloading klax-${TAG}-linux-${ARCH}..."
 
 mkdir -p "$INSTALL_DIR"
-if ! curl -sfL "$URL" -o "${INSTALL_DIR}/klax"; then
+download=$(mktemp "${INSTALL_DIR}/.klax.XXXXXX")
+trap 'rm -f -- "$download"' EXIT
+if ! curl -sfL "$URL" -o "$download"; then
     fail "download failed: ${URL}"
 fi
-chmod +x "${INSTALL_DIR}/klax"
+chmod 755 "$download"
+mv -f -- "$download" "${INSTALL_DIR}/klax"
 info "installed: $(tilde "${INSTALL_DIR}/klax")"
 
 # --- Ensure ~/.local/bin is in PATH ---

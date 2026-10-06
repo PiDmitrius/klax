@@ -20,9 +20,10 @@ func TestSessionNameArg(t *testing.T) {
 
 func TestDeleteInactiveSessions(t *testing.T) {
 	const sk = "tg:1"
-	st := &session.Store{
-		Chats: make(map[string]*session.ChatSessions),
-		Scope: make(map[string]*session.ScopeDefaults),
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	st, err := session.LoadStore()
+	if err != nil {
+		t.Fatal(err)
 	}
 	st.New(sk, "one", "/tmp", session.ScopeDefaults{})
 	st.New(sk, "two", "/tmp", session.ScopeDefaults{})
@@ -49,7 +50,10 @@ func TestDeleteInactiveSessions(t *testing.T) {
 	}
 	d.runners[runnerKey{sk: sk, klaxID: idleCreated}] = &sessionRunner{runner: runner.New()}
 
-	deleted, aborted := d.deleteInactiveSessions(sk)
+	deleted, aborted, err := d.deleteInactiveSessions(sk)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if deleted != 2 {
 		t.Fatalf("deleted = %d, want 2", deleted)
 	}

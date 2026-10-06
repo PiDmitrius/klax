@@ -266,8 +266,8 @@ func (d *daemon) scopeDefaults(chatID string) *session.ScopeDefaults {
 }
 
 // backendFor returns the Backend for a given session.
-func (d *daemon) backendFor(sess *session.Session) runner.Backend {
-	name := resolveSessionBackend(sess, nil, d.fallbackScopeDefaults().Backend)
+func (d *daemon) backendFor(sk string, sess *session.Session) runner.Backend {
+	name := resolveSessionBackend(sess, d.scopeDefaults(sk), d.cfg.GetDefaultBackend())
 	switch name {
 	case "codex":
 		return &runner.CodexBackend{}
@@ -572,10 +572,9 @@ func runDaemon() {
 		if canonical, ok := tgIdents[uid]; ok {
 			migrateKey = "user:" + canonical
 		}
-		if store.MigrateTo(migrateKey) {
-			if err := store.Save(); err != nil {
-				log.Printf("save sessions: %v", err)
-			}
+		if migrated, err := store.MigrateTo(migrateKey); err != nil {
+			log.Fatalf("migrate session key: %v", err)
+		} else if migrated {
 			log.Printf("migrated legacy sessions to %s", migrateKey)
 		}
 	}
@@ -598,10 +597,9 @@ func runDaemon() {
 		if u.YmLogin != "" {
 			oldKeys = append(oldKeys, fmt.Sprintf("ym:%s", u.YmLogin))
 		}
-		if store.MergeKeys(targetKey, oldKeys) {
-			if err := store.Save(); err != nil {
-				log.Printf("save sessions: %v", err)
-			}
+		if merged, err := store.MergeKeys(targetKey, oldKeys); err != nil {
+			log.Fatalf("merge session keys: %v", err)
+		} else if merged {
 			log.Printf("merged sessions into %s", targetKey)
 		}
 	}

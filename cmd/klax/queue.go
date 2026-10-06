@@ -226,10 +226,7 @@ func (d *daemon) replayDurableQueues() {
 	for sk, cs := range d.store.Chats {
 		for _, sess := range cs.Sessions {
 			if sess.BackendID != "" {
-				backend := sess.Backend
-				if backend == "" {
-					backend = "claude"
-				}
+				backend := resolveSessionBackend(sess, d.scopeDefaults(sk), d.cfg.GetDefaultBackend())
 				warm = append(warm, [3]string{backend, sess.BackendID, sess.CWD})
 			}
 			sr := d.getRunner(sk, sess.KlaxID)
@@ -560,7 +557,18 @@ func (d *daemon) runBackend(msg queuedMsg) {
 	}
 
 	prompt = promptcanon.Canonical(prompt)
-	backend := d.backendFor(sess)
+	backend := d.backendFor(sk, sess)
+	if sess.Backend == "" {
+		sess, err = d.store.UpdateSessionPersisted(sk, sess.KlaxID, nil, func(cur *session.Session) {
+			cur.Backend = backend.Name()
+		})
+		if err != nil {
+			log.Printf("save session backend (%s/%s): %v", sk, msg.klaxID, err)
+			_ = sr.store.MarkErr(msg.turnSeq, turnErrRunStartFailed, 0)
+			del.Final(runner.RunResult{Error: errors.New(turnErrRunStartFailed)})
+			return
+		}
+	}
 	fromEvent := int64(0)
 	if sess.BackendID != "" {
 		if _, cursor, snapErr := history.Snapshot(backend.Name(), sess.BackendID, sess.CWD); snapErr != nil {

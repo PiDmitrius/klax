@@ -167,9 +167,10 @@ func TestNewAssignsUniqueKlaxIDAcrossRapidCalls(t *testing.T) {
 }
 
 func TestSessionKeysStayUniqueAcrossMerge(t *testing.T) {
-	store := &Store{
-		Chats: make(map[string]*ChatSessions),
-		Scope: make(map[string]*ScopeDefaults),
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	store, err := LoadStore()
+	if err != nil {
+		t.Fatal(err)
 	}
 	a := store.New("tg:1", "telegram", "/tmp", ScopeDefaults{})
 	b := store.New("mx:1", "max", "/tmp", ScopeDefaults{})
@@ -177,8 +178,8 @@ func TestSessionKeysStayUniqueAcrossMerge(t *testing.T) {
 	if a.KlaxID == b.KlaxID || b.KlaxID == c.KlaxID || a.KlaxID == c.KlaxID {
 		t.Fatalf("keys must be unique across chats; got %s,%s,%s", a.KlaxID, b.KlaxID, c.KlaxID)
 	}
-	if !store.MergeKeys("user:alice", []string{"tg:1", "mx:1"}) {
-		t.Fatal("MergeKeys returned false")
+	if merged, err := store.MergeKeys("user:alice", []string{"tg:1", "mx:1"}); err != nil || !merged {
+		t.Fatalf("MergeKeys = %v, %v", merged, err)
 	}
 	seen := map[string]bool{}
 	for _, sess := range store.SessionsFor("user:alice") {
@@ -189,6 +190,89 @@ func TestSessionKeysStayUniqueAcrossMerge(t *testing.T) {
 	}
 	if next := store.New("user:alice", "next", "/tmp", ScopeDefaults{}); seen[next.KlaxID] {
 		t.Fatalf("next key after merge %s repeats an existing one", next.KlaxID)
+	}
+}
+
+func TestKeyMigrationResumesAfterFailedSave(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("KLAX_DATA_DIR", dir)
+	store, err := LoadStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := store.New("tg:1", "pending", "/tmp", ScopeDefaults{})
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	src, dst := WorkDir("tg:1", sess.KlaxID), WorkDir("user:test", sess.KlaxID)
+	if err := os.MkdirAll(src, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "queue.jsonl"), []byte("durable"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(dir, "sessions.saved.json")
+	if err := os.Rename(store.path, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(store.path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := store.MergeKeys("user:test", []string{"tg:1"}); err == nil || changed {
+		t.Fatalf("failed save accepted: %v, %v", changed, err)
+	}
+	if store.Get("tg:1", sess.KlaxID) == nil || store.Get("user:test", sess.KlaxID) != nil {
+		t.Fatal("metadata changed after failed save")
+	}
+	if err := os.Remove(store.path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(backup, store.path); err != nil {
+		t.Fatal(err)
+	}
+	store, err = LoadStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := store.MergeKeys("user:test", []string{"tg:1"}); err != nil || !changed {
+		t.Fatalf("retry = %v, %v", changed, err)
+	}
+	data, err := os.ReadFile(filepath.Join(dst, "queue.jsonl"))
+	if err != nil || string(data) != "durable" {
+		t.Fatalf("migrated data = %q, %v", data, err)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Fatalf("source still present: %v", err)
+	}
+}
+
+func TestKeyMigrationRefusesConflictingDirectories(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	store, err := LoadStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := store.New("tg:1", "pending", "/tmp", ScopeDefaults{})
+	for key, text := range map[string]string{"tg:1": "source", "user:test": "destination"} {
+		path := WorkDir(key, sess.KlaxID)
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "queue.jsonl"), []byte(text), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if changed, err := store.MergeKeys("user:test", []string{"tg:1"}); err == nil || changed {
+		t.Fatalf("conflict ignored: %v, %v", changed, err)
+	}
+	if store.Get("tg:1", sess.KlaxID) == nil || store.Get("user:test", sess.KlaxID) != nil {
+		t.Fatal("conflicting migration changed metadata")
+	}
+	for key, text := range map[string]string{"tg:1": "source", "user:test": "destination"} {
+		data, err := os.ReadFile(filepath.Join(WorkDir(key, sess.KlaxID), "queue.jsonl"))
+		if err != nil || string(data) != text {
+			t.Fatalf("conflict overwrote %s: %q, %v", key, data, err)
+		}
 	}
 }
 

@@ -46,11 +46,11 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Models(backend string) []Model {
 	if s == nil {
-		return nil
+		return []Model{}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return cloneModels(s.models[backend])
+	return append([]Model{}, cloneModels(s.models[backend])...)
 }
 
 func (s *Store) Refresh(ctx context.Context, backend string) ([]Model, error) {

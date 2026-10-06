@@ -63,6 +63,17 @@ function harness(){
   return { calls, render: context.renderSession, pos: context.pos, col: new Element() };
 }
 
+test("unknown outcome shows its note without a stop button", () => {
+  const h = harness();
+  const turn = { turn_seq: 1, role: "user", text: "request", state: "unknown", blocks: [] };
+  h.render(h.col, [turn]);
+  const tail = h.col.children[0].children.at(-1);
+  assert.ok(tail.html.includes("статус неизвестен"));
+  assert.equal(tail.querySelector(".stop"), null);
+  h.render(h.col, [{ ...turn, state: "done" }]);
+  assert.equal(h.col.children[0].children.length, 1);
+});
+
 test("divider collapse and join preserve unchanged tool contents and skip text formatting", () => {
   const h = harness();
   const blocks = Array.from({ length: 301 }, (_, i) => ({ id: String(i), role: "tool", text: "tool " + i }));

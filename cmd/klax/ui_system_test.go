@@ -130,6 +130,13 @@ func TestSystemCheckIsExplicit(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("check status = %d", rec.Code)
 	}
+	var check map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &check); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := check["checking"]; ok {
+		t.Fatal("check response duplicates sampled state")
+	}
 	select {
 	case <-called:
 	case <-time.After(time.Second):
@@ -170,16 +177,10 @@ func TestSystemUpdateMethodAndSingleFlight(t *testing.T) {
 	}
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, authSystemJSON(http.MethodPost, "/api/system/update", `{"tag":"v8.8.8"}`))
-	var rejected map[string]any
-	if err := json.NewDecoder(rec.Body).Decode(&rejected); err != nil {
-		t.Fatal(err)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("unchecked update status = %d", rec.Code)
 	}
-	if rejected["running"] != false {
-		t.Fatalf("unchecked tag accepted: %#v", rejected)
-	}
-	if rejected["started"] != false {
-		t.Fatalf("unchecked tag reported started: %#v", rejected)
-	}
+	errorResponse(t, rec, "update-not-checked")
 
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, authSystemJSON(http.MethodPost, "/api/system/update", `{"tag":"v9.9.9"}`))
@@ -190,26 +191,17 @@ func TestSystemUpdateMethodAndSingleFlight(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&first); err != nil {
 		t.Fatal(err)
 	}
-	if first["started"] != true {
+	if first["started"] != true || first["message"] != installStartMessage("v9.9.9") {
 		t.Fatalf("first update not reported started: %#v", first)
 	}
 	<-started
 
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, authSystemJSON(http.MethodPost, "/api/system/update", `{"tag":"v9.9.9"}`))
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusConflict {
 		t.Fatalf("second update status = %d", rec.Code)
 	}
-	var second map[string]any
-	if err := json.NewDecoder(rec.Body).Decode(&second); err != nil {
-		t.Fatal(err)
-	}
-	if second["message"] != "Обновление уже выполняется" {
-		t.Fatalf("second response = %#v", second)
-	}
-	if second["started"] != false {
-		t.Fatalf("second update reported started: %#v", second)
-	}
+	errorResponse(t, rec, "update-running")
 
 	close(release)
 	deadline := time.Now().Add(time.Second)
@@ -276,7 +268,7 @@ func TestSystemLocalReinstallUsesSourceArtifact(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
 		t.Fatal(err)
 	}
-	if response["started"] != true {
+	if rec.Code != http.StatusOK || response["started"] != true || response["message"] != installStartMessage("v"+version) {
 		t.Fatalf("local reinstall response = %#v", response)
 	}
 	select {

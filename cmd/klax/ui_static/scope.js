@@ -4,10 +4,10 @@
 // is a plain browser tab — no new UI, no server routing. One namespace holds three things, told
 // apart by shape (this parse rule is the whole contract):
 //
-//   #1783809783        all digits  → a session id, root scope
-//   #work              has neither → a user group
-//   #is:unread         has a colon → a computed view (parsed here, not implemented yet)
-//   #work/1783809783   two segments: scope + the tab active inside it
+//   #/lOGezVsS         a session in the root scope
+//   #work              a user group
+//   #is:unread         a computed view
+//   #work/lOGezVsS     scope + the tab active inside it
 //
 // Everything scope-shaped is derived HERE and nowhere else: membership, the per-scope "last viewed
 // tab" key, the hash writer, the window title prefix and the chip. Groups themselves are never stored

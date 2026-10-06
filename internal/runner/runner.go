@@ -389,7 +389,7 @@ type RunOptions struct {
 	Model                     string // model override
 	Effort                    string // reasoning effort: low | medium | high (claude also: max; codex also: xhigh)
 	ContextWindowHint         int    // last known context window for progress usage that only reports used tokens
-	AppendSystemPrompt        string // appended to default system prompt
+	AppendSystemPrompt        string // additional backend instructions
 	ClaudeTTY                 bool   // run Claude through klax tty instead of claude -p directly
 	SuppressNarrationProgress bool   // keep final-answer text buffered instead of streaming it as narration
 	// OnSessionID, if set, is called once with the backend session id the moment the run first

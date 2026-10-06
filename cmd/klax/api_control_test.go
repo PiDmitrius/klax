@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/PiDmitrius/klax/internal/config"
+	"github.com/PiDmitrius/klax/internal/sessfiles"
 	"github.com/PiDmitrius/klax/internal/session"
 	"github.com/PiDmitrius/klax/internal/turnaudit"
 )
@@ -796,6 +797,103 @@ func TestAPIFinalSaveFailure(t *testing.T) {
 	errorResponse(t, response(t, wait), "result-save-failed")
 }
 
+func TestMessengerDeletionPreservesFilesOnSaveFailure(t *testing.T) {
+	for _, command := range []string{"cleanup", "nuke"} {
+		t.Run(command, func(t *testing.T) {
+			f := newAPIFixture(t, "", "", "")
+			const sk = "user:test"
+			f.d.store.New(sk, "active", f.dir, session.ScopeDefaults{Backend: "codex"})
+			if err := f.d.store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			sr := f.d.getRunner(sk, f.klaxID)
+			cancelled := false
+			sr.cancel = func() { cancelled = true }
+			_, _, files, _, err := sr.store.Enqueue("tg:1", "", "pending", "pending", []sessfiles.NamedReader{{Name: "report.txt", R: strings.NewReader("DATA")}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(session.StoreDir(), "sessions.json")
+			if err := os.Rename(path, path+".saved"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if command == "cleanup" {
+				f.d.handleSessionDelete("tg:1", "", sk, "1")
+			} else if deleted, aborted, err := f.d.deleteInactiveSessions(sk); err == nil || deleted != 0 || aborted != 0 {
+				t.Fatalf("failed deletion = %d, %d, %v", deleted, aborted, err)
+			}
+			if f.d.store.Get(sk, f.klaxID) == nil || cancelled || f.d.lookupRunner(sk, f.klaxID) != sr {
+				t.Fatal("failed deletion removed or aborted the session")
+			}
+			data, err := os.ReadFile(sr.store.Path(files[0]))
+			if err != nil || string(data) != "DATA" {
+				t.Fatalf("file destroyed: %q, %v", data, err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(path+".saved", path); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := session.LoadStore()
+			if err != nil || loaded.Get(sk, f.klaxID) == nil {
+				t.Fatalf("persisted session lost: %v", err)
+			}
+		})
+	}
+}
+
+func TestEmptySessionBackendStaysResolvedAcrossTurns(t *testing.T) {
+	f := newAPIFixture(t, "", "", "")
+	f.d.cfg.DefaultBackend = "claude"
+	f.d.store.UpdateSession("user:test", f.klaxID, func(sess *session.Session) { sess.Backend = "" })
+	f.d.store.UpdateScopeDefaults("user:test", func(def *session.ScopeDefaults) { def.Backend = "codex" })
+	settings, _ := f.d.uiSessionSettings("user:test", f.klaxID)
+	tabs := f.d.sessionsSnapshot("user:test", f.d.store.SessionsFor("user:test"), nil, false)
+	if settings.Backend != "codex" || tabs[0].Backend != "codex" {
+		t.Fatalf("settings and tabs disagree: %s, %s", settings.Backend, tabs[0].Backend)
+	}
+	for _, nonce := range []string{"first", "second"} {
+		w := f.send("finish", nonce)
+		eventResponse(t, w, "finish", "success")
+	}
+	loaded, err := session.LoadStore()
+	if err != nil || loaded.Get("user:test", f.klaxID).Backend != "codex" {
+		t.Fatalf("backend not persisted: %v", err)
+	}
+	runs, err := os.ReadFile(filepath.Join(f.dir, "runs"))
+	if err != nil || strings.Count(string(runs), "x") != 2 {
+		t.Fatalf("both turns did not use the selected backend: %q, %v", runs, err)
+	}
+}
+
+func TestSettingsEmptyListsAndRenameErrors(t *testing.T) {
+	f := newAPIFixture(t, "", "", "")
+	f.d.models = nil
+	for _, query := range []string{"", "?klax_id=" + f.klaxID} {
+		r := httptest.NewRequest(http.MethodGet, "/api/settings"+query, nil)
+		r.Header.Set("Authorization", "Bearer access")
+		w := httptest.NewRecorder()
+		f.s.routes().ServeHTTP(w, r)
+		var data map[string]json.RawMessage
+		if err := json.Unmarshal(w.Body.Bytes(), &data); err != nil || w.Code != http.StatusOK {
+			t.Fatalf("settings: %d %s, %v", w.Code, w.Body.String(), err)
+		}
+		for _, field := range []string{"models", "groups"} {
+			if string(data[field]) != "[]" {
+				t.Fatalf("%s = %s, want []", field, data[field])
+			}
+		}
+	}
+	for _, path := range []string{"/api/rename", "/api/settings"} {
+		w := f.request(path, fmt.Sprintf(`{"klax_id":%q,"name":""}`, f.klaxID), "")
+		errorResponse(t, w, "invalid-settings")
+	}
+}
+
 func TestAPIResultRetentionPreservesPendingWaiters(t *testing.T) {
 	f := newAPIFixture(t, "", "", "")
 	sr := f.d.getRunner("user:test", f.klaxID)
@@ -877,6 +975,7 @@ func TestMessengerNukeWakesAPI(t *testing.T) {
 	if w := f.request("/api/new", `{"name":"managed"}`, ""); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
+	f.d.store.UpdateScopeDefaults("user:test", func(def *session.ScopeDefaults) { def.GroupAttachmentMode = "any" })
 	id := f.d.store.Active("user:test").KlaxID
 	wait := asyncResponse(func() *httptest.ResponseRecorder {
 		return f.request("/api/send", fmt.Sprintf(`{"klax_id":%q,"text":"hello","return_on":"finish"}`, id), "")
@@ -887,6 +986,17 @@ func TestMessengerNukeWakesAPI(t *testing.T) {
 	got := f.d.store.SessionsFor("user:test")
 	if len(got) != 1 || got[0].Name != "fresh" || !got[0].Active {
 		t.Fatal("nuke did not replace all sessions")
+	}
+	if f.d.scopeDefaults("user:test").GroupAttachmentMode != "any" {
+		t.Fatal("nuke reset the scope's attachment mode")
+	}
+	if got := f.d.scopeDefaults("user:test").CWD; got != "" {
+		t.Fatalf("nuke pinned the configured cwd: %q", got)
+	}
+	nextCWD := t.TempDir()
+	f.d.cfg.DefaultCWD = nextCWD
+	if next, _ := f.d.createSession("tg:1", "user:test", "next"); next.CWD != nextCWD {
+		t.Fatalf("new session cwd = %q, want changed config %q", next.CWD, nextCWD)
 	}
 	f.release(t, "start")
 }

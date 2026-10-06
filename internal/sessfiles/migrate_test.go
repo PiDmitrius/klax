@@ -48,7 +48,7 @@ func legacyFixture(t *testing.T) string {
 		key     string
 		created int64
 	}{{"user:alice", 1775462460}, {"mx:1", 5}} {
-		sd := filepath.Join(dir, "sessions", keyDir(d.key), fmt.Sprint(d.created))
+		sd := filepath.Join(dir, "sessions", session.KeyDir(d.key), fmt.Sprint(d.created))
 		if err := os.MkdirAll(sd, 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -122,7 +122,7 @@ func checkMigrated(t *testing.T, dir string) {
 			t.Fatalf("%s: unexpected dir: %v", s.Name, err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, "sessions", keyDir("user:alice"), "1775462460")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "sessions", session.KeyDir("user:alice"), "1775462460")); !os.IsNotExist(err) {
 		t.Fatalf("old dir left: %v", err)
 	}
 	q, err := os.ReadFile(filepath.Join(WorkDir("user:alice", alice[0].KlaxID), "queue.jsonl"))

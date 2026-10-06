@@ -15,7 +15,6 @@ package sessfiles
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -30,34 +29,9 @@ import (
 	"github.com/PiDmitrius/klax/internal/session"
 )
 
-// keyDir maps a sessionKey to one safe, injective path component
-// "<hint>--<base64url(raw key)>". The base64url suffix is lossless, so the
-// component is unique per key regardless of the cosmetic hint; base64url's
-// alphabet ([A-Za-z0-9_-]) is filesystem-safe. (A char-replacement sanitizer is
-// NOT injective — e.g. "a:b" and "a/b" would collide — so it is not used here.)
-func keyDir(key string) string {
-	return keyHint(key) + "--" + base64.RawURLEncoding.EncodeToString([]byte(key))
-}
-
-// keyHint is a short, sanitized, lossy label for human eyes only (ls legibility).
-func keyHint(key string) string {
-	h := strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '.':
-			return r
-		default:
-			return '_'
-		}
-	}, key)
-	if len(h) > 32 {
-		h = h[:32]
-	}
-	return h
-}
-
 // WorkDir is the per-session directory: <data>/sessions/<keyDir>/<klax_id>.
 func WorkDir(key, klaxID string) string {
-	return filepath.Join(session.StoreDir(), "sessions", keyDir(key), klaxID)
+	return session.WorkDir(key, klaxID)
 }
 
 // Store is a session's durable store: its files/ subdir and its queue.jsonl, plus

@@ -20,14 +20,15 @@ import (
 var ErrRemoved = errors.New("sessfiles: session store removed")
 
 // queue.jsonl is the per-session durable queue AND the session-lifetime inbound
-// log: append-only records enq → run → done/err, never deleted. fsync on every
-// append; enq is the durability point (a turn's files are fsynced first). Replay
+// log: append-only records reserve → enq → run → done/err, never deleted. fsync on every
+// append; reserve burns the sequence before files are written, and enq accepts the turn.
+// A turn's files are fsynced first. Replay
 // re-enqueues enq-without-run and flags run-without-terminal for transcript
 // reconciliation. `turn_seq` is the monotonic canonical turn id. Legacy enqueues
 // may carry a prompt marker; new runs bind to physical transcript coordinates.
 
 type record struct {
-	Ev           string         `json:"ev"` // enq|run|run_session|bind|done|err|hook
+	Ev           string         `json:"ev"` // reserve|enq|run|run_session|bind|done|err|hook
 	Seq          int64          `json:"turn_seq"`
 	ChatID       string         `json:"chat,omitempty"` // originating chat, for replay delivery
 	MsgID        string         `json:"msg,omitempty"`
@@ -139,8 +140,11 @@ func (s *Store) EnqueueOrigin(chatID, msgID, nonce, text, originalText string, f
 			}
 		}
 	}
-	s.seq++ // reserve first: a failure below just burns the seq (gaps are fine)
+	s.seq++
 	seq = s.seq
+	if err = s.appendRecord(record{Ev: "reserve", Seq: seq}); err != nil {
+		return
+	}
 	for i, f := range files {
 		var name string
 		if name, err = s.WriteFile(seq, i+1, f.Name, f.R); err != nil {
@@ -335,6 +339,9 @@ func (s *Store) refreshQueue() error {
 func (q *queueProjection) fold(r record) {
 	if r.Seq > q.maxSeq {
 		q.maxSeq = r.Seq
+	}
+	if r.Ev == "reserve" {
+		return
 	}
 	t := q.byseq[r.Seq]
 	if t == nil {

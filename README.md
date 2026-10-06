@@ -207,8 +207,8 @@ stopping its work and deleting its files.
 ### Create a session
 
 `POST /api/new` accepts the initial session settings: `name`, `cwd`, `backend`,
-`model_requested`, `think`, `sandbox`, `tty`, `system_prompt` (appended to the
-backend's own system prompt) and `groups`. Settings are validated
+`model_requested`, `think`, `sandbox`, `tty`, `system_prompt` (additional backend
+instructions) and `groups`. Settings are validated
 before the session and its defaults are saved and published. A failed request
 creates no session. An empty body creates a session with the scope defaults.
 
@@ -258,15 +258,17 @@ block on the current turn's completion.
 }
 ```
 
-Each session carries `klax_id`, `name`, `backend`, `model_requested`,
-`model_used`, `cwd` (absolute), `busy` and `queued` (messages waiting behind the
-running one), plus the state of its UI tab. `at` is the cursor of the session live
+Each session carries `klax_id`, `name`, `backend`, `cwd` (absolute), `busy` and
+`queued` (messages waiting behind the running one), plus the state of its UI tab.
+Empty optional fields, including `model_requested` and `model_used`, are omitted.
+`at` is the cursor of the session live
 channel; `system` is sampled at request time. Uptime and resource measurements do
 not advance `at` or emit live events. A client that only lists sessions ignores
 `at` and `system`. With management access, an empty account gets an initial session.
 
 `/api/changes` events for one session (`group`, `removed`, `tab`) carry `klax_id`
-beside `seq`. The `tab` payload contains only changed fields:
+beside `seq`. The `tab` payload is a JSON Merge Patch: it contains only changed
+fields, and `null` removes a field:
 
 ```json
 {"seq":42,"klax_id":"lOGezVsS","tab":{"busy":true}}
@@ -417,6 +419,8 @@ ready. Every `/api/*` error has this shape:
 | `bad-request`, `invalid-nonce`, `invalid-return-on`, `empty-message` | 400 | Invalid input; nothing enqueued or created. |
 | `invalid-settings` | 400 | Settings rejected: invalid value or unknown option. |
 | `session-busy` | 409 | Run settings cannot change while work is running or queued. |
+| `update-running` | 409 | An installation is already running. |
+| `update-not-checked` | 409 | The requested artifact is not available among the checked choices. |
 | `backend-locked`, `cwd-locked` | 409 | Backend or working directory cannot change after the first message. |
 | `last-session` | 409 | The last remaining session cannot be closed. |
 | `method-not-allowed` | 405 | Wrong HTTP method. |

@@ -621,10 +621,10 @@ func timeAgo(t time.Time) string {
 }
 
 // hasMultipleBackends checks if sessions use more than one backend.
-func hasMultipleBackends(sessions []*session.Session) bool {
+func (d *daemon) hasMultipleBackends(sk string, sessions []*session.Session) bool {
 	seen := ""
 	for _, s := range sessions {
-		b := resolveSessionBackend(s, nil, "claude")
+		b := effectiveBackendName(d.cfg, d.scopeDefaults(sk), s)
 		if seen == "" {
 			seen = b
 		} else if seen != b {
@@ -637,7 +637,7 @@ func hasMultipleBackends(sessions []*session.Session) bool {
 // formatSessionLine renders one session line.
 // activePrefix/inactiveCmd control per-mode differences.
 // showBackend adds backend name after message count when multiple backends are used.
-func formatSessionLine(sb *strings.Builder, i int, s *session.Session, activePrefix, inactiveCmd string, showBackend bool) {
+func (d *daemon) formatSessionLine(sk string, sb *strings.Builder, i int, s *session.Session, activePrefix, inactiveCmd string, showBackend bool) {
 	ctx := ""
 	if s.ContextWindow > 0 {
 		pct := s.ContextUsed * 100 / s.ContextWindow
@@ -645,7 +645,7 @@ func formatSessionLine(sb *strings.Builder, i int, s *session.Session, activePre
 	}
 	backendSuffix := ""
 	if showBackend {
-		b := resolveSessionBackend(s, nil, "claude")
+		b := effectiveBackendName(d.cfg, d.scopeDefaults(sk), s)
 		backendSuffix = fmt.Sprintf(" (%s)", b)
 	}
 	if s.Active {
@@ -681,14 +681,14 @@ func (d *daemon) cleanupText(chatID string) string {
 	if len(sessions) == 0 {
 		return "Нет сессий."
 	}
-	multi := hasMultipleBackends(sessions)
+	multi := d.hasMultipleBackends(chatID, sessions)
 	var sb strings.Builder
 	inactive := 0
 	for i, s := range sessions {
 		if !s.Active {
 			inactive++
 		}
-		formatSessionLine(&sb, i, s, "✅ ", "❌ /d", multi)
+		d.formatSessionLine(chatID, &sb, i, s, "✅ ", "❌ /d", multi)
 	}
 	if inactive == 0 {
 		sb.WriteString("\nНечего удалять.")
@@ -703,10 +703,10 @@ func (d *daemon) sessionsText(chatID string) string {
 	if len(sessions) == 0 {
 		return "Нет сессий. Напиши /new"
 	}
-	multi := hasMultipleBackends(sessions)
+	multi := d.hasMultipleBackends(chatID, sessions)
 	var sb strings.Builder
 	for i, s := range sessions {
-		formatSessionLine(&sb, i, s, "", "/s", multi)
+		d.formatSessionLine(chatID, &sb, i, s, "", "/s", multi)
 	}
 	sb.WriteString("\n/cleanup — управление сессиями")
 	return sb.String()

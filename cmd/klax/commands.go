@@ -437,11 +437,11 @@ func (d *daemon) handleSessionDelete(chatID, msgID, sk, n string) {
 		d.sendMessage(chatID, msgID, "⏳ Сессия занята: дождись завершения или сначала переключись и /abort.")
 		return
 	}
-	d.abortSession(sk, target.KlaxID, true)
-	d.store.DeleteByID(sk, target.KlaxID)
-	d.removeSessionStore(sk, target.KlaxID) // before dropRunner: latch the runner-owned store
-	d.dropRunner(sk, target.KlaxID)
-	d.saveStore()
+	if _, err := d.closeSession(sk, target.KlaxID); err != nil {
+		log.Printf("delete session: %v", err)
+		d.sendMessage(chatID, msgID, "❌ Не удалось сохранить удаление сессии.")
+		return
+	}
 	d.sendMessage(chatID, msgID, d.cleanupText(sk))
 }
 
@@ -483,31 +483,25 @@ func (d *daemon) defaultSessionCWD(chatID, sk string) string {
 	return cwd
 }
 
-// deleteInactiveSessions aborts and removes every non-active session in the
-// chat — /nuke wipes the slate, so a session with work in flight is aborted
-// (run cancelled, queued messages marked aborted) before being deleted, not
-// spared. The aborted run unwinds on its own goroutine; its final persist via
-// UpdateSession becomes a no-op once the record is gone (same as a session
-// deleted mid-run). Returns how many sessions were deleted and how many of
-// those had to be aborted. Iterates the SessionsFor snapshot high-to-low so
-// each Store.Delete only shifts indices already passed.
-func (d *daemon) deleteInactiveSessions(sk string) (deleted, aborted int) {
+// deleteInactiveSessions persists removal of each inactive session before aborting
+// its queued and running work and deleting its files.
+func (d *daemon) deleteInactiveSessions(sk string) (deleted, aborted int, err error) {
 	sessions := d.store.SessionsFor(sk)
 	for i := len(sessions) - 1; i >= 0; i-- {
 		s := sessions[i]
 		if s.Active {
 			continue
 		}
-		if d.abortSession(sk, s.KlaxID, true) {
+		wasAborted, err := d.closeSession(sk, s.KlaxID)
+		if err != nil {
+			return deleted, aborted, err
+		}
+		if wasAborted {
 			aborted++
 		}
-		if d.store.DeleteByID(sk, s.KlaxID) {
-			d.removeSessionStore(sk, s.KlaxID) // before dropRunner: latch the runner-owned store
-			d.dropRunner(sk, s.KlaxID)
-			deleted++
-		}
+		deleted++
 	}
-	return deleted, aborted
+	return deleted, aborted, nil
 }
 
 // argPayload returns everything after the first whitespace-delimited word in text.
@@ -575,13 +569,23 @@ func (d *daemon) handleCommand(chatID, msgID, text string) {
 		d.sendMessage(chatID, msgID, sessionCreatedText(d.cfg, chatID, def, sess))
 
 	case "/nuke":
-		sess, def := d.createSession(chatID, sk, sessionNameArg(args))
-		deleted, aborted := d.deleteInactiveSessions(sk)
-		d.saveStore()
+		name := sessionNameArg(args)
+		def := d.scopeDefaults(sk)
+		sess, err := d.createUISessionAtomic(sk, chatID, uiSettingsPatch{Name: &name})
+		if err != nil {
+			log.Printf("save new session: %v", err)
+			d.sendMessage(chatID, msgID, "❌ Не удалось сохранить новую сессию.")
+			return
+		}
+		deleted, aborted, err := d.deleteInactiveSessions(sk)
 		msg := sessionCreatedText(d.cfg, chatID, def, sess)
 		msg += fmt.Sprintf("\n\n💥 Снесено сессий: %d", deleted)
 		if aborted > 0 {
 			msg += fmt.Sprintf("\n❌ Прервано занятых: %d", aborted)
+		}
+		if err != nil {
+			log.Printf("delete inactive sessions: %v", err)
+			msg += "\n❌ Не удалось сохранить удаление остальных сессий."
 		}
 		d.sendMessage(chatID, msgID, msg)
 

@@ -136,8 +136,7 @@ async function beginInstall(chosen){
     const r = await api("/api/system/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tag: chosen.tag, source: chosen.source }) });
     const data = await r.json();
     if(!r.ok) throw new Error((data.error && data.error.message) || "Ошибка установки");
-    notify(data.message, data.started ? "info" : "warning");
-    if(lastData && lastData.update){ lastData.update.running = !!data.running; render(lastData); }
+    notify(data.message, "info");
     refresh();
   } catch(e){ notify(errorNotice("Ошибка установки", e), { error: true }); refresh(); }
 }

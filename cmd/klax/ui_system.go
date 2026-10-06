@@ -197,12 +197,12 @@ func (d *daemon) startUpdateCheck() bool {
 	return true
 }
 
-func (d *daemon) startSystemUpdate(tag, source string) (bool, string) {
+func (d *daemon) startSystemUpdate(tag, source string) (string, error) {
 	st := d.systemState()
 	st.mu.Lock()
 	if st.running {
 		st.mu.Unlock()
-		return false, "Обновление уже выполняется"
+		return "", &uiErr{status: http.StatusConflict, code: "update-running", msg: "Обновление уже выполняется"}
 	}
 	allowed := source == "local" && d.cfg.SourceDir != "" && tag == "v"+version
 	if source == "github" {
@@ -215,7 +215,7 @@ func (d *daemon) startSystemUpdate(tag, source string) (bool, string) {
 	}
 	if !allowed || (source == "github" && (!st.checked || st.checkError != "")) {
 		st.mu.Unlock()
-		return false, "Сначала проверьте обновления или выберите версию из списка"
+		return "", &uiErr{status: http.StatusConflict, code: "update-not-checked", msg: "Сначала проверьте обновления или выберите версию из списка"}
 	}
 	st.running = true
 	st.updateStarted = time.Now()
@@ -250,7 +250,7 @@ func (d *daemon) startSystemUpdate(tag, source string) (bool, string) {
 		st.running = false
 		st.mu.Unlock()
 	}()
-	return true, installStartMessage(tag)
+	return installStartMessage(tag), nil
 }
 
 func installStartMessage(tag string) string {
@@ -306,7 +306,7 @@ func (s *uiServer) handleSystemCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	started := s.d.startUpdateCheck()
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"checking": true, "started": started})
+	_ = json.NewEncoder(w).Encode(map[string]any{"started": started})
 }
 
 func (s *uiServer) handleSystemUpdate(w http.ResponseWriter, r *http.Request) {
@@ -329,11 +329,14 @@ func (s *uiServer) handleSystemUpdate(w http.ResponseWriter, r *http.Request) {
 	if body.Source == "" {
 		body.Source = "github"
 	}
-	started, message := s.d.startSystemUpdate(body.Tag, body.Source)
+	message, err := s.d.startSystemUpdate(body.Tag, body.Source)
+	if err != nil {
+		settingsFail(w, err)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"started": started,
-		"running": started || s.d.systemUpdateRunning(),
+		"started": true,
 		"message": message,
 	})
 }

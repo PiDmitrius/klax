@@ -210,14 +210,18 @@ func (d *daemon) createUISessionAtomic(sk, chatID string, patch uiSettingsPatch)
 		applySettingsPatch(sess, r)
 	}
 	newDefaults := session.ScopeDefaults{
-		Backend:        resolveSessionBackend(sess, def, d.cfg.GetDefaultBackend()),
-		ModelRequested: sess.ModelRequested,
-		Think:          sess.Think,
-		Sandbox:        sess.Sandbox,
-		TTY:            sess.TTY,
-		CWD:            sess.CWD,
-		GroupMode:      def.GroupMode,
-		GroupVerbose:   def.GroupVerbose,
+		Backend:             resolveSessionBackend(sess, def, d.cfg.GetDefaultBackend()),
+		ModelRequested:      sess.ModelRequested,
+		Think:               sess.Think,
+		Sandbox:             sess.Sandbox,
+		TTY:                 sess.TTY,
+		CWD:                 def.CWD,
+		GroupMode:           def.GroupMode,
+		GroupVerbose:        def.GroupVerbose,
+		GroupAttachmentMode: def.GroupAttachmentMode,
+	}
+	if patch.CWD != nil {
+		newDefaults.CWD = sess.CWD
 	}
 	klaxID, err := d.store.AddPersisted(sk, sess, &newDefaults)
 	if err != nil {
@@ -229,15 +233,7 @@ func (d *daemon) createUISessionAtomic(sk, chatID string, patch uiSettingsPatch)
 
 // renameSession renames one session (by klax_id) and pushes the updated tab strip.
 func (d *daemon) renameSession(sk string, klaxID string, name string) error {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return &uiErr{status: http.StatusBadRequest, msg: "Нужно указать имя"}
-	}
-	if _, err := d.store.UpdateSessionPersisted(sk, klaxID, nil, func(cur *session.Session) { cur.Name = name }); err != nil {
-		return err
-	}
-	d.broadcastSessions(sk)
-	return nil
+	return d.applyUISessionSettings(sk, klaxID, uiSettingsPatch{Name: &name})
 }
 
 // reorderSessions applies the tab strip's drag-and-drop order (by klax_id) and
@@ -252,15 +248,15 @@ func (d *daemon) reorderSessions(sk string, order []string) (bool, error) {
 }
 
 // closeSession persists removal before aborting work and deleting session files.
-func (d *daemon) closeSession(sk string, klaxID string) error {
+func (d *daemon) closeSession(sk string, klaxID string) (bool, error) {
 	if err := d.store.ClosePersisted(sk, klaxID); err != nil {
-		return err
+		return false, err
 	}
-	d.abortSession(sk, klaxID, true)
+	aborted := d.abortSession(sk, klaxID, true)
 	d.removeSessionStore(sk, klaxID) // latch + delete the runner-owned store before dropping it
 	d.dropRunner(sk, klaxID)
 	d.broadcastSessions(sk)
-	return nil
+	return aborted, nil
 }
 
 // sessionsSnapshot builds the tab strip of one access role from the sessions and read-model rows
@@ -268,10 +264,7 @@ func (d *daemon) closeSession(sk string, klaxID string) error {
 func (d *daemon) sessionsSnapshot(sk string, sessions []*session.Session, rows map[string][]uiTurn, readOnly bool) []uiSessionInfo {
 	out := make([]uiSessionInfo, 0, len(sessions))
 	for _, s := range sessions {
-		backend := s.Backend
-		if backend == "" {
-			backend = "claude"
-		}
+		backend := resolveSessionBackend(s, d.scopeDefaults(sk), d.cfg.GetDefaultBackend())
 		readTurn, readBlock := s.ReadPosition(readOnly)
 		out = append(out, uiSessionInfo{
 			KlaxID:         s.KlaxID,
@@ -306,10 +299,7 @@ func (d *daemon) readModelBuild(sk string, sess *session.Session) (rows []uiTurn
 	if st == nil {
 		return nil, 0, false
 	}
-	backend := sess.Backend
-	if backend == "" {
-		backend = "claude"
-	}
+	backend := resolveSessionBackend(sess, d.scopeDefaults(sk), d.cfg.GetDefaultBackend())
 	tm, ts, _ := history.Stat(backend, sess.BackendID, sess.CWD)
 	qm, qs := st.QueueStat()
 	busy := d.isSessionBusy(sk, sess.KlaxID)
@@ -912,10 +902,6 @@ func (s *uiServer) handleRename(w http.ResponseWriter, r *http.Request) {
 		apiFail(w, http.StatusBadRequest, "bad-request", "Некорректный запрос")
 		return
 	}
-	if strings.TrimSpace(body.Name) == "" {
-		apiFail(w, http.StatusBadRequest, "bad-request", "Нужно указать имя")
-		return
-	}
 	sk := s.d.sessionKey(s.chatID(user))
 	if !s.requireSession(w, sk, body.KlaxID) {
 		return
@@ -978,7 +964,7 @@ func (s *uiServer) handleClose(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSession(w, sk, body.KlaxID) {
 		return
 	}
-	if err := s.d.closeSession(sk, body.KlaxID); errors.Is(err, session.ErrSessionNotFound) {
+	if _, err := s.d.closeSession(sk, body.KlaxID); errors.Is(err, session.ErrSessionNotFound) {
 		writeAPIError(w, apiFailure("session-not-found"))
 		return
 	} else if errors.Is(err, session.ErrLastSession) {

@@ -56,7 +56,7 @@ type Session struct {
 	// has read, so unread state survives reloads and restarts. Empty means nothing read yet.
 	ReadPos      string `json:"read_pos,omitempty"`
 	ReadPosRO    string `json:"read_pos_ro,omitempty"`
-	SystemPrompt string `json:"system_prompt,omitempty"` // appended to the backend's system prompt
+	SystemPrompt string `json:"system_prompt,omitempty"` // additional backend instructions
 }
 
 // FormatReadPos renders a read position.
@@ -248,25 +248,33 @@ func IsLegacy(data []byte) bool {
 }
 
 // MigrateTo moves legacy sessions to the given chatID.
-func (s *Store) MigrateTo(chatID string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	migrated, ok := s.Chats["_migrated"]
-	if !ok {
-		return false
-	}
-	s.Chats[chatID] = migrated
-	delete(s.Chats, "_migrated")
-	return true
+func (s *Store) MigrateTo(chatID string) (bool, error) {
+	return s.MergeKeys(chatID, []string{"_migrated"})
 }
 
 // MergeKeys merges sessions from oldKeys into targetKey.
-// Sessions from old keys are appended to the target; old keys are deleted.
-// Returns true if any keys were merged.
-func (s *Store) MergeKeys(targetKey string, oldKeys []string) bool {
+// Directories are moved durably before metadata is saved. A failed startup migration
+// must be retried before any session stores are opened.
+func (s *Store) MergeKeys(targetKey string, oldKeys []string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	merged := false
+	for _, old := range oldKeys {
+		if cs, ok := s.Chats[old]; ok && old != targetKey {
+			merged = true
+			if err := moveSessionDirs(old, targetKey, cs.Sessions); err != nil {
+				return false, err
+			}
+		}
+	}
+	if !merged {
+		return false, nil
+	}
+	prior := s.Chats
+	s.Chats = make(map[string]*ChatSessions, len(prior))
+	for key, cs := range prior {
+		s.Chats[key] = &ChatSessions{Sessions: cloneSessions(cs.Sessions)}
+	}
 	target := s.chat(targetKey)
 	for _, old := range oldKeys {
 		cs, ok := s.Chats[old]
@@ -275,21 +283,22 @@ func (s *Store) MergeKeys(targetKey string, oldKeys []string) bool {
 		}
 		target.Sessions = append(target.Sessions, cs.Sessions...)
 		delete(s.Chats, old)
-		merged = true
 	}
 	// Ensure at most one session is active.
-	if merged {
-		foundActive := false
-		for i := len(target.Sessions) - 1; i >= 0; i-- {
-			if target.Sessions[i].Active {
-				if foundActive {
-					target.Sessions[i].Active = false
-				}
-				foundActive = true
+	foundActive := false
+	for i := len(target.Sessions) - 1; i >= 0; i-- {
+		if target.Sessions[i].Active {
+			if foundActive {
+				target.Sessions[i].Active = false
 			}
+			foundActive = true
 		}
 	}
-	return merged
+	if err := s.saveLocked(); err != nil {
+		s.Chats = prior
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Store) Save() error {

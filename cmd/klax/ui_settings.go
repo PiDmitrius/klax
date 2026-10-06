@@ -35,7 +35,7 @@ type uiSettings struct {
 	Sandbox       string               `json:"sandbox"`
 	TTY           bool                 `json:"tty"`
 	CWD           string               `json:"cwd"`           // absolute; the UI abbreviates it with home
-	SystemPrompt  string               `json:"system_prompt"` // appended to the backend's system prompt
+	SystemPrompt  string               `json:"system_prompt"` // additional backend instructions
 	Busy          bool                 `json:"busy"`
 	BackendLocked bool                 `json:"backend_locked"` // first message already sent
 	CWDLocked     bool                 `json:"cwd_locked"`     // first message already sent
@@ -138,7 +138,7 @@ func (d *daemon) uiSessionSettings(sk string, klaxID string) (*uiSettings, bool)
 		TTYAvailable:   backend == "claude",
 		Backends:       []uiSettingsOption{{Value: "claude", Label: "Claude"}, {Value: "codex", Label: "Codex"}},
 		Models:         d.models.Models(backend),
-		Groups:         sess.Groups,
+		Groups:         append([]string{}, sess.Groups...),
 	}, true
 }
 
@@ -178,6 +178,7 @@ func (d *daemon) uiDraftSettings(sk, chatID, backendOverride string) *uiSettings
 		TTYAvailable:   backend == "claude",
 		Backends:       []uiSettingsOption{{Value: "claude", Label: "Claude"}, {Value: "codex", Label: "Codex"}},
 		Models:         d.models.Models(backend),
+		Groups:         []string{},
 	}
 }
 

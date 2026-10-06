@@ -171,9 +171,6 @@ function indicator(state, seq, note, onStop){
   const stoppable = state === "run" || state === "enq";
   const d = document.createElement("div");
   d.className = "msg assistant typing" + (animated ? "" : " queued");
-  // The only note left is the enq queue position ('в очереди · N'). The context line is a
-  // separate tool bubble rendered below the dots (see buildItem), so the running indicator
-  // is just the animated dots + the ✕ button.
   const queueNote = note ? '<span class="qnote">'+esc(note)+'</span>' : "";
   const title = animated ? "Прервать" : "Убрать из очереди";
   d.innerHTML = DOTS + queueNote + (stoppable ? '<button class="stop" title="'+title+'">✕</button>' : "");
@@ -313,11 +310,7 @@ function buildTurn(it, onStop, old){
     node.classList.toggle("join-prev", !!g.joinPrev);
     node.classList.toggle("join-next", !!g.joinNext);
   }
-  // The working/queued dots — the turn's in-progress indicator. INVARIANT: a turn in progress ALWAYS
-  // shows this block, the WHOLE time it runs; it disappears only when the turn settles (done/err).
-  // Kept a reuse unit so a stream that adds a block above doesn't re-create the animated dots (which
-  // would restart the blink) or flicker them.
-  if(it.state === "run" || it.state === "enq"){
+  if(it.state === "run" || it.state === "enq" || it.state === "unknown"){
     put("dots", childSig("dots", [it.state, it.note]), () => indicator(it.state, it.seq, it.note, onStop));
   }
   // The context "cut line" is the turn's final element — below the dots while running, and the last

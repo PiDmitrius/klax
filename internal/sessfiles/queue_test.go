@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/PiDmitrius/klax/internal/session"
 )
 
 // An aborted queued turn (enq -> err:aborted, never run) must NOT replay.
@@ -52,6 +54,81 @@ func TestRemovedStoreNotResurrected(t *testing.T) {
 }
 
 func nr(name, data string) NamedReader { return NamedReader{Name: name, R: strings.NewReader(data)} }
+
+type failedAttachment struct{}
+
+func (failedAttachment) Read([]byte) (int, error) { return 0, errors.New("attachment read failed") }
+
+func TestFailedEnqueueReservesSequenceAcrossRestart(t *testing.T) {
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	s := Open("user:test", "s1")
+	failed, _, _, _, err := s.Enqueue("ui:test", "", "first", "first", []NamedReader{
+		nr("report.txt", "OLD"), {Name: "second.txt", R: failedAttachment{}},
+	})
+	if err == nil {
+		t.Fatal("accepted unreadable attachment")
+	}
+	s = Open("user:test", "s1")
+	if turns, err := s.InboundLog(); err != nil || len(turns) != 0 {
+		t.Fatalf("failed acceptance became a turn: %+v, %v", turns, err)
+	}
+	seq, _, files, _, err := s.Enqueue("ui:test", "", "second", "second", []NamedReader{nr("report.txt", "NEW")})
+	if err != nil || seq <= failed {
+		t.Fatalf("sequence reused: failed=%d accepted=%d error=%v", failed, seq, err)
+	}
+	data, err := os.ReadFile(s.Path(files[0]))
+	if err != nil || string(data) != "NEW" {
+		t.Fatalf("attachment = %q, error = %v", data, err)
+	}
+}
+
+func TestKeyMigrationPreservesDurableQueue(t *testing.T) {
+	for _, oldKey := range []string{"tg:1", "_migrated"} {
+		t.Run(oldKey, func(t *testing.T) {
+			t.Setenv("KLAX_DATA_DIR", t.TempDir())
+			store, err := session.LoadStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			sess := store.New(oldKey, "pending", "/tmp", session.ScopeDefaults{})
+			s := Open(oldKey, sess.KlaxID)
+			seq, _, files, _, err := s.Enqueue("tg:1", "1", "pending", "message", []NamedReader{nr("report.txt", "DATA")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var moved bool
+			if oldKey == "_migrated" {
+				moved, err = store.MigrateTo("user:test")
+			} else {
+				moved, err = store.MergeKeys("user:test", []string{oldKey})
+			}
+			if err != nil || !moved {
+				t.Fatalf("migration = %v, %v", moved, err)
+			}
+			store, err = session.LoadStore()
+			if err != nil || store.Get("user:test", sess.KlaxID) == nil || store.Get(oldKey, sess.KlaxID) != nil {
+				t.Fatalf("metadata migration failed: %v", err)
+			}
+			s = Open("user:test", sess.KlaxID)
+			pending, recovered, err := s.Replay()
+			if err != nil || len(pending) != 1 || len(recovered) != 0 || pending[0].Text != "message" {
+				t.Fatalf("replay = %+v, %+v, %v", pending, recovered, err)
+			}
+			data, err := os.ReadFile(s.Path(files[0]))
+			if err != nil || string(data) != "DATA" {
+				t.Fatalf("attachment = %q, %v", data, err)
+			}
+			got, _, _, duplicate, err := s.Enqueue("tg:1", "", "pending", "retry", nil)
+			if err != nil || !duplicate || got != seq {
+				t.Fatalf("nonce was lost: %d, %v, %v", got, duplicate, err)
+			}
+			got, _, _, _, err = s.Enqueue("tg:1", "", "next", "next", nil)
+			if err != nil || got <= seq {
+				t.Fatalf("sequence reset: %d, %v", got, err)
+			}
+		})
+	}
+}
 
 // Enqueue allocates an increasing turn_seq without creating new prompt markers,
 // persists files + an enq record, and the seq survives a "restart" (fresh Store
@@ -306,7 +383,8 @@ func TestQueueProjectionFollowsAppends(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := data[:bytes.IndexByte(data, '\n')+1]
+	enq := bytes.Index(data, []byte(`"ev":"enq"`))
+	first := data[:enq+bytes.IndexByte(data[enq:], '\n')+1]
 	if err := os.WriteFile(path+".new", first, 0o600); err != nil {
 		t.Fatal(err)
 	}

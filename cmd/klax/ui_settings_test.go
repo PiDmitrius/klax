@@ -125,6 +125,30 @@ func TestCreateUISessionAtomicPreservesExistingCWDDefault(t *testing.T) {
 	}
 }
 
+func TestCreateUISessionAtomicKeepsCWDFromConfigDynamic(t *testing.T) {
+	d := newTestDaemon(t)
+	t.Setenv("KLAX_DATA_DIR", t.TempDir())
+	var err error
+	d.store, err = session.LoadStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	chatID := "tg:test"
+	sk := d.sessionKey(chatID)
+	for range 2 {
+		d.cfg.DefaultCWD = t.TempDir()
+		sess, err := d.createUISessionAtomic(sk, chatID, uiSettingsPatch{})
+		if err != nil || sess.CWD != d.cfg.DefaultCWD || d.scopeDefaults(sk).CWD != "" {
+			t.Fatalf("create = %+v, defaults = %+v, err = %v", sess, d.scopeDefaults(sk), err)
+		}
+	}
+	explicit := t.TempDir()
+	sess, err := d.createUISessionAtomic(sk, chatID, uiSettingsPatch{CWD: &explicit})
+	if err != nil || sess.CWD != explicit || d.scopeDefaults(sk).CWD != explicit {
+		t.Fatalf("explicit cwd create = %+v, defaults = %+v, err = %v", sess, d.scopeDefaults(sk), err)
+	}
+}
+
 // A group is a view label, not a run parameter: it may be changed at any time, including while the
 // session is answering. Every field that DOES affect the run must stay refused meanwhile — the two
 // halves of that rule are asserted together so neither can drift.

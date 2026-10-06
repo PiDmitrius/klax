@@ -349,7 +349,7 @@ func TestSyncTabsReplayEqualsState(t *testing.T) {
 	f.d.uiPoke("alice")
 	c := f.changes(at)
 	f.d.store.UpdateSession("user:alice", f.klaxID, func(s *session.Session) { s.Groups = nil })
-	if err := f.d.closeSession("user:alice", added.KlaxID); err != nil {
+	if _, err := f.d.closeSession("user:alice", added.KlaxID); err != nil {
 		t.Fatal(err)
 	}
 	c2 := f.changes(c.At)
@@ -407,7 +407,7 @@ func TestSyncSessionLifecycleEvents(t *testing.T) {
 	r.apply(t, added.KlaxID, c.Events)
 	sameGroups(t, r.list(), f.window(added.KlaxID, "&limit=50").Groups)
 	at = c.At
-	if err := f.d.closeSession("user:alice", added.KlaxID); err != nil {
+	if _, err := f.d.closeSession("user:alice", added.KlaxID); err != nil {
 		t.Fatal(err)
 	}
 	c = f.changes(at)
