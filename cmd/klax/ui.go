@@ -373,7 +373,7 @@ func (d *daemon) watchRunTranscript(stop <-chan struct{}, idKnown <-chan string,
 	user := uiUserForKey(sk)
 	var lastM time.Time
 	var lastS int64
-	ticker := time.NewTicker(300 * time.Millisecond)
+	ticker := time.NewTicker(uiSyncInterval)
 	defer ticker.Stop()
 	for {
 		select {

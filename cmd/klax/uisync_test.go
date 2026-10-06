@@ -350,13 +350,18 @@ func TestSyncChangesBatchHasFixedDeadline(t *testing.T) {
 		start := time.Now()
 		f.d.uiNotice("alice", "one")
 		synctest.Wait()
-		time.Sleep(40 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 		f.d.uiNotice("alice", "two")
 		synctest.Wait()
-		time.Sleep(40 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 		f.d.uiNotice("alice", "three")
 		synctest.Wait()
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-done:
+			t.Fatal("poll returned before the collection window ended")
+		default:
+		}
+		time.Sleep(50 * time.Millisecond)
 		synctest.Wait()
 		var finished time.Time
 		select {
@@ -376,8 +381,8 @@ func TestSyncChangesBatchHasFixedDeadline(t *testing.T) {
 				t.Fatalf("events out of order: %+v", c.Events)
 			}
 		}
-		if elapsed := finished.Sub(start); elapsed != 100*time.Millisecond {
-			t.Fatalf("collection window = %s, want 100ms", elapsed)
+		if elapsed := finished.Sub(start); elapsed != 250*time.Millisecond {
+			t.Fatalf("collection window = %s, want 250ms", elapsed)
 		}
 		f.d.uiNotice("alice", "next")
 		if next := f.changes(c.At); len(next.Events) != 1 || next.Events[0].Notice != "next" {
@@ -405,7 +410,7 @@ func TestSyncChangesBatchDetectsLateTranscriptUsage(t *testing.T) {
 		f.write("s1", "answer")
 		f.d.uiPoke("alice")
 		synctest.Wait()
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 		fh, err := os.OpenFile(filepath.Join(f.dir, "s1.jsonl"), os.O_APPEND|os.O_WRONLY, 0o644)
 		if err != nil {
 			t.Fatal(err)

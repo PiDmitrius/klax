@@ -284,7 +284,7 @@ fields, and `null` removes a field:
 
 The `tabs` payload is the complete ordered list of session IDs.
 An idle `/api/changes` request waits up to 29 seconds. Its first available event
-starts a fixed 100 ms collection window; further updates do not extend it.
+starts a fixed 250 ms collection window; further updates do not extend it.
 The response includes changes detected at the end of that window. Poll requests
 allow 30 seconds for the complete response; other Web UI requests allow 10 seconds.
 Live and history retries wait 625 ms, 1.25 s, 2.5 s, then 5 s; a successful
