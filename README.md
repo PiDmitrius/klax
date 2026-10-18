@@ -294,8 +294,10 @@ Uploads with attachments use a 10-second inactivity deadline, renewed by progres
 while sending the files and receiving the response.
 The Web UI collects read-progress reports over the same fixed window and flushes
 pending progress for all sessions when the browser tab is hidden.
-Live, history and read-progress retries wait 625 ms, 1.25 s, 2.5 s, then 5 s;
-a successful response resets this sequence.
+Live retries wait 625 ms, 1.25 s, 2.5 s, then 5 s; a successful response resets
+this sequence. The live channel alone decides whether the server is reachable:
+while it is down the Web UI holds read-progress reports, and failed history and
+read-progress requests retry after its next successful response.
 
 ### System status
 

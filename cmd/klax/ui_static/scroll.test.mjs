@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { TurnModel } from "./model.js";
 import { pos, decodePos, answerBlock } from "./render.js";
-import { apiError, retryDelay, syncInterval } from "./base.js";
+import { apiError, syncInterval } from "./base.js";
 globalThis.document = { getElementById: () => ({ textContent: JSON.stringify({ sync_ms: 250, retry_min_ms: 625, retry_max_ms: 5000 }) }) };
 
 function harness(){
@@ -16,8 +16,8 @@ function harness(){
   log.addEventListener = (name, fn) => { logEvents[name] = fn; };
   const arm = (fn, delay) => { const id = ++nextTimer; timers.set(id, { fn, at: now + delay }); return id; };
   const context = vm.createContext({
-    TurnModel, calls, pos, decodePos, answerBlock, apiError, retryDelay, syncInterval, fadeOutDivider: () => false,
-    document: { visibilityState: "visible", getElementById: id => id === "log" ? log : col,
+    TurnModel, calls, pos, decodePos, answerBlock, apiError, syncInterval, fadeOutDivider: () => false,
+    document: { visibilityState: "visible", getElementById: id => id === "log" ? log : col, querySelector: () => null,
       addEventListener: (name, fn) => { documentEvents[name] = fn; } },
     setTimeout: arm, requestAnimationFrame: fn => arm(fn, 16),
     cancelAnimationFrame(id){ timers.delete(id); },
@@ -114,7 +114,7 @@ test("new read progress is sent while an older report is in flight", async () =>
   }
 });
 
-test("read retries use the shared backoff, send the latest position and reset after success", async () => {
+test("read reports wait for the live channel and send the latest position on its recovery", async () => {
   const h = harness();
   h.run(`
     reportRead = reportReadActual;
@@ -127,29 +127,33 @@ test("read retries use the shared backoff, send the latest position and reset af
     flushRead(1);
   `);
   await new Promise(resolve => setImmediate(resolve));
-  h.run("readThrough[1] = pos(2, 4); reportRead(1)");
-  for(const delay of [625, 1250, 2500, 5000, 5000]){
-    const before = h.calls.length;
-    h.tick(delay - 1);
-    assert.equal(h.calls.length, before);
-    h.tick(1);
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(h.calls.length, before + 1);
-    assert.equal(h.calls.at(-1), "2.4");
-  }
-  h.run("failRead = false");
-  h.tick(5000);
-  await new Promise(resolve => setImmediate(resolve));
-  const saved = h.calls.length;
+  h.run("host.onHealth(false, 1); readThrough[1] = pos(2, 4); reportRead(1)");
   h.tick(60000);
-  assert.equal(h.calls.length, saved);
-  h.run("failRead = true; readThrough[1] = pos(3, 0); flushRead(1)");
+  assert.deepEqual(h.calls, ["2.3"]);
+  h.run("failRead = false; host.onHealth(true, 0)");
   await new Promise(resolve => setImmediate(resolve));
-  h.tick(624);
-  assert.equal(h.calls.length, saved + 1);
-  h.tick(1);
+  assert.deepEqual(h.calls, ["2.3", "2.4"]);
+  h.run("host.onHealth(true, 0)");
+  h.tick(60000);
+  assert.equal(h.calls.length, 2);
+});
+
+test("a failed read holds later progress until the next live response", async () => {
+  const h = harness();
+  h.run(`
+    reportRead = reportReadActual;
+    showNotice = () => {};
+    readThrough[1] = pos(2, 3);
+    api = async (url, opts) => { calls.push(JSON.parse(opts.body).read_pos); return { ok: false, status: 503 }; };
+    flushRead(1);
+  `);
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(h.calls.length, saved + 2);
+  h.run("readThrough[1] = pos(2, 4); reportRead(1)");
+  h.tick(60000);
+  assert.deepEqual(h.calls, ["2.3"]);
+  h.run("host.onHealth(true, 0)");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(h.calls, ["2.3", "2.4"]);
 });
 
 for(const [status, retries] of [[408, true], [429, true], [503, true], [400, false], [401, false], [404, false]]){
@@ -163,7 +167,9 @@ for(const [status, retries] of [[408, true], [429, true], [503, true], [400, fal
       flushRead(1);
     `);
     await new Promise(resolve => setImmediate(resolve));
-    h.tick(retries ? 625 : 60000);
+    h.tick(60000);
+    assert.equal(h.calls.length, 1);
+    h.run("host.onHealth(true, 0)");
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(h.calls.length, retries ? 2 : 1);
   });
@@ -187,7 +193,7 @@ test("forgetting a session stops pending and in-flight read retries", async () =
       h.run('rejectRead(new Error("offline"))');
       await new Promise(resolve => setImmediate(resolve));
     }
-    h.tick(60000);
+    h.run("host.onHealth(true, 0)");
     await new Promise(resolve => setImmediate(resolve));
     assert.deepEqual(h.calls, ["read"]);
   }
