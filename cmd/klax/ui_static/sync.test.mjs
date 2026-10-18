@@ -13,14 +13,14 @@ function harness(epoch = null){
   const notices = [], homes = [];
   const stored = new Map(epoch === null ? [] : [["klax_server_epoch", epoch]]);
   const context = vm.createContext({
-    TurnModel, ordLess, applyMerge, apiError, retryDelay, syncInterval, cursorEpoch, cursorSeq, pos, parsePos, decodePos, answerBlock, console, setTimeout, clearTimeout, AbortController,
+    TurnModel, ordLess, applyMerge, apiError, syncInterval, cursorEpoch, cursorSeq, pos, parsePos, decodePos, answerBlock, console, setTimeout, clearTimeout, AbortController,
     requestAnimationFrame: () => 0, cancelAnimationFrame() {},
     api: url => new Promise(resolve => requests.push({ url, resolve })),
     selectionInLog: () => false, isReadOnly: () => true, filterScope: l => l, parseHash: () => ({}),
     reconcileSessions() {}, renderChip() {}, showNotice: value => notices.push(value), systemRestartNotice: (kind, version) => ({ kind, version }),
     writeHash() {}, storageKey: () => "session", loadDraft() {}, saveDraft() {}, setHome: value => homes.push(value),
     sessionStorage: { getItem: key => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value) },
-    document: { visibilityState: "visible", getElementById: () => null },
+    document: { visibilityState: "visible", getElementById: () => null, querySelector: () => null },
   });
   const source = readFileSync(new URL("./app.js", import.meta.url), "utf8")
     .replace(/^import .*;\n/gm, "")
@@ -72,7 +72,7 @@ test("live retries preserve the cursor, cap their pauses and reset after success
   await vm.runInNewContext(source + "\nchangesLoop(host)", context);
   assert.deepEqual(pauses, [625, 1250, 2500, 5000, 5000, 625]);
   assert.deepEqual(cursors, ["epoch.7", "epoch.7", "epoch.7", "epoch.7", "epoch.7", "epoch.7", "epoch.8", "epoch.8"]);
-  assert.deepEqual(nowaits, [false, true, true, true, true, true, false, true]);
+  assert.deepEqual(nowaits, [undefined, true, true, true, true, true, undefined, true]);
   assert.equal(applied, 1);
   assert.deepEqual(health.at(-2), [true, 0]);
   assert.deepEqual(health.at(-1), [false, 1]);
@@ -252,21 +252,13 @@ test("published read positions confirm local progress without another report", a
   assert.equal(h.run("readThrough[1]"), pos(3, 0));
 });
 
-test("a published read position stops a pending retry before its deadline", async () => {
+test("a published read position drops a pending read retry", async () => {
   const h = harness();
-  h.run(`
-    globalThis.readTimers = new Map();
-    setTimeout = (fn, ms) => { const id = Symbol(); readTimers.set(id, { fn, ms }); return id; };
-    clearTimeout = id => readTimers.delete(id);
-    active = "1"; readThrough[1] = pos(2, 3); flushRead("1");
-  `);
+  h.run(`active = "1"; readThrough[1] = pos(2, 3); flushRead("1")`);
   h.respond(0, null, false);
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(h.run("readTimers.size"), 1);
-  assert.equal(h.run("[...readTimers.values()][0].ms"), 625);
   await h.run('onSessionsList([{ klax_id: "1", read_pos: "2.3" }])');
-  assert.equal(h.run("readTimers.size"), 0);
-  h.run('flushRead("1")');
+  h.run("host.onHealth(true, 0)");
   assert.equal(h.requests.length, 1);
 });
 
@@ -363,17 +355,19 @@ test("the visible message keeps its offset when history grows above it", () => {
   assert.equal(h.run("fakeLog.scrollTop"), 1000);
 });
 
-test("a long-failing refresh keeps retrying with a bounded pause", async () => {
+test("a failed refresh retries on the next live response", async () => {
   const h = harness();
   const load = h.run("loadTranscript('1')");
   h.respond(0, { at: "1.10", from: null, to: null, more: false, groups: [group(5, ["a"])] });
   await load;
-  h.run("loaded[1] = true; globalThis.delays = []; setTimeout = (fn, ms) => { delays.push(ms); return 0; }; showNotice = () => {}");
-  const refresh = h.run("refreshWindow('1', 25)");
+  h.run("loaded[1] = true; showNotice = () => {}");
+  const refresh = h.run("refreshWindow('1')");
   h.respond(1, {}, false);
   await refresh;
-  assert.equal(h.run("delays.at(-1)"), 5000);
+  assert.equal(h.requests.length, 2);
   assert.equal(h.run("model.has('1') && loaded[1]"), true);
+  h.run("host.onHealth(true, 0)");
+  assert.match(h.requests[2].url, /transcript\?klax_id=1&limit=/);
 });
 
 test("closing the active session stops its pending refresh", async () => {
@@ -382,12 +376,12 @@ test("closing the active session stops its pending refresh", async () => {
   const load = h.run("loadTranscript('1')");
   h.respond(0, { at: "1.10", from: null, to: null, more: false, groups: [group(5, ["a"])] });
   await load;
-  h.run("loaded[1] = true; active = '1'; globalThis.timers = []; setTimeout = fn => { timers.push(fn); return 0; }; neighborIn = () => 0; markRead = () => {}; dropDraft = () => {}");
+  h.run("loaded[1] = true; active = '1'; neighborIn = () => 0; markRead = () => {}; dropDraft = () => {}");
   const refresh = h.run("refreshWindow('1')");
   h.respond(1, {}, false);
   await refresh;
   await h.run(`onSessionsList([{ klax_id: "2" }])`);
-  h.run("timers.forEach(fn => fn())");
+  h.run("host.onHealth(true, 0)");
   assert.deepEqual(h.requests.slice(2).map(r => r.url).filter(u => /klax_id=1/.test(u)), []);
   assert.equal(h.run("model.has('1') || !!refreshing[1] || !!loading[1]"), false);
 });

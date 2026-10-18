@@ -7,7 +7,7 @@ import { TurnModel, ordLess, applyMerge } from "./model.js";
 import { renderSession, answerBlock, beginShift, playShift, fadeOutDivider, DIVIDER_FADE_MS, pos, parsePos, decodePos } from "./render.js";
 import { esc } from "./markdown.js";
 import { changesLoop, cursorEpoch, cursorSeq, wakeChanges } from "./events.js";
-import { api, apiError, hasCoarsePointer, copyText, flashCopied, bindButtonActivation, setHome, retryDelay, syncInterval } from "./base.js";
+import { api, apiError, hasCoarsePointer, copyText, flashCopied, bindButtonActivation, setHome, syncInterval } from "./base.js";
 import { initAuth, isReadOnly } from "./auth.js";
 import { selectionInLog } from "./scroll.js";
 import { initCompose, updateComposerAccess, saveDraft, loadDraft, dropDraft, recoverOutbox, outboxList } from "./compose.js";
@@ -30,7 +30,12 @@ const unreadJump = {};    // klaxId -> one-shot scroll to the unread divider
 const readGraceUntil = {}, readGraceTimer = {};
 const readReportTimer = {}; // klaxId -> pending POST /api/read timer
 const readSaved = {}, readSending = {}; // klaxId -> confirmed / in-flight read position
-const readRetryAttempt = {};
+const readFailing = {};     // klaxId -> a retryable read report failure was already shown
+// The live channel is the one judge of reachability: while it is down read reports wait, and a
+// request that failed retries after its next successful response instead of on its own timer.
+let liveDown = false;
+const liveWaiters = new Map(); // key -> retry
+function whenLive(key, retry){ liveWaiters.set(key, retry); }
 const READ_GRACE_MS = 1600;
 let active = "";
 // Live channel. `after` is the ring cursor every applied snapshot/changes response advances. While
@@ -137,20 +142,21 @@ function clearReadReport(klaxId){
   delete readReportTimer[klaxId];
 }
 function confirmRead(klaxId, p){
-  if(p > (readSaved[klaxId] || 0)) delete readRetryAttempt[klaxId];
+  if(p > (readSaved[klaxId] || 0)) delete readFailing[klaxId];
   readSaved[klaxId] = Math.max(readSaved[klaxId] || 0, p);
   if(readThrough[klaxId] <= readSaved[klaxId]) clearReadReport(klaxId);
 }
-function reportRead(klaxId, delay = syncInterval()){
+function reportRead(klaxId){
   if(!klaxId || readThrough[klaxId] === undefined) return;
   if(readReportTimer[klaxId]) return;
-  readReportTimer[klaxId] = setTimeout(() => { delete readReportTimer[klaxId]; flushRead(klaxId); }, delay);
+  readReportTimer[klaxId] = setTimeout(() => { delete readReportTimer[klaxId]; flushRead(klaxId); }, syncInterval());
 }
 function flushRead(klaxId){
   if(!klaxId || readThrough[klaxId] === undefined) return;
   clearReadReport(klaxId);
   const p = readThrough[klaxId];
   if(p <= Math.max(readSaved[klaxId] || 0, readSending[klaxId] || 0)) return;
+  if(liveDown || liveWaiters.has("read:" + klaxId)) return whenLive("read:" + klaxId, () => flushRead(klaxId));
   readSending[klaxId] = p;
   let retry = false;
   const { turn, block } = decodePos(p);
@@ -160,14 +166,13 @@ function flushRead(klaxId){
       if(r.ok) confirmRead(klaxId, p);
       else {
         retry = r.status === 408 || r.status === 429 || r.status >= 500;
-        if(!retry || !readRetryAttempt[klaxId]) return apiError(r, "Не удалось сохранить отметку прочитанного").then(showNotice);
+        if(!retry || !readFailing[klaxId]) return apiError(r, "Не удалось сохранить отметку прочитанного").then(showNotice);
       }
     }).catch(() => { retry = true; }).finally(() => {
       if(readSending[klaxId] === p) delete readSending[klaxId];
       if(retry && readThrough[klaxId] > Math.max(readSaved[klaxId] || 0, readSending[klaxId] || 0)){
-        const attempt = readRetryAttempt[klaxId] || 0;
-        readRetryAttempt[klaxId] = attempt + 1;
-        reportRead(klaxId, retryDelay(attempt));
+        readFailing[klaxId] = true;
+        whenLive("read:" + klaxId, () => flushRead(klaxId));
       }
     });
 }
@@ -539,7 +544,7 @@ function reloadWindow(klaxId){
 // refreshWindow replaces a held session's window in place: the new window and the history the
 // session held before are loaded aside while its events wait in the buffer, then swapped in and
 // rendered once with the visible message kept where it was. A failed load keeps the old view and
-// retries with a growing pause.
+// retries after the next successful live response.
 async function refreshWindow(klaxId, attempt = 0){
   const req = winReq[klaxId] = (winReq[klaxId] || 0) + 1;
   const held = model.has(klaxId), cover = model.rangeStart(klaxId);
@@ -563,7 +568,7 @@ async function refreshWindow(klaxId, attempt = 0){
   } catch(err){
     if(req !== winReq[klaxId]) return;
     if(attempt === 0) showNotice("Не удалось обновить историю сессии — повторяю", "warning");
-    setTimeout(() => { if(winReq[klaxId] === req && refreshing[klaxId] === req) refreshWindow(klaxId, attempt + 1); }, retryDelay(attempt));
+    whenLive("window:" + klaxId, () => { if(winReq[klaxId] === req && refreshing[klaxId] === req) refreshWindow(klaxId, attempt + 1); });
     return;
   }
   if(req !== winReq[klaxId]) return;
@@ -963,7 +968,7 @@ function forgetSession(c){
   winReq[c] = (winReq[c] || 0) + 1;
   model.drop(c);
   clearReadReport(c); clearReadGrace(c);
-  delete readThrough[c]; delete readSaved[c]; delete readSending[c]; delete readRetryAttempt[c]; delete unreadJump[c];
+  delete readThrough[c]; delete readSaved[c]; delete readSending[c]; delete readFailing[c]; delete unreadJump[c];
   delete loaded[c]; delete loading[c]; delete refreshing[c]; delete buffered[c]; delete skips[c];
 }
 
@@ -1119,7 +1124,14 @@ const host = {
     }
     refreshStrip();
   },
-  onHealth: ok => setDegraded(!ok),
+  onHealth: ok => {
+    liveDown = !ok;
+    setDegraded(!ok);
+    if(!ok || !liveWaiters.size) return;
+    const retries = [...liveWaiters.values()];
+    liveWaiters.clear();
+    for(const retry of retries) retry();
+  },
 };
 
 // refreshStrip repaints BOTH surfaces that display unread counts — the tab badges and the scope
