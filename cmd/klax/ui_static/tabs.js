@@ -99,7 +99,7 @@ export function renderTabs(active){
     keep.add(key);
     t.dataset.klax_id = key;
     t._sessionName = s.name || "";
-    t.querySelector(".tx").classList.toggle("disabled", isReadOnly());
+    t.querySelector(".tx").classList.toggle("hidden", isReadOnly());
     t.className = "tab" + (isActive ? " active" : "") + (s.busy ? " busy" : "") + (unread ? " unread" : "");
     t.querySelector(".tname").textContent = s.name || ("сессия " + s.klax_id);
     const badge = t.querySelector(".badge");

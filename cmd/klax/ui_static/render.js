@@ -30,24 +30,35 @@ function contextText(used, window){
 // POS_MULT, so pos() is monotonic and collision-free; parse/decode bridge the "<turn>.<block>"
 // wire form the server persists. Legacy markerless turns have a negative seq ⇒ their positions sort
 // before any real watermark ⇒ always "read", exactly as the server's unreadAfter treats them.
+// Block -1 is the turn's user message: unread unless the writer typed it in the web UI (`read`) and
+// the viewer is that writer.
 export const POS_MULT = 1e6;
 export function pos(turn, block){ return turn * POS_MULT + block; }
+function userReadable(t, readOnly){ return readOnly || !t.read; }
+// readPositions is the ONE list of a row's unread-bearing positions, in order: the user message
+// (when readable), then each answer block. Standalone rows have none.
+export function readPositions(t, readOnly){
+  if(!t || t.role !== "user" || t.turn_seq === undefined) return [];
+  const out = userReadable(t, readOnly) ? [pos(t.turn_seq, -1)] : [];
+  (t.blocks || []).forEach((b, i) => { if(answerBlock(b)) out.push(pos(t.turn_seq, i)); });
+  return out;
+}
 export function parsePos(s){
   const i = String(s || "").indexOf(".");
   if(i < 0) return 0;
   return pos(parseInt(String(s).slice(0, i), 10) || 0, parseInt(String(s).slice(i + 1), 10) || 0);
 }
-export function decodePos(p){ p = p || 0; return { turn: Math.floor(p / POS_MULT), block: p % POS_MULT }; }
+export function decodePos(p){ p = p || 0; const turn = Math.floor((p + 1) / POS_MULT); return { turn, block: p - turn * POS_MULT }; }
 
 // renderModel computes the ordered render items for one session. PURE and unit-testable.
-// The unread divider stays turn-aware: user bubbles are the human's own messages and do not count
-// as unread; standalone non-durable rows are not counted and just flow to the right
-// side of the divider by document order; unread answer blocks land inside the turn at the exact
-// block boundary. `watermark` is the encoded read position (pos()); undefined ⇒ no divider.
+// The unread divider stays turn-aware: a readable user bubble (see userReadable) carries its own
+// data-pos and may open the divider; standalone non-durable rows are not counted and
+// just flow to the right side of the divider by document order; unread answer blocks land inside
+// the turn at the exact block boundary. `watermark` is the encoded read position (pos()); undefined ⇒ no divider.
 // `holdSplits` preserves group boundaries that used to be separated by the unread divider for one
 // live frame after the divider disappears. That lets the line fade out before the two bubble pieces
 // merge back into one.
-export function renderModel(turns, watermark, holdSplits, joinHeldSplits, ctxWindowHint){
+export function renderModel(turns, watermark, holdSplits, joinHeldSplits, ctxWindowHint, readOnly){
   const items = [];
   let queuePos = 0, divided = false;
   // The last context we actually know — the most recent turn's own measured value (the exact
@@ -66,6 +77,9 @@ export function renderModel(turns, watermark, holdSplits, joinHeldSplits, ctxWin
     }
     const blocks_ = t.blocks || [];
     const groups = [];
+    const userPos = userReadable(t, readOnly) ? pos(t.turn_seq, -1) : undefined;
+    const dividerBefore = userPos !== undefined && !divided && unread(userPos);
+    if(dividerBefore) divided = true;
     const held = holdSplits && holdSplits.get && holdSplits.get(t.turn_seq);
     let i = 0;
     let lastGroupTime = t.time;
@@ -116,7 +130,7 @@ export function renderModel(turns, watermark, holdSplits, joinHeldSplits, ctxWin
       : "";
     const note = t.state === "enq" ? "в очереди · " + queuePos
       : t.state === "unknown" ? "статус неизвестен" : undefined;
-    items.push({ kind: "turn", seq: t.turn_seq, text: t.text || "", time: t.time, groups, state: t.state, note, ctxLine, ctxTime: lastGroupTime });
+    items.push({ kind: "turn", seq: t.turn_seq, text: t.text || "", time: t.time, userPos, dividerBefore, groups, state: t.state, note, ctxLine, ctxTime: lastGroupTime });
     if(t.ctx_used) lastCtxUsed = t.ctx_used; // carry the known context forward to a later running turn
     if(t.ctx_window) lastCtxWindow = t.ctx_window;
   }
@@ -205,7 +219,7 @@ function renderKey(it){
 function renderSig(it){
   if(it.kind === "turn"){
     return JSON.stringify({
-      text: it.text, time: it.time, state: it.state, note: it.note, ctxLine: it.ctxLine,
+      text: it.text, time: it.time, userPos: it.userPos, dividerBefore: !!it.dividerBefore, state: it.state, note: it.note, ctxLine: it.ctxLine,
       groups: it.groups.map(g => ({
         divider: g.divider,
         cls: g.cls, tool: g.tool, time: g.time, startPos: g.startPos, maxPos: g.maxPos,
@@ -285,21 +299,22 @@ function buildTurn(it, onStop, old){
       ? updateBubble(old, cls, html, time, dataPos, raw)
       : bubble(cls, html, time, dataPos, raw);
   });
-  putBubble("u", childSig("u", [it.text, it.time]), "user", it.time, undefined,
+  const putDivider = () => {
+    // A fresh in-flow node every render (never reused via put() — it carries
+    // no content that could change) — dismissal fades it via fadeOutDivider,
+    // then the next render drops it. It still needs data-flip: beginShift/
+    // playShift only track children that have one, and without it the line
+    // snapped straight to its final layout position on every shift while
+    // everything else around it slid smoothly — the "out of sync" look.
+    const dv = divider();
+    dv.dataset.flip = "divider";
+    desired.push(dv);
+  };
+  if(it.dividerBefore) putDivider();
+  putBubble("u", childSig("u", [it.text, it.time, it.userPos]), "user", it.time, it.userPos,
     () => ({ html: mdSafe(it.text), raw: it.text }));
   for(const g of it.groups){
-    if(g.divider){
-      // A fresh in-flow node every render (never reused via put() — it carries
-      // no content that could change) — dismissal fades it via fadeOutDivider,
-      // then the next render drops it. It still needs data-flip: beginShift/
-      // playShift only track children that have one, and without it the line
-      // snapped straight to its final layout position on every shift while
-      // everything else around it slid smoothly — the "out of sync" look.
-      const dv = divider();
-      dv.dataset.flip = "divider";
-      desired.push(dv);
-      continue;
-    }
+    if(g.divider){ putDivider(); continue; }
     const fk = "g:" + g.startPos;
     const sig = childSig("g", { cls: g.cls, tool: g.tool, time: g.time, maxPos: g.maxPos,
       blocks: (g.blocks || []).map(b => ({ role: b.role, text: b.text, kind: b.kind, time: b.time })) });
@@ -376,8 +391,8 @@ export function paint(col, items, onStop){
   reconcileChildren(col, desired);
 }
 
-export function renderSession(col, turns, unreadAfter, onStop, holdSplits, joinHeldSplits, ctxWindowHint){
-  paint(col, renderModel(turns, unreadAfter, holdSplits, joinHeldSplits, ctxWindowHint), onStop);
+export function renderSession(col, turns, unreadAfter, onStop, holdSplits, joinHeldSplits, ctxWindowHint, readOnly){
+  paint(col, renderModel(turns, unreadAfter, holdSplits, joinHeldSplits, ctxWindowHint, readOnly), onStop);
 }
 
 // --- smooth live updates (FLIP) ---

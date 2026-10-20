@@ -82,6 +82,17 @@ func optionalNonemptyString(raw json.RawMessage, field, fallback string) (string
 	return value, nil
 }
 
+func optionalBool(raw json.RawMessage, field string) (bool, *apiError) {
+	if raw == nil {
+		return false, nil
+	}
+	var value bool
+	if json.Unmarshal(raw, &value) == nil {
+		return value, nil
+	}
+	return false, &apiError{Code: "invalid-" + strings.ReplaceAll(field, "_", "-"), Message: "Поле " + field + " должно быть логическим значением", status: http.StatusBadRequest}
+}
+
 func (s *uiServer) requireSession(w http.ResponseWriter, sk string, klaxID string) bool {
 	if s.d.store.Get(sk, klaxID) == nil {
 		writeAPIError(w, apiFailure("session-not-found"))
@@ -139,6 +150,7 @@ func (t *turnWait) fail(code string) {
 }
 
 type sendAdmission struct {
+	read       bool // the sender already read the message (the web UI that typed it)
 	completion *turnWait
 	err        *apiError
 }

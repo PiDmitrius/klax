@@ -49,6 +49,7 @@ type record struct {
 	Event        *int64         `json:"event,omitempty"`
 	RecordDigest string         `json:"record_digest,omitempty"`
 	Origin       inbound.Origin `json:"origin,omitempty"`
+	Read         bool           `json:"read,omitempty"` // the sender already read the message
 }
 
 // Turn is a reconstructed inbound message: its enq fields plus its latest state.
@@ -74,6 +75,7 @@ type Turn struct {
 	Event        int64
 	RecordDigest string
 	Origin       inbound.Origin
+	Read         bool
 	enqueued     bool
 }
 
@@ -112,14 +114,14 @@ func (s *Store) QueueStat() (time.Time, int64) {
 // Holds the durable-store lock across the whole acceptance, so turn_seq allocation,
 // file writes and the enq append are one atomic unit.
 func (s *Store) Enqueue(chatID, msgID, nonce, text string, files []NamedReader) (seq int64, marker string, stored []string, duplicate bool, err error) {
-	seq, marker, stored, duplicate, _, err = s.EnqueueOrigin(chatID, msgID, nonce, text, text, files, inbound.Origin{})
+	seq, marker, stored, duplicate, _, err = s.EnqueueOrigin(chatID, msgID, nonce, text, text, files, inbound.Origin{}, false)
 	return
 }
 
 // EnqueueOrigin is Enqueue plus the normalized immutable message origin needed
 // by consumers at run time, including after durable replay. acceptedAt is the
-// exact timestamp written to the enq record.
-func (s *Store) EnqueueOrigin(chatID, msgID, nonce, text, originalText string, files []NamedReader, origin inbound.Origin) (seq int64, marker string, stored []string, duplicate bool, acceptedAt int64, err error) {
+// exact timestamp written to the enq record. read records that the sender already read the message.
+func (s *Store) EnqueueOrigin(chatID, msgID, nonce, text, originalText string, files []NamedReader, origin inbound.Origin, read bool) (seq int64, marker string, stored []string, duplicate bool, acceptedAt int64, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.removed {
@@ -153,7 +155,7 @@ func (s *Store) EnqueueOrigin(chatID, msgID, nonce, text, originalText string, f
 		stored = append(stored, name)
 	}
 	acceptedAt = time.Now().UnixNano()
-	err = s.appendRecord(record{Ev: "enq", Seq: seq, ChatID: chatID, MsgID: msgID, Nonce: nonce, Text: text, OriginalText: originalText, Files: stored, Marker: marker, TS: acceptedAt, Origin: origin})
+	err = s.appendRecord(record{Ev: "enq", Seq: seq, ChatID: chatID, MsgID: msgID, Nonce: nonce, Text: text, OriginalText: originalText, Files: stored, Marker: marker, TS: acceptedAt, Origin: origin, Read: read})
 	return
 }
 
@@ -356,7 +358,7 @@ func (q *queueProjection) fold(r record) {
 		if t.OriginalText == "" {
 			t.OriginalText = r.Text
 		}
-		t.Origin = r.Origin
+		t.Origin, t.Read = r.Origin, r.Read
 		t.enqueued = true
 	case "run":
 		t.Last, t.Reason = r.Ev, r.Reason

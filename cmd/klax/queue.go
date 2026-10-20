@@ -136,7 +136,7 @@ func (d *daemon) enqueueToSessionOrigin(chatID, msgID, text, originalText string
 	for _, a := range attachments {
 		readers = append(readers, sessfiles.NamedReader{Name: a.filename, R: bytes.NewReader(a.data)})
 	}
-	turnSeq, _, files, duplicate, acceptedAt, err := sr.store.EnqueueOrigin(chatID, msgID, nonce, text, originalText, readers, origin)
+	turnSeq, _, files, duplicate, acceptedAt, err := sr.store.EnqueueOrigin(chatID, msgID, nonce, text, originalText, readers, origin, admission != nil && admission.read)
 	if err != nil {
 		if admission != nil {
 			admission.err = apiFailure("enqueue-failed")

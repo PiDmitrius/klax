@@ -393,6 +393,11 @@ A completed backend error or cancellation returns a finish event with
 `turn.result.status` equal to `error` or `aborted`. The existing normalized
 trace and raw-file range reference are retained; raw history is not embedded.
 
+`read: true` records that the sender has already seen the message: it does not
+count as unread for the management role. The web UI sets it for messages typed
+there; other messages, including programmatic and messenger ones, are unread for
+both roles until read. Multipart spells it `true` or `false`.
+
 `nonce` is optional. Omission generates a unique nonce. An explicit value must
 be a nonempty string. Repeating a nonce in the same session never starts another
 execution: `queued` confirms the existing acceptance; `start` and `finish`

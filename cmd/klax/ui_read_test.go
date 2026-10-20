@@ -37,11 +37,11 @@ func TestRaiseReadPosIsMonotonic(t *testing.T) {
 
 // TestUnreadAfterCountsBlocksPastWatermark locks the badge count:
 // answer blocks (a turn's actions) strictly after (turn,block) count, a never-read (0,0) session is
-// fully unread, user bubbles and standalone non-durable rows never count, and it drains to 0 as the
+// fully unread, user messages count unless the writer typed them in the web UI, standalone non-durable rows never count, and it drains to 0 as the
 // watermark advances — so it is >0 exactly when a divider would show.
 func TestUnreadAfterCountsBlocksPastWatermark(t *testing.T) {
 	mkturn := func(seq int64, blocks int) uiTurn {
-		u := uiTurn{Seq: seq, Role: "user"}
+		u := uiTurn{Seq: seq, Role: "user", Read: true}
 		for i := 0; i < blocks; i++ {
 			u.Blocks = append(u.Blocks, uiBlock{Role: "assistant", Text: "b"})
 		}
@@ -62,13 +62,24 @@ func TestUnreadAfterCountsBlocksPastWatermark(t *testing.T) {
 		{"read everything", 2, 2, 0},
 	}
 	for _, c := range cases {
-		if got := unreadAfter(page, c.turn, c.block); got != c.want {
+		if got := unreadAfter(page, c.turn, c.block, false); got != c.want {
 			t.Errorf("%s: unreadAfter(page, %d, %d) = %d, want %d", c.name, c.turn, c.block, got, c.want)
 		}
 	}
-	cancelled := append(page, uiTurn{Seq: 3, Role: "user", State: "err", Blocks: []uiBlock{{Role: "system", Kind: "cancelled"}}})
-	if got := unreadAfter(cancelled, 2, 2); got != 0 {
+	cancelled := append(page, uiTurn{Seq: 3, Role: "user", Read: true, State: "err", Blocks: []uiBlock{{Role: "system", Kind: "cancelled"}}})
+	if got := unreadAfter(cancelled, 2, 2, false); got != 0 {
 		t.Errorf("a cancelled note counts as unread: %d", got)
+	}
+	// Turn 1 came from a messenger: unread for the writer too; turn 2, typed in the web UI, only for a viewer.
+	page[0].Read = false
+	for _, c := range []struct {
+		readOnly    bool
+		turn        int64
+		block, want int
+	}{{true, 0, 0, 7}, {true, 1, -1, 6}, {true, 1, 1, 4}, {true, 2, -1, 3}, {true, 2, 2, 0}, {false, 0, 0, 6}, {false, 1, 1, 3}} {
+		if got := unreadAfter(page, c.turn, c.block, c.readOnly); got != c.want {
+			t.Errorf("readOnly=%v: unreadAfter(page, %d, %d) = %d, want %d", c.readOnly, c.turn, c.block, got, c.want)
+		}
 	}
 }
 

@@ -561,4 +561,3 @@
 #cbar.read-only > :not(.send), #cbar.read-only .send:disabled { filter: grayscale(1); opacity: .5; }
 #cbar.read-only textarea { caret-color: transparent; }
 #cbar.read-only button:disabled, #cbar.read-only input, #cbar.read-only textarea, .stop:disabled { cursor: default; }
-.tab .tx.disabled { opacity: .3; pointer-events: none; }

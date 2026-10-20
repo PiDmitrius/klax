@@ -283,7 +283,7 @@ func (d *daemon) sessionsSnapshot(sk string, sessions []*session.Session, rows m
 			CtxUsed:        s.ContextUsed,
 			CtxWindow:      s.ContextWindow,
 			ReadPos:        session.FormatReadPos(readTurn, readBlock),
-			Unread:         unreadAfter(rows[s.KlaxID], readTurn, readBlock),
+			Unread:         unreadAfter(rows[s.KlaxID], readTurn, readBlock, readOnly),
 			Groups:         s.Groups,
 		})
 	}
@@ -608,6 +608,7 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		Text     string          `json:"text"`
 		Nonce    json.RawMessage `json:"nonce"`
 		ReturnOn json.RawMessage `json:"return_on"`
+		Read     json.RawMessage `json:"read"`
 	}
 	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
@@ -615,13 +616,16 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer r.MultipartForm.RemoveAll()
-		fields := make(map[string]string, len(r.MultipartForm.Value))
+		fields := make(map[string]any, len(r.MultipartForm.Value))
 		for field, values := range r.MultipartForm.Value {
 			if len(values) != 1 {
 				apiFail(w, http.StatusBadRequest, "bad-request", "Поле формы указано несколько раз")
 				return
 			}
 			fields[field] = values[0]
+			if field == "read" && (values[0] == "true" || values[0] == "false") {
+				fields[field] = values[0] == "true" // the form spelling of the JSON boolean
+			}
 		}
 		data, _ := json.Marshal(fields)
 		if err := decodeAPIRequest(bytes.NewReader(data), &body, false); err != nil {
@@ -674,6 +678,11 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, parseErr)
 		return
 	}
+	read, parseErr := optionalBool(body.Read, "read")
+	if parseErr != nil {
+		writeAPIError(w, parseErr)
+		return
+	}
 	if returnOn != "queued" && returnOn != "start" && returnOn != "finish" {
 		writeAPIError(w, &apiError{Code: "invalid-return-on", Message: "Неизвестное значение return_on", status: http.StatusBadRequest})
 		return
@@ -700,7 +709,7 @@ func (s *uiServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	// point (enqueueToSession), so a Telegram/MAX/VK DM shows up live too — not just
 	// UI sends. The web client does not render a local echo; the server event is the
 	// first visible copy.
-	admission := &sendAdmission{}
+	admission := &sendAdmission{read: read}
 	if !s.d.handleInbound(Inbound{
 		admission:    admission,
 		ChatID:       s.chatID(user),

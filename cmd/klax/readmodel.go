@@ -29,6 +29,7 @@ type uiTurn struct {
 	Blocks    []uiBlock `json:"blocks,omitempty"`
 	CtxUsed   int       `json:"ctx_used,omitempty"`
 	CtxWindow int       `json:"ctx_window,omitempty"`
+	Read      bool      `json:"read,omitempty"` // user turns: the writer already read its own message
 	event     int64     // transcript record of the row's lead; positions turn groups (ord)
 	queueOnly bool      // a durable turn the transcript has not recorded
 }
@@ -249,7 +250,7 @@ func (d *daemon) buildReadModel(sk string, klaxID string, grouped []groupedTurn,
 			memo.degrade()
 		}
 		ut := uiTurn{
-			Seq: t.Seq, Role: "user", Text: text, queueOnly: true,
+			Seq: t.Seq, Role: "user", Text: text, Read: t.Read, queueOnly: true,
 			Time: time.Unix(0, t.TS).Format(time.RFC3339), State: resolvedTurnState(t, busy, newestRun, false),
 		}
 		switch t.Last {
@@ -285,7 +286,7 @@ func (d *daemon) userRow(store *sessfiles.Store, sk string, klaxID string, g gro
 			text = e
 		}
 	}
-	ut = uiTurn{Seq: seq, Role: "user", Text: text, Time: turnAt, State: state}
+	ut = uiTurn{Seq: seq, Role: "user", Text: text, Time: turnAt, State: state, Read: ok && matched.Read}
 	// Split an assistant item's text and each tool into separate blocks: one narration block,
 	// one block per tool.
 	// The displayed text gets the same outbound file-ref rewrite the live final applies, so
@@ -410,14 +411,18 @@ func mergeQueueOnlyTurns(base, missing []uiTurn) []uiTurn {
 // relative to a durable read watermark (turn_seq, block index) — the count the tab badge shows. A
 // user turn's block at index bi is unread when (turn.Seq, bi) sorts strictly after (throughTurn,
 // throughBlock); a never-read session is (0,0) ⇒ every block unread (uniform for UI- and
-// messenger-originated sessions). Only answer blocks count — the user's own bubbles do not, and
-// standalone non-durable rows (Seq==0) are skipped, so the count is >0 exactly when a
-// divider would show (badge↔line invariant) and a trailing notice can never wedge the badge >0.
-func unreadAfter(turns []uiTurn, throughTurn int64, throughBlock int) int {
+// messenger-originated sessions). A user message is unread at (turn.Seq, -1) unless the writer typed
+// it in the web UI (Read) and the viewer is that writer; standalone non-durable rows (Seq==0) are skipped,
+// so the count is >0 exactly when a divider would show (badge↔line invariant) and a trailing notice
+// can never wedge the badge >0.
+func unreadAfter(turns []uiTurn, throughTurn int64, throughBlock int, readOnly bool) int {
 	n := 0
 	for _, t := range turns {
 		if t.Role != "user" || t.Seq <= 0 {
 			continue
+		}
+		if (readOnly || !t.Read) && t.Seq > throughTurn {
+			n++
 		}
 		for bi, b := range t.Blocks {
 			if b.Kind == "cancelled" {
