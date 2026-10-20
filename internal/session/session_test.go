@@ -62,7 +62,7 @@ func TestReadPosRoundTrips(t *testing.T) {
 		t.Fatalf("fresh position = %d.%d", turn, block)
 	}
 	store.UpdateSession("user:alice", sess.KlaxID, func(cur *Session) {
-		if !cur.AdvanceReadPos(false, 9, 0) || !cur.AdvanceReadPos(true, 4, 2) || cur.AdvanceReadPos(false, 8, 5) {
+		if !cur.AdvanceReadPos(false, 9, 0) || !cur.AdvanceReadPos(true, 4, 2) || !cur.AdvanceReadPos(true, 5, -1) || cur.AdvanceReadPos(false, 8, 5) {
 			t.Fatal("AdvanceReadPos must raise and never lower")
 		}
 	})
@@ -74,10 +74,10 @@ func TestReadPosRoundTrips(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := reloaded.Get("user:alice", sess.KlaxID)
-	if got == nil || got.ReadPos != "9.0" || got.ReadPosRO != "4.2" {
+	if got == nil || got.ReadPos != "9.0" || got.ReadPosRO != "5.-1" {
 		t.Fatalf("reloaded = %+v", got)
 	}
-	for _, bad := range []string{"9", "a.1", "1.-1", "1.2.3"} {
+	for _, bad := range []string{"9", "a.1", "1.-2", "1.2.3"} {
 		if _, _, err := ParseReadPos(bad); err == nil {
 			t.Fatalf("ParseReadPos(%q) accepted", bad)
 		}

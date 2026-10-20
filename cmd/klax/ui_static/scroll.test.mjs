@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { TurnModel } from "./model.js";
-import { pos, decodePos, answerBlock } from "./render.js";
+import { pos, decodePos, answerBlock, readPositions } from "./render.js";
 import { apiError, syncInterval } from "./base.js";
 globalThis.document = { getElementById: () => ({ textContent: JSON.stringify({ sync_ms: 250, retry_min_ms: 625, retry_max_ms: 5000 }) }) };
 
@@ -16,7 +16,7 @@ function harness(){
   log.addEventListener = (name, fn) => { logEvents[name] = fn; };
   const arm = (fn, delay) => { const id = ++nextTimer; timers.set(id, { fn, at: now + delay }); return id; };
   const context = vm.createContext({
-    TurnModel, calls, pos, decodePos, answerBlock, apiError, syncInterval, fadeOutDivider: () => false,
+    TurnModel, calls, pos, decodePos, answerBlock, readPositions, isReadOnly: () => false, apiError, syncInterval, fadeOutDivider: () => false,
     document: { visibilityState: "visible", getElementById: id => id === "log" ? log : col, querySelector: () => null,
       addEventListener: (name, fn) => { documentEvents[name] = fn; } },
     setTimeout: arm, requestAnimationFrame: fn => arm(fn, 16),

@@ -272,11 +272,11 @@ async function send(deps){
     let r;
     if(staged.length){
       const fd = new FormData();
-      fd.append("klax_id", klaxId); fd.append("text", text); fd.append("nonce", nonce);
+      fd.append("klax_id", klaxId); fd.append("text", text); fd.append("nonce", nonce); fd.append("read", "true");
       staged.forEach(f => fd.append("files", f.file, f.name));
       r = await api("/api/send", { method: "POST", body: fd, signal: controller.signal });
     } else {
-      r = await api("/api/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ klax_id: klaxId, text, nonce }), signal: controller.signal });
+      r = await api("/api/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ klax_id: klaxId, text, nonce, read: true }), signal: controller.signal });
     }
     if(controller.signal.aborted) return;
     accepted = r.status === 204;

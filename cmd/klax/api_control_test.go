@@ -341,7 +341,7 @@ func TestAPINonceUnavailableAndValidation(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 	errorResponse(t, f.send("finish", "historical"), "result-unavailable")
-	for _, fields := range []string{`"nonce":""`, `"nonce":null`, `"nonce":1`, `"return_on":""`, `"return_on":true`, `"return_on":"later"`} {
+	for _, fields := range []string{`"nonce":""`, `"nonce":null`, `"nonce":1`, `"return_on":""`, `"return_on":true`, `"return_on":"later"`, `"read":null`, `"read":1`, `"read":"true"`} {
 		w := f.request("/api/send", fmt.Sprintf(`{"klax_id":%q,"text":"hello",%s}`, f.klaxID, fields), "")
 		if w.Code != 400 {
 			t.Fatalf("%s: %d", fields, w.Code)
@@ -507,6 +507,41 @@ func TestAPIMultipartRejectsUnknownAndDuplicateFields(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(f.dir, "backend.entered")); !os.IsNotExist(err) {
 		t.Fatal("invalid form started a backend", err)
+	}
+}
+
+func TestAPISendRecordsSenderRead(t *testing.T) {
+	f := newAPIFixture(t, "", "", "")
+	for _, body := range []string{`"nonce":"plain"`, `"nonce":"typed","read":true`} {
+		if w := f.request("/api/send", fmt.Sprintf(`{"klax_id":%q,"text":"hello",%s}`, f.klaxID, body), ""); w.Code != http.StatusNoContent {
+			t.Fatal(body, w.Code, w.Body.String())
+		}
+	}
+	var form bytes.Buffer
+	mw := multipart.NewWriter(&form)
+	_ = mw.WriteField("klax_id", f.klaxID)
+	_ = mw.WriteField("text", "hello")
+	_ = mw.WriteField("nonce", "form")
+	_ = mw.WriteField("read", "true")
+	_ = mw.Close()
+	r := httptest.NewRequest("POST", "/api/send", &form)
+	r.Header.Set("Authorization", "Bearer access")
+	r.Header.Set("Content-Type", mw.FormDataContentType())
+	w := httptest.NewRecorder()
+	f.s.routes().ServeHTTP(w, r)
+	if w.Code != http.StatusNoContent {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	turns, err := f.d.getRunner("user:test", f.klaxID).store.InboundLog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := map[string]bool{}
+	for _, turn := range turns {
+		read[turn.Nonce] = turn.Read
+	}
+	if len(read) != 3 || read["plain"] || !read["typed"] || !read["form"] {
+		t.Fatalf("read flags = %v", read)
 	}
 }
 

@@ -53,7 +53,8 @@ type Session struct {
 	// to several groups.
 	Groups []string `json:"groups,omitempty"`
 	// Durable read positions "<turn_seq>.<block_seq>" per access role: the highest block the user
-	// has read, so unread state survives reloads and restarts. Empty means nothing read yet.
+	// has read, so unread state survives reloads and restarts; block -1 is the turn's user message.
+	// Empty means nothing read yet.
 	ReadPos      string `json:"read_pos,omitempty"`
 	ReadPosRO    string `json:"read_pos_ro,omitempty"`
 	SystemPrompt string `json:"system_prompt,omitempty"` // additional backend instructions
@@ -79,7 +80,7 @@ func ParseReadPos(v string) (turn int64, block int, err error) {
 	if turn, err = strconv.ParseInt(t, 10, 64); err == nil {
 		block, err = strconv.Atoi(b)
 	}
-	if err != nil || block < 0 {
+	if err != nil || block < -1 {
 		return 0, 0, fmt.Errorf("read_pos %q: want <turn_seq>.<block_seq>", v)
 	}
 	return turn, block, nil

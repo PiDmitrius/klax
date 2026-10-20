@@ -4,7 +4,7 @@
 // insertAnswer/breakMerge) is gone — a turn's truth is model turn.state.
 
 import { TurnModel, ordLess, applyMerge } from "./model.js";
-import { renderSession, answerBlock, beginShift, playShift, fadeOutDivider, DIVIDER_FADE_MS, pos, parsePos, decodePos } from "./render.js";
+import { renderSession, readPositions, beginShift, playShift, fadeOutDivider, DIVIDER_FADE_MS, parsePos, decodePos } from "./render.js";
 import { esc } from "./markdown.js";
 import { changesLoop, cursorEpoch, cursorSeq, wakeChanges } from "./events.js";
 import { api, apiError, hasCoarsePointer, copyText, flashCopied, bindButtonActivation, setHome, syncInterval } from "./base.js";
@@ -121,18 +121,11 @@ function markRead(klaxId, force){
   if(next !== prev) reportRead(klaxId); // persist ONLY when the watermark actually advanced — no redundant /api/read
   return visualChange;
 }
-// modelMaxPos is the (turn,block) position of the LAST answer block currently in the model —
-// "read up to now". A later block (same turn next index, or a new turn) sorts after it, so a new
-// arrival reads as unread. Empty (answerless) turns contribute nothing; their first block, when it
-// lands, is unread by its higher turn_seq anyway.
+// modelMaxPos is the LAST unread-bearing position currently in the model — "read up to now". A
+// later block (same turn next index, or a new turn) sorts after it, so a new arrival reads as unread.
 function modelMaxPos(klaxId){
   let max = 0;
-  for(const t of model.turns(klaxId)){
-    if(t.role === "user" && t.turn_seq !== undefined){
-      const bs = t.blocks || [];
-      for(let i = bs.length - 1; i >= 0; i--) if(answerBlock(bs[i])){ const p = pos(t.turn_seq, i); if(p > max) max = p; break; }
-    }
-  }
+  for(const t of model.turns(klaxId)) for(const p of readPositions(t, isReadOnly())) if(p > max) max = p;
   return max;
 }
 // Tab-hide flushes pending progress with keepalive before freezing.
@@ -315,7 +308,7 @@ function rerender(klaxId, live, opts){
   const holdSplits = opts.holdSplits || (!opts.noHoldSplits && hadDivider && rawUnreadCount(active) === 0 && snap && snap.holdSplits && snap.holdSplits.size ? snap.holdSplits : null);
   const tab = sessionList.find(s => s.klax_id === active);
   shownSession = active;
-  renderSession(col, model.turns(active), readThrough[active], activeReadOnly() ? null : stopTurn, holdSplits, !!opts.joinHeldSplits, tab && tab.ctx_window);
+  renderSession(col, model.turns(active), readThrough[active], activeReadOnly() ? null : stopTurn, holdSplits, !!opts.joinHeldSplits, tab && tab.ctx_window, activeReadOnly());
   watchInlineImages(col);
   if(moreFor[active]){ // older history exists → a "load earlier" button at the top
     const m = document.createElement("button");
@@ -649,24 +642,16 @@ function rawUnreadCount(klaxId){
   const base = readThrough[klaxId];
   if(base === undefined) return 0;
   let n = 0;
-  for(const t of model.turns(klaxId)){
-    if(t.role !== "user" || t.turn_seq === undefined) continue; // user bubbles + standalone rows don't count
-    for(let i = 0; i < (t.blocks || []).length; i++) if(pos(t.turn_seq, i) > base && answerBlock(t.blocks[i])) n++;
-  }
+  for(const t of model.turns(klaxId)) for(const p of readPositions(t, isReadOnly())) if(p > base) n++;
   return n;
 }
-// firstUnreadRow is the index of the "непрочитанные сообщения" line: the first row carrying a block
+// firstUnreadRow is the index of the "непрочитанные сообщения" line: the first row carrying a position
 // after the read watermark. Returns arr.length when everything is read (line at the very bottom).
 function firstUnreadRow(klaxId){
   const base = readThrough[klaxId];
   const arr = model.turns(klaxId);
   if(base === undefined) return arr.length;
-  for(let i = 0; i < arr.length; i++){
-    const t = arr[i];
-    if(t.role === "user" && t.turn_seq !== undefined){
-      if((t.blocks || []).some((b, bi) => pos(t.turn_seq, bi) > base && answerBlock(b))) return i;
-    }
-  }
+  for(let i = 0; i < arr.length; i++) if(readPositions(arr[i], isReadOnly()).some(p => p > base)) return i;
   return arr.length;
 }
 // rowBubbles is a row's on-screen bubble count: a user turn renders as its message bubble PLUS one
@@ -917,15 +902,16 @@ async function onSessionsList(list){
   }
   if(!active && visible.length){
     // Restore priority: explicit URL hash → this scope's last-viewed tab (localStorage) →
-    // the server's active flag → first tab. Both remembered ids fall through if that session
-    // was since closed (find returns undefined), so a stale value can never strand the UI.
+    // the server's active flag (writers only; a viewer starts from the top) → first tab. Both
+    // remembered ids fall through if that session was since closed (find returns undefined), so a
+    // stale value can never strand the UI.
     // This runs BEFORE the strip is drawn: selection assigns `active` synchronously and only the
     // transcript is fetched afterwards, so drawing first would paint a strip with no active tab and
     // leave it that way until the fetch returned — or forever, if it never did.
     let stored = "";
     try { stored = localStorage.getItem(storageKey()) || ""; } catch(e){}
     const want = parseHash().klax_id || stored;
-    const a = visible.find(s => s.klax_id === want) || visible.find(s => s.active) || visible[0];
+    const a = visible.find(s => s.klax_id === want) || (!isReadOnly() && visible.find(s => s.active)) || visible[0];
     if(a) selectLater(a.klax_id);
   }
   reconcileSessions(visible, active);
@@ -1172,7 +1158,7 @@ function start(){
   initDebug({ notice: showNotice });
   initCompose({
     getActive, readOnly: activeReadOnly, notice: showNotice,
-    onAfterSend: () => { releaseBottomJump(); stick = true; markRead(active, true); refreshStrip(); stickToBottom(); },
+    onAfterSend: () => { releaseBottomJump(); stick = true; refreshStrip(); stickToBottom(); },
   });
   initTabs({ select: selectSession, onNew: onNewSession, afterClose, notice: showNotice, unread: badgeCount,
              focus: focusComposer, allSessions: () => sessionList });

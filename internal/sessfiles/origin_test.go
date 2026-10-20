@@ -16,7 +16,7 @@ func TestEnqueueOriginSurvivesReplay(t *testing.T) {
 		Sender:    inbound.Sender{ID: "u1", Username: "ivan@example.org", DisplayName: "Иван"},
 	}
 	seq, _, _, _, acceptedAt, err := s.EnqueueOrigin(
-		"ym:0/0/group#7", "99", "", "effective", "@bot effective", nil, origin,
+		"ym:0/0/group#7", "99", "", "effective", "@bot effective", nil, origin, true,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -32,7 +32,7 @@ func TestEnqueueOriginSurvivesReplay(t *testing.T) {
 		t.Fatalf("turn count = %d, want 1", len(turns))
 	}
 	got := turns[0]
-	if got.Seq != seq || got.OriginalText != "@bot effective" || got.Origin != origin {
+	if got.Seq != seq || got.OriginalText != "@bot effective" || got.Origin != origin || !got.Read {
 		t.Fatalf("replayed turn = %+v", got)
 	}
 }

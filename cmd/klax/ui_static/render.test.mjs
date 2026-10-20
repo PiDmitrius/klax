@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { playShift, renderModel } from "./render.js";
+import { playShift, renderModel, pos, decodePos } from "./render.js";
 
 test("shift animates the visible tail of a tall bubble and skips fully distant bubbles", () => {
   for(const [top, bottom, expected] of [[100, 400, 180], [-3000, 400, 180], [-3000, -2000, 0], [2000, 2300, 0]]){
@@ -158,8 +158,8 @@ test("queued ✕ stops only its own turn and re-enables after a failed cancel", 
 test("a cancelled note neither drives read-advance nor opens the unread divider", () => {
   const h = harness();
   h.render(h.col, [
-    { turn_seq: 1, role: "user", text: "running", state: "run", blocks: [{ id: "a", role: "assistant", text: "one" }] },
-    { turn_seq: 2, role: "user", text: "dropped", state: "err", blocks: [{ id: "c", role: "system", kind: "cancelled", text: "Отменено" }] },
+    { turn_seq: 1, role: "user", text: "running", read: true, state: "run", blocks: [{ id: "a", role: "assistant", text: "one" }] },
+    { turn_seq: 2, role: "user", text: "dropped", read: true, state: "err", blocks: [{ id: "c", role: "system", kind: "cancelled", text: "Отменено" }] },
   ], h.pos(1, 0));
   const [, note] = h.col.children[1].children;
   assert.equal(note.className.split(" ").includes("cancelled"), true);
@@ -180,4 +180,24 @@ test("a running turn measures its tokens against the last window a turn ran with
 test("a running turn without a known window uses the tab's window", () => {
   const items = renderModel([{ turn_seq: 1, role: "user", state: "run", ctx_used: 200000, blocks: [{ id: "c", role: "tool" }] }], undefined, null, false, 1000000);
   assert.equal(items.find(i => i.kind === "turn").ctxLine, "📊 Контекст: 20% (200k/1000k)");
+});
+
+test("user messages are unread unless the writer typed them in the web UI", () => {
+  const h = harness();
+  const turns = [
+    { turn_seq: 1, role: "user", text: "typed", read: true, state: "done", blocks: [{ id: "a", role: "assistant", text: "a" }] },
+    { turn_seq: 2, role: "user", text: "injected", state: "done", blocks: [{ id: "b", role: "assistant", text: "b" }] },
+  ];
+  const kinds = node => node.children.map(c => c.className.split(" ")[0]);
+  h.render(h.col, turns, h.pos(1, 0), null, null, false, 0, false);
+  assert.equal(h.col.children[0].children[0].dataset.pos, undefined);
+  assert.equal(h.col.children[1].children[1].dataset.pos, String(h.pos(2, -1)));
+  assert.deepEqual(kinds(h.col.children[1]), ["readline", "msg", "msg"]);
+  h.render(h.col, turns, h.pos(0, 0), null, null, false, 0, true);
+  assert.equal(h.col.children[0].children[1].dataset.pos, String(h.pos(1, -1)));
+  assert.deepEqual(kinds(h.col.children[0]), ["readline", "msg", "msg"]);
+});
+
+test("decodePos round-trips a user-message position", () => {
+  for(const [turn, block] of [[0, 0], [5, -1], [5, 0], [5, 7]]) assert.deepEqual(decodePos(pos(turn, block)), { turn, block });
 });
