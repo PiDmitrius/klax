@@ -341,6 +341,19 @@ func TestSyncNoWaitPollAnswersImmediately(t *testing.T) {
 	})
 }
 
+func TestSyncHeldPollSendsHeartbeat(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newSyncFixture(t)
+		uiPollHold = 29 * time.Second
+		at, _ := f.state()
+		body := f.do("POST", "/api/changes", fmt.Sprintf(`{"after":%q}`, at)).Body.String()
+		beats := int(uiPollHold / uiPollBeat)
+		if want := strings.Repeat("\n", beats) + fmt.Sprintf(`{"at":%q}`, at) + "\n"; body != want {
+			t.Fatalf("held poll = %q, want %q", body, want)
+		}
+	})
+}
+
 func TestSyncChangesBatchHasFixedDeadline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		f := newSyncFixture(t)

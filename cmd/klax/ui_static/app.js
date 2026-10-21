@@ -1275,6 +1275,7 @@ function start(){
   });
   // Read-through advances only while the user can actually see the bottom. Hidden tabs
   // stop advancing; foregrounding an unread active tab performs one jump to the divider.
+  window.addEventListener("online", wakeChanges);
   document.addEventListener("visibilitychange", () => {
     if(document.visibilityState === "hidden"){
       if(active && stick) markRead(active, true);

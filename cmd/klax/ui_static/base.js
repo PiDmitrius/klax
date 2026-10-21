@@ -58,8 +58,9 @@ export function retryDelay(attempt){
   return Math.min(delay, p.retry_max_ms);
 }
 
-// api bounds authenticated requests; multipart progress renews the deadline.
-export async function api(path, opts = {}, longPoll = false){
+// api bounds authenticated requests with an inactivity deadline. Multipart progress renews it; so
+// does every received chunk of a stream response (the heartbeat of a held long poll).
+export async function api(path, opts = {}, stream = false){
   const token = getToken(), ac = new AbortController();
   const abort = () => ac.abort(opts.signal.reason);
   if(opts.signal){
@@ -69,7 +70,7 @@ export async function api(path, opts = {}, longPoll = false){
   let timer;
   const renew = () => {
     clearTimeout(timer);
-    timer = setTimeout(() => ac.abort(new DOMException("Request timed out", "TimeoutError")), longPoll ? policy().poll_ms : policy().request_ms);
+    timer = setTimeout(() => ac.abort(new DOMException("Request timed out", "TimeoutError")), policy().request_ms);
   };
   renew();
   try {
@@ -81,11 +82,21 @@ export async function api(path, opts = {}, longPoll = false){
     };
     const r = opts.body instanceof FormData ? await multipart(url, options, renew) : await fetch(url, options);
     if(r.status === 401 && token === getToken()) authFailure();
-    const body = await r.arrayBuffer();
+    const body = stream && r.body ? await readRenewing(r.body, renew) : await r.arrayBuffer();
     return new Response([204, 205, 304].includes(r.status) ? null : body, { status: r.status, statusText: r.statusText, headers: r.headers });
   } finally {
     clearTimeout(timer);
     if(opts.signal) opts.signal.removeEventListener("abort", abort);
+  }
+}
+
+async function readRenewing(stream, renew){
+  const reader = stream.getReader(), parts = [];
+  for(;;){
+    const { done, value } = await reader.read();
+    if(done) return await new Blob(parts).arrayBuffer();
+    parts.push(value);
+    renew();
   }
 }
 
