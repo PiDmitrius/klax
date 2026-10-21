@@ -19,6 +19,8 @@ jobs:
           go-version: '1.22'
 
       - name: Build
+        env:
+          CGO_ENABLED: "0"
         run: |
           mkdir -p release
 
