@@ -16,7 +16,7 @@ function harness(epoch = null){
     TurnModel, ordLess, applyMerge, apiError, syncInterval, cursorEpoch, cursorSeq, pos, parsePos, decodePos, answerBlock, readPositions, console, setTimeout, clearTimeout, AbortController,
     requestAnimationFrame: () => 0, cancelAnimationFrame() {},
     api: url => new Promise(resolve => requests.push({ url, resolve })),
-    selectionInLog: () => false, isReadOnly: () => true, filterScope: l => l, parseHash: () => ({}),
+    selectionInLog: () => false, saveSelection: () => null, restoreSelection(){}, isReadOnly: () => true, filterScope: l => l, parseHash: () => ({}),
     reconcileSessions() {}, renderChip() {}, showNotice: value => notices.push(value), systemRestartNotice: (kind, version) => ({ kind, version }),
     writeHash() {}, storageKey: () => "session", loadDraft() {}, saveDraft() {}, setHome: value => homes.push(value),
     sessionStorage: { getItem: key => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value) },

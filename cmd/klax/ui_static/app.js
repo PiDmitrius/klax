@@ -9,7 +9,7 @@ import { esc } from "./markdown.js";
 import { changesLoop, cursorEpoch, cursorSeq, wakeChanges } from "./events.js";
 import { api, apiError, hasCoarsePointer, copyText, flashCopied, bindButtonActivation, setHome, syncInterval } from "./base.js";
 import { initAuth, isReadOnly } from "./auth.js";
-import { selectionInLog } from "./scroll.js";
+import { selectionInLog, saveSelection, restoreSelection } from "./scroll.js";
 import { initCompose, updateComposerAccess, saveDraft, loadDraft, dropDraft, recoverOutbox, outboxList } from "./compose.js";
 import { initTabs, reconcileSessions, renderTabs } from "./tabs.js";
 import { injectEmojiFont } from "./emoji.js";
@@ -50,7 +50,7 @@ const refreshing = {}; // klaxId -> a window is being replaced in place; the old
 let shownSession = ""; // the session the log DOM shows
 const affectedNow = new Set();
 let bottomJumpFrame = 0;
-let stick = true, pendingRender = false, readOnScroll = true;
+let stick = true, readOnScroll = true;
 let readScrollTimer = 0, readTouching = false, readScrollReady = 0;
 const SCROLL_IDLE_MS = 160;
 let liveRenderRAF = 0, liveRenderSession = "";
@@ -298,7 +298,6 @@ function rerender(klaxId, live, opts){
   }
   const col = logcol();
   if(!col) return noMotion();
-  if(selectionInLog(col)){ pendingRender = true; return noMotion(); } // don't collapse a live selection
   const log = document.getElementById("log");
   const anchorLive = !!(live && log);
   const beforeTop = anchorLive ? log.scrollTop : 0;
@@ -308,7 +307,9 @@ function rerender(klaxId, live, opts){
   const holdSplits = opts.holdSplits || (!opts.noHoldSplits && hadDivider && rawUnreadCount(active) === 0 && snap && snap.holdSplits && snap.holdSplits.size ? snap.holdSplits : null);
   const tab = sessionList.find(s => s.klax_id === active);
   shownSession = active;
+  const selection = saveSelection(col);
   renderSession(col, model.turns(active), readThrough[active], activeReadOnly() ? null : stopTurn, holdSplits, !!opts.joinHeldSplits, tab && tab.ctx_window, activeReadOnly());
+  restoreSelection(col, selection);
   watchInlineImages(col);
   if(moreFor[active]){ // older history exists → a "load earlier" button at the top
     const m = document.createElement("button");
@@ -1200,7 +1201,6 @@ function start(){
     if(e.target.closest && e.target.closest("#log .msg.has-actions")) return;
     document.querySelectorAll("#log .msg.show-actions").forEach(el => el.classList.remove("show-actions"));
   });
-  document.addEventListener("selectionchange", () => { if(pendingRender && !selectionInLog(logcol())){ pendingRender = false; commitLive(active); } });
   const log = document.getElementById("log");
   const allowReadOnScroll = () => { readOnScroll = true; };
   if(log){
