@@ -648,6 +648,8 @@ func (s *uiServer) handleChanges(w http.ResponseWriter, r *http.Request) {
 	sk := s.d.sessionKey(s.chatID(user))
 	deadline := time.NewTimer(uiPollHold)
 	defer deadline.Stop()
+	beat := time.NewTicker(uiPollBeat)
+	defer beat.Stop()
 	collect := func() ([]json.RawMessage, uint64, bool) {
 		s.d.uiSync(user, sk, role, nil)
 		return h.collect(user, after, role)
@@ -681,12 +683,22 @@ func (s *uiServer) handleChanges(w http.ResponseWriter, r *http.Request) {
 			writeChanges(w, h.cursor(after), nil)
 			return
 		}
-		select {
-		case <-ch:
-		case <-deadline.C:
-			expired = true
-		case <-r.Context().Done():
-			return
+	wait:
+		for {
+			select {
+			case <-ch:
+				break wait
+			case <-deadline.C:
+				expired = true
+				break wait
+			case <-beat.C:
+				_, _ = w.Write([]byte("\n"))
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+			case <-r.Context().Done():
+				return
+			}
 		}
 	}
 }

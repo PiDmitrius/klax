@@ -5,7 +5,7 @@ import vm from "node:vm";
 import { TurnModel, ordLess, applyMerge } from "./model.js";
 import { cursorEpoch, cursorSeq } from "./events.js";
 import { apiError, retryDelay, syncInterval } from "./base.js";
-globalThis.document = { getElementById: () => ({ textContent: JSON.stringify({request_ms:10000,poll_ms:30000,retry_min_ms:625,retry_max_ms:5000,sync_ms:250}) }) };
+globalThis.document = { getElementById: () => ({ textContent: JSON.stringify({request_ms:10000,retry_min_ms:625,retry_max_ms:5000,sync_ms:250}) }) };
 import { pos, parsePos, decodePos, answerBlock, readPositions } from "./render.js";
 
 function harness(epoch = null){
@@ -16,7 +16,7 @@ function harness(epoch = null){
     TurnModel, ordLess, applyMerge, apiError, syncInterval, cursorEpoch, cursorSeq, pos, parsePos, decodePos, answerBlock, readPositions, console, setTimeout, clearTimeout, AbortController,
     requestAnimationFrame: () => 0, cancelAnimationFrame() {},
     api: url => new Promise(resolve => requests.push({ url, resolve })),
-    selectionInLog: () => false, isReadOnly: () => true, filterScope: l => l, parseHash: () => ({}),
+    selectionInLog: () => false, saveSelection: () => null, restoreSelection(){}, isReadOnly: () => true, filterScope: l => l, parseHash: () => ({}),
     reconcileSessions() {}, renderChip() {}, showNotice: value => notices.push(value), systemRestartNotice: (kind, version) => ({ kind, version }),
     writeHash() {}, storageKey: () => "session", loadDraft() {}, saveDraft() {}, setHome: value => homes.push(value),
     sessionStorage: { getItem: key => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value) },
@@ -51,10 +51,11 @@ test("live retries preserve the cursor, cap their pauses and reset after success
   const pauses = [], cursors = [], nowaits = [], health = [];
   let call = 0, after = "epoch.7", applied = 0;
   const context = {
+    AbortController,
     retryDelay,
     setTimeout: (fn, ms) => { pauses.push(ms); queueMicrotask(fn); },
-    api: async (_url, opts, longPoll) => {
-      assert.equal(longPoll, true);
+    api: async (_url, opts, stream) => {
+      assert.equal(stream, true);
       const body = JSON.parse(opts.body);
       cursors.push(body.after);
       nowaits.push(body.nowait);
@@ -81,6 +82,7 @@ test("live retries preserve the cursor, cap their pauses and reset after success
 test("a returning page cuts the retry pause short", async () => {
   let calls = 0, fire;
   const context = {
+    AbortController,
     retryDelay: () => 5000,
     setTimeout: fn => { fire = fn; return 1; },
     clearTimeout: () => { fire = null; },
@@ -91,13 +93,37 @@ test("a returning page cuts the retry pause short", async () => {
     host: { after: () => "epoch.7" },
   };
   const source = readFileSync(new URL("./events.js", import.meta.url), "utf8").replace(/^import .*;\n/gm, "").replace(/export /g, "");
-  const loop = vm.runInNewContext(source + "\nconst loop = changesLoop(host); wakeChanges(); loop", context);
+  const loop = vm.runInNewContext(source + "\nchangesLoop(host)", context);
   await new Promise(res => setImmediate(res));
   assert.equal(calls, 1);
   vm.runInContext("wakeChanges()", context);
   await loop;
   assert.equal(calls, 2);
   assert.equal(fire, null);
+});
+
+test("a returning page replaces a held poll with an immediate one without a failure", async () => {
+  const bodies = [], health = [];
+  let held;
+  const context = {
+    AbortController,
+    retryDelay: () => 5000,
+    setTimeout: () => assert.fail("no retry pause"),
+    api: (_url, opts) => {
+      bodies.push(JSON.parse(opts.body));
+      if(bodies.length === 1) return new Promise((_, reject) => { held = opts.signal; opts.signal.addEventListener("abort", () => reject(new Error("aborted"))); });
+      return Promise.resolve({ status: 401 });
+    },
+    host: { after: () => "epoch.7", onHealth: ok => health.push(ok) },
+  };
+  const source = readFileSync(new URL("./events.js", import.meta.url), "utf8").replace(/^import .*;\n/gm, "").replace(/export /g, "");
+  const loop = vm.runInNewContext(source + "\nchangesLoop(host)", context);
+  await new Promise(res => setImmediate(res));
+  vm.runInContext("wakeChanges()", context);
+  await loop;
+  assert.equal(held.aborted, true);
+  assert.deepEqual(bodies, [{ after: "epoch.7" }, { after: "epoch.7", nowait: true }]);
+  assert.deepEqual(health, []);
 });
 
 for(const [name, previous, uptime, startup, show] of [

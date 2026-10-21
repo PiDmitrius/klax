@@ -10,6 +10,7 @@ const (
 	RetryMax       = RequestTimeout / 2
 	PollTimeout    = 30 * time.Second
 	PollHold       = PollTimeout - time.Second
+	PollBeat       = RequestTimeout / 2
 	ShortPollPause = RequestTimeout / 4
 )
 

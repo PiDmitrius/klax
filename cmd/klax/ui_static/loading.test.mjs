@@ -11,7 +11,7 @@ function harness(){
     TurnModel, ordLess, cursorEpoch, cursorSeq, console, setTimeout, clearTimeout, AbortController,
     api: url => new Promise(resolve => requests.push({ url, resolve })),
     parsePos: () => 0,
-    selectionInLog: () => false,
+    selectionInLog: () => false, saveSelection: () => null, restoreSelection(){},
     writeHash() {}, storageKey: () => "session", setHome() {},
     loadDraft() {}, saveDraft() {},
     document: { visibilityState: "visible", getElementById: () => null },

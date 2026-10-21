@@ -36,6 +36,10 @@ const uiPrefix = "ui"
 // typical proxy/browser limits; a cut request is just re-issued from the same cursor (idempotent).
 var uiPollHold = timing.PollHold
 
+// uiPollBeat is the whitespace heartbeat of a held /api/changes request, well inside the client's
+// inactivity deadline, so a connection that died without closing is noticed within that deadline.
+var uiPollBeat = timing.PollBeat
+
 const uiFileLinkRetry = timing.RetryMax
 
 // uiMaxInflightPerUser bounds concurrently-held polls per user — cheap hygiene
@@ -1029,7 +1033,6 @@ func (s *uiServer) handleSPA(w http.ResponseWriter, r *http.Request) {
 	page := bytes.ReplaceAll(spaHTML, []byte("__KLAX_UI_TITLE__"), []byte(html.EscapeString(s.d.cfg.GetUITitle())))
 	policy, _ := json.Marshal(map[string]int64{
 		"request_ms":   timing.RequestTimeout.Milliseconds(),
-		"poll_ms":      timing.PollTimeout.Milliseconds(),
 		"retry_min_ms": timing.RetryMin.Milliseconds(),
 		"retry_max_ms": timing.RetryMax.Milliseconds(),
 		"sync_ms":      uiSyncInterval.Milliseconds(),

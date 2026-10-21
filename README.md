@@ -284,14 +284,16 @@ fields, and `null` removes a field:
 
 The `tabs` payload is the complete ordered list of session IDs.
 An idle `/api/changes` request waits up to 29 seconds, or answers at once with
-`"nowait":true`. The Web UI sends `nowait` after a failed request, so recovery is
-shown within one round trip, and skips the retry pause when its browser tab becomes
-visible again. The first available event
+`"nowait":true`. While waiting it sends a newline every 5 seconds; the JSON
+response follows them. The first available event
 starts a fixed 250 ms collection window; further updates do not extend it.
-The response includes changes detected at the end of that window. Poll requests
-allow 30 seconds for the complete response; other Web UI requests allow 10 seconds.
-Uploads with attachments use a 10-second inactivity deadline, renewed by progress
-while sending the files and receiving the response.
+The response includes changes detected at the end of that window.
+Web UI requests use a 10-second inactivity deadline. It is renewed by every
+received chunk of a poll response, including the heartbeat, and by progress of
+uploads with attachments, so a connection that died without closing fails within
+10 seconds. The Web UI sends `nowait` after a failed request, so recovery is shown
+within one round trip. When its browser tab becomes visible or the network comes
+back, it replaces a waiting request or the retry pause with an immediate request.
 The Web UI collects read-progress reports over the same fixed window and flushes
 pending progress for all sessions when the browser tab is hidden.
 Live retries wait 625 ms, 1.25 s, 2.5 s, then 5 s; a successful response resets

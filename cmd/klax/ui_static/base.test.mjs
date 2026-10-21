@@ -39,9 +39,9 @@ function requests(){
     }
   }
   const context = {
-    AbortController, DOMException, Response, Headers, FormData, XMLHttpRequest,
+    AbortController, DOMException, Response, Headers, FormData, XMLHttpRequest, Blob,
     location: { pathname: "/mount/" }, localStorage: { getItem: () => "token" },
-    document: { getElementById: () => ({ textContent: JSON.stringify({ request_ms: 10000, poll_ms: 30000, retry_min_ms: 625, retry_max_ms: 5000 }) }) },
+    document: { getElementById: () => ({ textContent: JSON.stringify({ request_ms: 10000, retry_min_ms: 625, retry_max_ms: 5000 }) }) },
     setTimeout: (fn, ms) => { timers.set(++id, { fn, ms, at: now + ms }); return id; },
     clearTimeout: id => timers.delete(id),
     fetch: (url, opts) => new Promise((resolve, reject) => {
@@ -158,26 +158,36 @@ test("receiving headers does not clear the API deadline while the body is stalle
   assert.equal(h.timers.size, 0);
 });
 
-test("a held poll keeps its longer deadline while an ordinary request times out", async () => {
+test("a stream response stays alive while its heartbeat arrives and fails after silence", async () => {
   const h = requests();
   const poll = h.context.api("/api/changes", { method: "POST" }, true);
-  const ordinary = h.context.api("/api/settings");
-  const rejectedOrdinary = assert.rejects(ordinary, { name: "TimeoutError" });
-  const [pollTimer, ordinaryTimer] = h.timers.values();
-  assert.equal(pollTimer.ms, 30000);
-  assert.equal(ordinaryTimer.ms, 10000);
-  ordinaryTimer.fn();
-  await rejectedOrdinary;
-  assert.equal(h.calls[0].opts.signal.aborted, false);
-  const rejectedPoll = assert.rejects(poll, { name: "TimeoutError" });
+  let push;
   const stream = new ReadableStream({
-    start(controller){ h.calls[0].opts.signal.addEventListener("abort", () => controller.error(h.calls[0].opts.signal.reason)); },
+    start(controller){
+      push = text => controller.enqueue(new TextEncoder().encode(text));
+      h.calls[0].opts.signal.addEventListener("abort", () => controller.error(h.calls[0].opts.signal.reason));
+    },
   });
   h.calls[0].resolve(new Response(stream));
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(h.timers.size, 1);
-  pollTimer.fn();
-  await rejectedPoll;
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  for(let i = 0; i < 3; i++){
+    await settle();
+    h.tick(9000);
+    push("\n");
+  }
+  await settle();
+  assert.equal(h.calls[0].opts.signal.aborted, false);
+  const rejected = assert.rejects(poll, { name: "TimeoutError" });
+  h.tick(10000);
+  await rejected;
+  assert.equal(h.timers.size, 0);
+});
+
+test("a stream response is assembled from its chunks", async () => {
+  const h = requests();
+  const poll = h.context.api("/api/changes", { method: "POST" }, true);
+  h.calls[0].resolve(new Response("\n\n" + '{"at":"epoch.9"}'));
+  assert.deepEqual(await (await poll).json(), { at: "epoch.9" });
   assert.equal(h.timers.size, 0);
 });
 
