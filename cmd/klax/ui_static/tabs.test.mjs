@@ -123,6 +123,29 @@ test("badge width changes hold a visible active tab without reclaiming manual br
   strip.scrollLeft = 260;
   render('dragging = true; unread.c = 1');
   assert.equal(strip.scrollLeft, 260);
+  const scrolls = [], events = {};
+  strip.scrollWidth = 1000;
+  strip.scrollTo = options => scrolls.push(options);
+  strip.querySelector = () => strip.children[4];
+  strip.addEventListener = (name, fn) => { events[name] = fn; };
+  vm.runInContext('document.querySelector = () => null; document.addEventListener = () => {}; initTabs(deps); dragging = false; unread.c = 0;', context);
+  strip.scrollLeft = 320;
+  vm.runInContext('centerActiveTab(true)', context);
+  const firstTarget = scrolls[0].left;
+  render('');
+  assert.equal(strip.scrollLeft, 320);
+  assert.equal(scrolls.length, 1);
+  render('unread.a = 1');
+  assert.equal(strip.scrollLeft, 320);
+  assert.equal(scrolls.at(-1).left, firstTarget + 30);
+  events.pointerdown();
+  render('unread.a = 0');
+  assert.equal(scrolls.length, 2);
+  assert.equal(strip.scrollLeft, 290);
+  vm.runInContext('centerActiveTab(true)', context);
+  strip.scrollLeft = scrolls.at(-1).left;
+  events.scroll();
+  assert.equal(vm.runInContext('centerTarget', context), null);
 });
 
 test("scope changes reconcile tab order in one render and preserve retained nodes", () => {
