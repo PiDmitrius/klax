@@ -279,10 +279,15 @@ test("live updates wait for the jump and resume when it ends", () => {
   assert.ok(h.calls.includes("animate"));
 });
 
-test("reduced motion jumps on the next frame", () => {
+test("system motion preferences do not disable smooth scrolling", () => {
   const h = harness();
   h.run("matchMedia = () => ({ matches: true }); toggleToBottom = () => {}; jumpToBottom()");
   h.tick(16);
+  assert.equal(h.log.scrollTop, 1350);
+  assert.notEqual(h.run("bottomJumpFrame"), 0);
+  h.tick(112);
+  assert.ok(h.log.scrollTop > 1350 && h.log.scrollTop < 1400);
+  h.tick(128);
   assert.equal(h.log.scrollTop, 1400);
   assert.equal(h.run("bottomJumpFrame"), 0);
 });
