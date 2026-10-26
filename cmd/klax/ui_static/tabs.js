@@ -28,17 +28,25 @@ const TOUCH_TAP_PX = 10;
 let renderedActive = "";
 let renderedScope = null;
 let tabsResizeObserver = null;
+let centerTarget = null;
 // The shell's <title> (product name, server-injected) — the base for the unread prefix.
 const BASE_TITLE = (typeof document !== "undefined" && document.title) || "klax";
 export function initTabs(d){
   deps = d;
   const tabs = document.getElementById("tabs");
   if(tabs){
-    tabs.addEventListener("scroll", updateTabOverflow, { passive: true });
+    tabs.addEventListener("scroll", () => {
+      if(centerTarget !== null && Math.abs(tabs.scrollLeft - centerTarget) < 1) centerTarget = null;
+      updateTabOverflow();
+    }, { passive: true });
+    const releaseCenter = () => { centerTarget = null; };
+    tabs.addEventListener("pointerdown", releaseCenter, { passive: true });
+    tabs.addEventListener("keydown", releaseCenter);
     // A normal mouse wheel has only deltaY. Over the tab strip it means "browse tabs"; precision
     // trackpads that already provide deltaX keep that axis. Do not steal vertical page scrolling
     // when every tab fits.
     tabs.addEventListener("wheel", e => {
+      releaseCenter();
       if(tabs.scrollWidth <= tabs.clientWidth + 1) return;
       const delta = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
       if(!delta) return;
@@ -88,6 +96,14 @@ export function renderTabs(active){
   // same per-tab counts, so title and tabs never disagree — and no instant reset on entry.
   const existing = new Map();
   strip.querySelectorAll(".tab[data-klax_id]").forEach(t => existing.set(t.dataset.klax_id, t));
+  const activeKey = String(active || "");
+  const activeChanged = activeKey !== renderedActive;
+  const scopeChanged = !renderedScope || !sameScope(renderedScope, currentScope());
+  const anchor = !activeChanged && !scopeChanged && existing.get(activeKey);
+  const viewportLeft = strip.getBoundingClientRect().left + strip.clientLeft;
+  const before = anchor && anchor.getBoundingClientRect();
+  const hold = before && before.left >= viewportLeft - 1
+    && before.left + before.width <= viewportLeft + strip.clientWidth + 1;
   const keep = new Set();
   for(const [index, s] of sessions.entries()){
     const unread = deps.unread ? deps.unread(s.klax_id) : 0;
@@ -109,9 +125,14 @@ export function renderTabs(active){
     if(at !== t) strip.insertBefore(t, at);
   }
   for(const [key, t] of existing) if(!keep.has(key)) t.remove();
-  const activeKey = String(active || "");
-  const activeChanged = activeKey !== renderedActive;
-  const scopeChanged = !renderedScope || !sameScope(renderedScope, currentScope());
+  if(centerTarget !== null && !activeChanged && !scopeChanged){
+    centerActiveTab(true);
+  } else if(hold && keep.has(activeKey)){
+    const after = anchor.getBoundingClientRect();
+    const left = Math.max(viewportLeft, Math.min(before.left, viewportLeft + strip.clientWidth - after.width));
+    const delta = after.left - left;
+    if(Math.abs(delta) > .01) strip.scrollLeft += delta;
+  }
   renderedActive = activeKey;
   renderedScope = currentScope();
   requestAnimationFrame(() => {
@@ -142,7 +163,11 @@ function centerActiveTab(smooth){
   const target = strip.scrollLeft + tabRect.left - stripRect.left - strip.clientLeft
     + (tabRect.width - strip.clientWidth) / 2;
   const max = Math.max(0, strip.scrollWidth - strip.clientWidth);
-  strip.scrollTo({ left: Math.max(0, Math.min(max, target)), behavior: smooth ? "smooth" : "auto" });
+  const left = Math.max(0, Math.min(max, target));
+  if(centerTarget === left) return;
+  centerTarget = smooth ? left : null;
+  strip.scrollTo({ left, behavior: smooth ? "smooth" : "auto" });
+  if(Math.abs(strip.scrollLeft - left) < 1) centerTarget = null;
 }
 
 function createTab(){

@@ -279,10 +279,15 @@ test("live updates wait for the jump and resume when it ends", () => {
   assert.ok(h.calls.includes("animate"));
 });
 
-test("reduced motion jumps on the next frame", () => {
+test("system motion preferences do not disable smooth scrolling", () => {
   const h = harness();
   h.run("matchMedia = () => ({ matches: true }); toggleToBottom = () => {}; jumpToBottom()");
   h.tick(16);
+  assert.equal(h.log.scrollTop, 1350);
+  assert.notEqual(h.run("bottomJumpFrame"), 0);
+  h.tick(112);
+  assert.ok(h.log.scrollTop > 1350 && h.log.scrollTop < 1400);
+  h.tick(128);
   assert.equal(h.log.scrollTop, 1400);
   assert.equal(h.run("bottomJumpFrame"), 0);
 });
@@ -407,7 +412,28 @@ test("large histories are capped after reaching bottom, not in the approach zone
   assert.deepEqual(h.calls, ["advance", "render"]);
   h.calls.length = 0; h.log.scrollTop = 1400;
   h.run("scheduleReadProgress()"); h.tick(200);
-  assert.deepEqual(h.calls, ["read", "cap", "render"]);
+  assert.deepEqual(h.calls, ["read", "cap", "animate"]);
+});
+
+test("window trimming at the bottom preserves the divider fade before collapse", () => {
+  const h = harness();
+  h.log.scrollTop = 1400;
+  h.run(`
+    commitLive = commitLiveActual;
+    capWindow = () => { calls.push("cap"); return 10; };
+    fadeOutDivider = () => { calls.push("fade"); return true; };
+    DIVIDER_FADE_MS = 300;
+    rerender = () => { calls.push("collapse"); return noMotion(); };
+    scheduleReadProgress();
+  `);
+  h.tick(160);
+  assert.deepEqual(h.calls, ["read", "cap", "fade"]);
+  h.tick(299);
+  assert.equal(h.calls.includes("collapse"), false);
+  h.tick(1);
+  assert.deepEqual(h.calls, ["read", "cap", "fade", "collapse"]);
+  h.tick(1000);
+  assert.equal(h.run("liveBusy"), false);
 });
 
 

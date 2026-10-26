@@ -401,18 +401,13 @@ export function renderSession(col, turns, unreadAfter, onStop, holdSplits, joinH
 // animation. A FLIP *unit* is what actually moves: a standalone keyed bubble, or a CHILD of a .turn
 // (user bubble / answer group / indicator, keyed turnKey|data-flip) — the .turn container itself is
 // never transformed, so parent and child shifts cannot compound, and an in-turn divider collapse
-// animates block-level. Transforms only — layout and all scroll maths stay exact. Reduced motion
-// disables it. Dismissing the unread line is a SEPARATE first phase (fadeOutDivider): the line fades
+// animates block-level. Transforms only — layout and all scroll maths stay exact.
+// Dismissing the unread line is a SEPARATE first phase (fadeOutDivider): the line fades
 // in place, THEN a follow-up render removes it and this FLIP collapses the gap.
 export const DIVIDER_FADE_MS = 300; // .readline.leaving lineout duration in app.css
 const SHIFT_MS = 180, SHIFT_CAP = 800;
 
-function reducedMotion(){
-  return typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
-}
-
 export function beginShift(col){
-  if(reducedMotion()) return null;
   const units = new Map(), keys = new Set(), holdSplits = new Map();
   Array.from(col.children).forEach(node => {
     const key = node.dataset && node.dataset.renderKey;
@@ -500,9 +495,9 @@ export function playShift(col, snap){
 // fadeOutDivider dismisses the unread line as its FIRST phase: the real in-flow .readline node fades
 // in place (opacity → 0) exactly where it sits, so it scrolls with the messages and needs no ghost or
 // coordinates. commitLive waits DIVIDER_FADE_MS, then a normal render removes it and playShift
-// collapses the gap. Returns false (no node / reduced motion) so the caller collapses immediately.
+// collapses the gap. Returns false when there is no divider to fade.
 export function fadeOutDivider(col){
-  if(!col || reducedMotion()) return false;
+  if(!col) return false;
   const dv = col.querySelector(".readline");
   if(!dv) return false;
   dv.classList.add("leaving");

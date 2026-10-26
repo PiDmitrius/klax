@@ -74,7 +74,6 @@
   #bar .logo.degraded stop:nth-child(3) { stop-color: var(--badge-work-bottom); }
   #bar .logo.degraded { animation: logowarn 1.8s ease-in-out infinite; }
   @keyframes logowarn { 50% { opacity: .5; } }
-  @media (prefers-reduced-motion: reduce) { #bar .logo.degraded { animation: none; } }
   /* The strip scrolls horizontally, but overflow-x:auto also clips vertically — cutting the active
      tab's border and the lifted tab's shadow at the strip edges. Padding enlarges the clip box so both
      paint fully, and an equal NEGATIVE margin pulls that padding back out of the layout, so the strip's
@@ -246,7 +245,6 @@
   .readline.leaving { pointer-events: none; animation: lineout .3s ease-in forwards; }
   @keyframes lineout { to { opacity: 0; } }
   @keyframes copyflash { 0%, 25% { box-shadow: inset 0 0 0 9999px var(--copy-flash); } 100% { box-shadow: inset 0 0 0 9999px transparent; } }
-  @media (prefers-reduced-motion: reduce) { .turn.enter, .msg.enter, .readline.leaving { animation: none; } }
   /* klax-side blocks fill the column for a consistent width — only the colour
      differs between text, tool, error and command output. */
   .msg.assistant, .msg.tool, .msg.error, .msg.cancelled { align-self: stretch; }
@@ -534,12 +532,6 @@
   .smodal-actions { display: flex; justify-content: flex-end; margin-top: 14px; }
   .smodal-ok { min-width: 76px; background: var(--accent); color: #fff; border-color: var(--accent); }
   .hidden { display: none !important; }
-
-  @media (prefers-reduced-motion: reduce) {
-    .notify { transition: opacity .12s ease; transform: none; }
-    .notify.fade-out { transform: none; }
-    .notify.collapse { transition: height .12s ease, padding .12s ease, margin .12s ease, border-width .12s ease; }
-  }
 
   /* Mobile Safari auto-zooms focused form controls whose text is smaller than 16px and does not
      restore the old scale when the keyboard closes. Keep manual pinch zoom available; only remove

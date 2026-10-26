@@ -222,10 +222,9 @@ function jumpToBottom(){
   log.style.overflowY = overflow;
   const start = log.scrollTop;
   let started;
-  const reduced = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
   const frame = now => {
     if(started === undefined) started = now;
-    const progress = reduced ? 1 : Math.min(1, (now - started) / 220);
+    const progress = Math.min(1, (now - started) / 220);
     const target = Math.max(0, log.scrollTop + settledDistance(log));
     log.scrollTop = start + (target - start) * (1 - Math.pow(1 - progress, 3));
     if(progress < 1){ bottomJumpFrame = requestAnimationFrame(frame); return; }
@@ -328,7 +327,7 @@ function rerender(klaxId, live, opts){
     }
   } else if(dividerGone){
     // At the bottom, playShift owns the visible sequence: line fades, blocks collapse, split bubbles
-    // join. Away from the bottom (or with reduced motion), preserve the reader's viewport instead:
+    // join. Away from the bottom, preserve the reader's viewport instead:
     // the divider may be off-screen, so moving visible content for it is a regression.
     if(!stick || !snap) log.scrollTop = Math.max(0, beforeTop + (col.offsetHeight - beforeColH));
   } else if(stick) stickToBottom();
@@ -766,8 +765,7 @@ function settleReadProgress(log){
       const capped = capWindow(active) > 0;
       if(read || capped){
         refreshStrip();
-        if(capped) rerenderStructural(active);
-        else commitLive(active);
+        commitLive(active);
       }
     } else if(advanced){
       refreshStrip();
