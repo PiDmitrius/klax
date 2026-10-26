@@ -6,6 +6,10 @@ import { reconcileSessions, renderTabs } from "./tabs.js";
 import { ROOT, setScope } from "./scope.js";
 
 class Element {
+  scrollLeft = 0;
+  clientLeft = 0;
+  clientWidth = 0;
+  getBoundingClientRect() { return { left: 0, width: 0 }; }
   children = [];
   dataset = {};
   parentNode = null;
@@ -73,6 +77,52 @@ test("strip resize preserves manual browsing and centering yields to a drag", ()
   vm.runInContext("dragging = false; centerActiveTab(true);", context);
   assert.equal(strip.scrollLeft, 410);
   assert.equal(scrolls.length, 1);
+});
+
+test("badge width changes hold a visible active tab without reclaiming manual browsing", () => {
+  const strip = new Element();
+  strip.clientWidth = 300;
+  const width = tab => 100 + (tab.querySelector(".badge").textContent ? 30 : 0);
+  const context = vm.createContext({
+    document: {
+      title: "klax",
+      getElementById: id => id === "tabs" ? strip : null,
+      createElement: () => {
+        const tab = new Element();
+        tab.getBoundingClientRect = () => ({
+          left: strip.children.slice(0, strip.children.indexOf(tab)).reduce((n, t) => n + width(t), 0) - strip.scrollLeft,
+          width: width(tab),
+        });
+        return tab;
+      },
+    },
+    requestAnimationFrame() {},
+    currentScope: () => "root", sameScope: (a, b) => a === b,
+    isReadOnly: () => false, titlePrefix: () => "",
+  });
+  const source = readFileSync(new URL("./tabs.js", import.meta.url), "utf8")
+    .replace(/^import .*;\n/gm, "").replace(/^export /gm, "");
+  vm.runInContext(source + `
+    let unread = {};
+    deps = { unread: id => unread[id] || 0 };
+    sessions = ["a", "b", "c", "d", "e"].map(klax_id => ({ klax_id }));
+    renderTabs("e");
+  `, context);
+  strip.scrollLeft = 200;
+  const render = code => vm.runInContext(code + '; renderTabs("e");', context);
+  render('unread.a = 1');
+  assert.equal(strip.scrollLeft, 230);
+  assert.equal(strip.children[4].getBoundingClientRect().left, 200);
+  render('unread.a = 0');
+  assert.equal(strip.scrollLeft, 200);
+  render('unread.e = 1');
+  assert.equal(strip.scrollLeft, 230);
+  strip.scrollLeft = 0;
+  render('unread.b = 1');
+  assert.equal(strip.scrollLeft, 0);
+  strip.scrollLeft = 260;
+  render('dragging = true; unread.c = 1');
+  assert.equal(strip.scrollLeft, 260);
 });
 
 test("scope changes reconcile tab order in one render and preserve retained nodes", () => {

@@ -88,6 +88,14 @@ export function renderTabs(active){
   // same per-tab counts, so title and tabs never disagree — and no instant reset on entry.
   const existing = new Map();
   strip.querySelectorAll(".tab[data-klax_id]").forEach(t => existing.set(t.dataset.klax_id, t));
+  const activeKey = String(active || "");
+  const activeChanged = activeKey !== renderedActive;
+  const scopeChanged = !renderedScope || !sameScope(renderedScope, currentScope());
+  const anchor = !activeChanged && !scopeChanged && existing.get(activeKey);
+  const viewportLeft = strip.getBoundingClientRect().left + strip.clientLeft;
+  const before = anchor && anchor.getBoundingClientRect();
+  const hold = before && before.left >= viewportLeft - 1
+    && before.left + before.width <= viewportLeft + strip.clientWidth + 1;
   const keep = new Set();
   for(const [index, s] of sessions.entries()){
     const unread = deps.unread ? deps.unread(s.klax_id) : 0;
@@ -109,9 +117,11 @@ export function renderTabs(active){
     if(at !== t) strip.insertBefore(t, at);
   }
   for(const [key, t] of existing) if(!keep.has(key)) t.remove();
-  const activeKey = String(active || "");
-  const activeChanged = activeKey !== renderedActive;
-  const scopeChanged = !renderedScope || !sameScope(renderedScope, currentScope());
+  if(hold && keep.has(activeKey)){
+    const after = anchor.getBoundingClientRect();
+    const left = Math.max(viewportLeft, Math.min(before.left, viewportLeft + strip.clientWidth - after.width));
+    strip.scrollLeft += after.left - left;
+  }
   renderedActive = activeKey;
   renderedScope = currentScope();
   requestAnimationFrame(() => {
