@@ -766,8 +766,7 @@ function settleReadProgress(log){
       const capped = capWindow(active) > 0;
       if(read || capped){
         refreshStrip();
-        if(capped) rerenderStructural(active);
-        else commitLive(active);
+        commitLive(active);
       }
     } else if(advanced){
       refreshStrip();

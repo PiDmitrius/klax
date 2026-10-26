@@ -407,7 +407,28 @@ test("large histories are capped after reaching bottom, not in the approach zone
   assert.deepEqual(h.calls, ["advance", "render"]);
   h.calls.length = 0; h.log.scrollTop = 1400;
   h.run("scheduleReadProgress()"); h.tick(200);
-  assert.deepEqual(h.calls, ["read", "cap", "render"]);
+  assert.deepEqual(h.calls, ["read", "cap", "animate"]);
+});
+
+test("window trimming at the bottom preserves the divider fade before collapse", () => {
+  const h = harness();
+  h.log.scrollTop = 1400;
+  h.run(`
+    commitLive = commitLiveActual;
+    capWindow = () => { calls.push("cap"); return 10; };
+    fadeOutDivider = () => { calls.push("fade"); return true; };
+    DIVIDER_FADE_MS = 300;
+    rerender = () => { calls.push("collapse"); return noMotion(); };
+    scheduleReadProgress();
+  `);
+  h.tick(160);
+  assert.deepEqual(h.calls, ["read", "cap", "fade"]);
+  h.tick(299);
+  assert.equal(h.calls.includes("collapse"), false);
+  h.tick(1);
+  assert.deepEqual(h.calls, ["read", "cap", "fade", "collapse"]);
+  h.tick(1000);
+  assert.equal(h.run("liveBusy"), false);
 });
 
 
