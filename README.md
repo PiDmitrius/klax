@@ -33,6 +33,7 @@ Other outbound messenger API requests allow 10 seconds. Failed polls retry after
 ## Features
 
 - Telegram, MAX, VK, and Yandex Messenger transports
+- Incoming Telegram Rich Messages: structured text as Markdown and embedded media as attachments
 - `claude` and `codex` backends
 - Persistent sessions with resume support
 - Per-session backend, model, thinking level, and sandbox mode
