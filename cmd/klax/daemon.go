@@ -1112,11 +1112,7 @@ func (d *daemon) pollTG(ctx context.Context) {
 			}
 			msgID := fmt.Sprintf("%d", msg.MessageID)
 
-			// Extract text: prefer Text, fall back to Caption for media messages.
-			text := msg.Text
-			if text == "" {
-				text = msg.Caption
-			}
+			text, richMedia := msg.InboundContent()
 
 			// Download attachments (photo or document).
 			var attachments []attachment
@@ -1166,6 +1162,23 @@ func (d *daemon) pollTG(ctx context.Context) {
 					}
 					attachErrs = append(attachErrs, fmt.Sprintf("%s: %v", label, err))
 				}
+			}
+
+			for _, media := range richMedia {
+				data, name, err := bot.DownloadFile(media.FileID)
+				if err != nil {
+					log.Printf("tg: download rich %s: %v", media.Kind, err)
+					label := "вложение"
+					if media.FileName != "" {
+						label += fmt.Sprintf(" %q", media.FileName)
+					}
+					attachErrs = append(attachErrs, fmt.Sprintf("%s: %v", label, err))
+					continue
+				}
+				if media.FileName != "" {
+					name = media.FileName
+				}
+				attachments = append(attachments, attachment{filename: name, data: data})
 			}
 
 			d.dispatchInbound(chatID, msgID, text, attachments, attachErrs, d.isTGAllowed(msg.From.ID), inbound.Origin{
