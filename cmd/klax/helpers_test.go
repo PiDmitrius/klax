@@ -557,12 +557,8 @@ func TestRegisterSelfMentionTriggerMakesMentionAGroupTrigger(t *testing.T) {
 
 	registerSelfMentionTrigger("Yndx-Mssngr-jB6XY8NfmC-Bot")
 
-	rest, ok := stripGroupTrigger("@yndx-mssngr-jb6xy8nfmc-bot TEST123")
-	if !ok {
+	if !hasGroupTrigger("@yndx-mssngr-jb6xy8nfmc-bot TEST123") {
 		t.Fatal("a YM mention of the bot's own login must be recognized as a group trigger")
-	}
-	if rest != "TEST123" {
-		t.Fatalf("stripped prompt = %q, want %q", rest, "TEST123")
 	}
 }
 
@@ -572,12 +568,10 @@ func TestRegisterSelfMentionTriggerWorksForTelegramUsername(t *testing.T) {
 
 	registerSelfMentionTrigger("klax_dev_bot")
 
-	rest, ok := stripGroupTrigger("@klax_dev_bot TEST123")
-	if !ok {
-		t.Fatal("a Telegram mention of the bot's own username must be recognized as a group trigger")
-	}
-	if rest != "TEST123" {
-		t.Fatalf("stripped prompt = %q, want %q", rest, "TEST123")
+	for _, text := range []string{"@klax_dev_bot TEST123", "**@KLAX_DEV_BOT** TEST123", "[@klax_dev_bot](https://example.com) TEST123"} {
+		if !hasGroupTrigger(text) {
+			t.Fatalf("bot mention must be recognized: %q", text)
+		}
 	}
 }
 
@@ -593,7 +587,7 @@ func TestRegisterSelfMentionTriggerIgnoresEmptyLogin(t *testing.T) {
 }
 
 // A mention of some OTHER, unrelated user/bot whose name happens to start with the same
-// letters must not false-trigger — stripGroupTrigger's existing separator requirement
+// letters must not false-trigger — hasGroupTrigger's separator requirement
 // (punctuation or whitespace right after the matched prefix) already guards this; this
 // just locks that guarantee in for the mention case specifically.
 func TestRegisterSelfMentionTriggerDoesNotMatchUnrelatedNameWithSamePrefix(t *testing.T) {
@@ -602,8 +596,10 @@ func TestRegisterSelfMentionTriggerDoesNotMatchUnrelatedNameWithSamePrefix(t *te
 
 	registerSelfMentionTrigger("klax_dev_bot")
 
-	if _, ok := stripGroupTrigger("@klax_dev_bot_2 TEST123"); ok {
-		t.Fatal("a mention of a DIFFERENT bot whose username merely starts with the registered one must not trigger")
+	for _, text := range []string{"@klax_dev_bot_2 TEST123", "**@klax_dev_bot_2** TEST123"} {
+		if hasGroupTrigger(text) {
+			t.Fatalf("unrelated bot mention accepted: %q", text)
+		}
 	}
 }
 
@@ -615,21 +611,21 @@ func TestGroupPromptAttachmentModes(t *testing.T) {
 	if d.groupAttachmentMode(chatID) != "on" {
 		t.Fatal("attachments must default to on")
 	}
-	if _, ok := d.groupPrompt(chatID, "", true); ok {
+	if _, _, ok := d.groupPrompt(chatID, "", true); ok {
 		t.Fatal("on must still require the explicit group trigger")
 	}
 	d.setGroupAttachmentMode(chatID, "any")
-	if prompt, ok := d.groupPrompt(chatID, "", true); !ok || prompt != "" {
+	if prompt, _, ok := d.groupPrompt(chatID, "", true); !ok || prompt != "" {
 		t.Fatalf("attachment-only prompt = %q, %v; want empty accepted prompt", prompt, ok)
 	}
-	if prompt, ok := d.groupPrompt(chatID, "describe this", true); !ok || prompt != "describe this" {
+	if prompt, _, ok := d.groupPrompt(chatID, "describe this", true); !ok || prompt != "describe this" {
 		t.Fatalf("attachment caption = %q, %v; want preserved caption", prompt, ok)
 	}
-	if _, ok := d.groupPrompt(chatID, "ordinary group chatter", false); ok {
+	if _, _, ok := d.groupPrompt(chatID, "ordinary group chatter", false); ok {
 		t.Fatal("text without attachment must still require the explicit trigger")
 	}
-	if prompt, ok := d.groupPrompt(chatID, "Клакс explicit", false); !ok || prompt != "explicit" {
-		t.Fatalf("explicit trigger = %q, %v; want existing trigger semantics", prompt, ok)
+	if prompt, _, ok := d.groupPrompt(chatID, "Клакс explicit", false); !ok || prompt != "Клакс explicit" {
+		t.Fatalf("explicit trigger = %q, %v; want source text", prompt, ok)
 	}
 	d.setGroupAttachmentMode(chatID, "off")
 	if d.groupAttachmentMode(chatID) != "off" {
