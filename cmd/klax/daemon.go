@@ -17,7 +17,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-	"unicode"
 
 	"github.com/PiDmitrius/klax/internal/claudetty/hook"
 	"github.com/PiDmitrius/klax/internal/config"
@@ -1066,9 +1065,9 @@ func (d *daemon) dispatchInbound(chatID, msgID, text string, attachments []attac
 		}
 		return
 	}
-	if prompt, ok := d.groupPrompt(chatID, text, hadAttachment); ok {
+	if prompt, content, ok := d.groupPrompt(chatID, text, hadAttachment); ok {
 		notifyAttachErrs()
-		if prompt == "" && len(attachments) == 0 {
+		if !content && len(attachments) == 0 {
 			return
 		}
 		d.ensureSessionWithCWD(d.sessionKey(chatID), d.sessionCWD(chatID))
@@ -1778,7 +1777,7 @@ func (d *daemon) saveGroupChats() {
 }
 
 // groupTriggerPrefixes are the recognized prefixes for group mode messages.
-// Checked case-insensitively. Must be followed by comma or any whitespace.
+// Checked case-insensitively with a punctuation or whitespace boundary.
 // Copy-on-write behind an atomic: registrations happen on background connect goroutines while
 // other transports are already reading the list.
 var groupTriggerPrefixes atomic.Value // []string
@@ -1803,7 +1802,7 @@ func triggerPrefixes() []string { return groupTriggerPrefixes.Load().([]string) 
 // likewise offsets into a text that already contains the literal "@username" — the bot's
 // own username is never used by anyone else, so this alone makes an @mention behave
 // exactly like typing the trigger word, with no new parsing path to keep in sync with
-// stripGroupTrigger.
+// hasGroupTrigger.
 func registerSelfMentionTrigger(login string) {
 	login = strings.ToLower(strings.TrimSpace(login))
 	if login == "" {
@@ -1817,42 +1816,17 @@ func registerSelfMentionTrigger(login string) {
 	groupTriggerPrefixes.Store(append(next, "@"+login))
 }
 
-// stripGroupTrigger checks if text starts with a group trigger prefix.
-// Returns the remaining text (trimmed) and true, or "" and false.
-func stripGroupTrigger(text string) (string, bool) {
-	lower := strings.ToLower(text)
-	for _, prefix := range triggerPrefixes() {
-		if !strings.HasPrefix(lower, prefix) {
-			continue
-		}
-		rest := text[len(prefix):]
-		// Trigger alone (e.g. caption "кл" with attachment) — valid, empty prompt.
-		if len(rest) == 0 {
-			return "", true
-		}
-		// Must be followed by punctuation or any whitespace.
-		r := rune(rest[0])
-		if strings.ContainsRune(",.!?:;—", r) {
-			rest = strings.TrimLeft(rest, ",.!?:;—")
-		} else if !unicode.IsSpace(r) {
-			continue
-		}
-		rest = strings.TrimLeftFunc(rest, unicode.IsSpace)
-		return rest, true
-	}
-	return "", false
-}
-
 // groupPrompt is the single group-trigger policy. An explicit trigger always
 // wins; with /attachments any, carrying a file supplies it implicitly.
-func (d *daemon) groupPrompt(chatID, text string, hasAttachment bool) (string, bool) {
-	if prompt, ok := stripGroupTrigger(strings.TrimSpace(text)); ok {
-		return prompt, true
+func (d *daemon) groupPrompt(chatID, text string, hasAttachment bool) (prompt string, content, accepted bool) {
+	if addressed, content := readGroupTrigger(text); addressed {
+		return text, content, true
 	}
 	if hasAttachment && d.groupAttachmentMode(chatID) == "any" {
-		return strings.TrimSpace(text), true
+		prompt = strings.TrimSpace(text)
+		return prompt, prompt != "", true
 	}
-	return "", false
+	return "", false, false
 }
 
 // groupAttachmentsBlocked is the single off-mode policy. Ambient group files
@@ -1861,7 +1835,7 @@ func (d *daemon) groupAttachmentsBlocked(chatID, text string, hasAttachment bool
 	if !hasAttachment || d.groupAttachmentMode(chatID) != "off" {
 		return false, false
 	}
-	_, addressed = stripGroupTrigger(strings.TrimSpace(text))
+	addressed = hasGroupTrigger(text)
 	return true, addressed
 }
 
@@ -1926,10 +1900,13 @@ func (d *daemon) handleInbound(in Inbound) bool {
 
 	// In group mode, require a trigger prefix unless attachments supply it.
 	if d.isGroupChat(in.ChatID) {
-		if blocked, _ := d.groupAttachmentsBlocked(in.ChatID, text, len(in.Attachments) > 0); blocked {
+		if blocked, _ := d.groupAttachmentsBlocked(in.ChatID, in.Text, len(in.Attachments) > 0); blocked {
 			return false
 		}
-		if prompt, ok := d.groupPrompt(in.ChatID, text, len(in.Attachments) > 0); ok {
+		if prompt, content, ok := d.groupPrompt(in.ChatID, in.Text, len(in.Attachments) > 0); ok {
+			if !content && len(in.Attachments) == 0 {
+				return false
+			}
 			return d.enqueueToSessionOrigin(in.ChatID, in.MsgID, prompt, in.Text, in.Attachments, in.TargetKlaxID, in.Nonce, in.Origin, in.admission)
 		}
 		// No prefix — ignore silently

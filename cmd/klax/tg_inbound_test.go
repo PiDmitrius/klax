@@ -106,10 +106,8 @@ func TestRichTextPreservesGroupTriggersAndCommands(t *testing.T) {
 		raw, _ := json.Marshal(input)
 		msg := tg.Message{RichMessage: &tg.RichMessage{Blocks: []tg.RichBlock{{Type: "paragraph", Text: raw}}}}
 		text, _ := msg.InboundContent()
-		want, ok := stripGroupTrigger(input)
-		got, accepted := stripGroupTrigger(text)
-		if !ok || !accepted || got != want {
-			t.Errorf("rich group trigger changed: %q -> %q; accepted=%v, want %q", input, text, accepted, want)
+		if text != input || !hasGroupTrigger(text) {
+			t.Errorf("rich group trigger changed: %q -> %q", input, text)
 		}
 	}
 	for _, input := range []string{"/model gpt-5.5", "/m_update", "/cwd ~/project/my-app", "a_b имя_файла a~b a=b x+y {value} (text)"} {
