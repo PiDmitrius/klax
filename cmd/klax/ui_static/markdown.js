@@ -116,7 +116,7 @@ function renderList(lines){
   const close = () => { const t = stack.pop(); out += "</li>" + (t.type === "ol" ? "</ol>" : "</ul>"); };
   const open = (indent, type, start) => { out += (type === "ol" ? (start > 1 ? '<ol start="'+start+'">' : "<ol>") : "<ul>"); stack.push({indent, type}); };
   lines.forEach(raw => {
-    const m = raw.match(/^(\s*)(?:([-*+])|(\d+)[.)])\s+(.*)$/);
+    const m = raw.match(/^(\s*)(?:([-*+])|(\d+)[.)])\s+(.*)$/s);
     if(!m) return;
     const indent = m[1].replace(/\t/g, "  ").length;
     const type = m[3] ? "ol" : "ul";
@@ -196,6 +196,7 @@ function md(src, depth){
 // mdSafe wraps md() so a pathological block degrades to escaped text with line breaks
 // instead of throwing. ALL render paths use this, never md() directly.
 export function mdSafe(src){
+  src = (src || "").replace(/\r\n?/g, "\n");
   try { return md(src); }
   catch(e){ console.error("klax md()", e); return esc(src).replace(/\n/g, "<br>"); }
 }
