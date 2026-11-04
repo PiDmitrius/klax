@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { setHome, tildePath } from "./base.js";
-import { fmtDate, fmtTime } from "./markdown.js";
+import { fmtDate, fmtTime, mdSafe } from "./markdown.js";
 
 function harness(){
   const rows = [];
@@ -57,4 +57,10 @@ test("durations retain CPU fractions and carry rounded seconds", () => {
   for(const [sec, text] of [[0, "0 с"], [0.14, "0.1 с"], [59.96, "1 мин 0 с"], [3661.24, "1 ч 1 мин 1.2 с"], [86400, "1 д 0 с"]]){
     assert.equal(h.run(`elapsed(${sec})`), text);
   }
+});
+
+test("markdown reads CRLF line breaks as LF", () => {
+  assert.equal(mdSafe("- one\r\n\r\ntwo"), mdSafe("- one\n\ntwo"));
+  assert.equal(mdSafe("- one\r\n\r\ntwo"), "<ul><li>one</li></ul><p>two</p>");
+  assert.equal(mdSafe("- a\u2028b"), "<ul><li>a\u2028b</li></ul>");
 });

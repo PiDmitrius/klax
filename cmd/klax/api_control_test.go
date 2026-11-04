@@ -649,7 +649,7 @@ func TestAPIMultipartWait(t *testing.T) {
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
 	_ = mw.WriteField("klax_id", f.klaxID)
-	_ = mw.WriteField("text", "read file")
+	_ = mw.WriteField("text", "- read\r\n\r\nfile")
 	_ = mw.WriteField("return_on", "finish")
 	part, _ := mw.CreateFormFile("files", "note.txt")
 	_, _ = io.WriteString(part, "contents")
@@ -662,6 +662,9 @@ func TestAPIMultipartWait(t *testing.T) {
 	ev := eventResponse(t, w, "finish", "success")
 	if len(ev.Turn.Request.Attachments) != 1 || ev.Turn.Request.Attachments[0].Name != "note.txt" {
 		t.Fatal("missing attachment snapshot")
+	}
+	if ev.Turn.Request.OriginalText != "- read\r\n\r\nfile" {
+		t.Fatalf("text = %q", ev.Turn.Request.OriginalText)
 	}
 }
 
