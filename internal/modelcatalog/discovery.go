@@ -32,7 +32,11 @@ func Fetch(ctx context.Context, backend string) ([]Model, error) {
 	case "codex":
 		args = []string{"app-server"}
 	case "claude":
-		args = []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--no-session-persistence", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`, "--setting-sources", "user"}
+		// With nonessential traffic or telemetry disabled, the CLI skips the server
+		// model data and lists models from its stale cache. Empty values override
+		// user settings; "0" still counts as set.
+		args = []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--no-session-persistence", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`, "--setting-sources", "user",
+			"--settings", `{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":"","DISABLE_TELEMETRY":""}}`}
 	default:
 		return nil, errors.New("unknown backend")
 	}
