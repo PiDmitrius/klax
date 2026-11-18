@@ -497,7 +497,7 @@ func TestReadModelQueueOnlyTurnStaysOnItsPage(t *testing.T) {
 }
 
 // A memoized build equals a from-scratch build at every step of a session's life — queued,
-// running with growing blocks and amended usage, finished, errored — and reuses the rows of
+// running with growing blocks, amended usage and amended tools, finished, errored — and reuses the rows of
 // turns the step did not touch.
 func TestReadModelMemoMatchesFullBuild(t *testing.T) {
 	d, klaxID := newReadModelDaemon(t)
@@ -528,6 +528,12 @@ func TestReadModelMemoMatchesFullBuild(t *testing.T) {
 			check(fmt.Sprint(text, " block ", b), true)
 			items[len(items)-1].CtxUsed = 100 * (b + 1)
 			check(fmt.Sprint(text, " usage ", b), true)
+			if b > 0 { // a completed command amends an earlier block of the running turn
+				done := &items[len(items)-2]
+				done.Tools = []history.ToolCall{{Name: "Exec", Label: fmt.Sprint(text, b-1, " ✗"), Detail: "status: failed"}}
+				done.Rev++
+				check(fmt.Sprint(text, " completed ", b-1), true)
+			}
 		}
 		items = append(items, history.Item{Role: "assistant", Text: "answer " + text})
 		check(text+" answer while running", true)
