@@ -164,17 +164,33 @@ func isTableSeparator(line string) bool {
 	return true
 }
 
-// parseTableRow splits a "| a | b |" row into trimmed cells, tolerating missing
-// outer pipes.
+// parseTableRow splits a "| a | b |" row into trimmed cells, tolerating missing outer pipes,
+// on pipes outside code spans; `\|` is a literal pipe.
 func parseTableRow(line string) []string {
 	s := strings.TrimSpace(line)
 	s = strings.TrimPrefix(s, "|")
-	s = strings.TrimSuffix(s, "|")
-	parts := strings.Split(s, "|")
-	for i := range parts {
-		parts[i] = strings.TrimSpace(parts[i])
+	if strings.HasSuffix(s, "|") && !strings.HasSuffix(s, `\|`) {
+		s = s[:len(s)-1]
 	}
-	return parts
+	var parts []string
+	var cur strings.Builder
+	for i := 0; i < len(s); i++ {
+		switch {
+		case s[i] == '`':
+			end := codeSpanEnd(s, i)
+			cur.WriteString(strings.ReplaceAll(s[i:end], `\|`, "|"))
+			i = end - 1
+		case s[i] == '\\' && i+1 < len(s) && s[i+1] == '|':
+			cur.WriteByte('|')
+			i++
+		case s[i] == '|':
+			parts = append(parts, strings.TrimSpace(cur.String()))
+			cur.Reset()
+		default:
+			cur.WriteByte(s[i])
+		}
+	}
+	return append(parts, strings.TrimSpace(cur.String()))
 }
 
 func parseTableAligns(line string) []string {

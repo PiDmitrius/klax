@@ -37,7 +37,14 @@ export function inline(s){
   const Z = String.fromCharCode(0);
   s = (s || "").split(Z).join("");
   const codes = [];
-  let h = s.replace(/`[^`]+`/g, m => { codes.push("<code>" + esc(m.slice(1, -1)) + "</code>"); return Z + (codes.length - 1) + Z; });
+  let h = "";
+  for(let i = 0; i < s.length;){
+    const j = s.indexOf("`", i);
+    if(j < 0){ h += s.slice(i); break; }
+    const span = codeSpan(s, j);
+    h += s.slice(i, j) + (span.text === null ? s.slice(j, span.end) : Z + (codes.push("<code>" + esc(span.text) + "</code>") - 1) + Z);
+    i = span.end;
+  }
   h = esc(h);
   if(h.indexOf("**") !== -1) h = h.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
   if(h.indexOf("~~") !== -1) h = h.replace(/~~([^~]+)~~/g, '<s>$1</s>');
@@ -56,6 +63,25 @@ export function inline(s){
   // Restore code spans (already escaped); linkifyBare then leaves <code>/<a>/<u> alone.
   h = h.replace(new RegExp(Z + "(\\d+)" + Z, "g"), (m, i) => codes[+i] || "");
   return linkifyBare(h);
+}
+
+// codeSpan reads the backtick run at i as a CommonMark code span: it closes at the next run of
+// the same length, so ``a `b` c`` holds single backticks, and one space is stripped from each
+// end of padded content. text is null when the run has no closer and stays literal.
+function codeSpan(s, i){
+  let n = i;
+  while(s[n] === "`") n++;
+  for(let k = s.indexOf("`", n); k >= 0; k = s.indexOf("`", k)){
+    let e = k;
+    while(s[e] === "`") e++;
+    if(e - k === n - i){
+      let text = s.slice(n, k);
+      if(text[0] === " " && text[text.length - 1] === " " && text.trim()) text = text.slice(1, -1);
+      return { text, end: e };
+    }
+    k = e;
+  }
+  return { text: null, end: n };
 }
 
 function imageSizeAttrs(href){
@@ -89,12 +115,12 @@ export function linkifyBare(h){
 // Split a table row into trimmed cells on top-level pipes only.
 function splitRow(line){
   const s = line.trim(), cells = [];
-  let cur = "", code = false;
+  let cur = "";
   for(let i = 0; i < s.length; i++){
     const ch = s[i];
-    if(ch === "`"){ code = !code; cur += ch; }
+    if(ch === "`"){ const end = codeSpan(s, i).end; cur += s.slice(i, end).split("\\|").join("|"); i = end - 1; }
     else if(ch === "\\" && s[i+1] === "|"){ cur += "|"; i++; }
-    else if(ch === "|" && !code){ cells.push(cur.trim()); cur = ""; }
+    else if(ch === "|"){ cells.push(cur.trim()); cur = ""; }
     else cur += ch;
   }
   cells.push(cur.trim());

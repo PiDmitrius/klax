@@ -160,6 +160,34 @@ func TestConvertLegacyLinkValidation(t *testing.T) {
 	}
 }
 
+// A code span closes on a backtick run of its own length, so it can hold single backticks.
+func TestConvertCodeSpanRuns(t *testing.T) {
+	for in, want := range map[string]string{
+		"``a `b` c`` and `d`": "<code>a `b` c</code> and <code>d</code>",
+		"`` `x` ``":           "<code>`x`</code>",
+		"a ``b` c":            "a ``b` c",
+		"`<b>` **x**":         "<code>&lt;b&gt;</code> <b>x</b>",
+	} {
+		if got := Convert(in, false); got != want {
+			t.Errorf("Convert(%q) = %q, want %q", in, got, want)
+		}
+		if got := ConvertRich(in); got != "<p>"+want+"</p>" {
+			t.Errorf("ConvertRich(%q) = %q, want <p>%s</p>", in, got, want)
+		}
+	}
+}
+
+// Table cells split on pipes outside code spans, and an escaped pipe is literal, as in the web UI.
+func TestConvertRichTablePipesInCode(t *testing.T) {
+	got := ConvertRich("| k | v |\n|---|---|\n| ``a|`b`` | c \\| d |\n| `a \\| b` | e |")
+	got += ConvertRich("| k | v |\n|---|---|\n| x | c \\|")
+	for _, want := range []string{"<td><code>a|`b</code></td><td>c | d</td>", "<td><code>a | b</code></td><td>e</td>", "<td>x</td><td>c |</td>"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("ConvertRich table = %q, want it to contain %q", got, want)
+		}
+	}
+}
+
 func TestConvertBlockquote(t *testing.T) {
 	// Telegram (useBlockquote=true): real <blockquote> — markers stripped, inline
 	// kept, lines joined with "\n" (legacy parse_mode=HTML has NO <br>).
