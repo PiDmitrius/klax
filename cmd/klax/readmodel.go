@@ -14,6 +14,9 @@ type uiBlock struct {
 	Text string `json:"text,omitempty"`
 	Kind string `json:"kind,omitempty"`
 	Time string `json:"time,omitempty"` // RFC3339; a merged answer bubble shows its LAST block's time
+	// Detail is a tool row's full record (a finished command's directory, outcome and
+	// output), shown on hover and copied instead of the row text.
+	Detail string `json:"detail,omitempty"`
 }
 
 // uiTurn is one row of the read model. A user row carries the durable turn seq + state
@@ -227,6 +230,9 @@ func (d *daemon) buildReadModel(sk string, klaxID string, grouped []groupedTurn,
 			last := g.blocks[n-1]
 			key.lastCtx, key.lastCtxWindow, key.lastTime = last.CtxUsed, last.CtxWindow, last.Time
 		}
+		for _, b := range g.blocks {
+			key.rev += b.Rev
+		}
 		ut, keep := memo.get(key)
 		if !keep {
 			ut, keep = d.userRow(store, sk, klaxID, g, matched, ok, seq, state, reason)
@@ -299,7 +305,7 @@ func (d *daemon) userRow(store *sessfiles.Store, sk string, klaxID string, g gro
 				ut.Blocks = append(ut.Blocks, uiBlock{Role: "assistant", Text: text, Time: b.Time})
 			}
 			for _, tc := range b.Tools {
-				ut.Blocks = append(ut.Blocks, uiBlock{Role: "tool", Text: tc.Label, Time: b.Time})
+				ut.Blocks = append(ut.Blocks, uiBlock{Role: "tool", Text: tc.Label, Time: b.Time, Detail: tc.Detail})
 			}
 			// The per-turn context "cut line" comes from the last assistant block's usage —
 			// including a tool-only block (a codex turn whose final token_count lands on a
@@ -335,10 +341,10 @@ func (d *daemon) userRow(store *sessfiles.Store, sk string, klaxID string, g gro
 
 // rowMemo carries a session's user rows from one read-model build to the next, within one
 // transcript index generation. A row is a pure function of its rowKey — transcript blocks are
-// append-only apart from the last one's usage and time, and the durable text, time and published
-// file links of a seq never change — so a transcript append rebuilds only the turns it touched.
-// A row whose file link degraded is not kept, and marks the build degraded. A nil memo builds
-// every row.
+// append-only apart from the last one's usage and time and the tool amendments Item.Rev counts,
+// and the durable text, time and published file links of a seq never change — so a transcript
+// append rebuilds only the turns it touched. A row whose file link degraded is not kept, and
+// marks the build degraded. A nil memo builds every row.
 type rowMemo struct {
 	prev, next map[rowKey]uiTurn
 	degraded   bool
@@ -346,7 +352,7 @@ type rowMemo struct {
 
 type rowKey struct {
 	event, seq             int64
-	blocks                 int
+	blocks, rev            int
 	lastCtx, lastCtxWindow int
 	lastTime               string
 	state, reason          string

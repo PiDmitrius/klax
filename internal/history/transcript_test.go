@@ -154,21 +154,36 @@ func TestIndexRebuildsChangedPrefix(t *testing.T) {
 	check("replaced", a, c)
 }
 
-func TestCodexSilentRecognizesOnlyNonRenderingRecords(t *testing.T) {
+func TestCodexRecordKind(t *testing.T) {
 	const lead = `{"timestamp":"2026-09-02T12:32:57.061Z","ordinal":44,`
 	const ids = `"thread_id":"t","turn_id":"u",`
-	for line, want := range map[string]bool{
-		lead + `"type":"response_item","payload":{"type":"custom_tool_call_output","output":[]}}`:                      true,
-		lead + `"type":"response_item","payload":{"type":"reasoning","encrypted_content":"x"}}`:                        true,
-		lead + `"type":"event_msg","payload":{"type":"item_completed",` + ids + `"item":{"type":"CommandExecution"}}}`: true,
-		lead + `"type":"event_msg","payload":{"type":"item_completed",` + ids + `"item":{"type":"UserMessage"}}}`:      false,
-		lead + `"type":"event_msg","payload":{"type":"item_completed",` + ids + `"item":{"type":"AgentMessage"}}}`:     false,
-		lead + `"type":"response_item","payload":{"type":"custom_tool_call","name":"exec"}}`:                           false,
-		lead + `"type":"event_msg","payload":{"type":"token_count"}}`:                                                  false,
-		`{"type":"response_item","payload":{"type":"reasoning"}}`:                                                      false,
+	output := lead + `"type":"response_item","payload":{"type":"custom_tool_call_output","id":"o","call_id":"c","output":[]}}`
+	command := lead + `"type":"event_msg","payload":{"type":"item_completed",` + ids + `"item":{"type":"CommandExecution"}}}`
+	idle := &codexParser{}
+	for line, want := range map[string]codexRecordKind{
+		output: codexSilentRecord,
+		lead + `"type":"response_item","payload":{"type":"reasoning","encrypted_content":"x"}}`: codexSilentRecord,
+		command: codexSilentRecord,
+		lead + `"type":"event_msg","payload":{"type":"item_completed",` + ids + `"item":{"type":"UserMessage"}}}`:  codexRecord,
+		lead + `"type":"event_msg","payload":{"type":"item_completed",` + ids + `"item":{"type":"AgentMessage"}}}`: codexRecord,
+		lead + `"type":"response_item","payload":{"type":"custom_tool_call","name":"exec"}}`:                       codexRecord,
+		lead + `"type":"event_msg","payload":{"type":"token_count"}}`:                                              codexRecord,
+		`{"type":"response_item","payload":{"type":"reasoning"}}`:                                                  codexRecord,
 	} {
-		if got := codexSilent([]byte(line)); got != want {
-			t.Errorf("codexSilent(%s) = %v, want %v", line, got, want)
+		if got := idle.kind([]byte(line)); got != want {
+			t.Errorf("kind(%s) = %v, want %v", line, got, want)
 		}
+	}
+	// A turn with exec wrappers reads their outputs and completed commands.
+	busy := &codexParser{execs: []*codexExecWrap{{callID: "c"}}}
+	if got := busy.kind([]byte(output)); got != codexExecOutput {
+		t.Errorf("kind(output) with an exec wrapper = %v", got)
+	}
+	if got := busy.kind([]byte(command)); got != codexExecCommand {
+		t.Errorf("kind(command) with an exec wrapper = %v", got)
+	}
+	busy.execOutput([]byte(output))
+	if w := busy.execs[0]; !w.closed || w.to.IsZero() {
+		t.Errorf("the output's leading keys did not close its wrapper: %+v", w)
 	}
 }

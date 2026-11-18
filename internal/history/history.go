@@ -29,8 +29,9 @@ import (
 // same rich label the live UI stream shows, rendered at the wider web-UI width
 // (ToolUse.Preview(UIToolPreviewLimit)) rather than the narrow Telegram one.
 type ToolCall struct {
-	Name  string `json:"name"`
-	Label string `json:"label,omitempty"`
+	Name   string `json:"name"`
+	Label  string `json:"label,omitempty"`
+	Detail string `json:"-"` // a finished command's directory, outcome and output tail
 }
 
 func toolCall(name, input string) ToolCall {
@@ -62,6 +63,7 @@ type Item struct {
 	PromptDigest string `json:"-"` // canonical external-user payload, before display trimming
 	Backend      string `json:"-"`
 	Session      string `json:"-"`
+	Rev          int    `json:"-"` // counts amendments of Tools after the item was appended
 }
 
 // turnMarkerRe matches ONLY klax's injected marker shape: the exact 16-hex token
@@ -511,6 +513,7 @@ type codexParser struct {
 	lastAssistant    int
 	lastWasCompacted bool
 	lastCompacted    int
+	execs            []*codexExecWrap // exec wrappers of the current turn
 }
 
 func (c *codexParser) publish() []Item {
@@ -545,6 +548,7 @@ func (c *codexParser) appendUser(message, ts string, rec rawRecord) {
 	if t, marker := StripTurnMarker(message); t != "" {
 		c.append(Item{Role: "user", Text: t, Marker: marker, Time: ts, Event: rec.Event, RecordDigest: rec.digest(), PromptDigest: promptcanon.Digest(message)})
 		c.lastAssistant = -1
+		c.execs = nil
 	}
 	c.lastWasCompacted = false
 	c.lastCompacted = -1
@@ -556,27 +560,100 @@ func (c *codexParser) appendAgent(message, ts string) {
 	}
 }
 
-// codexSilent reports a record that never renders: tool output, reasoning, raw model messages
-// and completed items other than messages. They are most of a rollout's bytes, so they are
-// recognized by their leading keys and skip JSON decoding.
-func codexSilent(raw []byte) bool {
+type codexRecordKind int
+
+const (
+	codexRecord       codexRecordKind = iota // decoded by the general path
+	codexSilentRecord                        // never renders
+	codexExecOutput                          // a tool output while the turn has exec wrappers
+	codexExecCommand                         // a completed command while the turn has exec wrappers
+)
+
+// kind classifies a record by its leading keys. Tool output, reasoning, raw model messages and
+// completed items other than messages never render; they are most of a rollout's bytes, so
+// they skip JSON decoding. While the turn has exec wrappers, their outputs and completed
+// commands are read narrowly to place the commands' outcomes.
+func (c *codexParser) kind(raw []byte) codexRecordKind {
 	record, payload, item, ok := runner.CodexLead(raw)
 	if !ok {
-		return false
+		return codexRecord
 	}
 	switch record + "/" + payload {
-	case "response_item/function_call_output", "response_item/custom_tool_call_output", "response_item/reasoning", "response_item/message":
-		return true
+	case "response_item/function_call_output", "response_item/reasoning", "response_item/message":
+		return codexSilentRecord
+	case "response_item/custom_tool_call_output":
+		if len(c.execs) > 0 {
+			return codexExecOutput
+		}
+		return codexSilentRecord
 	case "event_msg/item_completed":
-		return item != "" && item != "UserMessage" && item != "AgentMessage"
+		switch {
+		case item == "" || item == "UserMessage" || item == "AgentMessage":
+		case item == "CommandExecution" && len(c.execs) > 0:
+			return codexExecCommand
+		default:
+			return codexSilentRecord
+		}
 	}
-	return false
+	return codexRecord
+}
+
+var codexOutputLeadRe = regexp.MustCompile(`^\{"timestamp":"([^"]*)",(?:"ordinal":\d+,)?"type":"response_item","payload":\{"type":"custom_tool_call_output",(?:"id":"[^"]*",)?"call_id":"([^"]*)"`)
+
+// execOutput closes the exec wrapper whose call_id the tool output carries.
+func (c *codexParser) execOutput(raw []byte) {
+	var r struct {
+		Timestamp string `json:"timestamp"`
+		Payload   struct {
+			CallID string `json:"call_id"`
+		} `json:"payload"`
+	}
+	if m := codexOutputLeadRe.FindSubmatch(raw[:min(len(raw), 512)]); m != nil {
+		r.Timestamp, r.Payload.CallID = string(m[1]), string(m[2])
+	} else if json.Unmarshal(raw, &r) != nil {
+		return
+	}
+	for _, w := range slices.Backward(c.execs) {
+		if r.Payload.CallID != "" && w.callID == r.Payload.CallID {
+			w.closed, w.to = true, codexTime(r.Timestamp)
+			return
+		}
+	}
+}
+
+// execCommand reads a completed command and places it into its exec wrapper.
+func (c *codexParser) execCommand(raw []byte) {
+	var r struct {
+		Timestamp string `json:"timestamp"`
+		Payload   struct {
+			Completed int64          `json:"completed_at_ms"`
+			Item      codexEventItem `json:"item"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(raw, &r) != nil {
+		return
+	}
+	done := codexTime(r.Timestamp)
+	if r.Payload.Completed > 0 {
+		done = time.UnixMilli(r.Payload.Completed)
+	}
+	c.execCompleted(&r.Payload.Item, done)
 }
 
 func (c *codexParser) add(rec rawRecord) {
 	raw := rec.Raw
 	raw = bytes.TrimSpace(raw)
-	if len(raw) == 0 || codexSilent(raw) {
+	if len(raw) == 0 {
+		return
+	}
+	switch c.kind(raw) {
+	case codexSilentRecord:
+		return
+	case codexExecOutput:
+		c.execOutput(raw)
+		return
+	case codexExecCommand:
+		c.execCommand(raw)
 		return
 	}
 	var entry struct {
@@ -595,6 +672,7 @@ func (c *codexParser) add(rec rawRecord) {
 		Type      string          `json:"type"`
 		Message   string          `json:"message"`
 		Name      string          `json:"name"`
+		CallID    string          `json:"call_id"`
 		Namespace string          `json:"namespace"`
 		Arguments json.RawMessage `json:"arguments"`
 		Input     json.RawMessage `json:"input"`
@@ -625,14 +703,18 @@ func (c *codexParser) add(rec rawRecord) {
 	case entry.Type == "event_msg" && p.Type == "agent_message":
 		c.appendAgent(p.Message, ts)
 	case entry.Type == "event_msg" && p.Type == "item_completed" && p.Item != nil:
-		// Codex carries conversation text as completed items; only the two message
-		// kinds are read here, because every other kind reaches the timeline through
-		// the response_item tool records and would otherwise be drawn twice.
+		// Codex carries conversation text as completed items. Other kinds reach the
+		// timeline through the response_item tool records; a completed command only
+		// completes the row of the exec wrapper that ran it.
 		switch p.Item.Type {
 		case "UserMessage":
 			c.appendUser(p.Item.text(), ts, rec)
 		case "AgentMessage":
 			c.appendAgent(p.Item.text(), ts)
+		case "CommandExecution":
+			if len(c.execs) > 0 {
+				c.execCommand(raw)
+			}
 		}
 	case entry.Type == "event_msg" && p.Type == "context_compacted":
 		if !c.lastWasCompacted {
@@ -655,21 +737,9 @@ func (c *codexParser) add(rec rawRecord) {
 	case entry.Type == "item.completed" && entry.Item != nil && entry.Item.Type == "web_search" && entry.Item.Query != "":
 		c.appendAssistant(Item{Role: "assistant", Tools: []ToolCall{toolCall("WebSearch", jsonObject("query", entry.Item.Query))}, Time: ts})
 	case entry.Type == "response_item" && p.Type == "custom_tool_call" && p.Name == "exec":
-		// New Codex orchestration wrapper: its JavaScript `input` invokes one or more
-		// tools.<name>(...) actions. Decode them into real tool rows (Exec, Write, …).
-		// If nothing decodes, fall back to showing the RAW orchestration source as an Exec
-		// row (truncated by the preview) so the user still sees what Codex ran, rather than
-		// an opaque 🔧 exec; a row is never silently dropped.
-		src := rawJSONArgument(p.Input)
-		if tools := decodeCodexExecTools(src); len(tools) > 0 {
-			for _, tc := range tools {
-				c.appendTool(tc, ts)
-			}
-		} else if src != "" {
-			c.appendAssistant(Item{Role: "assistant", Tools: []ToolCall{toolCall("Exec", jsonObject("command", src))}, Time: ts})
-		} else {
-			c.appendAssistant(Item{Role: "assistant", Tools: []ToolCall{{Name: "exec", Label: "🔧 exec"}}, Time: ts})
-		}
+		c.appendExec(p.CallID, rawJSONArgument(p.Input), codexTime(entry.Timestamp), ts)
+	case entry.Type == "response_item" && p.Type == "custom_tool_call_output":
+		c.execOutput(raw)
 	case entry.Type == "response_item" && (p.Type == "function_call" || p.Type == "custom_tool_call"):
 		if p.Name != "" {
 			args := rawJSONArgument(p.Arguments)
@@ -689,13 +759,22 @@ func (c *codexParser) add(rec rawRecord) {
 	}
 }
 
-// codexEventItem is a completed conversation item; its content parts all carry the
-// text under the same field regardless of part kind.
+// codexEventItem is a completed item: a message, whose content parts all carry the text
+// under the same field regardless of part kind, or a command execution.
 type codexEventItem struct {
 	Type    string `json:"type"`
 	Content []struct {
 		Text string `json:"text"`
 	} `json:"content"`
+	Command  json.RawMessage `json:"command"`
+	Cwd      string          `json:"cwd"`
+	Status   string          `json:"status"`
+	Output   string          `json:"aggregated_output"`
+	ExitCode *int            `json:"exit_code"`
+	Duration *struct {
+		Secs  int64 `json:"secs"`
+		Nanos int64 `json:"nanos"`
+	} `json:"duration"`
 }
 
 func (it *codexEventItem) text() string {
