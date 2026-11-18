@@ -224,7 +224,7 @@ function renderSig(it){
         divider: g.divider,
         cls: g.cls, tool: g.tool, time: g.time, startPos: g.startPos, maxPos: g.maxPos,
         joinPrev: !!g.joinPrev, joinNext: !!g.joinNext,
-        blocks: (g.blocks || []).map(b => ({ role: b.role, text: b.text, kind: b.kind, time: b.time, detail: b.detail })),
+        blocks: (g.blocks || []).map(b => ({ role: b.role, text: b.text, kind: b.kind, time: b.time })),
       })),
     });
   }
@@ -317,11 +317,10 @@ function buildTurn(it, onStop, old){
     if(g.divider){ putDivider(); continue; }
     const fk = "g:" + g.startPos;
     const sig = childSig("g", { cls: g.cls, tool: g.tool, time: g.time, maxPos: g.maxPos,
-      blocks: (g.blocks || []).map(b => ({ role: b.role, text: b.text, kind: b.kind, time: b.time, detail: b.detail })) });
+      blocks: (g.blocks || []).map(b => ({ role: b.role, text: b.text, kind: b.kind, time: b.time })) });
     const node = putBubble(fk, sig, g.cls, g.time, g.maxPos, () => ({
-      html: g.blocks.map(b => !g.tool ? mdSafe(b.text || "")
-        : b.detail ? '<span title="' + esc(b.detail) + '">' + esc(b.text || "") + "</span>" : esc(b.text || "")).join(g.tool ? "<br>" : ""),
-      raw: g.blocks.map(b => (g.tool && b.detail) || b.text || "").join(g.tool ? "\n" : "\n\n"),
+      html: g.blocks.map(b => g.tool ? esc(b.text || "") : mdSafe(b.text || "")).join(g.tool ? "<br>" : ""),
+      raw: g.blocks.map(b => b.text || "").join(g.tool ? "\n" : "\n\n"),
     }));
     node.classList.toggle("join-prev", !!g.joinPrev);
     node.classList.toggle("join-next", !!g.joinNext);

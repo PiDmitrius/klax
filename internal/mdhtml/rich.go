@@ -27,17 +27,17 @@ func ConvertRich(md string) string {
 		line := lines[i]
 
 		// Fenced code block: ``` — the only block kept multi-line.
-		if strings.HasPrefix(line, "```") {
+		if n := fenceRun(line); n > 0 {
 			// Use the fence info string as the language ONLY if its first token is a
 			// safe identifier — otherwise a value like `go" onx="y` would break out
 			// of the class attribute and make Telegram reject the whole message.
 			lang := ""
-			if f := strings.Fields(strings.TrimPrefix(line, "```")); len(f) > 0 && reLangSafe.MatchString(f[0]) {
+			if f := strings.Fields(line[n:]); len(f) > 0 && reLangSafe.MatchString(f[0]) {
 				lang = f[0]
 			}
 			var block []string
 			i++ // skip opening fence
-			for i < len(lines) && !strings.HasPrefix(lines[i], "```") {
+			for i < len(lines) && !strings.HasPrefix(lines[i], line[:n]) {
 				block = append(block, escapeHTML(lines[i]))
 				i++
 			}
@@ -164,17 +164,33 @@ func isTableSeparator(line string) bool {
 	return true
 }
 
-// parseTableRow splits a "| a | b |" row into trimmed cells, tolerating missing
-// outer pipes.
+// parseTableRow splits a "| a | b |" row into trimmed cells, tolerating missing outer pipes,
+// on pipes outside code spans; `\|` is a literal pipe.
 func parseTableRow(line string) []string {
 	s := strings.TrimSpace(line)
 	s = strings.TrimPrefix(s, "|")
-	s = strings.TrimSuffix(s, "|")
-	parts := strings.Split(s, "|")
-	for i := range parts {
-		parts[i] = strings.TrimSpace(parts[i])
+	if strings.HasSuffix(s, "|") && !strings.HasSuffix(s, `\|`) {
+		s = s[:len(s)-1]
 	}
-	return parts
+	var parts []string
+	var cur strings.Builder
+	for i := 0; i < len(s); i++ {
+		switch {
+		case s[i] == '`':
+			end := codeSpanEnd(s, i)
+			cur.WriteString(strings.ReplaceAll(s[i:end], `\|`, "|"))
+			i = end - 1
+		case s[i] == '\\' && i+1 < len(s) && s[i+1] == '|':
+			cur.WriteByte('|')
+			i++
+		case s[i] == '|':
+			parts = append(parts, strings.TrimSpace(cur.String()))
+			cur.Reset()
+		default:
+			cur.WriteByte(s[i])
+		}
+	}
+	return append(parts, strings.TrimSpace(cur.String()))
 }
 
 func parseTableAligns(line string) []string {

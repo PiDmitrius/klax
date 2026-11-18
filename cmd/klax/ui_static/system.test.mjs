@@ -59,6 +59,22 @@ test("durations retain CPU fractions and carry rounded seconds", () => {
   }
 });
 
+test("markdown code spans close on a backtick run of their own length", () => {
+  assert.equal(mdSafe("``a `b` c`` and `d`"), "<p><code>a `b` c</code> and <code>d</code></p>");
+  assert.equal(mdSafe("`` `x` ``"), "<p><code>`x`</code></p>");
+  assert.equal(mdSafe("a ``b` c"), "<p>a ``b` c</p>");
+  assert.equal(mdSafe("a ``` ``x`` ``` b"), "<p>a <code>``x``</code> b</p>");
+  assert.equal(mdSafe("``` ``x`` ```. b"), "<p><code>``x``</code>. b</p>");
+  assert.equal(mdSafe("```x``` b"), "<p><code>x</code> b</p>");
+  assert.equal(mdSafe("````md\n```sh\n**x**\n```\n````\nb"), '<pre><button class="copy" title="Копировать">⧉</button><code>```sh\n**x**\n```</code></pre><p>b</p>');
+  assert.equal(mdSafe("````\nprintf ````\n**x**\n`````\nb"), '<pre><button class="copy" title="Копировать">⧉</button><code>printf ````\n**x**</code></pre><p>b</p>');
+  assert.equal(mdSafe("a\n```sh\nls\n```\nb"), '<p>a</p><pre><button class="copy" title="Копировать">⧉</button><code>ls</code></pre><p>b</p>');
+  assert.equal(mdSafe("| k | v |\n|---|---|\n| ``a|`b`` | c |"),
+    "<table><thead><tr><th>k</th><th>v</th></tr></thead><tbody><tr><td><code>a|`b</code></td><td>c</td></tr></tbody></table>");
+  assert.equal(mdSafe("| k | v |\n|---|---|\n| `a \\| b` | e |"),
+    "<table><thead><tr><th>k</th><th>v</th></tr></thead><tbody><tr><td><code>a | b</code></td><td>e</td></tr></tbody></table>");
+});
+
 test("markdown reads CRLF line breaks as LF", () => {
   assert.equal(mdSafe("- one\r\n\r\ntwo"), mdSafe("- one\n\ntwo"));
   assert.equal(mdSafe("- one\r\n\r\ntwo"), "<ul><li>one</li></ul><p>two</p>");

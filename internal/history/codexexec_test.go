@@ -283,7 +283,7 @@ var batchLines = []string{
 }
 
 // A batch the source hides behind a variable shows its commands from the completion events:
-// in source order, with the failure marked and directory, outcome and output in the detail.
+// in source order, with the failure marked.
 func TestCodexExecBatchUsesCompletedCommands(t *testing.T) {
 	got := execTools(t, batchLines)
 	if len(got) != 1 {
@@ -293,12 +293,6 @@ func TestCodexExecBatchUsesCompletedCommands(t *testing.T) {
 	if !reflect.DeepEqual(labels(got[0]), want) {
 		t.Fatalf("labels = %q, want %q", labels(got[0]), want)
 	}
-	if d := got[0][0].Detail; d != "$ pwd\ncwd: /work\nstatus: completed, exit 0\n\n/work" {
-		t.Fatalf("pwd detail = %q", d)
-	}
-	if d := got[0][1].Detail; d != "$ false\ncwd: /work\nstatus: failed, exit 1\n\nboom" {
-		t.Fatalf("false detail = %q", d)
-	}
 }
 
 // Without completion events the statically decoded rows stay as they are.
@@ -307,19 +301,16 @@ func TestCodexExecBatchWithoutEvents(t *testing.T) {
 	if want := []string{"⚙️ Exec: `pwd`", "⚙️ Exec: `false`"}; len(got) != 1 || !reflect.DeepEqual(labels(got[0]), want) {
 		t.Fatalf("got %+v, want %q", got, want)
 	}
-	if got[0][0].Detail != "" || got[0][1].Detail != "" {
-		t.Fatalf("static rows carry a detail: %+v", got[0])
-	}
 }
 
 func TestCodexExecSingleLiteralCompleted(t *testing.T) {
 	got := execTools(t, []string{
 		execUser(0, "go"),
 		execCall(100, "call_1", `const r = await tools.exec_command({cmd:"ls -la", workdir:"/work"}); text(r.output);`),
-		execDone(140, 30, "ls -la", "completed", 0, ""),
+		execDone(140, 30, "ls -la", "failed", 2, ""),
 		execOutput(150, "call_1"),
 	})
-	if len(got) != 1 || len(got[0]) != 1 || got[0][0].Label != "⚙️ Exec: `ls -la`" || got[0][0].Detail != "$ ls -la\ncwd: /work\nstatus: completed, exit 0" {
+	if len(got) != 1 || len(got[0]) != 1 || got[0][0].Label != "⚙️ Exec: `ls -la` ✗ (exit 2)" {
 		t.Fatalf("got %+v", got)
 	}
 }
@@ -361,7 +352,7 @@ func TestCodexExecEventsStayInTheirWrapper(t *testing.T) {
 		execDone(2200, 2090, "sleep 9", "failed", 130, ""),
 		execOutput(2300, "call_2"),
 		`{"timestamp":"` + execStamp(3000) + `","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"date\"}"}}`,
-		execDone(3100, 50, "date", "completed", 0, ""),
+		execDone(3100, 50, "date", "failed", 1, ""),
 		execUser(4000, "next"),
 		execCall(4100, "call_3", `await tools.write_stdin({session_id: 2, chars: ""})`),
 		execDone(4200, 3000, "make", "completed", 0, ""), // started in the previous turn
@@ -380,9 +371,6 @@ func TestCodexExecEventsStayInTheirWrapper(t *testing.T) {
 		if !reflect.DeepEqual(labels(got[i]), want[i]) {
 			t.Fatalf("item %d = %q, want %q", i, labels(got[i]), want[i])
 		}
-	}
-	if got[2][0].Detail != "" {
-		t.Fatalf("a direct call took a wrapper's event: %+v", got[2])
 	}
 }
 
@@ -472,7 +460,7 @@ func TestCodexExecIncrementalAppend(t *testing.T) {
 	data := strings.Join(batchLines, "\n") + "\n"
 	want := fullLoad(t, data)
 	path := filepath.Join(t.TempDir(), "lines.jsonl")
-	wantDetails := [][2]bool{2: {false, false}, 3: {false, true}, 4: {true, true}, 5: {true, true}}
+	wantRev := []int{2: 0, 3: 1, 4: 2, 5: 2}
 	for n, line := range batchLines {
 		i := n + 1 // records appended
 		appendFile(t, path, line+"\n")
@@ -483,12 +471,12 @@ func TestCodexExecIncrementalAppend(t *testing.T) {
 		if i < 2 {
 			continue
 		}
-		tools := snap.items[len(snap.items)-1].Tools
-		if len(snap.items) != 2 || len(tools) != 2 || !strings.Contains(tools[0].Label, "pwd") || !strings.Contains(tools[1].Label, "false") {
+		wrap := snap.items[len(snap.items)-1]
+		if len(snap.items) != 2 || len(wrap.Tools) != 2 || !strings.Contains(wrap.Tools[0].Label, "pwd") || !strings.Contains(wrap.Tools[1].Label, "false") {
 			t.Fatalf("after %d records: %+v", i, snap.items)
 		}
-		if d := [2]bool{tools[0].Detail != "", tools[1].Detail != ""}; d != wantDetails[i] {
-			t.Fatalf("after %d records: details %v, want %v", i, d, wantDetails[i])
+		if wrap.Rev != wantRev[i] || strings.Contains(wrap.Tools[1].Label, "✗") != (i >= 3) {
+			t.Fatalf("after %d records: rev %d, want %d; %q", i, wrap.Rev, wantRev[i], labels(wrap.Tools))
 		}
 	}
 	rng := rand.New(rand.NewSource(2))

@@ -27,10 +27,10 @@ func Convert(md string, useBlockquote bool) string {
 		line := lines[i]
 
 		// Fenced code block: ```
-		if strings.HasPrefix(line, "```") {
+		if n := fenceRun(line); n > 0 {
 			var block []string
 			i++ // skip opening ```
-			for i < len(lines) && !strings.HasPrefix(lines[i], "```") {
+			for i < len(lines) && !strings.HasPrefix(lines[i], line[:n]) {
 				block = append(block, escapeHTML(lines[i]))
 				i++
 			}
@@ -93,6 +93,17 @@ func escapeHTML(s string) string {
 	return s
 }
 
+// fenceRun returns the length of the backtick run that opens a code fence on line: 3 or more
+// at its start with no other backtick on the line, which would make it a code span instead.
+// The fence closes at the next line starting with a run at least as long. It is 0 for no fence.
+func fenceRun(line string) int {
+	n := len(line) - len(strings.TrimLeft(line, "`"))
+	if n < 3 || strings.Contains(line[n:], "`") {
+		return 0
+	}
+	return n
+}
+
 // convertInline handles inline formatting on an already HTML-escaped line. A
 // markdown link is emitted only for a target validLinkURL accepts, with its href
 // quote-escaped; an unsupported target (relative path, bare word like "url", a
@@ -103,12 +114,7 @@ func escapeHTML(s string) string {
 // entity in the chunk along with it.
 func convertInline(line string) string {
 	// 1. Inline code: `...` — atomic, no further parsing inside.
-	var codeParts []string
-	line = reInlineCode.ReplaceAllStringFunc(line, func(m string) string {
-		inner := m[1 : len(m)-1]
-		codeParts = append(codeParts, inner)
-		return "\x00CODE\x00"
-	})
+	line, codeParts := extractCodeSpans(line)
 
 	// 2. Links: [text](url) — only when validLinkURL accepts the target (see above).
 	line = reLink.ReplaceAllStringFunc(line, func(m string) string {
@@ -135,6 +141,67 @@ func convertInline(line string) string {
 	}
 
 	return line
+}
+
+// extractCodeSpans replaces each code span with a placeholder and returns the spans' content.
+func extractCodeSpans(line string) (string, []string) {
+	var b strings.Builder
+	var codes []string
+	for i := 0; i < len(line); {
+		j := strings.IndexByte(line[i:], '`')
+		if j < 0 {
+			b.WriteString(line[i:])
+			break
+		}
+		j += i
+		b.WriteString(line[i:j])
+		text, end, ok := codeSpan(line, j)
+		if ok {
+			codes = append(codes, text)
+			b.WriteString("\x00CODE\x00")
+		} else {
+			b.WriteString(line[j:end])
+		}
+		i = end
+	}
+	return b.String(), codes
+}
+
+// codeSpan reads the backtick run at i as a CommonMark code span: it closes at the next run of
+// the same length, so “a `b` c“ holds single backticks, and one space is stripped from each
+// end of padded content. ok is false when the run has no closer and stays literal; end is
+// past the span or the run.
+func codeSpan(s string, i int) (text string, end int, ok bool) {
+	n := i
+	for n < len(s) && s[n] == '`' {
+		n++
+	}
+	for k := n; k < len(s); {
+		m := strings.IndexByte(s[k:], '`')
+		if m < 0 {
+			break
+		}
+		k += m
+		e := k
+		for e < len(s) && s[e] == '`' {
+			e++
+		}
+		if e-k == n-i {
+			text = s[n:k]
+			if strings.HasPrefix(text, " ") && strings.HasSuffix(text, " ") && strings.TrimSpace(text) != "" {
+				text = text[1 : len(text)-1]
+			}
+			return text, e, true
+		}
+		k = e
+	}
+	return "", n, false
+}
+
+// codeSpanEnd is the end of the code span or literal backtick run at i.
+func codeSpanEnd(s string, i int) int {
+	_, end, _ := codeSpan(s, i)
+	return end
 }
 
 // validLinkURL reports whether u is a link target Telegram accepts in a message.
@@ -173,7 +240,6 @@ func validLinkURL(u string) bool {
 }
 
 var (
-	reInlineCode       = regexp.MustCompile("`[^`]+`")
 	reLink             = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
 	reBold             = regexp.MustCompile(`\*\*(.+?)\*\*`)
 	reStrike           = regexp.MustCompile(`~~(.+?)~~`)
