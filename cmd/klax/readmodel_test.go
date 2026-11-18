@@ -530,7 +530,7 @@ func TestReadModelMemoMatchesFullBuild(t *testing.T) {
 			check(fmt.Sprint(text, " usage ", b), true)
 			if b > 0 { // a completed command amends an earlier block of the running turn
 				done := &items[len(items)-2]
-				done.Tools = []history.ToolCall{{Name: "Exec", Label: fmt.Sprint(text, b-1, " ✗"), Detail: "status: failed"}}
+				done.Tools = []history.ToolCall{{Name: "Exec", Label: fmt.Sprint(text, b-1, " ✗")}}
 				done.Rev++
 				check(fmt.Sprint(text, " completed ", b-1), true)
 			}

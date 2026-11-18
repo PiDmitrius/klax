@@ -29,9 +29,8 @@ import (
 // same rich label the live UI stream shows, rendered at the wider web-UI width
 // (ToolUse.Preview(UIToolPreviewLimit)) rather than the narrow Telegram one.
 type ToolCall struct {
-	Name   string `json:"name"`
-	Label  string `json:"label,omitempty"`
-	Detail string `json:"-"` // a finished command's directory, outcome and output tail
+	Name  string `json:"name"`
+	Label string `json:"label,omitempty"`
 }
 
 func toolCall(name, input string) ToolCall {
@@ -767,9 +766,7 @@ type codexEventItem struct {
 		Text string `json:"text"`
 	} `json:"content"`
 	Command  json.RawMessage `json:"command"`
-	Cwd      string          `json:"cwd"`
 	Status   string          `json:"status"`
-	Output   string          `json:"aggregated_output"`
 	ExitCode *int            `json:"exit_code"`
 	Duration *struct {
 		Secs  int64 `json:"secs"`

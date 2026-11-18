@@ -74,20 +74,6 @@ test("unknown outcome shows its note without a stop button", () => {
   assert.equal(h.col.children[0].children.length, 1);
 });
 
-test("a tool row with a detail shows it on hover, copies it, and patches when it arrives", () => {
-  const h = harness();
-  const pending = { turn_seq: 1, role: "user", text: "request", state: "run", blocks: [{ role: "tool", text: "Exec: false" }] };
-  h.render(h.col, [pending]);
-  const tools = h.col.children[0].children[1];
-  assert.equal(tools.html.includes("<span"), false);
-  assert.equal(tools._raw, "Exec: false");
-  const detail = "$ false\nstatus: failed, exit 1";
-  h.render(h.col, [{ ...pending, blocks: [{ role: "tool", text: "Exec: false ✗ (exit 1)", detail }] }]);
-  assert.equal(h.col.children[0].children[1], tools);
-  assert.ok(tools.html.includes('<span title="' + detail + '">Exec: false ✗ (exit 1)</span>'));
-  assert.equal(tools._raw, detail);
-});
-
 test("divider collapse and join preserve unchanged tool contents and skip text formatting", () => {
   const h = harness();
   const blocks = Array.from({ length: 301 }, (_, i) => ({ id: String(i), role: "tool", text: "tool " + i }));

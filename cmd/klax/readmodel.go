@@ -14,9 +14,6 @@ type uiBlock struct {
 	Text string `json:"text,omitempty"`
 	Kind string `json:"kind,omitempty"`
 	Time string `json:"time,omitempty"` // RFC3339; a merged answer bubble shows its LAST block's time
-	// Detail is a tool row's full record (a finished command's directory, outcome and
-	// output), shown on hover and copied instead of the row text.
-	Detail string `json:"detail,omitempty"`
 }
 
 // uiTurn is one row of the read model. A user row carries the durable turn seq + state
@@ -305,7 +302,7 @@ func (d *daemon) userRow(store *sessfiles.Store, sk string, klaxID string, g gro
 				ut.Blocks = append(ut.Blocks, uiBlock{Role: "assistant", Text: text, Time: b.Time})
 			}
 			for _, tc := range b.Tools {
-				ut.Blocks = append(ut.Blocks, uiBlock{Role: "tool", Text: tc.Label, Time: b.Time, Detail: tc.Detail})
+				ut.Blocks = append(ut.Blocks, uiBlock{Role: "tool", Text: tc.Label, Time: b.Time})
 			}
 			// The per-turn context "cut line" comes from the last assistant block's usage —
 			// including a tool-only block (a codex turn whose final token_count lands on a

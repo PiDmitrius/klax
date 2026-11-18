@@ -3,11 +3,9 @@ package history
 import (
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"slices"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 // Codex's `custom_tool_call(name="exec")` wrapper carries a small JavaScript snippet in its
@@ -26,9 +24,8 @@ import (
 // transcripts, extend the decoder for that shape then.
 
 const (
-	maxExecInput  = 128 * 1024 // cap the wrapper source we scan
-	maxExecCalls  = 32         // cap actions decoded from one wrapper
-	maxExecOutput = 4 * 1024   // cap the output tail a finished command row carries
+	maxExecInput = 128 * 1024 // cap the wrapper source we scan
+	maxExecCalls = 32         // cap actions decoded from one wrapper
 )
 
 type codexToolCall struct {
@@ -217,7 +214,7 @@ func (w *codexExecWrap) tools() []ToolCall {
 }
 
 // codexCommandTool renders a completed command: the Exec row of its command, marked when it
-// failed, with its directory, outcome and output tail as the row's detail.
+// failed.
 func codexCommandTool(it *codexEventItem) (string, ToolCall) {
 	var cmd string
 	var argv []string
@@ -231,39 +228,12 @@ func codexCommandTool(it *codexEventItem) (string, ToolCall) {
 		_ = json.Unmarshal(it.Command, &cmd)
 	}
 	tool := toolCall("Exec", jsonObject("command", cmd))
-	outcome := it.Status
-	if it.ExitCode != nil {
-		outcome = fmt.Sprintf("exit %d", *it.ExitCode)
+	switch {
+	case it.ExitCode != nil && *it.ExitCode != 0:
+		tool.Label += fmt.Sprintf(" ✗ (exit %d)", *it.ExitCode)
+	case it.Status != "" && it.Status != "completed":
+		tool.Label += " ✗ (" + it.Status + ")"
 	}
-	if it.Status != "" && it.Status != "completed" || it.ExitCode != nil && *it.ExitCode != 0 {
-		tool.Label += " ✗ (" + outcome + ")"
-	}
-	var b strings.Builder
-	b.WriteString("$ " + cmd)
-	if dir := it.Cwd; dir != "" {
-		if u, err := url.Parse(dir); err == nil && u.Scheme == "file" {
-			dir = u.Path
-		}
-		b.WriteString("\ncwd: " + dir)
-	}
-	status := it.Status
-	if it.ExitCode != nil {
-		status = strings.TrimPrefix(status+", "+outcome, ", ")
-	}
-	if status != "" {
-		b.WriteString("\nstatus: " + status)
-	}
-	if out := strings.TrimRight(it.Output, "\n"); out != "" {
-		if len(out) > maxExecOutput {
-			cut := len(out) - maxExecOutput
-			for cut < len(out) && !utf8.RuneStart(out[cut]) {
-				cut++
-			}
-			out = "…" + out[cut:]
-		}
-		b.WriteString("\n\n" + out)
-	}
-	tool.Detail = b.String()
 	return cmd, tool
 }
 
