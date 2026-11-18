@@ -27,10 +27,10 @@ func Convert(md string, useBlockquote bool) string {
 		line := lines[i]
 
 		// Fenced code block: ```
-		if strings.HasPrefix(line, "```") {
+		if n := fenceRun(line); n > 0 {
 			var block []string
 			i++ // skip opening ```
-			for i < len(lines) && !strings.HasPrefix(lines[i], "```") {
+			for i < len(lines) && !strings.HasPrefix(lines[i], line[:n]) {
 				block = append(block, escapeHTML(lines[i]))
 				i++
 			}
@@ -91,6 +91,17 @@ func escapeHTML(s string) string {
 	s = strings.ReplaceAll(s, "<", "&lt;")
 	s = strings.ReplaceAll(s, ">", "&gt;")
 	return s
+}
+
+// fenceRun returns the length of the backtick run that opens a code fence on line: 3 or more
+// at its start with no other backtick on the line, which would make it a code span instead.
+// The fence closes at the next line starting with a run at least as long. It is 0 for no fence.
+func fenceRun(line string) int {
+	n := len(line) - len(strings.TrimLeft(line, "`"))
+	if n < 3 || strings.Contains(line[n:], "`") {
+		return 0
+	}
+	return n
 }
 
 // convertInline handles inline formatting on an already HTML-escaped line. A

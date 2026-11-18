@@ -167,6 +167,7 @@ func TestConvertCodeSpanRuns(t *testing.T) {
 		"`` `x` ``":           "<code>`x`</code>",
 		"a ``b` c":            "a ``b` c",
 		"`<b>` **x**":         "<code>&lt;b&gt;</code> <b>x</b>",
+		"``` ``x`` ```. b":    "<code>``x``</code>. b",
 	} {
 		if got := Convert(in, false); got != want {
 			t.Errorf("Convert(%q) = %q, want %q", in, got, want)
@@ -174,6 +175,17 @@ func TestConvertCodeSpanRuns(t *testing.T) {
 		if got := ConvertRich(in); got != "<p>"+want+"</p>" {
 			t.Errorf("ConvertRich(%q) = %q, want <p>%s</p>", in, got, want)
 		}
+	}
+}
+
+// A fence of four backticks holds lines of three and closes on its own length.
+func TestConvertLongFence(t *testing.T) {
+	in := "````md\n```sh\n**x**\n```\n````\nb"
+	if got, want := Convert(in, false), "<pre>```sh\n**x**\n```</pre>\nb"; got != want {
+		t.Errorf("Convert = %q, want %q", got, want)
+	}
+	if got := ConvertRich(in); !strings.Contains(got, "```sh\n**x**\n```</code></pre>") || !strings.Contains(got, `class="language-md"`) {
+		t.Errorf("ConvertRich = %q", got)
 	}
 }
 

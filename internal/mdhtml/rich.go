@@ -27,17 +27,17 @@ func ConvertRich(md string) string {
 		line := lines[i]
 
 		// Fenced code block: ``` — the only block kept multi-line.
-		if strings.HasPrefix(line, "```") {
+		if n := fenceRun(line); n > 0 {
 			// Use the fence info string as the language ONLY if its first token is a
 			// safe identifier — otherwise a value like `go" onx="y` would break out
 			// of the class attribute and make Telegram reject the whole message.
 			lang := ""
-			if f := strings.Fields(strings.TrimPrefix(line, "```")); len(f) > 0 && reLangSafe.MatchString(f[0]) {
+			if f := strings.Fields(line[n:]); len(f) > 0 && reLangSafe.MatchString(f[0]) {
 				lang = f[0]
 			}
 			var block []string
 			i++ // skip opening fence
-			for i < len(lines) && !strings.HasPrefix(lines[i], "```") {
+			for i < len(lines) && !strings.HasPrefix(lines[i], line[:n]) {
 				block = append(block, escapeHTML(lines[i]))
 				i++
 			}

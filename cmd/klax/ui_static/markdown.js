@@ -159,14 +159,32 @@ function renderList(lines){
 }
 
 // Block-level Markdown -> HTML: headings, paragraphs, ordered & nested lists, blockquotes,
-// pipe tables (with alignment), fenced code, thematic breaks. Code fences are isolated
-// first so their contents are never transformed.
+// pipe tables (with alignment), fenced code, thematic breaks. Code fences — a line starting
+// with a run of 3+ backticks and no other backtick; otherwise the run opens a code span — are
+// isolated first so their contents are never transformed. A ``` fence closes at the next ```;
+// a longer one at the next line starting with a run at least as long, as in mdhtml.
 function md(src, depth){
   depth = depth || 0;
   let html = "";
-  (src||"").split(/(```[\s\S]*?```)/g).forEach(seg => {
-    const fence = seg.match(/^```(\w*)\n?([\s\S]*?)```$/);
-    if(fence){ html += '<pre><button class="copy" title="Копировать">⧉</button><code>'+esc(fence[2].replace(/\n+$/,""))+'</code></pre>'; return; }
+  src = src || "";
+  const segs = [];
+  let last = 0;
+  const open = /^[ \t]*(`{3,})[^`\n]*\n/gm;
+  for(let m; (m = open.exec(src));){
+    const body = open.lastIndex, n = m[1].length;
+    let close = -1, next = 0;
+    if(n === 3){ close = src.indexOf("```", body); next = close + 3; }
+    else {
+      const c = src.slice(body).match(new RegExp("^[ \\t]*`{" + n + ",}.*$", "m"));
+      if(c){ close = body + c.index; next = close + c[0].length; }
+    }
+    if(close < 0) continue;
+    segs.push(src.slice(last, m.index), { code: src.slice(body, close) });
+    last = open.lastIndex = next;
+  }
+  segs.push(src.slice(last));
+  segs.forEach(seg => {
+    if(seg.code !== undefined){ html += '<pre><button class="copy" title="Копировать">⧉</button><code>'+esc(seg.code.replace(/\n+$/,""))+'</code></pre>'; return; }
     const lines = seg.split("\n");
     let para = [];
     const flush = () => { if(para.length){ html += '<p>'+para.map(inline).join("<br>")+'</p>'; para = []; } };
